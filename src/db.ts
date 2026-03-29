@@ -655,8 +655,9 @@ export function updateRegisteredGroup(
   }
   if (fields.length === 0) return;
   values.push(jid);
-  db.prepare(`UPDATE registered_groups SET ${fields.join(', ')} WHERE jid = ?`)
-    .run(...values);
+  db.prepare(
+    `UPDATE registered_groups SET ${fields.join(', ')} WHERE jid = ?`,
+  ).run(...values);
 }
 
 export function deleteRegisteredGroup(jid: string): void {
