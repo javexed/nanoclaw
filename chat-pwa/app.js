@@ -326,7 +326,7 @@ function renderRooms(rooms) {
     li.style.alignItems = 'center';
     if (i === lastMainIdx && lastMainIdx < sorted.length - 1) li.classList.add('main-divider');
     const text = document.createElement('span');
-    text.textContent = `# ${room.name}`;
+    text.textContent = `#${room.id}`;
     text.style.flex = '1';
     li.appendChild(text);
     if (unreadRooms.has(room.id)) {
@@ -366,7 +366,7 @@ function joinRoom(roomId, roomName) {
   $('#messages').innerHTML = '<div class="empty-state">Loading...</div>';
   ws.send(JSON.stringify({ type: 'join', room_id: roomId }));
   sessionStorage.setItem('lastRoom', roomId);
-  $('#room-name').textContent = `# ${roomName}`;
+  $('#room-name').textContent = `#${roomId}`;
   $('#message-input').disabled = false;
   $('button[type=submit]').disabled = false;
   document.querySelectorAll('#room-list li').forEach(li => {
@@ -809,7 +809,7 @@ function renderActivityFeed(roomActivity) {
     const content = m.message_type === 'file' ? `📎 ${m.content}` : m.content;
     const senderColor = m.sender_type === 'agent' ? 'var(--agent)' : 'var(--text-dim)';
     return `<div class="dash-activity-row">
-      <span class="dash-activity-room" style="color:${color}"># ${esc(m.roomName)}</span>
+      <span class="dash-activity-room" style="color:${color}">#${esc(m.roomId)}</span>
       <span class="dash-activity-sender" style="color:${senderColor}">${m.sender_type === 'agent' ? '🤖 ' : ''}${esc(m.sender)}</span>
       <span class="dash-activity-content">${esc(content.slice(0, 80))}</span>
       <span class="dash-activity-time">${relativeTime(m.created_at)}</span>
