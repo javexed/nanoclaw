@@ -234,7 +234,10 @@ function connect() {
           authFetch('/api/bots').then(r => r.json()).then(b => { allBots = b; renderRooms(msg.rooms); }).catch(() => {});
         }
         renderRooms(msg.rooms);
-        if (!currentRoom) {
+        if (currentRoom) {
+          // Rejoin after reconnect
+          ws.send(JSON.stringify({ type: 'join', room_id: currentRoom }));
+        } else {
           const saved = sessionStorage.getItem('lastRoom');
           if (saved) {
             const room = msg.rooms.find(r => r.id === saved);
@@ -300,6 +303,7 @@ function connect() {
 
   ws.onclose = () => {
     $('#connection-banner').classList.add('visible');
+    myIdentity = '';
     setTimeout(connect, 3000);
   };
 }
