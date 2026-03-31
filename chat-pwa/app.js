@@ -1158,6 +1158,9 @@ window.showBotDetail = showBotDetail;
 const CHANNEL_ICONS = {
   whatsapp: '💬', telegram: '✈️', discord: '🎮', slack: '📡', chat: '🌐', local: '🌐', gmail: '📧',
 };
+const CHANNEL_COLORS = {
+  whatsapp: '#25D366', telegram: '#2AABEE', discord: '#5865F2', slack: '#E01E5A', chat: '#888', local: '#888', gmail: '#EA4335',
+};
 
 let allBots = [];
 let selectedBotJid = null;
@@ -1175,16 +1178,58 @@ async function fetchBots() {
 function renderBots() {
   const list = $('#bot-list');
   list.innerHTML = '';
+
+  // Build room-id routes for pipeline arrows
+  const routes = getPipelineRoutes();
+  const targets = new Set();
+  for (const dests of Object.values(routes)) {
+    for (const d of dests) targets.add(d);
+  }
+  const incomingCount = {};
+  for (const dests of Object.values(routes)) {
+    for (const d of dests) incomingCount[d] = (incomingCount[d] || 0) + 1;
+  }
+
+  // Map bot JID to room ID for chat bots
+  function botRoomId(bot) {
+    return bot.jid.startsWith('chat:') ? bot.jid.replace(/^chat:/, '') : null;
+  }
+
+  // Sort: main first, then non-targets, then alphabetical
   const sorted = [...allBots].sort((a, b) => {
     if (a.isMain !== b.isMain) return a.isMain ? -1 : 1;
+    const aTarget = targets.has(botRoomId(a)) ? 1 : 0;
+    const bTarget = targets.has(botRoomId(b)) ? 1 : 0;
+    if (aTarget !== bTarget) return aTarget - bTarget;
     return a.name.localeCompare(b.name);
   });
-  const lastMainBotIdx = sorted.reduce((acc, b, i) => b.isMain ? i : acc, -1);
-  sorted.forEach((bot, idx) => {
+
+  // Filter out pipeline targets from top level
+  const topLevel = sorted.filter(b => !targets.has(botRoomId(b)));
+
+  const lastMainBotIdx = topLevel.reduce((acc, b, i) => b.isMain ? i : acc, -1);
+  const rendered = new Set();
+
+  function addBotLi(bot, isPipeChild, idx) {
+    const rid = botRoomId(bot);
+    if (rid && rendered.has(rid)) return;
+    if (rid) rendered.add(rid);
+
     const li = document.createElement('li');
     li.dataset.jid = bot.jid;
+    const chColor = CHANNEL_COLORS[bot.channel] || '';
+    if (chColor) li.style.borderLeftColor = chColor;
     if (bot.jid === selectedBotJid) li.classList.add('active');
-    if (idx === lastMainBotIdx && lastMainBotIdx < sorted.length - 1) li.classList.add('main-divider');
+    if (!isPipeChild && idx === lastMainBotIdx && lastMainBotIdx < topLevel.length - 1) li.classList.add('main-divider');
+
+    // Pipeline arrow
+    if (isPipeChild) {
+      const arrow = document.createElement('span');
+      arrow.className = 'room-pipe-arrow';
+      arrow.textContent = '→';
+      if (chColor) arrow.style.color = chColor;
+      li.appendChild(arrow);
+    }
 
     const icon = document.createElement('span');
     icon.className = 'bot-icon';
@@ -1210,14 +1255,39 @@ function renderBots() {
       li.appendChild(tag);
     }
 
+    // Fan-in badge
+    if (rid && (incomingCount[rid] || 0) > 1) {
+      const badge = document.createElement('span');
+      badge.className = 'fan-in-badge';
+      badge.textContent = `←${incomingCount[rid]}`;
+      badge.title = 'Receives from multiple bots';
+      li.appendChild(badge);
+    }
+
     li.setAttribute('role', 'button');
     li.setAttribute('tabindex', '0');
-    li.addEventListener('click', () => openBotDetail(bot.jid));
+    li.addEventListener('click', () => {
+      if (selectedBotJid === bot.jid && !$('#bot-detail').hidden) {
+        closeBotDetail();
+      } else {
+        openBotDetail(bot.jid);
+      }
+    });
     li.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openBotDetail(bot.jid); }
     });
     list.appendChild(li);
-  });
+
+    // Render pipeline children
+    if (rid && routes[rid]) {
+      for (const targetRoomId of routes[rid]) {
+        const childBot = allBots.find(b => botRoomId(b) === targetRoomId);
+        if (childBot) addBotLi(childBot, true, -1);
+      }
+    }
+  }
+
+  topLevel.forEach((bot, idx) => addBotLi(bot, false, idx));
 }
 
 // Templates for bot instructions
