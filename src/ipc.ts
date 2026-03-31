@@ -7,7 +7,13 @@ import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { createChatRoom } from './chat-db.js';
 import { isChatServerRunning } from './chat-server.js';
 import { AvailableGroup } from './container-runner.js';
-import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
+import {
+  createTask,
+  deleteTask,
+  getTaskById,
+  logMessageRoute,
+  updateTask,
+} from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
@@ -84,6 +90,13 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
                   await deps.sendMessage(data.chatJid, data.text);
+                  // Log cross-group message routes for topology
+                  if (
+                    !targetGroup ||
+                    targetGroup.folder !== sourceGroup
+                  ) {
+                    logMessageRoute(sourceGroup, data.chatJid);
+                  }
                   logger.info(
                     { chatJid: data.chatJid, sourceGroup },
                     'IPC message sent',
@@ -435,7 +448,7 @@ export async function processTaskIpc(
         );
         break;
       }
-      if (data.jid && data.name && data.folder && data.trigger) {
+      if (data.jid && data.name && data.folder && data.trigger !== undefined) {
         if (!isValidGroupFolder(data.folder)) {
           logger.warn(
             { sourceGroup, folder: data.folder },

@@ -681,7 +681,7 @@ function renderFilePreview() {
   } else {
     html += `<span class="file-preview-icon">📎</span>`;
   }
-  html += `<span class="file-preview-name">${pendingFile.name}</span>`;
+  html += `<span class="file-preview-name">${esc(pendingFile.name)}</span>`;
   html += `<span class="file-preview-size">${formatFileSize(pendingFile.size)}</span>`;
   html += `<button class="file-preview-remove" id="file-preview-remove">&times;</button>`;
   html += '</div>';

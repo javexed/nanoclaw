@@ -76,21 +76,18 @@ Environment variables:
 | `CHAT_SERVER_PORT` | `3100` | HTTP/WebSocket port |
 | `CHAT_SERVER_HOST` | `127.0.0.1` | Bind address (`0.0.0.0` for network access) |
 | `CHAT_SERVER_TOKEN` | (none) | Bearer token for remote authentication |
-| `TRUSTED_PROXY_IPS` | (none) | Comma-separated trusted proxy IPs |
-| `TRUSTED_PROXY_HEADER` | `X-Forwarded-User` | Header containing authenticated username |
 
 ## Authentication
 
-Four auth methods, evaluated in order:
+Three auth methods, evaluated in order:
 
 1. **Localhost** — connections from `127.0.0.1` or `::1` always pass. No token needed.
-2. **Trusted Proxy** — if the request comes from a trusted IP (configured via `TRUSTED_PROXY_IPS`) and carries an identity header (default: `X-Forwarded-User`), the server trusts it. Covers Cloudflare Access, Azure/Entra ID, Authelia, Authentik, Caddy, nginx, AWS ALB, and Google IAP. Set `TRUSTED_PROXY_IPS` and optionally `TRUSTED_PROXY_HEADER`. Checked before bearer token so the proxy remains the auth authority.
-3. **Bearer token** — remote connections authenticate with `Authorization: Bearer <token>` header (HTTP) or `?token=<token>` query parameter (WebSocket). Set `CHAT_SERVER_TOKEN`.
-4. **Tailscale** — if the connecting IP is a Tailscale peer, identity is resolved via `tailscale whois`. No configuration needed beyond having Tailscale running.
+2. **Tailscale** — if the connecting IP is a Tailscale peer, identity is resolved via `tailscale whois`. No token needed.
+3. **Bearer token** — remote connections can authenticate with `Authorization: Bearer <token>` header (HTTP) or `?token=<token>` query parameter (WebSocket).
 
-If `CHAT_SERVER_HOST` is set to `0.0.0.0`, at least one auth method must be configured. Unauthenticated remote connections are rejected with 401.
+If `CHAT_SERVER_HOST` is set to `0.0.0.0`, configure at least one of Tailscale or a bearer token. Without either, the server logs a warning and allows unauthenticated remote connections.
 
-The PWA shows a login screen when accessing from a non-localhost address without proxy or Tailscale auth. The token is stored in `localStorage`.
+The PWA shows a login screen when accessing from a non-localhost address without Tailscale. The token is stored in `localStorage`.
 
 ## API Reference
 
