@@ -65,6 +65,15 @@ function createSchema(database: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_task_run_logs ON task_run_logs(task_id, run_at);
 
+    CREATE TABLE IF NOT EXISTS message_routes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_folder TEXT NOT NULL,
+      target_jid TEXT NOT NULL,
+      timestamp TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_routes_source ON message_routes(source_folder);
+    CREATE INDEX IF NOT EXISTS idx_message_routes_ts ON message_routes(timestamp);
+
     CREATE TABLE IF NOT EXISTS router_state (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -760,4 +769,36 @@ function migrateJsonState(): void {
       }
     }
   }
+}
+
+// ── Message route logging ─────────────────────────────────────────────────
+
+export function logMessageRoute(
+  sourceFolder: string,
+  targetJid: string,
+): void {
+  db.prepare(
+    'INSERT INTO message_routes (source_folder, target_jid, timestamp) VALUES (?, ?, ?)',
+  ).run(sourceFolder, targetJid, new Date().toISOString());
+}
+
+export function getMessageRoutes(
+  sinceDays = 7,
+): Array<{ source_folder: string; target_jid: string; count: number }> {
+  const since = new Date(
+    Date.now() - sinceDays * 24 * 60 * 60 * 1000,
+  ).toISOString();
+  return db
+    .prepare(
+      `SELECT source_folder, target_jid, COUNT(*) as count
+       FROM message_routes
+       WHERE timestamp > ?
+       GROUP BY source_folder, target_jid
+       ORDER BY count DESC`,
+    )
+    .all(since) as Array<{
+    source_folder: string;
+    target_jid: string;
+    count: number;
+  }>;
 }

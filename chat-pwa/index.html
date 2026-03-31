@@ -139,12 +139,15 @@
       <div class="dash-body">
         <div id="dash-health" class="dash-health"></div>
         <div class="dash-section">
-          <div class="dash-section-title">Rooms &amp; Bots</div>
+          <div class="dash-section-title">Metrics</div>
           <div id="dash-graph" class="dash-graph"></div>
         </div>
-        <div class="dash-section">
-          <div class="dash-section-title">Recent Activity</div>
-          <div id="dash-activity" class="dash-activity"></div>
+        <div id="dash-detail" class="dash-detail" hidden>
+          <div class="dash-detail-header">
+            <span id="dash-detail-title">Detail</span>
+            <button id="dash-detail-close">&times;</button>
+          </div>
+          <div id="dash-detail-body"></div>
         </div>
       </div>
     </section>

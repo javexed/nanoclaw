@@ -26,6 +26,9 @@ import { randomUUID } from 'crypto';
 import { ASSISTANT_NAME, DATA_DIR } from './config.js';
 import {
   getAllRegisteredGroups,
+  getAllTasks,
+  getMessageRoutes,
+  logMessageRoute,
   setRegisteredGroup,
   updateRegisteredGroup,
   deleteRegisteredGroup,
@@ -375,6 +378,226 @@ async function handleHttp(
   // Auth check — used by PWA to verify token (reuses auth from above)
   if (url.pathname === '/api/auth/check' && method === 'GET') {
     return json(200, { ok: true, identity: senderIdentity });
+  }
+
+  // Stats — dashboard metrics
+  if (url.pathname === '/api/stats' && method === 'GET') {
+    const groups = getAllRegisteredGroups();
+    const entries = Object.entries(groups);
+
+    // Channel breakdown
+    const channels: Record<string, number> = {};
+    for (const [jid, g] of entries) {
+      const ch = jid.startsWith('tg:')
+        ? 'telegram'
+        : jid.startsWith('dc:')
+          ? 'discord'
+          : jid.startsWith('chat:')
+            ? 'local-chat'
+            : jid.endsWith('@g.us') || jid.endsWith('@s.whatsapp.net')
+              ? 'whatsapp'
+              : g.folder.split('_')[0] || 'unknown';
+      channels[ch] = (channels[ch] || 0) + 1;
+    }
+
+    // Scheduled tasks
+    let tasks: { active: number; paused: number; total: number } = {
+      active: 0,
+      paused: 0,
+      total: 0,
+    };
+    try {
+      const allTasks = getAllTasks();
+      tasks.total = allTasks.length;
+      tasks.active = allTasks.filter(
+        (t) => t.status === 'active',
+      ).length;
+      tasks.paused = allTasks.filter(
+        (t) => t.status === 'paused',
+      ).length;
+    } catch {
+      // table may not exist
+    }
+
+    // IPC queue depth per group (async)
+    const ipcQueues: Record<string, number> = {};
+    const fsPromises = (await import('fs/promises'));
+    await Promise.all(
+      entries.map(async ([, g]) => {
+        const msgDir = path.join(DATA_DIR, 'ipc', g.folder, 'messages');
+        try {
+          const files = await fsPromises.readdir(msgDir);
+          ipcQueues[g.folder] = files.filter((f) => f.endsWith('.json')).length;
+        } catch {
+          ipcQueues[g.folder] = 0;
+        }
+      }),
+    );
+
+    // Active containers
+    let activeContainers = 0;
+    try {
+      const out = await new Promise<string>((resolve, reject) =>
+        execFile(
+          'docker',
+          ['ps', '--filter', 'name=nanoclaw-', '--format', '{{.Names}}'],
+          { timeout: 3000 },
+          (err, stdout) => (err ? reject(err) : resolve(stdout)),
+        ),
+      );
+      activeContainers = out.trim().split('\n').filter(Boolean).length;
+    } catch {
+      // docker not available or no containers
+    }
+
+    // 24h message counts from chat rooms
+    let messages24h = 0;
+    const messagesByChannel: Record<string, number> = {};
+    const roomMessages: Array<{ id: string; name: string; count: number }> =
+      [];
+    try {
+      const rooms = getChatRooms();
+      const since = Date.now() - 86400000;
+      for (const room of rooms) {
+        const msgs = getChatMessages(room.id, 1000);
+        const recent = msgs.filter((m) => m.created_at > since).length;
+        messages24h += recent;
+        if (recent > 0) {
+          roomMessages.push({ id: room.id, name: room.name, count: recent });
+          const jid = `chat:${room.id}`;
+          const group = groups[jid];
+          const ch = group
+            ? jid.startsWith('chat:')
+              ? 'local-chat'
+              : 'unknown'
+            : 'local-chat';
+          messagesByChannel[ch] = (messagesByChannel[ch] || 0) + recent;
+        }
+      }
+    } catch {
+      // chat db may not exist
+    }
+    roomMessages.sort((a, b) => b.count - a.count);
+    const busiestRooms = roomMessages.slice(0, 5);
+
+    // Ollama status
+    const ollamaHost = process.env.OLLAMA_HOST || '';
+    let ollama: { ok: boolean; models?: string[]; host: string } = {
+      ok: false,
+      host: ollamaHost,
+    };
+    if (ollamaHost) {
+      try {
+        const ollamaRes = await fetch(`${ollamaHost}/api/tags`, {
+          signal: AbortSignal.timeout(3000),
+        });
+        if (ollamaRes.ok) {
+          const data = (await ollamaRes.json()) as {
+            models?: Array<{ name: string }>;
+          };
+          ollama = {
+            ok: true,
+            host: ollamaHost,
+            models: (data.models || []).map((m) => m.name),
+          };
+        }
+      } catch {
+        // Ollama not reachable
+      }
+    }
+
+    // Host system metrics
+    const os = await import('os');
+    const totalMem = os.totalmem();
+    const freeMem = os.freemem();
+    const system = {
+      memoryUsedPct: Math.round(((totalMem - freeMem) / totalMem) * 100),
+      memoryUsedGB: +((totalMem - freeMem) / 1073741824).toFixed(1),
+      memoryTotalGB: +(totalMem / 1073741824).toFixed(1),
+      loadAvg: os.loadavg().map((v) => +v.toFixed(2)),
+      cpus: os.cpus().length,
+      platform: os.platform(),
+    };
+
+    return json(200, {
+      bots: entries.length,
+      channels,
+      tasks,
+      ipcQueues,
+      activeContainers,
+      messages24h,
+      messagesByChannel,
+      busiestRooms,
+      ollama,
+      system,
+    });
+  }
+
+  // Message routes — cross-group send history (last 30 days)
+  if (url.pathname === '/api/routes' && method === 'GET') {
+    try {
+      const routes = getMessageRoutes(30);
+      const groups = getAllRegisteredGroups();
+      const result: Record<string, string[]> = {};
+      for (const route of routes) {
+        const sourceBot = Object.entries(groups).find(
+          ([, g]) => g.folder === route.source_folder,
+        );
+        if (!sourceBot) continue;
+        const sourceRoomId = sourceBot[0].startsWith('chat:')
+          ? sourceBot[0].replace(/^chat:/, '')
+          : null;
+        const targetRoomId = route.target_jid.startsWith('chat:')
+          ? route.target_jid.replace(/^chat:/, '')
+          : null;
+        if (sourceRoomId && targetRoomId) {
+          if (!result[sourceRoomId]) result[sourceRoomId] = [];
+          if (!result[sourceRoomId].includes(targetRoomId)) {
+            result[sourceRoomId].push(targetRoomId);
+          }
+        }
+      }
+      return json(200, result);
+    } catch {
+      return json(200, {});
+    }
+  }
+
+  // Save pipeline routes
+  if (url.pathname === '/api/routes' && method === 'POST') {
+    try {
+      const body = JSON.parse(await readBody());
+      if (!body.source || !Array.isArray(body.targets)) {
+        return json(400, { error: 'source and targets[] required' });
+      }
+      if (typeof body.source !== 'string' || !/^[a-z0-9_-]+$/i.test(body.source)) {
+        return json(400, { error: 'Invalid source format' });
+      }
+      const groups = getAllRegisteredGroups();
+      const sourceJid = `chat:${body.source}`;
+      const sourceGroup = groups[sourceJid];
+      if (!sourceGroup) {
+        return json(404, { error: `No bot registered for room ${body.source}` });
+      }
+      for (const target of body.targets) {
+        if (typeof target !== 'string' || !/^[a-z0-9_-]+$/i.test(target)) continue;
+        const targetJid = `chat:${target}`;
+        if (!groups[targetJid]) continue;
+        logMessageRoute(sourceGroup.folder, targetJid);
+      }
+      return json(200, { ok: true });
+    } catch {
+      return json(400, { error: 'Invalid JSON' });
+    }
+  }
+
+  // List scheduled tasks
+  if (url.pathname === '/api/tasks' && method === 'GET') {
+    try {
+      return json(200, getAllTasks());
+    } catch {
+      return json(200, []);
+    }
   }
 
   // List rooms

@@ -880,121 +880,279 @@ function formatUptime(seconds) {
 }
 
 async function refreshDashboard() {
-  const [bots, rooms, health] = await Promise.all([
-    authFetch('/api/bots').then(r => r.json()).catch(() => []),
-    authFetch('/api/rooms').then(r => r.json()).catch(() => []),
+  const [health, stats] = await Promise.all([
     authFetch('/health').then(r => r.json()).catch(() => ({ ok: false })),
+    authFetch('/api/stats').then(r => r.json()).catch(() => null),
   ]);
 
-  // Fetch last few messages per room (in parallel)
-  const roomActivity = await Promise.all(
-    rooms.map(async (room) => {
-      const msgs = await authFetch(`/api/rooms/${encodeURIComponent(room.id)}/messages`)
-        .then(r => r.json()).catch(() => []);
-      return { room, messages: msgs, lastMsg: msgs[msgs.length - 1] || null, count: msgs.length };
-    })
-  );
-
-  renderHealthStrip(health, bots, rooms);
-  renderBotRoomGraph(bots, rooms, roomActivity);
-  renderActivityFeed(roomActivity);
+  renderHealthStrip(health, stats);
+  renderMetrics(stats);
 }
 
-function renderHealthStrip(health, bots, rooms) {
+function renderHealthStrip(health, stats) {
   const el = $('#dash-health');
   const wsOk = ws && ws.readyState === WebSocket.OPEN;
   const pills = [
     { dot: health.ok ? 'ok' : 'err', label: 'Server', value: health.ok ? 'Online' : 'Offline' },
     { dot: 'ok', label: 'Uptime', value: health.uptime ? formatUptime(health.uptime) : '—' },
     { dot: wsOk ? 'ok' : 'err', label: 'WebSocket', value: wsOk ? 'Connected' : 'Disconnected' },
-    { dot: bots.length > 0 ? 'ok' : 'warn', label: 'Bots', value: String(bots.length) },
-    { dot: rooms.length > 0 ? 'ok' : 'warn', label: 'Rooms', value: String(rooms.length) },
   ];
   el.innerHTML = pills.map(p =>
     `<div class="dash-pill"><span class="pill-dot ${p.dot}"></span><span class="pill-label">${p.label}</span><span class="pill-value">${p.value}</span></div>`
   ).join('');
 }
 
-function renderBotRoomGraph(bots, rooms, roomActivity) {
+function renderMetrics(stats) {
   const el = $('#dash-graph');
-
-
-  // Rooms column
-  let roomsHtml = '<div><div class="dash-col-title">Rooms</div>';
-  if (rooms.length === 0) {
-    roomsHtml += '<div class="dash-empty">No rooms</div>';
-  } else {
-    for (const ra of roomActivity) {
-      const r = ra.room;
-      const color = roomColor(r.id) || 'var(--border)';
-      const time = ra.lastMsg ? relativeTime(ra.lastMsg.created_at) : 'no activity';
-      roomsHtml += `<div class="dash-card" style="border-left-color:${color}">
-        <div class="card-row"><span class="card-name"># ${esc(r.name)}</span><span class="card-badge">${ra.count} msgs</span></div>
-        <div class="card-meta">${time}</div>
-      </div>`;
-    }
-  }
-  roomsHtml += '</div>';
-
-  // Bots column
-  let botsHtml = '<div><div class="dash-col-title">Bots</div>';
-  if (bots.length === 0) {
-    botsHtml += '<div class="dash-empty">No bots</div>';
-  } else {
-    const sorted = [...bots].sort((a, b) => {
-      if (a.isMain !== b.isMain) return a.isMain ? -1 : 1;
-      return a.name.localeCompare(b.name);
-    });
-    for (const bot of sorted) {
-      // Color-code chat bots to match their room
-      let color = 'var(--border)';
-      if (bot.jid.startsWith('chat:')) {
-        const roomId = bot.jid.replace(/^chat:/, '');
-        color = roomColor(roomId);
-      }
-      const icon = CHANNEL_ICONS[bot.channel] || '🤖';
-      const mainTag = bot.isMain ? '<span class="card-badge main">MAIN</span>' : '';
-      botsHtml += `<div class="dash-card" style="border-left-color:${color}">
-        <div class="card-row"><span class="card-name">${icon} ${esc(bot.name)}</span>${mainTag}</div>
-        <div class="card-meta">${esc(bot.channel)} · ${esc(bot.trigger)}</div>
-      </div>`;
-    }
-  }
-  botsHtml += '</div>';
-
-  el.innerHTML = roomsHtml + botsHtml;
-}
-
-function renderActivityFeed(roomActivity) {
-  const el = $('#dash-activity');
-
-  // Flatten all messages, sort by time, take top 15
-  const allMsgs = [];
-  roomActivity.forEach((ra) => {
-    for (const msg of ra.messages) {
-      allMsgs.push({ ...msg, roomName: ra.room.name, roomId: ra.room.id });
-    }
-  });
-  allMsgs.sort((a, b) => b.created_at - a.created_at);
-  const recent = allMsgs.slice(0, 15);
-
-  if (recent.length === 0) {
-    el.innerHTML = '<div class="dash-empty">No recent activity</div>';
+  if (!stats) {
+    el.innerHTML = '<div class="dash-empty">Unable to load metrics</div>';
     return;
   }
 
-  el.innerHTML = recent.map(m => {
-    const color = roomColor(m.roomId);
-    const content = m.message_type === 'file' ? `📎 ${m.content}` : m.content;
-    const senderColor = m.sender_type === 'agent' ? 'var(--agent)' : 'var(--text-dim)';
-    return `<div class="dash-activity-row">
-      <span class="dash-activity-room" style="color:${color}">#${esc(m.roomId)}</span>
-      <span class="dash-activity-sender" style="color:${senderColor}">${m.sender_type === 'agent' ? '🤖 ' : ''}${esc(m.sender)}</span>
-      <span class="dash-activity-content">${esc(content.slice(0, 80))}</span>
-      <span class="dash-activity-time">${relativeTime(m.created_at)}</span>
+  function num(v) { return esc(String(Number(v) || 0)); }
+
+  // Top row: key numbers (clickable)
+  const msg24h = `<div class="metric-card clickable" onclick="showMessageDetail()">
+    <div class="metric-value">${num(stats.messages24h)}</div>
+    <div class="metric-label">Messages (24h)</div>
+  </div>`;
+
+  const containers = `<div class="metric-card clickable" onclick="showContainerDetail()">
+    <div class="metric-value">${num(stats.activeContainers)}</div>
+    <div class="metric-label">Active Containers</div>
+  </div>`;
+
+  const bots = `<div class="metric-card clickable" onclick="showBotDetail()">
+    <div class="metric-value">${num(stats.bots)}</div>
+    <div class="metric-label">Registered Bots</div>
+  </div>`;
+
+  const ta = Number(stats.tasks.active) || 0;
+  const tp = Number(stats.tasks.paused) || 0;
+  const tt = Number(stats.tasks.total) || 0;
+  const tc = tt - ta - tp;
+  const taskStr = ta > 0
+    ? `${ta} active` + (tp > 0 ? ` / ${tp} paused` : '') + (tc > 0 ? ` / ${tc} done` : '')
+    : tp > 0 ? `${tp} paused` + (tc > 0 ? ` / ${tc} done` : '')
+    : tc > 0 ? `${tc} completed` : 'None';
+  const tasks = `<div class="metric-card clickable" onclick="showTaskDetail()">
+    <div class="metric-value">${num(tt)}</div>
+    <div class="metric-label">Scheduled Tasks</div>
+    <div class="metric-sub">${esc(taskStr)}</div>
+  </div>`;
+
+  // System
+  const sys = stats.system || {};
+  const memBar = sys.memoryUsedPct || 0;
+  const memColor = memBar > 85 ? 'var(--delete-color)' : memBar > 60 ? '#ffd54f' : 'var(--accent)';
+  const loadStr = (sys.loadAvg || []).join(' / ');
+  const system = `<div class="metric-card wide">
+    <div class="metric-label">System</div>
+    <div class="sys-row"><span>Memory</span><span>${num(sys.memoryUsedGB)} / ${num(sys.memoryTotalGB)} GB (${num(memBar)}%)</span></div>
+    <div class="progress-bar"><div class="progress-fill" style="width:${num(memBar)}%;background:${memColor}"></div></div>
+    <div class="sys-row"><span>CPU Load (1/5/15m)</span><span>${esc(loadStr)}</span></div>
+    <div class="sys-row"><span>CPUs</span><span>${num(sys.cpus)}</span></div>
+    <div class="sys-row"><span>Platform</span><span>${esc(sys.platform || '')}</span></div>
+  </div>`;
+
+  // Ollama
+  const oll = stats.ollama || {};
+  let ollamaHtml;
+  if (!oll.host) {
+    ollamaHtml = `<div class="metric-card wide">
+      <div class="metric-label">Ollama</div>
+      <div class="metric-sub">Not configured</div>
     </div>`;
-  }).join('');
+  } else {
+    const dot = oll.ok ? '<span class="pill-dot ok"></span>' : '<span class="pill-dot err"></span>';
+    const models = oll.models && oll.models.length > 0
+      ? oll.models.map(m => `<span class="model-tag">${esc(m)}</span>`).join(' ')
+      : '<span class="metric-sub">No models</span>';
+    ollamaHtml = `<div class="metric-card wide">
+      <div class="metric-label">${dot} Ollama</div>
+      <div class="sys-row"><span>Host</span><span>${esc(oll.host)}</span></div>
+      <div class="sys-row"><span>Status</span><span>${oll.ok ? 'Connected' : 'Unreachable'}</span></div>
+      <div style="margin-top:6px">${models}</div>
+    </div>`;
+  }
+
+  // Bots by channel
+  const channelHtml = Object.entries(stats.channels)
+    .sort((a, b) => b[1] - a[1])
+    .map(([ch, count]) => `<div class="channel-row"><span class="channel-name">${esc(ch)}</span><span class="channel-count">${count}</span></div>`)
+    .join('');
+  const channels = `<div class="metric-card">
+    <div class="metric-label">Bots by Channel</div>
+    ${channelHtml}
+  </div>`;
+
+  // Busiest rooms
+  const busyRooms = (stats.busiestRooms || []);
+  let busiestHtml;
+  if (busyRooms.length === 0) {
+    busiestHtml = `<div class="metric-card">
+      <div class="metric-label">Busiest Rooms (24h)</div>
+      <div class="metric-sub">No activity</div>
+    </div>`;
+  } else {
+    const rows = busyRooms.map(r =>
+      `<div class="channel-row"><span class="channel-name">#${esc(r.id)}</span><span class="channel-count">${r.count} msgs</span></div>`
+    ).join('');
+    busiestHtml = `<div class="metric-card">
+      <div class="metric-label">Busiest Rooms (24h)</div>
+      ${rows}
+    </div>`;
+  }
+
+  // IPC queue
+  const queueEntries = Object.entries(stats.ipcQueues).filter(([, v]) => v > 0);
+  let ipcHtml;
+  if (queueEntries.length === 0) {
+    ipcHtml = `<div class="metric-card wide">
+      <div class="metric-label">IPC Queue</div>
+      <div class="metric-sub">All clear</div>
+    </div>`;
+  } else {
+    const rows = queueEntries
+      .sort((a, b) => b[1] - a[1])
+      .map(([folder, count]) => `<div class="channel-row"><span class="channel-name">${esc(folder)}</span><span class="channel-count">${count} pending</span></div>`)
+      .join('');
+    ipcHtml = `<div class="metric-card wide">
+      <div class="metric-label">IPC Queue</div>
+      ${rows}
+    </div>`;
+  }
+
+  el.innerHTML = `
+    <div class="metrics-grid">${msg24h}${containers}${bots}${tasks}</div>
+    <div class="metrics-grid two-col">${system}${ollamaHtml}</div>
+    <div class="metrics-grid two-col">${channels}${busiestHtml}</div>
+    ${ipcHtml}`;
 }
+
+// ── Dashboard detail panel ────────────────────────────────────────────────
+function showDetail(title, html) {
+  $('#dash-detail-title').textContent = title;
+  $('#dash-detail-body').innerHTML = html;
+  $('#dash-detail').hidden = false;
+  $('#dash-detail').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function hideDetail() {
+  $('#dash-detail').hidden = true;
+}
+
+$('#dash-detail-close').addEventListener('click', hideDetail);
+
+async function showMessageDetail() {
+  const rooms = await authFetch('/api/rooms').then(r => r.json()).catch(() => []);
+  const since = Date.now() - 86400000;
+  const roomMsgs = await Promise.all(
+    rooms.map(room =>
+      authFetch(`/api/rooms/${encodeURIComponent(room.id)}/messages`)
+        .then(r => r.json())
+        .then(msgs => msgs.filter(m => m.created_at > since).map(m => ({ ...m, roomId: room.id })))
+        .catch(() => [])
+    )
+  );
+  const allMsgs = roomMsgs.flat();
+  allMsgs.sort((a, b) => b.created_at - a.created_at);
+  const recent = allMsgs.slice(0, 50);
+
+  if (recent.length === 0) {
+    showDetail('Messages (24h)', '<div class="metric-sub">No messages in the last 24 hours</div>');
+    return;
+  }
+
+  const rows = recent.map(m => {
+    const time = new Date(m.created_at).toLocaleTimeString();
+    const icon = m.sender_type === 'agent' ? '🤖' : '👤';
+    return `<tr>
+      <td>${time}</td>
+      <td style="color:${roomColor(m.roomId)}">#${esc(m.roomId)}</td>
+      <td>${icon} ${esc(m.sender)}</td>
+      <td class="msg-content">${esc(m.content?.slice(0, 100) || '')}</td>
+    </tr>`;
+  }).join('');
+
+  showDetail('Messages (24h)', `<table class="detail-table">
+    <thead><tr><th>Time</th><th>Room</th><th>Sender</th><th>Message</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`);
+}
+
+async function showTaskDetail() {
+  const tasks = await authFetch('/api/tasks').then(r => r.json()).catch(() => []);
+
+  if (tasks.length === 0) {
+    showDetail('Scheduled Tasks', '<div class="metric-sub">No scheduled tasks</div>');
+    return;
+  }
+
+  const rows = tasks.map(t => {
+    const statusClass = t.status === 'active' ? 'status-active' : t.status === 'paused' ? 'status-paused' : 'status-completed';
+    const nextRun = t.next_run ? new Date(t.next_run).toLocaleString() : '—';
+    const lastRun = t.last_run ? relativeTime(t.last_run) : 'never';
+    return `<tr>
+      <td><span class="status-badge ${statusClass}">${esc(t.status)}</span></td>
+      <td>${esc(t.group_folder)}</td>
+      <td>${esc(t.schedule_type)}: ${esc(t.schedule_value)}</td>
+      <td class="msg-content">${esc(t.prompt?.slice(0, 80) || '')}</td>
+      <td>${nextRun}</td>
+      <td>${lastRun}</td>
+    </tr>`;
+  }).join('');
+
+  showDetail('Scheduled Tasks', `<table class="detail-table">
+    <thead><tr><th>Status</th><th>Group</th><th>Schedule</th><th>Prompt</th><th>Next Run</th><th>Last Run</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`);
+}
+
+async function showContainerDetail() {
+  // Fetch active containers from stats (re-fetch to get fresh data)
+  const stats = await authFetch('/api/stats').then(r => r.json()).catch(() => null);
+  if (!stats || stats.activeContainers === 0) {
+    showDetail('Active Containers', '<div class="metric-sub">No containers running</div>');
+    return;
+  }
+  showDetail('Active Containers', `<div class="metric-sub">${stats.activeContainers} container(s) currently running. Check <code>docker ps --filter name=nanoclaw-</code> for details.</div>`);
+}
+
+async function showBotDetail() {
+  const bots = await authFetch('/api/bots').then(r => r.json()).catch(() => []);
+  if (bots.length === 0) {
+    showDetail('Registered Bots', '<div class="metric-sub">No bots registered</div>');
+    return;
+  }
+
+  const sorted = [...bots].sort((a, b) => {
+    if (a.isMain !== b.isMain) return a.isMain ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  const rows = sorted.map(b => {
+    const mainBadge = b.isMain ? '<span class="status-badge status-active">MAIN</span>' : '';
+    return `<tr>
+      <td>${esc(b.name)} ${mainBadge}</td>
+      <td>${esc(b.channel)}</td>
+      <td><code>${esc(b.folder)}</code></td>
+      <td><code>${esc(b.trigger)}</code></td>
+      <td>${b.requiresTrigger ? 'Yes' : 'No'}</td>
+    </tr>`;
+  }).join('');
+
+  showDetail('Registered Bots', `<table class="detail-table">
+    <thead><tr><th>Name</th><th>Channel</th><th>Folder</th><th>Trigger</th><th>Requires Trigger</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`);
+}
+
+// Make detail functions globally accessible for onclick handlers
+window.showMessageDetail = showMessageDetail;
+window.showTaskDetail = showTaskDetail;
+window.showContainerDetail = showContainerDetail;
+window.showBotDetail = showBotDetail;
 
 // ── Bot management ────────────────────────────────────────────────────────
 const CHANNEL_ICONS = {
