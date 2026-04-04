@@ -315,6 +315,15 @@ function connect() {
   };
 }
 
+// iOS/mobile: when the app returns from background, the WebSocket may be
+// silently dead without onclose firing. Detect this and force a reconnect.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && ws && ws.readyState !== WebSocket.OPEN) {
+    try { ws.close(); } catch {}
+    connect();
+  }
+});
+
 // ── Rooms ─────────────────────────────────────────────────────────────────
 // ── Room ordering ─────────────────────────────────────────────────────────
 function getSavedRoomOrder() {
