@@ -553,7 +553,7 @@ function joinRoom(roomId, roomName) {
   sessionStorage.setItem('lastRoom', roomId);
   $('#room-name').textContent = `#${roomId}`;
   $('#message-input').disabled = false;
-  $('button[type=submit]').disabled = false;
+  $('#message-form button[type=submit]').disabled = false;
   document.querySelectorAll('#room-list li').forEach(li => {
     li.classList.toggle('active', li.dataset.roomId === roomId);
   });
@@ -787,7 +787,9 @@ function isNearBottom() {
   const el = $('#messages');
   const elNear = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   const winNear = document.documentElement.scrollHeight - window.scrollY - window.innerHeight < 80;
-  return elNear || winNear;
+  // Both must be near bottom — on mobile the window scrolls (elNear is always
+  // true because #messages doesn't overflow), on desktop #messages scrolls.
+  return elNear && winNear;
 }
 
 let missedMsgCount = 0;
