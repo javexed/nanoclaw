@@ -160,26 +160,28 @@ function createSchema(database: Database.Database): void {
 
   // Add tags column if it doesn't exist (migration for existing DBs)
   try {
-    database.exec(
-      `ALTER TABLE registered_groups ADD COLUMN tags TEXT`,
-    );
+    database.exec(`ALTER TABLE registered_groups ADD COLUMN tags TEXT`);
   } catch {
     /* column already exists */
   }
 
   // Add reply context columns if they don't exist (migration for existing DBs)
   try {
-    database.exec(
-      `ALTER TABLE messages ADD COLUMN reply_to_message_id TEXT`,
-    );
+    database.exec(`ALTER TABLE messages ADD COLUMN reply_to_message_id TEXT`);
+  } catch {
+    /* column already exists */
+  }
+  try {
     database.exec(
       `ALTER TABLE messages ADD COLUMN reply_to_message_content TEXT`,
     );
-    database.exec(
-      `ALTER TABLE messages ADD COLUMN reply_to_sender_name TEXT`,
-    );
   } catch {
-    /* columns already exist */
+    /* column already exists */
+  }
+  try {
+    database.exec(`ALTER TABLE messages ADD COLUMN reply_to_sender_name TEXT`);
+  } catch {
+    /* column already exists */
   }
 }
 
@@ -740,13 +742,25 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
       trigger: row.trigger_pattern,
       added_at: row.added_at,
       containerConfig: row.container_config
-        ? (() => { try { return JSON.parse(row.container_config!); } catch { return undefined; } })()
+        ? (() => {
+            try {
+              return JSON.parse(row.container_config!);
+            } catch {
+              return undefined;
+            }
+          })()
         : undefined,
       requiresTrigger:
         row.requires_trigger === null ? undefined : row.requires_trigger === 1,
       isMain: row.is_main === 1 ? true : undefined,
       tags: row.tags
-        ? (() => { try { return JSON.parse(row.tags!); } catch { return undefined; } })()
+        ? (() => {
+            try {
+              return JSON.parse(row.tags!);
+            } catch {
+              return undefined;
+            }
+          })()
         : undefined,
     };
   }
@@ -817,10 +831,7 @@ function migrateJsonState(): void {
 
 // ── Message route logging ─────────────────────────────────────────────────
 
-export function logMessageRoute(
-  sourceFolder: string,
-  targetJid: string,
-): void {
+export function logMessageRoute(sourceFolder: string, targetJid: string): void {
   db.prepare(
     'INSERT INTO message_routes (source_folder, target_jid, timestamp) VALUES (?, ?, ?)',
   ).run(sourceFolder, targetJid, new Date().toISOString());
