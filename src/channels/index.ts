@@ -2,6 +2,7 @@
 // Each import triggers the channel module's registerChannel() call.
 
 // discord
+import './discord.js';
 
 // gmail
 
@@ -13,3 +14,6 @@
 import './local-chat.js';
 
 // whatsapp
+
+// emacs
+import './emacs.js';
