@@ -83,7 +83,12 @@ export function broadcast(
   const isMessage = (msg as { type?: string }).type === 'message';
   // Redact sensitive data before sending to chat clients
   const outgoing = isMessage
-    ? { ...msg, content: redactSensitiveData((msg as { content?: string }).content || '') }
+    ? {
+        ...msg,
+        content: redactSensitiveData(
+          (msg as { content?: string }).content || '',
+        ),
+      }
     : msg;
   const payload = JSON.stringify(outgoing);
   const notifyPayload = isMessage
@@ -756,10 +761,13 @@ async function handleHttp(
   if (histMatch && method === 'GET') {
     const room = getChatRoom(histMatch[1]);
     if (!room) return json(404, { error: 'Room not found' });
-    return json(200, getChatMessages(room.id, 100).map(m => ({
-      ...m,
-      content: redactSensitiveData(m.content),
-    })));
+    return json(
+      200,
+      getChatMessages(room.id, 100).map((m) => ({
+        ...m,
+        content: redactSensitiveData(m.content),
+      })),
+    );
   }
 
   // Agent tokens
@@ -1377,7 +1385,7 @@ function setupWebSocket(server: http.Server): void {
         send({
           type: 'history',
           room_id: room.id,
-          messages: getChatMessages(room.id, 50).map(m => ({
+          messages: getChatMessages(room.id, 50).map((m) => ({
             ...m,
             content: redactSensitiveData(m.content),
           })),
@@ -1433,14 +1441,15 @@ function setupWebSocket(server: http.Server): void {
         const outgoing: Record<string, unknown> = {
           type: 'message',
           ...stored,
-          content: redactSensitiveData(stored.content),
         };
         if (msg.client_id) outgoing.client_id = msg.client_id;
+        // broadcast() handles redaction for all message payloads
         broadcast(client.room_id, outgoing, clientId);
         if (onNewMessageCallback && client.identity_type === 'user') {
           onNewMessageCallback(client.room_id, stored);
         }
-        send(outgoing);
+        // Redact for the sender's own echo
+        send({ ...outgoing, content: redactSensitiveData(stored.content) });
         return;
       }
     });

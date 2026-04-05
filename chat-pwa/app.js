@@ -2175,11 +2175,12 @@ let isTyping = false;
 
 $('#message-input').addEventListener('input', function() {
   // Auto-grow textarea — only resize when content overflows or shrinks
-  if (this.scrollHeight > this.clientHeight || this.value.split('\n').length < (this._prevLines || 1)) {
+  const prevH = this._prevScrollHeight || this.clientHeight;
+  if (this.scrollHeight > this.clientHeight || this.scrollHeight < prevH) {
     this.style.height = '0';
     this.style.height = Math.min(this.scrollHeight, 120) + 'px';
   }
-  this._prevLines = this.value.split('\n').length;
+  this._prevScrollHeight = this.scrollHeight;
   if (!currentRoom || !ws || ws.readyState !== WebSocket.OPEN) return;
   if (!isTyping) {
     isTyping = true;
