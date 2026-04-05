@@ -2174,9 +2174,12 @@ let typingTimeout = null;
 let isTyping = false;
 
 $('#message-input').addEventListener('input', function() {
-  // Auto-grow textarea
-  this.style.height = 'auto';
-  this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+  // Auto-grow textarea — only resize when content overflows or shrinks
+  if (this.scrollHeight > this.clientHeight || this.value.split('\n').length < (this._prevLines || 1)) {
+    this.style.height = '0';
+    this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+  }
+  this._prevLines = this.value.split('\n').length;
   if (!currentRoom || !ws || ws.readyState !== WebSocket.OPEN) return;
   if (!isTyping) {
     isTyping = true;
