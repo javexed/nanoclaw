@@ -309,7 +309,7 @@ export function setLastGroupSync(): void {
  * Store a message with full content.
  * Only call this for registered groups where message history is needed.
  */
-export function storeMessage(msg: NewMessage): void {
+export function storeMessage(msg: NewMessage, skipRedact = false): void {
   db.prepare(
     `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
@@ -317,7 +317,7 @@ export function storeMessage(msg: NewMessage): void {
     msg.chat_jid,
     msg.sender,
     msg.sender_name,
-    redactSensitiveData(msg.content),
+    skipRedact ? msg.content : redactSensitiveData(msg.content),
     msg.timestamp,
     msg.is_from_me ? 1 : 0,
     msg.is_bot_message ? 1 : 0,

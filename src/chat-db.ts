@@ -164,10 +164,11 @@ export function storeChatMessage(
   sender: string,
   senderType: string,
   content: string,
+  skipRedact = false,
 ): ChatMessage {
   const id = randomUUID();
   const now = Date.now();
-  const safeContent = redactSensitiveData(content);
+  const safeContent = skipRedact ? content : redactSensitiveData(content);
   getDb()
     .prepare(
       'INSERT INTO chat_messages (id, room_id, sender, sender_type, content, created_at) VALUES (?, ?, ?, ?, ?, ?)',

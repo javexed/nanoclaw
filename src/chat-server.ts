@@ -1413,11 +1413,15 @@ function setupWebSocket(server: http.Server): void {
           return;
         }
         if (!msg.content?.trim()) return;
+        // Skip redaction for the main/control group so tokens can be passed through
+        const groups = getAllRegisteredGroups();
+        const isMain = groups[`chat:${client.room_id}`]?.isMain === true;
         const stored = storeChatMessage(
           client.room_id,
           client.identity,
           client.identity_type,
           msg.content,
+          isMain,
         );
         const outgoing: Record<string, unknown> = {
           type: 'message',
