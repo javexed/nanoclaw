@@ -155,6 +155,13 @@ export function clearOnNewMessage(): void {
   onNewMessageCallback = null;
 }
 
+export function broadcastRooms(): void {
+  const payload = JSON.stringify({ type: 'rooms', rooms: getChatRooms() });
+  for (const c of clients.values()) {
+    if (c.ws.readyState === WebSocket.OPEN) c.ws.send(payload);
+  }
+}
+
 export function setOnGroupUpdated(cb: () => void): void {
   onGroupUpdatedCallback = cb;
 }
@@ -535,19 +542,15 @@ async function handleHttp(
     try {
       const allTasks = getAllTasks();
       tasks.total = allTasks.length;
-      tasks.active = allTasks.filter(
-        (t) => t.status === 'active',
-      ).length;
-      tasks.paused = allTasks.filter(
-        (t) => t.status === 'paused',
-      ).length;
+      tasks.active = allTasks.filter((t) => t.status === 'active').length;
+      tasks.paused = allTasks.filter((t) => t.status === 'paused').length;
     } catch {
       // table may not exist
     }
 
     // IPC queue depth per group (async)
     const ipcQueues: Record<string, number> = {};
-    const fsPromises = (await import('fs/promises'));
+    const fsPromises = await import('fs/promises');
     await Promise.all(
       entries.map(async ([, g]) => {
         const msgDir = path.join(DATA_DIR, 'ipc', g.folder, 'messages');
@@ -579,8 +582,7 @@ async function handleHttp(
     // 24h message counts from chat rooms
     let messages24h = 0;
     const messagesByChannel: Record<string, number> = {};
-    const roomMessages: Array<{ id: string; name: string; count: number }> =
-      [];
+    const roomMessages: Array<{ id: string; name: string; count: number }> = [];
     try {
       const rooms = getChatRooms();
       const since = Date.now() - 86400000;
@@ -590,7 +592,8 @@ async function handleHttp(
         messages24h += recent;
         if (recent > 0) {
           roomMessages.push({ id: room.id, name: room.name, count: recent });
-          messagesByChannel['local-chat'] = (messagesByChannel['local-chat'] || 0) + recent;
+          messagesByChannel['local-chat'] =
+            (messagesByChannel['local-chat'] || 0) + recent;
         }
       }
     } catch {
@@ -689,17 +692,23 @@ async function handleHttp(
       if (!body.source || !Array.isArray(body.targets)) {
         return json(400, { error: 'source and targets[] required' });
       }
-      if (typeof body.source !== 'string' || !/^[a-z0-9_-]+$/i.test(body.source)) {
+      if (
+        typeof body.source !== 'string' ||
+        !/^[a-z0-9_-]+$/i.test(body.source)
+      ) {
         return json(400, { error: 'Invalid source format' });
       }
       const groups = getAllRegisteredGroups();
       const sourceJid = `chat:${body.source}`;
       const sourceGroup = groups[sourceJid];
       if (!sourceGroup) {
-        return json(404, { error: `No bot registered for room ${body.source}` });
+        return json(404, {
+          error: `No bot registered for room ${body.source}`,
+        });
       }
       for (const target of body.targets) {
-        if (typeof target !== 'string' || !/^[a-z0-9_-]+$/i.test(target)) continue;
+        if (typeof target !== 'string' || !/^[a-z0-9_-]+$/i.test(target))
+          continue;
         const targetJid = `chat:${target}`;
         if (!groups[targetJid]) continue;
         logMessageRoute(sourceGroup.folder, targetJid);
@@ -1083,7 +1092,11 @@ async function handleHttp(
     }
 
     // Validate uploadId as UUID to prevent path traversal
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(uploadId)) {
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        uploadId,
+      )
+    ) {
       return json(400, { error: 'Invalid uploadId format' });
     }
 
@@ -1105,7 +1118,10 @@ async function handleHttp(
         receivedChunks: new Set(),
         tempDir,
         sender: senderIdentity,
-        timer: setTimeout(() => cleanupChunkedUpload(uploadId), CHUNK_UPLOAD_TIMEOUT),
+        timer: setTimeout(
+          () => cleanupChunkedUpload(uploadId),
+          CHUNK_UPLOAD_TIMEOUT,
+        ),
         cumulativeSize: 0,
       };
       pendingChunkedUploads.set(uploadId, upload);

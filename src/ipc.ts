@@ -5,9 +5,18 @@ import { CronExpressionParser } from 'cron-parser';
 
 import { randomUUID } from 'crypto';
 
-import { ASSISTANT_NAME, DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
+import {
+  ASSISTANT_NAME,
+  DATA_DIR,
+  IPC_POLL_INTERVAL,
+  TIMEZONE,
+} from './config.js';
 import { createChatRoom, storeFileMessage } from './chat-db.js';
-import { broadcast, isChatServerRunning } from './chat-server.js';
+import {
+  broadcast,
+  broadcastRooms,
+  isChatServerRunning,
+} from './chat-server.js';
 import { AvailableGroup } from './container-runner.js';
 import {
   createTask,
@@ -38,19 +47,43 @@ export interface IpcDeps {
 let ipcWatcherRunning = false;
 
 const MIME_TYPES: Record<string, string> = {
-  '.pdf': 'application/pdf', '.txt': 'text/plain', '.md': 'text/markdown',
-  '.csv': 'text/csv', '.json': 'application/json', '.xml': 'application/xml',
-  '.zip': 'application/zip', '.gz': 'application/gzip',
-  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
-  '.mp3': 'audio/mpeg', '.mp4': 'video/mp4', '.webm': 'video/webm',
-  '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript',
-  '.ts': 'text/plain', '.py': 'text/plain', '.cs': 'text/plain',
-  '.java': 'text/plain', '.go': 'text/plain', '.rs': 'text/plain',
-  '.c': 'text/plain', '.cpp': 'text/plain', '.h': 'text/plain',
-  '.sh': 'text/plain', '.yml': 'text/yaml', '.yaml': 'text/yaml',
-  '.doc': 'application/msword', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  '.xls': 'application/vnd.ms-excel', '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.pdf': 'application/pdf',
+  '.txt': 'text/plain',
+  '.md': 'text/markdown',
+  '.csv': 'text/csv',
+  '.json': 'application/json',
+  '.xml': 'application/xml',
+  '.zip': 'application/zip',
+  '.gz': 'application/gzip',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+  '.mp3': 'audio/mpeg',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.html': 'text/html',
+  '.css': 'text/css',
+  '.js': 'application/javascript',
+  '.ts': 'text/plain',
+  '.py': 'text/plain',
+  '.cs': 'text/plain',
+  '.java': 'text/plain',
+  '.go': 'text/plain',
+  '.rs': 'text/plain',
+  '.c': 'text/plain',
+  '.cpp': 'text/plain',
+  '.h': 'text/plain',
+  '.sh': 'text/plain',
+  '.yml': 'text/yaml',
+  '.yaml': 'text/yaml',
+  '.doc': 'application/msword',
+  '.docx':
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xls': 'application/vnd.ms-excel',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 };
 
 /**
@@ -58,7 +91,13 @@ const MIME_TYPES: Record<string, string> = {
  * and broadcast as a file message to the local chat room.
  */
 async function handleFileMessage(
-  data: { chatJid: string; text: string; file_path: string; file_name?: string; file_size?: number },
+  data: {
+    chatJid: string;
+    text: string;
+    file_path: string;
+    file_name?: string;
+    file_size?: number;
+  },
   sourceGroup: string,
 ): Promise<void> {
   const roomId = data.chatJid.replace(/^chat:/, '');
@@ -72,21 +111,33 @@ async function handleFileMessage(
   // Only allow files from the group's own workspace — never project root
   let hostFilePath: string;
   if (data.file_path.startsWith(containerPrefix)) {
-    hostFilePath = path.join(groupFolderPath, data.file_path.slice(containerPrefix.length));
+    hostFilePath = path.join(
+      groupFolderPath,
+      data.file_path.slice(containerPrefix.length),
+    );
   } else {
-    logger.warn({ file_path: data.file_path, sourceGroup }, 'File path outside group workspace — blocked');
+    logger.warn(
+      { file_path: data.file_path, sourceGroup },
+      'File path outside group workspace — blocked',
+    );
     return;
   }
 
   if (!fs.existsSync(hostFilePath)) {
-    logger.warn({ hostFilePath, sourceGroup }, 'IPC file attachment not found on host');
+    logger.warn(
+      { hostFilePath, sourceGroup },
+      'IPC file attachment not found on host',
+    );
     return;
   }
 
   const stat = fs.statSync(hostFilePath);
   const id = randomUUID();
   // Strip path separators from file_name to prevent path traversal in extension
-  const safeName = (data.file_name || path.basename(data.file_path)).replace(/[/\\]/g, '');
+  const safeName = (data.file_name || path.basename(data.file_path)).replace(
+    /[/\\]/g,
+    '',
+  );
   const ext = path.extname(safeName);
   const safeFilename = `${id}${ext}`;
   const destPath = path.join(uploadsDir, safeFilename);
@@ -101,9 +152,18 @@ async function handleFileMessage(
     size: stat.size,
   };
 
-  const stored = storeFileMessage(roomId, ASSISTANT_NAME, 'agent', fileMeta, data.text);
+  const stored = storeFileMessage(
+    roomId,
+    ASSISTANT_NAME,
+    'agent',
+    fileMeta,
+    data.text,
+  );
   broadcast(roomId, { type: 'message', ...stored });
-  logger.info({ roomId, filename, size: stat.size }, 'IPC file message sent to local chat');
+  logger.info(
+    { roomId, filename, size: stat.size },
+    'IPC file message sent to local chat',
+  );
 }
 
 export function startIpcWatcher(deps: IpcDeps): void {
@@ -558,6 +618,7 @@ export async function processTaskIpc(
         if (data.jid.startsWith('chat:') && isChatServerRunning()) {
           const roomId = data.jid.replace(/^chat:/, '');
           createChatRoom(roomId, data.name);
+          broadcastRooms();
           logger.info(
             { roomId, name: data.name },
             'Auto-created chat room for registered group',
