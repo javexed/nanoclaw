@@ -5,7 +5,6 @@ import path from 'path';
 import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
-import { redactSensitiveData } from './redact.js';
 import {
   NewMessage,
   RegisteredGroup,
@@ -309,7 +308,7 @@ export function setLastGroupSync(): void {
  * Store a message with full content.
  * Only call this for registered groups where message history is needed.
  */
-export function storeMessage(msg: NewMessage, skipRedact = false): void {
+export function storeMessage(msg: NewMessage): void {
   db.prepare(
     `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
@@ -317,7 +316,7 @@ export function storeMessage(msg: NewMessage, skipRedact = false): void {
     msg.chat_jid,
     msg.sender,
     msg.sender_name,
-    skipRedact ? msg.content : redactSensitiveData(msg.content),
+    msg.content,
     msg.timestamp,
     msg.is_from_me ? 1 : 0,
     msg.is_bot_message ? 1 : 0,
@@ -347,7 +346,7 @@ export function storeMessageDirect(msg: {
     msg.chat_jid,
     msg.sender,
     msg.sender_name,
-    redactSensitiveData(msg.content),
+    msg.content,
     msg.timestamp,
     msg.is_from_me ? 1 : 0,
     msg.is_bot_message ? 1 : 0,

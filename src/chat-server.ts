@@ -25,6 +25,7 @@ import Busboy from 'busboy';
 import { randomUUID } from 'crypto';
 
 import { ASSISTANT_NAME, DATA_DIR } from './config.js';
+import { redactSensitiveData } from './redact.js';
 import {
   getAllRegisteredGroups,
   getAllTasks,
@@ -79,8 +80,12 @@ export function broadcast(
   msg: object,
   excludeId?: string,
 ): void {
-  const payload = JSON.stringify(msg);
   const isMessage = (msg as { type?: string }).type === 'message';
+  // Redact sensitive data before sending to chat clients
+  const outgoing = isMessage
+    ? { ...msg, content: redactSensitiveData((msg as { content?: string }).content || '') }
+    : msg;
+  const payload = JSON.stringify(outgoing);
   const notifyPayload = isMessage
     ? JSON.stringify({ type: 'unread', room_id: roomId })
     : '';
@@ -751,7 +756,10 @@ async function handleHttp(
   if (histMatch && method === 'GET') {
     const room = getChatRoom(histMatch[1]);
     if (!room) return json(404, { error: 'Room not found' });
-    return json(200, getChatMessages(room.id, 100));
+    return json(200, getChatMessages(room.id, 100).map(m => ({
+      ...m,
+      content: redactSensitiveData(m.content),
+    })));
   }
 
   // Agent tokens
@@ -1369,7 +1377,10 @@ function setupWebSocket(server: http.Server): void {
         send({
           type: 'history',
           room_id: room.id,
-          messages: getChatMessages(room.id, 50),
+          messages: getChatMessages(room.id, 50).map(m => ({
+            ...m,
+            content: redactSensitiveData(m.content),
+          })),
         });
         broadcast(
           room.id,
@@ -1413,19 +1424,16 @@ function setupWebSocket(server: http.Server): void {
           return;
         }
         if (!msg.content?.trim()) return;
-        // Skip redaction for the main/control group so tokens can be passed through
-        const groups = getAllRegisteredGroups();
-        const isMain = groups[`chat:${client.room_id}`]?.isMain === true;
         const stored = storeChatMessage(
           client.room_id,
           client.identity,
           client.identity_type,
           msg.content,
-          isMain,
         );
         const outgoing: Record<string, unknown> = {
           type: 'message',
           ...stored,
+          content: redactSensitiveData(stored.content),
         };
         if (msg.client_id) outgoing.client_id = msg.client_id;
         broadcast(client.room_id, outgoing, clientId);

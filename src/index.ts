@@ -678,8 +678,7 @@ async function main(): Promise<void> {
           return;
         }
       }
-      const isMain = registeredGroups[chatJid]?.isMain === true;
-      storeMessage(msg, isMain);
+      storeMessage(msg);
     },
     onChatMetadata: (
       chatJid: string,
