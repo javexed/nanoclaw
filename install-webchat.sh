@@ -55,61 +55,80 @@ else
   echo "= Channel adapter already registered (skip)"
 fi
 
-# ── 4. Migrations index: idempotent insertion via inline node ───────────
-node --input-type=module -e "
+# ── 4. Migrations index: idempotent upgrade-safe insertion ──────────────
+# Each symbol is checked independently against the array body, so installing
+# v2 of webchat on top of v1 (different symbol count) adds only the new
+# entries. Uses a heredoc'd temp script to dodge bash-escape gymnastics in
+# the regex literals.
+TMPFILE=$(mktemp --suffix=.mjs)
+cat > "$TMPFILE" <<'NODE_EOF'
 import { readFileSync, writeFileSync } from 'node:fs';
+
+const SYMBOLS = [
+  'moduleWebchat',
+  'moduleWebchatDropRooms',
+  'moduleWebchatRoomPrimes',
+  'moduleWebchatModels',
+  'moduleWebchatApprovalsIndex',
+  'moduleWebchatUserArchives',
+];
 
 const target = 'src/db/migrations/index.ts';
 let src = readFileSync(target, 'utf8');
-
-const IMPORT_BLOCK =
-\`import {
-  moduleWebchat,
-  moduleWebchatDropRooms,
-  moduleWebchatRoomPrimes,
-  moduleWebchatModels,
-  moduleWebchatApprovalsIndex,
-} from '../../channels/webchat/migration.js';
-
-\`;
-
-const ARRAY_ENTRIES =
-\`  moduleWebchat,
-  moduleWebchatDropRooms,
-  moduleWebchatRoomPrimes,
-  moduleWebchatModels,
-  moduleWebchatApprovalsIndex,
-\`;
-
 let changed = false;
 
-if (!src.includes(\"channels/webchat/migration\")) {
-  // Insert import block right before the first \`export\`
-  src = src.replace(/^(export )/m, IMPORT_BLOCK + '\$1');
+const IMPORT_BLOCK =
+  `import {\n${SYMBOLS.map((s) => '  ' + s).join(',\n')},\n} from '../../channels/webchat/migration.js';`;
+
+if (src.includes("from '../../channels/webchat/migration.js'")) {
+  // Already imported — replace the block in place so a new SYMBOLS list
+  // (post-upgrade) is fully reflected. No-op if nothing changed.
+  //
+  // [^}]* (not [\s\S]*?) makes the match local to one import block —
+  // crucial because other imports also use `import { ... } from '...';`
+  // and a too-greedy regex would eat everything between the first import
+  // and this one.
+  const before = src;
+  src = src.replace(
+    /import \{[^}]*\} from ['"]\.\.\/\.\.\/channels\/webchat\/migration\.js['"];/,
+    IMPORT_BLOCK,
+  );
+  if (before !== src) changed = true;
+} else {
+  // Fresh insert — put it right before the first `export`, with a blank
+  // line on either side.
+  src = src.replace(/^(export )/m, IMPORT_BLOCK + '\n\n$1');
   changed = true;
 }
 
-// Check the array body specifically — \"moduleWebchatApprovalsIndex\" also
-// appears in the import block above, so a top-level src.includes() would
-// false-positive after the import is inserted on a fresh run.
-const arrayMatch = src.match(/const migrations: Migration\[\] = \[[\\s\\S]*?\];/);
-const arrayHasEntries = arrayMatch && arrayMatch[0].includes('moduleWebchatApprovalsIndex');
-
-if (!arrayHasEntries) {
+const arrayMatch = src.match(/(const migrations: Migration\[\] = \[[\s\S]*?)\];/);
+if (!arrayMatch) {
+  console.error('migrations array not found — upstream `src/db/migrations/index.ts` schema changed?');
+  process.exit(1);
+}
+const arrayBody = arrayMatch[1];
+const missing = SYMBOLS.filter((s) => !arrayBody.includes(s + ','));
+if (missing.length > 0) {
+  const block = missing.map((s) => '  ' + s + ',\n').join('');
   src = src.replace(
-    /(const migrations: Migration\[\] = \[[\\s\\S]*?)\];/,
-    '\$1' + ARRAY_ENTRIES + '];',
+    /(const migrations: Migration\[\] = \[[\s\S]*?)\];/,
+    '$1' + block + '];',
   );
   changed = true;
 }
 
 if (changed) {
   writeFileSync(target, src);
-  console.log('→ Registered 5 webchat migrations in ' + target);
+  console.log(`→ Registered ${SYMBOLS.length} webchat migrations in ${target}` +
+              (missing.length > 0 && missing.length < SYMBOLS.length
+                ? ` (+${missing.length} new since last install)`
+                : ''));
 } else {
-  console.log('= Migrations already registered (skip)');
+  console.log(`= Migrations already registered (skip)`);
 }
-"
+NODE_EOF
+node "$TMPFILE"
+rm -f "$TMPFILE"
 
 # ── 5. Install pinned packages ──────────────────────────────────────────
 echo "→ Installing webchat dependencies …"

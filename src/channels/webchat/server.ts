@@ -15,6 +15,8 @@
  *   PUT  /api/rooms/:id/prime                    set { agentId } as the room's prime  [owner]
  *   DELETE /api/rooms/:id/prime                  clear the room's prime designation  [owner]
  *   GET  /api/rooms/:id/messages                 history (?after_id= for incremental)
+ *   POST /api/rooms/:id/archive                  hide from this user's sidebar
+ *   POST /api/rooms/:id/unarchive                un-hide for this user
  *   POST /api/rooms/:id/upload                   multipart upload
  *   POST /api/rooms/:id/upload/chunk             chunked upload
  *   GET  /api/files/:roomId/:filename            serve uploaded file
@@ -101,6 +103,7 @@ import {
 } from './auth.js';
 import {
   approvalInboxForUser,
+  archiveRoomForUser,
   assignModelToAgent,
   clearPrimeAgentForWebchatRoom,
   countAgentsForWebchatRoom,
@@ -111,6 +114,7 @@ import {
   getAgentsAssignedToModel,
   getAgentsForWebchatRoom,
   getAllWebchatRooms,
+  getArchivedRoomIdsForUser,
   getAssignedModelForAgent,
   getPrimeAgentForWebchatRoom,
   getWebchatMessages,
@@ -121,6 +125,7 @@ import {
   listWebchatModels,
   setPrimeAgentForWebchatRoom,
   storeWebchatFileMessage,
+  unarchiveRoomForUser,
   unassignModelFromAgent,
   unwireAgentFromWebchatRoom,
   updateWebchatModel,
@@ -335,7 +340,13 @@ async function handleHttp(
   // room is the conversation unit and you wire 1+ agents to it). Both
   // converge on the same messaging_groups + messaging_group_agents shape.
   if (url.pathname === '/api/rooms' && method === 'GET') {
-    return json(res, 200, filterRoomsForUser(userId, getAllWebchatRooms()));
+    const visible = filterRoomsForUser(userId, getAllWebchatRooms());
+    const archivedSet = getArchivedRoomIdsForUser(userId);
+    return json(
+      res,
+      200,
+      visible.map((r) => ({ ...r, archived: archivedSet.has(r.id) })),
+    );
   }
   if (url.pathname === '/api/rooms' && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') {
@@ -403,6 +414,27 @@ async function handleHttp(
   if (roomPrimeMatch && method === 'DELETE') {
     if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
     return clearRoomPrimeHandler(res, decodeURIComponent(roomPrimeMatch[1]));
+  }
+
+  // ── Per-user archive (sidebar hint, not access control) ──
+  // Anyone with access to the room can toggle archive for THEIR sidebar.
+  // Doesn't affect message routing or other users' views. CSRF-guarded
+  // because it's a state-mutating POST.
+  const roomArchiveMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/(archive|unarchive)$/);
+  if (roomArchiveMatch && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') {
+      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    }
+    const roomId = decodeURIComponent(roomArchiveMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    if (roomArchiveMatch[2] === 'archive') {
+      archiveRoomForUser(userId, roomId);
+    } else {
+      unarchiveRoomForUser(userId, roomId);
+    }
+    broadcastRooms();
+    return json(res, 200, { ok: true });
   }
 
   const histMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/messages$/);

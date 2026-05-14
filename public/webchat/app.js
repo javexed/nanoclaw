@@ -376,6 +376,7 @@ let ws,
 const pendingMessages = new Map();
 const typingUsers = new Map();
 const unreadRooms = new Set();
+let showArchived = sessionStorage.getItem('webchat:showArchived') === '1';
 let agentName = '';
 let lastSeenMessageId = sessionStorage.getItem('lastSeenMessageId') || null;
 let reconnectDelay = 1000;
@@ -596,14 +597,30 @@ function renderRooms(rooms) {
 
   const sorted = [...rooms].sort(cmp);
 
-  for (let i = 0; i < sorted.length; i++) {
-    const room = sorted[i];
+  // Partition archived vs active. Archived rooms only render when the
+  // "Show N archived" toggle is on; the toggle itself updates regardless
+  // (it's the affordance that reveals them).
+  const active = sorted.filter((r) => !r.archived);
+  const archived = sorted.filter((r) => r.archived);
+  const toggleBtn = $('#archived-toggle');
+  if (archived.length === 0) {
+    toggleBtn.hidden = true;
+  } else {
+    toggleBtn.hidden = false;
+    toggleBtn.textContent = showArchived ? `Hide ${archived.length} archived` : `Show ${archived.length} archived`;
+  }
+  const toRender = showArchived ? [...active, ...archived] : active;
+
+  for (let i = 0; i < toRender.length; i++) {
+    const room = toRender[i];
     const li = document.createElement('li');
     const color = roomColor(room.id);
     li.dataset.roomId = room.id;
     li.style.borderLeftColor = color;
     li.style.display = 'flex';
     li.style.alignItems = 'center';
+    li.style.position = 'relative';
+    if (room.archived) li.classList.add('archived');
 
     const text = document.createElement('span');
     text.textContent = `#${room.id}`;
@@ -616,6 +633,38 @@ function renderRooms(rooms) {
       dot.style.background = color;
       li.appendChild(dot);
     }
+
+    // Kebab — opens a tiny menu with Archive / Unarchive. Click stops
+    // propagation so it doesn't bubble to the `<li>` click (which joins
+    // the room). Only one menu open at a time across the list.
+    const kebab = document.createElement('button');
+    kebab.className = 'room-kebab';
+    kebab.type = 'button';
+    kebab.textContent = '⋯';
+    kebab.setAttribute('aria-label', 'Room actions');
+    kebab.addEventListener('click', (e) => {
+      e.stopPropagation();
+      list.querySelectorAll('.room-menu').forEach((m) => m.remove());
+      const menu = document.createElement('div');
+      menu.className = 'room-menu';
+      const action = document.createElement('button');
+      action.type = 'button';
+      action.textContent = room.archived ? 'Unarchive' : 'Archive';
+      action.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        menu.remove();
+        await toggleRoomArchive(room.id, !room.archived);
+      });
+      menu.appendChild(action);
+      li.appendChild(menu);
+      const close = () => {
+        menu.remove();
+        document.removeEventListener('click', close);
+      };
+      setTimeout(() => document.addEventListener('click', close), 0);
+    });
+    li.appendChild(kebab);
+
     if (room.id === currentRoom) li.classList.add('active');
     li.setAttribute('role', 'button');
     li.setAttribute('tabindex', '0');
@@ -667,6 +716,26 @@ function renderRooms(rooms) {
 let lastRoomsList = [];
 function updateUnreadDots() {
   if (lastRoomsList.length) renderRooms(lastRoomsList);
+}
+
+async function toggleRoomArchive(roomId, archive) {
+  // Optimistic: flip locally and re-render immediately so the kebab close
+  // animation isn't broken by the network round-trip. Server-side success
+  // will replay the same state via broadcastRooms; failure rolls back.
+  const target = lastRoomsList.find((r) => r.id === roomId);
+  if (target) target.archived = archive;
+  renderRooms(lastRoomsList);
+  try {
+    const res = await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/${archive ? 'archive' : 'unarchive'}`, {
+      method: 'POST',
+      headers: { 'X-Webchat-CSRF': '1' },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    console.error('toggleRoomArchive failed:', err);
+    if (target) target.archived = !archive; // roll back
+    renderRooms(lastRoomsList);
+  }
 }
 
 function joinRoom(roomId, roomName) {
@@ -3069,6 +3138,11 @@ function renderRoomCreateAgentChecklist() {
 }
 
 $('#create-room-btn').addEventListener('click', openRoomCreate);
+$('#archived-toggle').addEventListener('click', () => {
+  showArchived = !showArchived;
+  sessionStorage.setItem('webchat:showArchived', showArchived ? '1' : '0');
+  if (lastRoomsList.length) renderRooms(lastRoomsList);
+});
 $('#room-create-close').addEventListener('click', closeRoomDetail);
 $('#room-create-toggle-new').addEventListener('click', () => {
   $('#room-create-new-block').hidden = !$('#room-create-new-block').hidden;

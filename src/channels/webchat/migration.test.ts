@@ -19,12 +19,13 @@ afterEach(() => {
 describe('moduleWebchat migration', () => {
   it('leaves the expected tables after all webchat migrations', () => {
     runMigrations(getDb());
-    // After all five webchat migrations:
+    // After all webchat migrations:
     //   webchat-initial          → webchat_rooms, webchat_messages, webchat_push_subscriptions
     //   webchat-drop-rooms       → drops webchat_rooms (data moved to messaging_groups)
     //   webchat-room-primes      → adds webchat_room_primes
     //   webchat-models           → adds webchat_models, webchat_agent_models
     //   webchat-approvals-index  → adds webchat_approvals_index
+    //   webchat-user-archives    → adds webchat_user_room_archives
     const tables = getDb()
       .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'webchat_%' ORDER BY name`)
       .all() as { name: string }[];
@@ -35,6 +36,7 @@ describe('moduleWebchat migration', () => {
       'webchat_models',
       'webchat_push_subscriptions',
       'webchat_room_primes',
+      'webchat_user_room_archives',
     ]);
   });
 
@@ -49,11 +51,12 @@ describe('moduleWebchat migration', () => {
         'idx_webchat_approvals_platform',
         'idx_webchat_messages_room',
         'idx_webchat_push_identity',
+        'idx_webchat_user_archives_user',
       ].sort(),
     );
   });
 
-  it('records all five webchat migrations in schema_version', () => {
+  it('records all webchat migrations in schema_version', () => {
     runMigrations(getDb());
     const rows = getDb().prepare(`SELECT name FROM schema_version WHERE name LIKE 'webchat-%' ORDER BY name`).all() as {
       name: string;
@@ -64,6 +67,7 @@ describe('moduleWebchat migration', () => {
       'webchat-initial',
       'webchat-models',
       'webchat-room-primes',
+      'webchat-user-archives',
     ]);
   });
 

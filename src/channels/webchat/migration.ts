@@ -241,3 +241,35 @@ export const moduleWebchatApprovalsIndex: Migration = {
     `);
   },
 };
+
+/**
+ * Per-user room archive state.
+ *
+ * "Archived" is purely a sidebar-presentation hint — the room still routes
+ * messages normally and shows up in unread counts. Each user controls their
+ * own archive set; archiving a room only affects the archiving user's view.
+ *
+ * `room_id` is `messaging_groups.platform_id`. No FK (matches the
+ * webchat_room_primes / webchat_messages convention) so cascade-on-delete
+ * is handled in application code (deleteWebchatRoom).
+ *
+ * `user_id` is the trusted webchat userId (`webchat:<scheme>:<id>`),
+ * established at auth time — same identifier used everywhere else
+ * webchat does per-user state (push subscriptions, role grants).
+ */
+export const moduleWebchatUserArchives: Migration = {
+  version: 105,
+  name: 'webchat-user-archives',
+  up(db: Database.Database) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS webchat_user_room_archives (
+        user_id     TEXT NOT NULL,
+        room_id     TEXT NOT NULL,
+        archived_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, room_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_webchat_user_archives_user
+        ON webchat_user_room_archives(user_id);
+    `);
+  },
+};
