@@ -299,7 +299,7 @@ This skill is upstream-PR scope; the following are known follow-ups:
 
 ## Create your first agent
 
-A fresh webchat install has no agents yet, and `/init-first-agent` doesn't have a webchat code path (it's built around the DM-channel mental model that webchat doesn't share). Use `POST /api/agents` with `withRoom: true` instead — that opt-in flag tells the handler to provision the agent group, initialize the on-disk filesystem (`groups/<folder>/CLAUDE.local.md`), create a 1:1 webchat room, and wire the channel→agent in one call.
+A fresh webchat install has no agents yet, and `/init-first-agent` doesn't have a webchat code path. Use `POST /api/agents` with `withRoom: true` instead — that opt-in flag tells the handler to provision the agent group, initialize the on-disk filesystem (`groups/<folder>/CLAUDE.local.md`), create a 1:1 webchat room, and wire the channel→agent in one call.
 
 (Without `withRoom`, the call creates a bare agent_group with no chat surface — the v2 default, since agents are entities and rooms are conversation spaces. You'd then wire the agent into a room via `POST /api/rooms` or the PWA's "+ Add agent" inside an existing room.)
 
