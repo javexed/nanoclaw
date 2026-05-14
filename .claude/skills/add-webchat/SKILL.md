@@ -27,113 +27,61 @@ Webchat layers on top of a working v2 install — it does not replicate `/setup`
 
 ## Install
 
-Webchat's source-of-truth lives on the long-lived `channels-webchat` branch — same pattern the `channels` branch uses for Discord/Slack/etc. The skill is a thin installer: it fetches that branch and copies the channel-owned paths into your working tree. When upstream `main` drifts and breaks something, the fix lands on `channels-webchat` once (merge `main` in, resolve conflicts there, push) and every install picks it up on the next fetch.
+Webchat's source-of-truth lives on the long-lived `channels-webchat` branch — same pattern the `channels` branch uses for Discord/Slack/etc. The install is wrapped in two scripts that ship on the branch: a deterministic `install-webchat.sh` and an interactive `configure-webchat.sh`. The SKILL.md just bootstraps them.
 
-### Pre-flight (idempotent)
+### Pre-flight
 
-Skip to **Configure** if all of these are already in place:
+`/add-webchat` is safe to run repeatedly — both scripts are idempotent.
 
-- `src/channels/webchat/index.ts` exists
-- `src/channels/index.ts` contains `import './webchat/index.js';`
-- All five migrations are imported in `src/db/migrations/index.ts`: `moduleWebchat`, `moduleWebchatDropRooms`, `moduleWebchatRoomPrimes`, `moduleWebchatModels`, `moduleWebchatApprovalsIndex`
-- `ws`, `busboy`, `web-push`, `undici` are in `package.json` dependencies
+You need a `pnpm` in PATH (the project pins `pnpm@10.33.0`). If you usually run NanoClaw, you have one. If not, install via npm or mise — see `CLAUDE.md`'s "Development" section.
 
-Otherwise continue. Every step is safe to re-run.
+### 1. Detect remote + fetch the channel branch
 
-### 1. Fetch the channel branch + check out channel-owned files
-
-`channels-webchat` lives on the **same remote** that hosts the `skill/webchat` branch you just merged to get this SKILL.md. Auto-detect that remote, fetch the branch, and check out the files in one shot:
+`channels-webchat` lives on the same remote that hosts the `skill/webchat` branch you just merged. Auto-detect:
 
 ```bash
 WEBCHAT_REMOTE=$(git branch -r | grep -E '/skill/webchat$' | awk -F'/' '{print $1}' | sort -u | head -1 | xargs)
 if [ -z "$WEBCHAT_REMOTE" ]; then
-  echo "ERROR: no remote carries 'skill/webchat'. Did you fetch the remote that hosts the webchat skill before invoking /add-webchat?" >&2
+  echo "ERROR: no remote carries 'skill/webchat' — fetch the remote that hosts this skill first." >&2
   exit 1
 fi
-echo "Using remote: $WEBCHAT_REMOTE"
-
 git fetch "$WEBCHAT_REMOTE" channels-webchat
-git checkout "$WEBCHAT_REMOTE/channels-webchat" -- \
-  src/channels/webchat/ \
-  public/webchat/ \
-  src/modules/agent-to-agent/create-agent.ts \
-  src/modules/agent-to-agent/create-agent.test.ts \
-  container/agent-runner/src/destinations.ts
 ```
 
-If multiple remotes carry `skill/webchat` (you fetched both `origin` and a private mirror), the script picks the alphabetically-first one. To force a specific remote, run with `WEBCHAT_REMOTE=origin` (or whichever) prepended:
+If multiple remotes carry `skill/webchat`, the script picks the alphabetically-first; override with `WEBCHAT_REMOTE=<name>` in the environment.
+
+### 2. Check out and run the install script
 
 ```bash
-WEBCHAT_REMOTE=origin git fetch "$WEBCHAT_REMOTE" channels-webchat && \
-  git checkout "$WEBCHAT_REMOTE/channels-webchat" -- src/channels/webchat/ public/webchat/ \
-    src/modules/agent-to-agent/create-agent.ts src/modules/agent-to-agent/create-agent.test.ts \
-    container/agent-runner/src/destinations.ts
+git checkout "$WEBCHAT_REMOTE/channels-webchat" -- install-webchat.sh configure-webchat.sh
+WEBCHAT_REMOTE="$WEBCHAT_REMOTE" ./install-webchat.sh
 ```
 
-The 5 files are fully owned by webchat — checking them out overwrites any local edits. `create-agent.ts` and `destinations.ts` carry sentinel-bounded modifications (`webchat:create-agent-gating`, `webchat:send-file-hint`); they're full-file checkouts because webchat is the only channel today that patches either. If another channel you've installed also modifies these files, reconcile by hand.
+This single script does the deterministic work: checks out webchat-owned source paths from the branch, appends the channels-barrel import, idempotently registers the 5 migrations in `src/db/migrations/index.ts`, runs `pnpm add` for the four pinned deps + their `@types`, runs `pnpm run build`, and rebuilds the agent container image.
 
-The `create-agent.ts` auth gate requires the **permissions module** (`src/modules/permissions/`) to be present — it provides `isOwner` and `hasAdminPrivilege`. SKILL.md's prerequisites call this out.
+Skip the container image step (e.g., in CI) with `SKIP_CONTAINER_BUILD=1`.
 
-### 2. Append the channel self-registration import
+If it fails partway through, the script exits non-zero with a clear message; the changes already applied stay in place (idempotent re-run is safe). Common failures:
+
+- **`pnpm: command not found`** — install pnpm first (see Pre-flight).
+- **`fatal: ambiguous argument 'channels-webchat'`** — the fetch in step 1 didn't actually pull the branch. Confirm `WEBCHAT_REMOTE` is correct and that the remote URL is reachable.
+- **TypeScript build errors** — most likely an upstream drift in `src/modules/agent-to-agent/create-agent.ts` or `container/agent-runner/src/destinations.ts`. Report; the fix lives on `channels-webchat` (merge `main` in, resolve, push).
+
+### 3. Run the interactive configure script
 
 ```bash
-grep -qF "'./webchat/index.js'" src/channels/index.ts \
-  || echo "import './webchat/index.js';" >> src/channels/index.ts
+./configure-webchat.sh
 ```
 
-### 3. Register the database migrations
+Asks (with safe defaults if non-TTY):
 
-Edit `src/db/migrations/index.ts`. **Skip each addition if it's already present** — running install twice will otherwise produce duplicate-import or unused-import errors from `tsc` and break the build.
+- Network access mode (localhost / network)
+- Auth method for network mode (bearer / tailscale / proxy-header)
+- VAPID subject email (for Web Push)
 
-Add this import alongside the others (skip if `grep -q "channels/webchat/migration" src/db/migrations/index.ts` already matches):
+Writes idempotent additions to `.env`, generates a VAPID keypair if absent (never rotates an existing one), and syncs to `data/env/env`.
 
-```typescript
-import {
-  moduleWebchat,
-  moduleWebchatDropRooms,
-  moduleWebchatRoomPrimes,
-  moduleWebchatModels,
-  moduleWebchatApprovalsIndex,
-} from '../../channels/webchat/migration.js';
-```
-
-And add all five symbols to the `migrations` array (skip individual entries that are already present — any position is fine, order is determined by name uniqueness, not array index):
-
-```typescript
-const migrations: Migration[] = [
-  // ... existing entries
-  moduleWebchat,
-  moduleWebchatDropRooms,
-  moduleWebchatRoomPrimes,
-  moduleWebchatModels,
-  moduleWebchatApprovalsIndex,
-];
-```
-
-### 4. Install pinned packages
-
-```bash
-pnpm add ws@8.20.0 busboy@1.6.0 web-push@3.6.7 undici@7.16.0
-pnpm add -D @types/ws@8.18.1 @types/busboy@1.5.4 @types/web-push@3.6.4
-```
-
-`undici` is required by `drafter.ts` for `ProxyAgent` — it routes the agent-drafter LLM call through the OneCLI proxy. Node's built-in `fetch` uses undici internally but doesn't expose `ProxyAgent`. Undici ships its own TypeScript types — no `@types/undici` required.
-
-### 5. Build
-
-```bash
-pnpm run build
-```
-
-Build must be clean before continuing.
-
-### 6. Rebuild the agent container image
-
-The `destinations.ts` modification lives in agent-runner code that gets baked into the container image. Without this rebuild, running agents keep using the old `destinations.ts` until their next image refresh.
-
-```bash
-./container/build.sh
-```
+For exotic configs not covered (TLS, multiple auth methods, custom `WEBCHAT_PORT`/`WEBCHAT_HOST`, opt-out of push), edit `.env` by hand after — see the **Configure** section below for the full menu.
 
 ## Configure
 
