@@ -33,20 +33,6 @@
             <img class="logo logo-dark" src="/logo-dark.svg" alt="NanoClaw" />
             <img class="logo logo-light" src="/logo-light.svg" alt="NanoClaw" />
             <button id="dash-toggle" class="settings-btn" aria-label="Dashboard" title="Dashboard">▦</button>
-            <button
-              id="perms-toggle"
-              class="settings-btn admin-btn"
-              aria-label="Manage permissions"
-              title="Manage permissions"
-              hidden
-            >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16" aria-hidden="true">
-                <circle cx="8" cy="15" r="4" />
-                <path d="M10.85 12.15L19 4" />
-                <path d="M18 5l2 2" />
-                <path d="M15 8l2 2" />
-              </svg>
-            </button>
             <button id="settings-btn" class="settings-btn" aria-label="Settings">⚙</button>
           </div>
           <span id="identity" class="identity"></span>
@@ -517,6 +503,10 @@
                 <span>Desktop notifications</span>
                 <input id="notif-toggle" type="checkbox" />
               </label>
+            </div>
+            <div class="setting-group" id="settings-perms-group" hidden>
+              <span class="setting-label">Admin</span>
+              <button id="settings-perms-btn" type="button" class="setting-option">Manage permissions →</button>
             </div>
           </div>
         </div>

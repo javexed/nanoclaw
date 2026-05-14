@@ -1695,35 +1695,6 @@ button:focus-visible {
   color: var(--text);
 }
 
-/* Admin entry button (shown only for owners). Distinct from the other
-   header icons so it reads as "privileged action" at a glance — gold
-   accent borrowed from the owner-crown palette, key glyph SVG instead
-   of an emoji to avoid font-rendering inconsistencies. */
-.admin-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  padding: 4px 8px;
-  background: color-mix(in srgb, var(--agent) 15%, transparent);
-  border: 1px solid color-mix(in srgb, var(--agent) 50%, transparent);
-  color: var(--agent-strong);
-  border-radius: 999px;
-}
-.admin-btn:hover {
-  background: color-mix(in srgb, var(--agent) 28%, transparent);
-  border-color: var(--agent);
-  color: var(--agent-strong);
-}
-.admin-btn.active {
-  background: color-mix(in srgb, var(--agent) 32%, transparent);
-  border-color: var(--agent);
-  color: var(--agent-strong);
-}
-.admin-btn svg {
-  display: block;
-}
-
 /* Modal overlay */
 .modal-overlay {
   position: fixed;
