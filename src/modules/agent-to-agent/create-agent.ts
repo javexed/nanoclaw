@@ -116,7 +116,7 @@ export async function handleCreateAgent(content: Record<string, unknown>, sessio
     return;
   }
 
-// webchat:create-agent-gating-call START — installed by /add-webchat
+  // webchat:create-agent-gating-call START — installed by /add-webchat
   const _triggerSender = findTriggerSenderId(session);
   const _decision = decideCreateAgentAuthorization(_triggerSender, sourceGroup.id, {
     isOwner,
@@ -136,7 +136,7 @@ export async function handleCreateAgent(content: Record<string, unknown>, sessio
     });
     return;
   }
-// webchat:create-agent-gating-call END
+  // webchat:create-agent-gating-call END
 
   const localName = normalizeName(name);
 
