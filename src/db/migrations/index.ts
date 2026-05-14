@@ -14,6 +14,13 @@ import { migration014 } from './014-container-configs.js';
 import { migration015 } from './015-cli-scope.js';
 import { moduleApprovalsPendingApprovals } from './module-approvals-pending-approvals.js';
 import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js';
+import {
+  moduleWebchat,
+  moduleWebchatDropRooms,
+  moduleWebchatRoomPrimes,
+  moduleWebchatModels,
+  moduleWebchatApprovalsIndex,
+} from '../../channels/webchat/migration.js';
 
 export interface Migration {
   version: number;
@@ -35,6 +42,11 @@ const migrations: Migration[] = [
   migration013,
   migration014,
   migration015,
+  moduleWebchat,
+  moduleWebchatDropRooms,
+  moduleWebchatRoomPrimes,
+  moduleWebchatModels,
+  moduleWebchatApprovalsIndex,
 ];
 
 export function runMigrations(db: Database.Database): void {
