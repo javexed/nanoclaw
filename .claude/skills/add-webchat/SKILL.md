@@ -40,27 +40,20 @@ Skip to **Configure** if all of these are already in place:
 
 Otherwise continue. Every step is safe to re-run.
 
-### 1. Confirm the upstream remote exists
+### 1. Fetch the channel branch + check out channel-owned files
 
-The branch lives on the canonical NanoClaw remote, conventionally named `upstream`. If your clone uses a different name (`origin`, or anything else), substitute it everywhere `upstream` appears below.
-
-```bash
-git remote -v | grep -qE '^upstream\b' \
-  || echo "ERROR: no 'upstream' remote — add it with: git remote add upstream <repo-url>"
-```
-
-### 2. Fetch the channel branch
+`channels-webchat` lives on the **same remote** that hosts the `skill/webchat` branch you just merged to get this SKILL.md. Auto-detect that remote, fetch the branch, and check out the files in one shot:
 
 ```bash
-git fetch upstream channels-webchat
-```
+WEBCHAT_REMOTE=$(git branch -r | grep -E '/skill/webchat$' | awk -F'/' '{print $1}' | sort -u | head -1 | xargs)
+if [ -z "$WEBCHAT_REMOTE" ]; then
+  echo "ERROR: no remote carries 'skill/webchat'. Did you fetch the remote that hosts the webchat skill before invoking /add-webchat?" >&2
+  exit 1
+fi
+echo "Using remote: $WEBCHAT_REMOTE"
 
-### 3. Check out channel-owned files from the branch
-
-These files are fully owned by webchat — checking them out overwrites any local edits.
-
-```bash
-git checkout upstream/channels-webchat -- \
+git fetch "$WEBCHAT_REMOTE" channels-webchat
+git checkout "$WEBCHAT_REMOTE/channels-webchat" -- \
   src/channels/webchat/ \
   public/webchat/ \
   src/modules/agent-to-agent/create-agent.ts \
@@ -68,18 +61,27 @@ git checkout upstream/channels-webchat -- \
   container/agent-runner/src/destinations.ts
 ```
 
-`create-agent.ts` and `destinations.ts` carry sentinel-bounded webchat-owned modifications (`webchat:create-agent-gating`, `webchat:send-file-hint`). They're full-file checkouts here because, today, webchat is the only channel that patches either. If you've installed another channel that also modifies these files, reconcile by hand.
+If multiple remotes carry `skill/webchat` (you fetched both `origin` and a private mirror), the script picks the alphabetically-first one. To force a specific remote, run with `WEBCHAT_REMOTE=origin` (or whichever) prepended:
+
+```bash
+WEBCHAT_REMOTE=origin git fetch "$WEBCHAT_REMOTE" channels-webchat && \
+  git checkout "$WEBCHAT_REMOTE/channels-webchat" -- src/channels/webchat/ public/webchat/ \
+    src/modules/agent-to-agent/create-agent.ts src/modules/agent-to-agent/create-agent.test.ts \
+    container/agent-runner/src/destinations.ts
+```
+
+The 5 files are fully owned by webchat — checking them out overwrites any local edits. `create-agent.ts` and `destinations.ts` carry sentinel-bounded modifications (`webchat:create-agent-gating`, `webchat:send-file-hint`); they're full-file checkouts because webchat is the only channel today that patches either. If another channel you've installed also modifies these files, reconcile by hand.
 
 The `create-agent.ts` auth gate requires the **permissions module** (`src/modules/permissions/`) to be present — it provides `isOwner` and `hasAdminPrivilege`. SKILL.md's prerequisites call this out.
 
-### 4. Append the channel self-registration import
+### 2. Append the channel self-registration import
 
 ```bash
 grep -qF "'./webchat/index.js'" src/channels/index.ts \
   || echo "import './webchat/index.js';" >> src/channels/index.ts
 ```
 
-### 5. Register the database migrations
+### 3. Register the database migrations
 
 Edit `src/db/migrations/index.ts`. **Skip each addition if it's already present** — running install twice will otherwise produce duplicate-import or unused-import errors from `tsc` and break the build.
 
@@ -108,7 +110,7 @@ const migrations: Migration[] = [
 ];
 ```
 
-### 6. Install pinned packages
+### 4. Install pinned packages
 
 ```bash
 pnpm add ws@8.20.0 busboy@1.6.0 web-push@3.6.7 undici@7.16.0
@@ -117,7 +119,7 @@ pnpm add -D @types/ws@8.18.1 @types/busboy@1.5.4 @types/web-push@3.6.4
 
 `undici` is required by `drafter.ts` for `ProxyAgent` — it routes the agent-drafter LLM call through the OneCLI proxy. Node's built-in `fetch` uses undici internally but doesn't expose `ProxyAgent`. Undici ships its own TypeScript types — no `@types/undici` required.
 
-### 7. Build
+### 5. Build
 
 ```bash
 pnpm run build
@@ -125,7 +127,7 @@ pnpm run build
 
 Build must be clean before continuing.
 
-### 8. Rebuild the agent container image
+### 6. Rebuild the agent container image
 
 The `destinations.ts` modification lives in agent-runner code that gets baked into the container image. Without this rebuild, running agents keep using the old `destinations.ts` until their next image refresh.
 
