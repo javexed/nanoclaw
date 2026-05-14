@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#1a1a2e" />
+    <title>NanoClaw Chat</title>
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <!-- Login screen (shown when auth required) -->
+    <div id="login-screen" class="login-screen" hidden>
+      <div class="login-card">
+        <img class="logo logo-dark" src="/logo-dark.svg" alt="NanoClaw" style="height: 32px; margin-bottom: 16px" />
+        <img class="logo logo-light" src="/logo-light.svg" alt="NanoClaw" style="height: 32px; margin-bottom: 16px" />
+        <p class="login-subtitle">Enter your access token to continue</p>
+        <form id="login-form" class="login-form">
+          <input id="login-token" type="password" placeholder="Access token" autocomplete="off" required />
+          <button type="submit" class="btn-save">Connect</button>
+        </form>
+        <p id="login-error" class="login-error" hidden></p>
+      </div>
+    </div>
+
+    <div id="app">
+      <nav id="sidebar">
+        <div class="sidebar-header">
+          <div class="sidebar-header-row">
+            <img class="logo logo-dark" src="/logo-dark.svg" alt="NanoClaw" />
+            <img class="logo logo-light" src="/logo-light.svg" alt="NanoClaw" />
+            <button id="dash-toggle" class="settings-btn" aria-label="Dashboard" title="Dashboard">▦</button>
+            <button
+              id="perms-toggle"
+              class="settings-btn admin-btn"
+              aria-label="Manage permissions"
+              title="Manage permissions"
+              hidden
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16" aria-hidden="true">
+                <circle cx="8" cy="15" r="4" />
+                <path d="M10.85 12.15L19 4" />
+                <path d="M18 5l2 2" />
+                <path d="M15 8l2 2" />
+              </svg>
+            </button>
+            <button id="settings-btn" class="settings-btn" aria-label="Settings">⚙</button>
+          </div>
+          <span id="identity" class="identity"></span>
+        </div>
+        <div class="sidebar-tabs">
+          <button class="sidebar-tab active" data-tab="rooms">Rooms</button>
+          <button class="sidebar-tab" data-tab="agents">Agents</button>
+          <button class="sidebar-tab" data-tab="models">Models</button>
+        </div>
+        <div id="approvals-banner" class="approvals-banner" hidden>
+          <button class="approvals-banner-header" id="approvals-banner-toggle" type="button" aria-expanded="false">
+            <span class="approvals-banner-icon">⚠</span>
+            <span class="approvals-banner-text"><span id="approvals-count">0</span> approval pending</span>
+            <span class="approvals-banner-chevron">›</span>
+          </button>
+          <ul id="approval-list" class="approvals-banner-list" hidden></ul>
+        </div>
+        <div id="tab-rooms" class="tab-content active">
+          <ul id="room-list"></ul>
+          <button id="create-room-btn" class="create-agent-btn">+ New Room</button>
+        </div>
+        <div id="tab-agents" class="tab-content">
+          <ul id="agent-list"></ul>
+          <button id="create-agent-btn" class="create-agent-btn">+ New Agent</button>
+        </div>
+        <div id="tab-models" class="tab-content">
+          <ul id="model-list"></ul>
+          <button id="create-model-btn" class="create-agent-btn">+ New Model</button>
+        </div>
+      </nav>
+      <div id="approval-toasts" class="approval-toasts" aria-live="polite"></div>
+      <main id="chat">
+        <div id="chat-header">
+          <button id="mobile-back" class="mobile-back" aria-label="Back to rooms">‹</button>
+          <span id="room-name">Select a room</span>
+          <button id="room-settings-toggle" class="members-toggle" hidden aria-label="Room settings" title="Room settings">⚙</button>
+          <button id="members-toggle" class="members-toggle" hidden aria-label="Show room members">0</button>
+        </div>
+        <div id="connection-banner" class="connection-banner">Connection lost. Reconnecting...</div>
+        <div id="chat-body">
+          <div id="chat-content">
+            <div
+              id="messages-wrap"
+              style="position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column"
+            >
+              <div id="messages">
+                <div id="empty-state" class="empty-state">Select a room from the sidebar to start chatting</div>
+              </div>
+            </div>
+            <div id="typing-indicator" class="typing-indicator" hidden></div>
+            <div id="file-preview" class="file-preview" hidden></div>
+            <form id="message-form">
+              <button type="button" id="file-picker" class="file-picker-btn" title="Upload file">📎</button>
+              <button type="button" id="camera-btn" class="file-picker-btn mobile-only" title="Take photo">📷</button>
+              <textarea id="message-input" rows="1" placeholder="Message..." autocomplete="off" disabled></textarea>
+              <button type="submit" id="send-btn" disabled aria-label="Send message">
+                <svg
+                  viewBox="0 0 24 24"
+                  width="18"
+                  height="18"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <line x1="12" y1="19" x2="12" y2="5" />
+                  <polyline points="5 12 12 5 19 12" />
+                </svg>
+              </button>
+            </form>
+          </div>
+          <aside id="members-panel" class="members-panel" hidden>
+            <div class="members-header">
+              <span>Members</span>
+              <button id="members-close" class="members-close">&times;</button>
+            </div>
+            <ul id="members-list"></ul>
+          </aside>
+          <aside id="agent-detail" class="agent-detail" hidden>
+            <!-- Edit mode -->
+            <div id="agent-edit-view">
+              <div class="agent-detail-header">
+                <span id="agent-detail-title">Agent Details</span>
+                <button id="agent-detail-close" class="members-close">&times;</button>
+              </div>
+              <form id="agent-detail-form" class="agent-detail-form">
+                <label>
+                  <span class="form-label">Name</span>
+                  <input id="agent-name" type="text" required />
+                </label>
+                <label>
+                  <span class="form-label">Model</span>
+                  <button type="button" id="agent-model-trigger" class="model-picker-trigger">
+                    <span class="model-picker-trigger-content">
+                      <span class="model-picker-trigger-name">Default</span>
+                      <span class="model-picker-trigger-meta">Built-in Anthropic</span>
+                    </span>
+                    <span class="model-picker-trigger-caret" aria-hidden="true">&#9662;</span>
+                  </button>
+                  <input id="agent-model" type="hidden" />
+                </label>
+                <label>
+                  <span class="form-label">Instructions</span>
+                  <textarea id="agent-instructions" rows="12" placeholder="CLAUDE.md instructions..."></textarea>
+                </label>
+                <div class="agent-detail-actions">
+                  <button type="submit" class="btn-save">Save</button>
+                </div>
+                <div class="agent-detail-danger">
+                  <button type="button" id="agent-delete" class="btn-delete-link">Delete this agent</button>
+                </div>
+              </form>
+            </div>
+            <!-- Create mode (form) -->
+            <div id="agent-create-view" hidden>
+              <div class="agent-detail-header">
+                <span>Create Agent</span>
+                <button id="agent-create-close" class="members-close">&times;</button>
+              </div>
+              <form id="agent-create-form" class="agent-detail-form">
+                <div class="drafter-block">
+                  <label>
+                    <span class="form-label">Describe the agent (optional)</span>
+                    <textarea id="agent-create-draft-prompt" rows="2" placeholder="An agent that…" autocomplete="off"></textarea>
+                  </label>
+                  <button type="button" class="drafter-btn" data-drafter-target="agent-create">✨ Suggest from prompt</button>
+                </div>
+                <label>
+                  <span class="form-label">Name</span>
+                  <input id="agent-create-name" type="text" placeholder="My helper" required autocomplete="off" />
+                </label>
+                <label>
+                  <span class="form-label">Instructions (optional)</span>
+                  <textarea id="agent-create-instructions" rows="6" placeholder="You are…" autocomplete="off"></textarea>
+                </label>
+                <p class="form-hint">This agent won't appear in any room until you wire it from the Rooms tab.</p>
+                <div class="agent-detail-actions">
+                  <button type="submit" class="btn-save">Create</button>
+                </div>
+              </form>
+            </div>
+          </aside>
+          <aside id="room-detail" class="agent-detail" hidden>
+            <!-- Edit mode: show wired agents, allow add/remove, delete room -->
+            <div id="room-edit-view">
+              <div class="agent-detail-header">
+                <span id="room-detail-title">Room Settings</span>
+                <button id="room-detail-close" class="members-close">&times;</button>
+              </div>
+              <div class="agent-detail-form">
+                <div>
+                  <span class="form-label">Wired agents</span>
+                  <ul id="room-wired-agents" class="room-wired-agents"></ul>
+                  <button type="button" id="room-add-agent-toggle" class="create-agent-btn">+ Add agent</button>
+                  <div id="room-add-agent-form" class="room-add-agent-form" hidden>
+                    <div class="room-agent-picker-tabs">
+                      <button type="button" class="room-agent-picker-tab active" data-picker="existing">Existing</button>
+                      <button type="button" class="room-agent-picker-tab" data-picker="new">New</button>
+                    </div>
+                    <div id="room-add-agent-existing" class="room-agent-picker-pane">
+                      <ul id="room-add-agent-list" class="room-create-agent-checklist"></ul>
+                      <button type="button" id="room-add-agent-existing-submit" class="btn-save" disabled>Add selected</button>
+                    </div>
+                    <div id="room-add-agent-new" class="room-agent-picker-pane" hidden>
+                      <div class="drafter-block">
+                        <textarea id="room-add-agent-draft-prompt" rows="2" placeholder="Describe the agent (optional)…" autocomplete="off"></textarea>
+                        <button type="button" class="drafter-btn" data-drafter-target="room-add-agent">✨ Suggest from prompt</button>
+                      </div>
+                      <input id="room-add-agent-new-name" type="text" placeholder="Agent name" autocomplete="off" />
+                      <textarea id="room-add-agent-new-instructions" rows="3" placeholder="Optional instructions..."></textarea>
+                      <button type="button" id="room-add-agent-new-submit" class="btn-save">Create &amp; add</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="agent-detail-actions">
+                  <button type="button" id="room-delete" class="btn-delete">Delete Room</button>
+                </div>
+              </div>
+            </div>
+            <!-- Create mode: name + multi-select agents + inline-new-agent toggle -->
+            <div id="room-create-view" hidden>
+              <div class="agent-detail-header">
+                <span>Create Room</span>
+                <button id="room-create-close" class="members-close">&times;</button>
+              </div>
+              <form id="room-create-form" class="agent-detail-form">
+                <label>
+                  <span class="form-label">Room name</span>
+                  <input id="room-create-name" type="text" placeholder="My room" required autocomplete="off" />
+                </label>
+                <div>
+                  <span class="form-label">Wire existing agents</span>
+                  <ul id="room-create-existing-agents" class="room-create-agent-checklist"></ul>
+                </div>
+                <div>
+                  <button type="button" id="room-create-toggle-new" class="create-agent-btn">+ Create new agent inline</button>
+                  <div id="room-create-new-block" hidden class="room-create-new-block">
+                    <div class="drafter-block">
+                      <textarea id="room-create-draft-prompt" rows="2" placeholder="Describe the agent (optional)…" autocomplete="off"></textarea>
+                      <button type="button" class="drafter-btn" data-drafter-target="room-create">✨ Suggest from prompt</button>
+                    </div>
+                    <input id="room-create-new-name" type="text" placeholder="New agent name" autocomplete="off" />
+                    <textarea id="room-create-new-instructions" rows="3" placeholder="Optional instructions..."></textarea>
+                  </div>
+                </div>
+                <div class="agent-detail-actions">
+                  <button type="submit" class="btn-save">Create</button>
+                </div>
+              </form>
+            </div>
+          </aside>
+          <aside id="model-detail" class="agent-detail" hidden>
+            <!-- Edit mode -->
+            <div id="model-edit-view">
+              <div class="agent-detail-header">
+                <span id="model-detail-title">Model</span>
+                <button id="model-detail-close" class="members-close">&times;</button>
+              </div>
+              <form id="model-detail-form" class="agent-detail-form">
+                <label>
+                  <span class="form-label">Display name</span>
+                  <input id="model-name" type="text" required />
+                </label>
+                <label>
+                  <span class="form-label">Kind</span>
+                  <input id="model-kind" type="text" readonly class="readonly" />
+                </label>
+                <label id="model-endpoint-label">
+                  <span class="form-label">Endpoint</span>
+                  <input id="model-endpoint" type="text" placeholder="http://localhost:11434" autocomplete="off" />
+                </label>
+                <label>
+                  <span class="form-label">Model ID</span>
+                  <div class="model-id-row">
+                    <input id="model-model-id" type="text" required autocomplete="off" />
+                    <button type="button" id="model-discover-btn" class="create-agent-btn">Browse</button>
+                  </div>
+                  <select id="model-discover-select" hidden></select>
+                </label>
+                <p id="model-detail-usage" class="room-prime-note"></p>
+                <div class="agent-detail-actions">
+                  <button type="submit" class="btn-save">Save</button>
+                </div>
+                <div class="agent-detail-danger">
+                  <button type="button" id="model-delete" class="btn-delete-link">Delete this model</button>
+                </div>
+              </form>
+            </div>
+            <!-- Create mode -->
+            <div id="model-create-view" hidden>
+              <div class="agent-detail-header">
+                <span>Add Model</span>
+                <button id="model-create-close" class="members-close">&times;</button>
+              </div>
+              <div class="agent-detail-form">
+                <!-- Probe section: paste a URL, classify the provider, bulk-add discovered models -->
+                <div class="model-probe-block">
+                  <label>
+                    <span class="form-label">Endpoint URL</span>
+                    <div class="model-id-row">
+                      <input id="model-probe-url" type="text" placeholder="localhost:11434, api.anthropic.com, … (scheme optional)" autocomplete="off" />
+                      <button type="button" id="model-probe-btn" class="create-agent-btn">Probe</button>
+                    </div>
+                  </label>
+                  <p id="model-probe-status" class="model-probe-status" hidden></p>
+                  <div id="model-probe-results" class="model-probe-results" hidden>
+                    <div class="model-probe-summary">
+                      <span class="model-probe-kind"></span>
+                      <span class="model-probe-notes"></span>
+                    </div>
+                    <ul id="model-probe-list" class="model-probe-list"></ul>
+                    <div class="model-probe-actions">
+                      <button type="button" id="model-probe-select-all" class="drafter-btn">Select all</button>
+                      <button type="button" id="model-probe-add-selected" class="btn-save">Add selected</button>
+                    </div>
+                  </div>
+                </div>
+                <details class="model-advanced">
+                  <summary>Advanced — manual entry</summary>
+                  <form id="model-create-form" class="agent-detail-form" style="margin-top: 8px;">
+                    <label>
+                      <span class="form-label">Display name</span>
+                      <input id="model-create-name" type="text" placeholder="My Sonnet 4.6" required autocomplete="off" />
+                    </label>
+                    <label>
+                      <span class="form-label">Kind</span>
+                      <select id="model-create-kind">
+                        <option value="anthropic">Anthropic (custom model id)</option>
+                        <option value="ollama">Ollama (local endpoint)</option>
+                        <option value="openai-compatible">OpenAI-compatible (requires /add-opencode)</option>
+                      </select>
+                    </label>
+                    <label id="model-create-endpoint-label" hidden>
+                      <span class="form-label">Endpoint</span>
+                      <input id="model-create-endpoint" type="text" placeholder="http://localhost:11434" autocomplete="off" />
+                    </label>
+                    <label>
+                      <span class="form-label">Model ID</span>
+                      <div class="model-id-row">
+                        <input id="model-create-model-id" type="text" required autocomplete="off" placeholder="claude-sonnet-4-6 or llama3.1:70b" />
+                        <button type="button" id="model-create-discover-btn" class="create-agent-btn">Browse</button>
+                      </div>
+                      <select id="model-create-discover-select" hidden></select>
+                    </label>
+                    <div class="agent-detail-actions">
+                      <button type="submit" class="btn-save">Create</button>
+                    </div>
+                  </form>
+                </details>
+              </div>
+            </div>
+          </aside>
+        </div>
+        <button id="scroll-bottom" class="scroll-bottom" hidden aria-label="Jump to bottom">
+          ↓<span id="unread-badge" class="unread-count"></span>
+        </button>
+      </main>
+      <section id="permissions" hidden>
+        <div class="dash-header">
+          <button id="perms-exit" class="mobile-back" aria-label="Back">‹</button>
+          <span>Permissions</span>
+          <button id="perms-refresh" class="dash-refresh-btn">↻ Refresh</button>
+        </div>
+        <div id="perms-body" class="perms-body" data-mode="list">
+          <aside class="perms-list-pane">
+            <ul id="perms-user-list" class="perms-user-list"></ul>
+            <button id="perms-new-btn" class="create-agent-btn">+ New User</button>
+          </aside>
+          <main class="perms-detail-pane">
+            <div id="perms-detail-empty" class="perms-empty-state">
+              <p>Select a user to view and manage their roles.</p>
+              <p class="form-hint">User IDs are channel-namespaced — e.g. <code>webchat:tailscale:carl@example.com</code>. Anyone who authenticates is added automatically.</p>
+            </div>
+            <div id="perms-detail-view" class="perms-detail-view" hidden>
+              <div class="agent-detail-header">
+                <button id="perms-detail-back" class="mobile-back" aria-label="Back to list">‹</button>
+                <span id="perms-detail-name">User</span>
+              </div>
+              <div class="perms-detail-body">
+                <div id="perms-detail-id" class="perms-detail-id"></div>
+                <div class="perms-section-title">Global</div>
+                <div id="perms-global-toggles" class="perms-toggle-list"></div>
+                <div class="perms-section-title">Per agent group</div>
+                <div class="perms-matrix-header">
+                  <span class="perms-matrix-name">Group</span>
+                  <span class="perms-matrix-cell-label">Admin</span>
+                  <span class="perms-matrix-cell-label">Member</span>
+                </div>
+                <div id="perms-matrix" class="perms-matrix"></div>
+                <div class="perms-detail-footer">
+                  <button id="perms-delete-btn" type="button" class="btn-danger" hidden>Delete user</button>
+                </div>
+              </div>
+            </div>
+            <div id="perms-create-view" class="perms-detail-view" hidden>
+              <div class="agent-detail-header">
+                <button id="perms-create-back" class="mobile-back" aria-label="Back to list">‹</button>
+                <span>New User</span>
+              </div>
+              <form id="perms-create-form" class="perms-detail-body">
+                <p class="form-hint">
+                  Skip this if the user can authenticate directly — they'll appear in the list automatically the first time they connect.
+                </p>
+                <label>
+                  <span class="form-label">Channel</span>
+                  <select id="perms-create-channel">
+                    <option value="webchat:tailscale">Webchat (Tailscale)</option>
+                    <option value="webchat:proxy">Webchat (reverse proxy header)</option>
+                    <option value="webchat">Webchat (bearer / generic)</option>
+                    <option value="slack">Slack</option>
+                    <option value="discord">Discord</option>
+                    <option value="telegram">Telegram</option>
+                    <option value="cli">CLI</option>
+                    <option value="__raw__">— raw user_id (advanced) —</option>
+                  </select>
+                </label>
+                <label id="perms-create-handle-label">
+                  <span class="form-label">Handle / email</span>
+                  <input id="perms-create-handle" type="text" placeholder="carl@example.com" autocomplete="off" />
+                </label>
+                <label id="perms-create-raw-label" hidden>
+                  <span class="form-label">Raw user_id</span>
+                  <input id="perms-create-raw" type="text" placeholder="channel:specifics" autocomplete="off" />
+                </label>
+                <p id="perms-create-preview" class="form-hint" style="margin-top: -4px">Resolved id will appear here.</p>
+                <label>
+                  <span class="form-label">Initial role</span>
+                  <select id="perms-create-kind">
+                    <option value="member">member</option>
+                    <option value="admin">admin</option>
+                    <option value="owner">owner</option>
+                  </select>
+                </label>
+                <label id="perms-create-group-label" hidden>
+                  <span class="form-label">Agent group</span>
+                  <select id="perms-create-group">
+                    <option value="">— global —</option>
+                  </select>
+                </label>
+                <div class="agent-detail-actions">
+                  <button type="submit" class="btn-save">Add user</button>
+                </div>
+              </form>
+            </div>
+          </main>
+        </div>
+      </section>
+      <section id="dashboard" hidden>
+        <div class="dash-header">
+          <button id="dash-back" class="mobile-back" aria-label="Back">‹</button>
+          <span>Dashboard</span>
+          <button id="dash-refresh" class="dash-refresh-btn">↻ Refresh</button>
+        </div>
+        <div class="dash-body">
+          <div id="dash-health" class="dash-health"></div>
+          <div class="dash-section">
+            <div class="dash-section-title">Metrics</div>
+            <div id="dash-graph" class="dash-graph"></div>
+          </div>
+          <div id="dash-detail" class="dash-detail" hidden>
+            <div class="dash-detail-header">
+              <span id="dash-detail-title">Detail</span>
+              <button id="dash-detail-close">&times;</button>
+            </div>
+            <div id="dash-detail-body"></div>
+          </div>
+        </div>
+      </section>
+      <div id="members-overlay" class="members-overlay" hidden></div>
+
+      <!-- Settings modal -->
+      <div id="settings-overlay" class="modal-overlay" hidden>
+        <div class="modal">
+          <div class="modal-header">
+            <span>Settings</span>
+            <button id="settings-close" class="members-close">&times;</button>
+          </div>
+          <div class="modal-body">
+            <div class="setting-group">
+              <span class="setting-label">Theme</span>
+              <div class="setting-options" id="theme-options">
+                <button class="setting-option" data-value="dark">Dark</button>
+                <button class="setting-option" data-value="light">Light</button>
+                <button class="setting-option" data-value="system">System</button>
+              </div>
+            </div>
+            <div class="setting-group">
+              <span class="setting-label">Font size</span>
+              <div class="setting-options" id="font-options">
+                <button class="setting-option" data-value="small">Small</button>
+                <button class="setting-option" data-value="medium">Medium</button>
+                <button class="setting-option" data-value="large">Large</button>
+              </div>
+            </div>
+            <div class="setting-group">
+              <span class="setting-label">Send message</span>
+              <div class="setting-options" id="send-options">
+                <button class="setting-option" data-value="enter">Enter</button>
+                <button class="setting-option" data-value="shift-enter">Shift+Enter</button>
+                <button class="setting-option" data-value="ctrl-enter">Ctrl+Enter</button>
+              </div>
+            </div>
+            <div class="setting-group">
+              <label class="setting-toggle">
+                <span>Desktop notifications</span>
+                <input id="notif-toggle" type="checkbox" />
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!--
+      Model picker overlay — bottom sheet on mobile, popover on desktop.
+      Lives at body root so it z-stacks above asides + the overlay backdrop.
+    -->
+    <div id="model-picker" class="model-picker-overlay" hidden>
+      <div class="model-picker-backdrop"></div>
+      <div class="model-picker-sheet" role="dialog" aria-modal="true" aria-label="Choose a model">
+        <div class="model-picker-grabber" aria-hidden="true"></div>
+        <div class="model-picker-header">
+          <span id="model-picker-title">Choose a model</span>
+          <button id="model-picker-close" class="members-close" aria-label="Close">&times;</button>
+        </div>
+        <div class="model-picker-body">
+          <input
+            id="model-picker-search"
+            type="search"
+            class="model-picker-search"
+            placeholder="Search by name, model id, or endpoint…"
+            autocomplete="off"
+          />
+          <ul id="model-picker-list" class="model-picker-list"></ul>
+        </div>
+        <div class="model-picker-footer">
+          <button type="button" id="model-picker-add-new" class="create-agent-btn">+ Add new model</button>
+        </div>
+      </div>
+    </div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

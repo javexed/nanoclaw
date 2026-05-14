@@ -126,5 +126,25 @@ function buildDestinationsSection(): string {
   lines.push(
     'The `send_message` MCP tool is the same delivery, available mid-turn — handy for a quick acknowledgment ("on it") before a slow tool call. Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation, so they read as a sequence rather than as one combined reply.',
   );
+  if (webchatHasChannel(all)) {
+    lines.push('', sendFileHint());
+  }
   return lines.join('\n');
 }
+
+// webchat:send-file-hint START — installed by /add-webchat (channels-webchat branch)
+// Removed by /remove-webchat. Inline-attachment hint shown when at least one
+// destination is a chat channel (webchat, slack, telegram, ...).
+function sendFileHint(): string {
+  return [
+    '### Sending files',
+    '',
+    'When the user asks for a file (a report, screenshot, generated artifact, exported data), deliver it — don\'t just describe it. Save the file under `uploads/` in your group folder and call the `send_file` MCP tool with `path: "uploads/<filename>"` and an optional `text` caption. The destination renders it as an attachment in its native format (inline preview in webchat; uploaded file on Slack, Telegram, etc.).',
+    '',
+    'Use `send_file` for deliverables intended for the user. Working files / scratch artifacts stay in your workspace.',
+  ].join('\n');
+}
+function webchatHasChannel(all: ReturnType<typeof getAllDestinations>): boolean {
+  return all.some((d) => d.type === 'channel');
+}
+// webchat:send-file-hint END
