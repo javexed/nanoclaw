@@ -27,7 +27,7 @@ Webchat layers on top of a working v2 install — it does not replicate `/setup`
 
 ## Install
 
-NanoClaw doesn't ship channel adapters in trunk. This skill copies the webchat module from the skill's own `add/` directory (the adapter is self-contained and doesn't ship on the `channels` branch — there's no Chat SDK package to wrap).
+Webchat's source-of-truth lives on the long-lived `channels-webchat` branch — same pattern the `channels` branch uses for Discord/Slack/etc. The skill is a thin installer: it fetches that branch and copies the channel-owned paths into your working tree. When upstream `main` drifts and breaks something, the fix lands on `channels-webchat` once (merge `main` in, resolve conflicts there, push) and every install picks it up on the next fetch.
 
 ### Pre-flight (idempotent)
 
@@ -35,47 +35,53 @@ Skip to **Configure** if all of these are already in place:
 
 - `src/channels/webchat/index.ts` exists
 - `src/channels/index.ts` contains `import './webchat/index.js';`
-- All five migrations are imported and listed in `src/db/migrations/index.ts`: `moduleWebchat`, `moduleWebchatDropRooms`, `moduleWebchatRoomPrimes`, `moduleWebchatModels`, AND `moduleWebchatApprovalsIndex`
-- `ws`, `busboy`, `web-push`, AND `undici` are listed in `package.json` dependencies
-- `container/agent-runner/src/destinations.ts` contains the `webchat:send-file-hint START` sentinel (step 7 patch applied)
-- `src/modules/agent-to-agent/create-agent.ts` contains the `webchat:create-agent-gating START` sentinel (step 6 patch applied)
+- All five migrations are imported in `src/db/migrations/index.ts`: `moduleWebchat`, `moduleWebchatDropRooms`, `moduleWebchatRoomPrimes`, `moduleWebchatModels`, `moduleWebchatApprovalsIndex`
+- `ws`, `busboy`, `web-push`, `undici` are in `package.json` dependencies
 
-Otherwise continue. Every step below is safe to re-run.
+Otherwise continue. Every step is safe to re-run.
 
-### 1. Copy source files
+### 1. Confirm the upstream remote exists
 
-`-n` skips files that already exist so re-running install won't clobber local edits to the channel module.
+The branch lives on the canonical NanoClaw remote, conventionally named `upstream`. If your clone uses a different name (`origin`, or anything else), substitute it everywhere `upstream` appears below.
 
 ```bash
-mkdir -p src/channels/webchat
-cp -n .claude/skills/add-webchat/add/src/channels/webchat/*.ts src/channels/webchat/
-mkdir -p src/modules/agent-to-agent
-cp -n .claude/skills/add-webchat/add/src/modules/agent-to-agent/*.ts src/modules/agent-to-agent/
+git remote -v | grep -qE '^upstream\b' \
+  || echo "ERROR: no 'upstream' remote — add it with: git remote add upstream <repo-url>"
 ```
 
-The `src/modules/agent-to-agent/` copy is `create-agent.test.ts` — the
-test for the auth gate that step 7 patches into `create-agent.ts`. It's
-ineffective without that patch.
-
-> If you've **intentionally** changed a channel file and want install to refresh it from the skill, drop `-n`.
-
-### 2. Copy PWA assets
+### 2. Fetch the channel branch
 
 ```bash
-mkdir -p public/webchat
-cp -rn .claude/skills/add-webchat/add/public/webchat/. public/webchat/
+git fetch upstream channels-webchat
 ```
 
-### 3. Append the channel self-registration import
+### 3. Check out channel-owned files from the branch
+
+These files are fully owned by webchat — checking them out overwrites any local edits.
 
 ```bash
-grep -q "channels/webchat/index.js" src/channels/index.ts \
+git checkout upstream/channels-webchat -- \
+  src/channels/webchat/ \
+  public/webchat/ \
+  src/modules/agent-to-agent/create-agent.ts \
+  src/modules/agent-to-agent/create-agent.test.ts \
+  container/agent-runner/src/destinations.ts
+```
+
+`create-agent.ts` and `destinations.ts` carry sentinel-bounded webchat-owned modifications (`webchat:create-agent-gating`, `webchat:send-file-hint`). They're full-file checkouts here because, today, webchat is the only channel that patches either. If you've installed another channel that also modifies these files, reconcile by hand.
+
+The `create-agent.ts` auth gate requires the **permissions module** (`src/modules/permissions/`) to be present — it provides `isOwner` and `hasAdminPrivilege`. SKILL.md's prerequisites call this out.
+
+### 4. Append the channel self-registration import
+
+```bash
+grep -qF "'./webchat/index.js'" src/channels/index.ts \
   || echo "import './webchat/index.js';" >> src/channels/index.ts
 ```
 
-### 4. Register the database migration
+### 5. Register the database migrations
 
-Edit `src/db/migrations/index.ts`. **Skip each addition if it's already present** — running install twice will otherwise produce a duplicate-import / unused-import error from `tsc` and break the build.
+Edit `src/db/migrations/index.ts`. **Skip each addition if it's already present** — running install twice will otherwise produce duplicate-import or unused-import errors from `tsc` and break the build.
 
 Add this import alongside the others (skip if `grep -q "channels/webchat/migration" src/db/migrations/index.ts` already matches):
 
@@ -102,63 +108,16 @@ const migrations: Migration[] = [
 ];
 ```
 
-### 5. Install pinned packages
+### 6. Install pinned packages
 
 ```bash
 pnpm add ws@8.20.0 busboy@1.6.0 web-push@3.6.7 undici@7.16.0
 pnpm add -D @types/ws@8.18.1 @types/busboy@1.5.4 @types/web-push@3.6.4
 ```
 
-`undici` is required by `drafter.ts` for `ProxyAgent` — it routes the
-agent-drafter LLM call through the OneCLI proxy. Node's built-in `fetch`
-uses undici internally but doesn't expose `ProxyAgent`, so the explicit
-package is needed. Undici ships its own TypeScript types — no
-`@types/undici` required.
+`undici` is required by `drafter.ts` for `ProxyAgent` — it routes the agent-drafter LLM call through the OneCLI proxy. Node's built-in `fetch` uses undici internally but doesn't expose `ProxyAgent`. Undici ships its own TypeScript types — no `@types/undici` required.
 
-### 6. Patch a2a `create_agent` with an owner/admin auth gate
-
-The agent-to-agent `create_agent` action lets one agent spawn another.
-Without this gate, any authenticated user who can drive an agent
-(via webchat or any other channel) can cause that agent to spawn
-arbitrary new agents — privilege escalation. The gate reads the trusted
-`senderId` from `inbound.db` (host-owned) and rejects unless the
-requesting user is owner, admin-of-this-group, or a CLI client (Unix
-socket carve-out).
-
-The patch is sentinel-bounded and reversible. `REMOVE.md` calls the
-inverse script.
-
-```bash
-node .claude/skills/add-webchat/install/patch-create-agent.mjs
-```
-
-Idempotent (safe to re-run; detects the sentinel and exits 0). Fails
-loud if trunk's `create-agent.ts` has been reformatted upstream — in
-that case re-pull main and re-run, or update the script's anchors.
-
-Requires the **permissions module** (`src/modules/permissions/`) to be
-present — it provides `isOwner` and `hasAdminPrivilege`. SKILL.md's
-pre-flight already calls this out as a prerequisite for webchat.
-
-### 7. Patch agent-runner with the send_file prompt hint
-
-The webchat PWA inline-renders attachments (image previews, PDF previews,
-syntax-highlighted code). Without a small prompt nudge, agents tend to
-describe files in prose instead of calling `send_file` — which works but
-the file feature goes unused. This step patches `container/agent-runner/
-src/destinations.ts` to add the hint when at least one destination is a
-chat surface. The patch is sentinel-bounded and reversible — `REMOVE.md`
-calls the inverse script.
-
-```bash
-node .claude/skills/add-webchat/install/patch-destinations.mjs
-```
-
-Idempotent (safe to re-run; detects the sentinel and exits 0). Fails loud
-if trunk's `destinations.ts` has been reformatted upstream — in that case
-re-pull main and re-run, or update the script's anchors.
-
-### 8. Build
+### 7. Build
 
 ```bash
 pnpm run build
@@ -166,12 +125,9 @@ pnpm run build
 
 Build must be clean before continuing.
 
-### 9. Rebuild the agent container image
+### 8. Rebuild the agent container image
 
-The `destinations.ts` patch lives in agent-runner code which gets baked
-into the agent container image. Without this rebuild, running agents
-keep using the un-patched destinations section until their next image
-refresh.
+The `destinations.ts` modification lives in agent-runner code that gets baked into the container image. Without this rebuild, running agents keep using the old `destinations.ts` until their next image refresh.
 
 ```bash
 ./container/build.sh
@@ -347,12 +303,19 @@ A fresh webchat install has no agents yet, and `/init-first-agent` doesn't have 
 
 (Without `withRoom`, the call creates a bare agent_group with no chat surface — the v2 default, since agents are entities and rooms are conversation spaces. You'd then wire the agent into a room via `POST /api/rooms` or the PWA's "+ Add agent" inside an existing room.)
 
-Ask the user for an agent name and an optional persona. There is no special first-agent role in v2 — every webchat agent has the same capabilities (see "Channel Info"), so pick a name that reflects what the agent is for.
+Ask the user for an agent name, then offer a persona prompt with **Skip** as the recommended default — most first installs just want a working agent to talk to, and any persona can be edited later via `CLAUDE.local.md` or the PWA. There is no special first-agent role in v2 — every webchat agent has the same capabilities (see "Channel Info"), so pick a name that reflects what the agent is for.
 
 ```
 AskUserQuestion: "What should we call this first agent?"
-AskUserQuestion: "Optional — a one-line persona / system instruction. Leave blank for the default."
+  (free-form; suggest "Helper" as the recommended option)
+
+AskUserQuestion: "Add a custom persona / system instruction?"
+  Options:
+    1. Skip — use the default persona (Recommended)
+    2. Yes, I'll write one
 ```
+
+If the user picks **Skip**, omit `instructions` from the POST body — the handler will apply the built-in default. Only ask the follow-up persona question if they pick "Yes".
 
 Then `curl` it (substitute the answers). The `X-Webchat-CSRF` header is required on every owner-only POST — the PWA sets it automatically; for direct `curl` calls you have to include it explicitly:
 
