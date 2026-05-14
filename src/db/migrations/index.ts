@@ -20,6 +20,7 @@ import {
   moduleWebchatRoomPrimes,
   moduleWebchatModels,
   moduleWebchatApprovalsIndex,
+  moduleWebchatUserArchives,
 } from '../../channels/webchat/migration.js';
 
 export interface Migration {
@@ -47,6 +48,7 @@ const migrations: Migration[] = [
   moduleWebchatRoomPrimes,
   moduleWebchatModels,
   moduleWebchatApprovalsIndex,
+  moduleWebchatUserArchives,
 ];
 
 export function runMigrations(db: Database.Database): void {

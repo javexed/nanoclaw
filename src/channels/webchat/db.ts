@@ -22,6 +22,12 @@ export interface WebchatRoom {
   id: string;
   name: string;
   created_at: number;
+  /**
+   * Per-user archive flag. Not populated by row mapping (it's per-viewer
+   * state, not part of the room itself); set by the view layer before
+   * returning to the client. Optional + default-false on the client.
+   */
+  archived?: boolean;
 }
 
 export interface FileMeta {
@@ -219,6 +225,7 @@ export function deleteWebchatRoom(id: string): void {
   db.prepare(`DELETE FROM webchat_messages WHERE room_id = ?`).run(id);
   db.prepare(`DELETE FROM messaging_group_agents WHERE messaging_group_id = ?`).run(mg.id);
   db.prepare(`DELETE FROM webchat_room_primes WHERE room_id = ?`).run(id);
+  db.prepare(`DELETE FROM webchat_user_room_archives WHERE room_id = ?`).run(id);
   // Drop any agent_destinations rows pointing at this room. target_id has no
   // FK so they wouldn't block, just rot. Guarded — a2a module may not be installed.
   if (hasTable(db, 'agent_destinations')) {
@@ -583,4 +590,40 @@ export function assignModelToAgent(agentGroupId: string, modelId: string): void 
 
 export function unassignModelFromAgent(agentGroupId: string): void {
   getDb().prepare(`DELETE FROM webchat_agent_models WHERE agent_group_id = ?`).run(agentGroupId);
+}
+
+// ── Per-user room archive ──
+//
+// Sidebar-only state. The room still routes messages normally; only the
+// archiving user's sidebar surfacing changes. `room_id` is the
+// messaging_groups.platform_id (consistent with webchat_room_primes etc.).
+
+export function archiveRoomForUser(userId: string, roomId: string): void {
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_user_room_archives (user_id, room_id, archived_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(user_id, room_id) DO NOTHING`,
+    )
+    .run(userId, roomId, new Date().toISOString());
+}
+
+export function unarchiveRoomForUser(userId: string, roomId: string): void {
+  getDb().prepare(`DELETE FROM webchat_user_room_archives WHERE user_id = ? AND room_id = ?`).run(userId, roomId);
+}
+
+export function getArchivedRoomIdsForUser(userId: string): Set<string> {
+  const rows = getDb().prepare(`SELECT room_id FROM webchat_user_room_archives WHERE user_id = ?`).all(userId) as {
+    room_id: string;
+  }[];
+  return new Set(rows.map((r) => r.room_id));
+}
+
+/**
+ * Drop all archive rows for a room (called when the room is deleted —
+ * webchat_user_room_archives has no FK, so we clean up explicitly to
+ * avoid orphan rows accumulating across many user accounts).
+ */
+export function clearArchivesForRoom(roomId: string): void {
+  getDb().prepare(`DELETE FROM webchat_user_room_archives WHERE room_id = ?`).run(roomId);
 }
