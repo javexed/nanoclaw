@@ -136,26 +136,20 @@ sqlite3 data/v2.db "DELETE FROM users WHERE id LIKE 'webchat:%';"
 rm -rf data/webchat/
 ```
 
-## 10. Reverse the a2a `create_agent` auth-gate patch
+## 10. Restore the unpatched upstream versions of patched files
 
-Strips the auth gate that SKILL.md step 6 added. Idempotent — no-op if
-not patched. After running, `src/modules/agent-to-agent/create-agent.ts`
-is byte-identical to the upstream version.
+Webchat fully owns `create-agent.ts` and `destinations.ts` while installed (via sentinel-bounded blocks). To revert both to the unpatched upstream version, fetch and check them out from `main`:
 
 ```bash
-node .claude/skills/add-webchat/install/unpatch-create-agent.mjs
+git fetch upstream main
+git checkout upstream/main -- \
+  src/modules/agent-to-agent/create-agent.ts \
+  container/agent-runner/src/destinations.ts
 ```
 
-## 11. Reverse the agent-runner send_file patch
+Idempotent — running it on already-unpatched files is a no-op (the upstream version overwrites with identical content).
 
-Strips the `send_file` prompt hint that SKILL.md step 7 added.
-Idempotent — no-op if not patched.
-
-```bash
-node .claude/skills/add-webchat/install/unpatch-destinations.mjs
-```
-
-## 12. Rebuild the agent container image
+## 11. Rebuild the agent container image
 
 Required for the unpatched `destinations.ts` to take effect on running
 agents:
@@ -164,7 +158,7 @@ agents:
 ./container/build.sh
 ```
 
-## 13. Rebuild host & restart
+## 12. Rebuild host & restart
 
 ```bash
 pnpm run build
