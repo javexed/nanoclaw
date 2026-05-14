@@ -43,10 +43,11 @@ Edit `src/db/migrations/index.ts` and remove **all** of the following in the sam
      moduleWebchatRoomPrimes,
      moduleWebchatModels,
      moduleWebchatApprovalsIndex,
+     moduleWebchatUserArchives,
    } from '../../channels/webchat/migration.js';
    ```
 
-2. All five entries inside the `migrations` array:
+2. All six entries inside the `migrations` array:
 
    ```typescript
    moduleWebchat,
@@ -54,6 +55,7 @@ Edit `src/db/migrations/index.ts` and remove **all** of the following in the sam
    moduleWebchatRoomPrimes,
    moduleWebchatModels,
    moduleWebchatApprovalsIndex,
+   moduleWebchatUserArchives,
    ```
 
 Do not run `pnpm run build` until both edits are done.
@@ -62,22 +64,24 @@ The `webchat_*` tables remain in the central DB. SQLite has no auto-rollback for
 
 ```bash
 sqlite3 data/v2.db <<'EOF'
--- Tables (6 total — all five migrations' targets)
+-- Tables (7 total — all six migrations' targets)
 DROP TABLE IF EXISTS webchat_approvals_index;
 DROP TABLE IF EXISTS webchat_agent_models;
 DROP TABLE IF EXISTS webchat_models;
 DROP TABLE IF EXISTS webchat_room_primes;
 DROP TABLE IF EXISTS webchat_messages;
 DROP TABLE IF EXISTS webchat_push_subscriptions;
+DROP TABLE IF EXISTS webchat_user_room_archives;
 -- Note: webchat_rooms is intentionally absent — it was dropped by the
 -- webchat-drop-rooms migration itself, leaving the data on messaging_groups.
--- Schema-version rows (5 total)
+-- Schema-version rows (6 total)
 DELETE FROM schema_version WHERE name IN (
   'webchat-initial',
   'webchat-drop-rooms',
   'webchat-room-primes',
   'webchat-models',
-  'webchat-approvals-index'
+  'webchat-approvals-index',
+  'webchat-user-archives'
 );
 EOF
 ```
