@@ -1759,6 +1759,7 @@ function togglePermissions() {
   permsActive = !permsActive;
   $('#chat').hidden = permsActive;
   $('#permissions').hidden = !permsActive;
+  $('#perms-toggle').classList.toggle('active', permsActive);
   $('#app').classList.toggle('in-dashboard', permsActive);
   $('#app').classList.remove('in-room');
   if (permsActive) {
@@ -1775,7 +1776,7 @@ async function probeIsOwner() {
       if (body && typeof body.userId === 'string') myUserId = body.userId;
     }
     if (users.ok) {
-      $('#settings-perms-group').hidden = false;
+      $('#perms-toggle').hidden = false;
       return true;
     }
   } catch {}
@@ -2158,10 +2159,7 @@ async function revokePerm(targetUserId, kind, agentGroupId) {
 }
 
 // Wiring
-$('#settings-perms-btn').addEventListener('click', () => {
-  closeSettings();
-  if (!permsActive) togglePermissions();
-});
+$('#perms-toggle').addEventListener('click', togglePermissions);
 $('#perms-exit').addEventListener('click', togglePermissions);
 $('#perms-refresh').addEventListener('click', refreshPermissions);
 $('#perms-new-btn').addEventListener('click', () => {
