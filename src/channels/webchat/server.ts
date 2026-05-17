@@ -128,6 +128,7 @@ import {
   getPrimeAgentForWebchatRoom,
   getRoomEngageDefault,
   setRoomEngageDefault,
+  getWebchatApprovalPlatformId,
   getWebchatMessages,
   getWebchatMessagesAfterId,
   getWebchatModel,
@@ -681,8 +682,13 @@ async function handleHttp(
     if (!pending || pending.status !== 'pending') {
       return json(res, 404, { error: 'Approval not found or already resolved' });
     }
+    // Authorize against the webchat-owned index, not the pending_approvals row
+    // columns — trunk's `requestApproval` doesn't populate channel_type /
+    // platform_id, so those are NULL on every webchat-routed approval. Same
+    // constraint that drove the read path's JOIN against webchat_approvals_index.
     const expectedPlatformId = approvalInboxForUser(userId);
-    if (pending.channel_type !== 'webchat' || pending.platform_id !== expectedPlatformId) {
+    const indexedPlatformId = getWebchatApprovalPlatformId(approvalId);
+    if (!expectedPlatformId || !indexedPlatformId || indexedPlatformId !== expectedPlatformId) {
       return json(res, 403, { error: 'Not the intended approver for this request' });
     }
     const raw = await readJsonBody(req, res);
@@ -1584,25 +1590,24 @@ function deleteAgentHandler(res: ServerResponse, id: string): void {
   const sessions = findSessionsByAgentGroup(id);
 
   try {
-    getDb()
-      .transaction(() => {
-        const db = getDb();
-        for (const s of sessions) deleteSessionDbState(s.sessionId);
-        db.prepare(`DELETE FROM messaging_group_agents WHERE agent_group_id = ?`).run(id);
-        // Drop the model assignment too — the agent is going away, no point
-        // keeping a row pointing at a dead agent_group_id.
-        unassignModelFromAgent(id);
-        // Drop agent_destinations rows owned by this agent — the FK
-        // (agent_destinations.agent_group_id REFERENCES agent_groups.id) would
-        // otherwise block deleteAgentGroup. Guarded — a2a module may not be
-        // installed, in which case the table is absent.
-        if (hasTable(db, 'agent_destinations')) {
-          db.prepare(`DELETE FROM agent_destinations WHERE agent_group_id = ?`).run(id);
-        }
-        // Delete the home room (its own session rows are already gone above).
-        deleteWebchatRoom(group.folder);
-        deleteAgentGroup(id);
-      })();
+    getDb().transaction(() => {
+      const db = getDb();
+      for (const s of sessions) deleteSessionDbState(s.sessionId);
+      db.prepare(`DELETE FROM messaging_group_agents WHERE agent_group_id = ?`).run(id);
+      // Drop the model assignment too — the agent is going away, no point
+      // keeping a row pointing at a dead agent_group_id.
+      unassignModelFromAgent(id);
+      // Drop agent_destinations rows owned by this agent — the FK
+      // (agent_destinations.agent_group_id REFERENCES agent_groups.id) would
+      // otherwise block deleteAgentGroup. Guarded — a2a module may not be
+      // installed, in which case the table is absent.
+      if (hasTable(db, 'agent_destinations')) {
+        db.prepare(`DELETE FROM agent_destinations WHERE agent_group_id = ?`).run(id);
+      }
+      // Delete the home room (its own session rows are already gone above).
+      deleteWebchatRoom(group.folder);
+      deleteAgentGroup(id);
+    })();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log.error('Webchat: deleteAgentHandler failed', { id, err });
