@@ -101,6 +101,7 @@ async function main(): Promise<void> {
             timestamp: message.timestamp,
             isMention: message.isMention,
             isGroup: message.isGroup,
+            senderAgentGroupId: message.senderAgentGroupId,
           },
         }).catch((err) => {
           log.error('Failed to route inbound message', { channelType: adapter.channelType, err });
@@ -150,13 +151,20 @@ async function main(): Promise<void> {
       kind: string,
       content: string,
       files?: import('./channels/adapter.js').OutboundFile[],
+      source?: { sessionId: string; agentGroupId: string },
     ): Promise<string | undefined> {
       const adapter = getChannelAdapter(channelType);
       if (!adapter) {
         log.warn('No adapter for channel type', { channelType });
         return;
       }
-      return adapter.deliver(platformId, threadId, { kind, content: JSON.parse(content), files });
+      return adapter.deliver(platformId, threadId, {
+        kind,
+        content: JSON.parse(content),
+        files,
+        senderSessionId: source?.sessionId,
+        senderAgentGroupId: source?.agentGroupId,
+      });
     },
     async setTyping(channelType: string, platformId: string, threadId: string | null): Promise<void> {
       const adapter = getChannelAdapter(channelType);

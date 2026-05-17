@@ -2822,13 +2822,26 @@ function closeRoomDetail() {
   selectedRoomId = null;
 }
 
+// Engage mode for the currently-loaded room. Populated alongside the agents
+// list. Two values surface here: 'mention-only' (default — only @-mentioned
+// agents fire) and 'broadcast' (legacy — every agent fires on every message).
+// The PWA never sets 'broadcast'; operators who want it can hit the API
+// directly. Mode-aware rendering is in renderRoomWiredAgents.
+let roomDetailEngageMode = 'mention-only';
+
 async function refreshRoomWiredAgents(roomId) {
   try {
-    const res = await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/agents`);
-    roomDetailWiredAgents = await res.json();
+    const [agentsRes, modeRes] = await Promise.all([
+      authFetch(`/api/rooms/${encodeURIComponent(roomId)}/agents`),
+      authFetch(`/api/rooms/${encodeURIComponent(roomId)}/engage-mode`),
+    ]);
+    roomDetailWiredAgents = await agentsRes.json();
+    const modeBody = await modeRes.json().catch(() => ({ mode: 'mention-only' }));
+    roomDetailEngageMode = modeBody.mode === 'broadcast' ? 'broadcast' : 'mention-only';
   } catch (err) {
     console.error('Failed to fetch wired agents:', err);
     roomDetailWiredAgents = [];
+    roomDetailEngageMode = 'mention-only';
   }
   renderRoomWiredAgents();
   await populateAddAgentSelect();
@@ -2837,25 +2850,29 @@ async function refreshRoomWiredAgents(roomId) {
 function renderRoomWiredAgents() {
   const list = $('#room-wired-agents');
   list.innerHTML = '';
-  const onlyOne = roomDetailWiredAgents.length <= 1;
   const anyPrime = roomDetailWiredAgents.some((a) => a.is_prime);
+  // The effective mode the operator sees: prime if anyone's starred, otherwise
+  // whatever engage_default is set to. With this build's UI never producing
+  // 'broadcast', the no-prime case is 'mention-only' in practice.
+  const effectiveMode = anyPrime ? 'prime' : roomDetailEngageMode;
   for (const agent of roomDetailWiredAgents) {
     const li = document.createElement('li');
 
     // Prime toggle (★) — clicking sets this agent as prime, or clears if already prime.
-    // With only one wired agent, prime designation is meaningless (that agent fires on
-    // everything anyway), so the control is hidden.
+    // Always shown now: even a single-agent room in mention-only mode benefits
+    // from showing the toggle, because clicking ★ flips the room into prime
+    // mode (the one agent then answers everything, regardless of @-mention).
     const primeBtn = document.createElement('button');
     primeBtn.type = 'button';
     primeBtn.className = 'room-wired-prime' + (agent.is_prime ? ' active' : '');
     primeBtn.textContent = agent.is_prime ? '★' : '☆';
     primeBtn.title = agent.is_prime
-      ? `Clear prime — ${agent.name} will lose default-responder status`
-      : `Make ${agent.name} prime — they answer all messages except those that @mention another wired agent`;
-    primeBtn.hidden = onlyOne;
+      ? `Clear prime — room reverts to mention-only (no fallback)`
+      : `Make ${agent.name} the prime fallback — answers messages that don't @-mention any wired agent`;
     primeBtn.addEventListener('click', () => togglePrimeAgent(agent));
     li.appendChild(primeBtn);
 
+    const onlyOne = roomDetailWiredAgents.length <= 1;
     const name = document.createElement('span');
     name.className = 'room-wired-name';
     name.textContent = agent.name;
@@ -2879,23 +2896,39 @@ function renderRoomWiredAgents() {
     list.appendChild(li);
   }
 
-  // Helper line below the list explaining the prime model. Only shown when the
-  // toggle is meaningful (≥2 agents) so it doesn't clutter the 1:1 case.
+  // Mode indicator pill above the helper note — shows the current engage state
+  // at a glance so the operator never has to infer it from "is anything starred".
+  let badge = $('#room-mode-badge');
+  if (!badge) {
+    badge = document.createElement('div');
+    badge.id = 'room-mode-badge';
+    badge.className = 'room-mode-badge';
+    list.parentElement?.insertBefore(badge, list.nextSibling);
+  }
+  badge.className = `room-mode-badge mode-${effectiveMode}`;
+  badge.textContent =
+    effectiveMode === 'prime'
+      ? `Mode: prime (★ ${roomDetailWiredAgents.find((a) => a.is_prime)?.name ?? 'unknown'})`
+      : effectiveMode === 'broadcast'
+        ? 'Mode: broadcast (all agents respond — legacy)'
+        : 'Mode: mention-only (no fallback agent)';
+
+  // Helper line below the badge explains what the mode does. Always shown so
+  // the operator's mental model stays current as they ★ / unstar.
   let note = $('#room-prime-note');
   if (!note) {
     note = document.createElement('p');
     note.id = 'room-prime-note';
     note.className = 'room-prime-note';
-    list.parentElement?.insertBefore(note, list.nextSibling);
+    list.parentElement?.insertBefore(note, badge.nextSibling);
   }
-  if (onlyOne) {
-    note.hidden = true;
-  } else {
-    note.hidden = false;
-    note.textContent = anyPrime
-      ? 'Prime agent answers everything except messages that @mention another wired agent (by their slug folder).'
-      : 'No prime: every wired agent answers every message. Star one to make it the default responder.';
-  }
+  note.hidden = false;
+  note.textContent =
+    effectiveMode === 'prime'
+      ? 'Prime agent answers messages that do not @-mention another wired agent.'
+      : effectiveMode === 'broadcast'
+        ? 'Every wired agent responds to every message. (Legacy mode — not produced by this UI.)'
+        : 'Only @-mentioned agents respond. Plain text wakes no one. Star an agent to designate a prime fallback.';
 }
 
 async function togglePrimeAgent(agent) {

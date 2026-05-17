@@ -269,6 +269,12 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   //    avoids the extra await).
   const parsed = safeParseContent(event.message.content);
   const messageText = parsed.text ?? '';
+  // Agent-authored fan-out (e.g. webchat loop-back). Tightens engagement:
+  // (1) the producing agent never re-engages on its own post (self-exclusion),
+  // (2) prime-style negative-lookahead wirings — patterns like `^(?!...)` that
+  //     model "catch any unaddressed human message" — are skipped, since their
+  //     intent is to greet humans, not to chain off other agents' chatter.
+  const senderAgentGroupId = event.message.senderAgentGroupId;
 
   let engagedCount = 0;
   let accumulatedCount = 0;
@@ -277,6 +283,17 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   for (const agent of agents) {
     const agentGroup = getAgentGroup(agent.agent_group_id);
     if (!agentGroup) continue;
+
+    if (senderAgentGroupId && agent.agent_group_id === senderAgentGroupId) {
+      // Self-exclusion: agent's own loop-back never re-engages itself.
+      continue;
+    }
+    if (senderAgentGroupId && agent.engage_pattern?.startsWith('^(?!')) {
+      // Prime negative-lookahead: catch-all for unaddressed *human* messages.
+      // Skipping on agent fan-out prevents the prime from sweeping in on every
+      // unaddressed agent reply (which would chain forever).
+      continue;
+    }
 
     const engages = evaluateEngage(agent, messageText, isMention, mg, event.threadId);
 
@@ -361,6 +378,26 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
  *                      a thread has engaged us once, follow-ups arrive
  *                      with no mention and should still fire.
  */
+/**
+ * Strip markdown code regions (triple-backtick fences + single-backtick inline)
+ * so engage-pattern regex doesn't treat `@handle` inside a code span as a live
+ * mention. Replacing matches with empty strings is safe — pattern matching is
+ * boolean (presence/absence), so the resulting text just lacks the masked
+ * region. Order matters: fences first (greedy across newlines) so triple
+ * backticks don't get eaten one at a time by the inline pass.
+ *
+ * Edge cases:
+ *   - Unbalanced backticks fall through unstripped (e.g. a single ` with no
+ *     closer leaves the rest of the line addressable — wrong markdown but the
+ *     safer router default is "engage on apparent mentions").
+ *   - The regex is non-greedy so multiple code spans on one line work.
+ */
+export function stripCodeRegions(text: string): string {
+  let t = text.replace(/```[\s\S]*?```/g, '');
+  t = t.replace(/`[^`\n]*`/g, '');
+  return t;
+}
+
 function evaluateEngage(
   agent: MessagingGroupAgent,
   text: string,
@@ -373,7 +410,12 @@ function evaluateEngage(
       const pat = agent.engage_pattern ?? '.';
       if (pat === '.') return true;
       try {
-        return new RegExp(pat).test(text);
+        // Strip markdown code regions before pattern matching so handles inside
+        // backticks are treated as literal text, not live mentions. Triple-
+        // backtick fences (```@advisor```) and single-backtick inline code
+        // (`@advisor`) both protect. Unbalanced backticks pass through so a
+        // stray ` doesn't accidentally mask the rest of the message.
+        return new RegExp(pat).test(stripCodeRegions(text));
       } catch {
         // Bad regex: fail open so admin sees the agent responding + can fix.
         return true;

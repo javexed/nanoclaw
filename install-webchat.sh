@@ -45,7 +45,15 @@ git checkout "$WEBCHAT_REMOTE/channels-webchat" -- \
   public/webchat/ \
   src/modules/agent-to-agent/create-agent.ts \
   src/modules/agent-to-agent/create-agent.test.ts \
-  container/agent-runner/src/destinations.ts
+  container/agent-runner/src/destinations.ts \
+  src/channels/adapter.ts \
+  src/delivery.ts \
+  src/index.ts \
+  src/router.ts \
+  src/session-teardown.ts \
+  src/session-teardown.test.ts \
+  src/router.agent-loopback.test.ts \
+  src/router.backtick-escape.test.ts
 
 # ── 3. Channels barrel: idempotent append ───────────────────────────────
 if ! grep -qF "'./webchat/index.js'" src/channels/index.ts; then
@@ -69,6 +77,7 @@ const SYMBOLS = [
   'moduleWebchatDropRooms',
   'moduleWebchatRoomPrimes',
   'moduleWebchatModels',
+  'moduleWebchatRoomSettings',
   'moduleWebchatApprovalsIndex',
   'moduleWebchatUserArchives',
 ];
