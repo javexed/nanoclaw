@@ -58,6 +58,12 @@ export interface InboundEvent {
     isMention?: boolean;
     /** True when the source is a group/channel thread, false for DMs. */
     isGroup?: boolean;
+    /**
+     * Producing agent's `agent_group_id` when this event was synthesised by
+     * an adapter that loops agent posts back through onInbound. See
+     * `InboundMessage.senderAgentGroupId` for rationale.
+     */
+    senderAgentGroupId?: string;
   };
   replyTo?: DeliveryAddress;
 }
@@ -85,6 +91,15 @@ export interface InboundMessage {
   isMention?: boolean;
   /** True when the source is a group/channel thread, false for DMs. */
   isGroup?: boolean;
+  /**
+   * When set, this inbound was authored by an agent (loop-back fan-out from
+   * an adapter that re-routes agent posts through onInbound — e.g. webchat).
+   * The value is the producing agent's `agent_group_id`. Router uses this
+   * for self-exclusion and to skip prime-style negative-lookahead wirings
+   * (which model "catch unaddressed human messages" semantics, not "catch
+   * everything"). Adapters that don't loop back leave it undefined.
+   */
+  senderAgentGroupId?: string;
 }
 
 /** A file attachment to deliver alongside a message. */
@@ -98,6 +113,15 @@ export interface OutboundMessage {
   kind: string;
   content: unknown; // parsed JSON from messages_out
   files?: OutboundFile[]; // file attachments from the session outbox
+  /**
+   * Producing session's id. Threaded through delivery so adapters that need
+   * to know exactly who emitted the message (e.g. webchat for sender
+   * attribution + Pattern C loop-back) don't have to fall back to
+   * `most-recently-active` heuristics that race under concurrent containers.
+   */
+  senderSessionId?: string;
+  /** Producing session's agent_group_id (correlates with `senderSessionId`). */
+  senderAgentGroupId?: string;
 }
 
 /** Discovered conversation info (from syncConversations). */

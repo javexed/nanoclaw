@@ -308,6 +308,15 @@ export function findActiveAgentForWebchatRoom(roomId: string): WebchatRoomAgent 
   if (agents.length === 1) return agents[0];
   const mg = getMessagingGroupByPlatform('webchat', roomId);
   if (!mg) return agents[0];
+  // Filter to sessions whose container is actually running. Without this,
+  // `writeSessionMessage` bumps `last_active` even for accumulate writes
+  // (router stores message context without waking the container), so an
+  // accumulate-only session can win the "most recent" race against the
+  // session that actually produced the message. That mis-attributes the
+  // sender name in the UI AND — load-bearing — feeds the wrong
+  // `senderAgentGroupId` into the Pattern C loop-back, breaking router
+  // self-exclusion. Container-status filtering identifies the actual
+  // producer because only true wakes spawn/run a container.
   const row = getDb()
     .prepare(
       `SELECT ag.id, ag.name, ag.folder
@@ -315,6 +324,7 @@ export function findActiveAgentForWebchatRoom(roomId: string): WebchatRoomAgent 
        JOIN agent_groups ag ON ag.id = s.agent_group_id
        WHERE s.messaging_group_id = ?
          AND s.last_active IS NOT NULL
+         AND s.container_status IN ('running', 'idle')
        ORDER BY s.last_active DESC
        LIMIT 1`,
     )
@@ -366,6 +376,37 @@ export function setPrimeAgentForWebchatRoom(roomId: string, agentGroupId: string
 
 export function clearPrimeAgentForWebchatRoom(roomId: string): void {
   getDb().prepare(`DELETE FROM webchat_room_primes WHERE room_id = ?`).run(roomId);
+}
+
+// ── Room settings (engage_default) ──
+
+export type EngageDefault = 'broadcast' | 'mention-only';
+
+/**
+ * Per-room engagement default used when no prime is configured. Controls
+ * what `recomputeEngagePatterns` rewrites un-primed wirings to:
+ *
+ *   'broadcast'    → engage_pattern = '.'           (every agent responds)
+ *   'mention-only' → engage_pattern = `\B@<folder>\b` (only addressed agents respond)
+ *
+ * Rooms with no row default to 'broadcast' so installs that predate this
+ * setting see no behavior change.
+ */
+export function getRoomEngageDefault(roomId: string): EngageDefault {
+  const row = getDb()
+    .prepare(`SELECT engage_default FROM webchat_room_settings WHERE room_id = ?`)
+    .get(roomId) as { engage_default: EngageDefault } | undefined;
+  return row?.engage_default ?? 'broadcast';
+}
+
+export function setRoomEngageDefault(roomId: string, mode: EngageDefault): void {
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_room_settings (room_id, engage_default, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(room_id) DO UPDATE SET engage_default = excluded.engage_default, updated_at = excluded.updated_at`,
+    )
+    .run(roomId, mode, Date.now());
 }
 
 // ── Messages ──

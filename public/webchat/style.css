@@ -1539,6 +1539,30 @@ button:focus-visible {
   opacity: 0.75;
   line-height: 1.4;
 }
+.room-mode-badge {
+  margin: 8px 0 4px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  border-radius: 4px;
+  display: inline-block;
+  border: 1px solid var(--border);
+}
+.room-mode-badge.mode-prime {
+  background: var(--accent);
+  color: var(--surface);
+  border-color: var(--accent);
+}
+.room-mode-badge.mode-mention-only {
+  background: var(--surface2);
+  color: var(--text);
+}
+.room-mode-badge.mode-broadcast {
+  background: #f5b1a0;
+  color: #4a1a10;
+  border-color: #d97050;
+}
 
 .room-add-agent-form {
   margin-top: 8px;

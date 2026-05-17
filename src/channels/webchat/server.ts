@@ -14,6 +14,8 @@
  *   DELETE /api/rooms/:id/agents/:agentId        unwire an agent (refuses last)  [owner]
  *   PUT  /api/rooms/:id/prime                    set { agentId } as the room's prime  [owner]
  *   DELETE /api/rooms/:id/prime                  clear the room's prime designation  [owner]
+ *   GET  /api/rooms/:id/engage-mode              read room's engage default ('mention-only' | 'broadcast')
+ *   PUT  /api/rooms/:id/engage-mode              set { mode } for the room  [owner]
  *   GET  /api/rooms/:id/messages                 history (?after_id= for incremental)
  *   POST /api/rooms/:id/archive                  hide from this user's sidebar
  *   POST /api/rooms/:id/unarchive                un-hide for this user
@@ -65,6 +67,13 @@ import path from 'path';
 import { DATA_DIR, GROUPS_DIR } from '../../config.js';
 import { getDb, hasTable } from '../../db/connection.js';
 import { log } from '../../log.js';
+import {
+  deleteSessionDbState,
+  findSessionsByAgentGroup,
+  findSessionsByMessagingGroup,
+  teardownSessionResources,
+  type TeardownTarget,
+} from '../../session-teardown.js';
 import type { AgentGroup } from '../../types.js';
 import {
   createAgentGroup,
@@ -117,6 +126,8 @@ import {
   getArchivedRoomIdsForUser,
   getAssignedModelForAgent,
   getPrimeAgentForWebchatRoom,
+  getRoomEngageDefault,
+  setRoomEngageDefault,
   getWebchatMessages,
   getWebchatMessagesAfterId,
   getWebchatModel,
@@ -214,8 +225,12 @@ export async function startWebchatServer(hooks: WebchatServerHooks): Promise<Web
     void handleHttp(req, res, hooks, publicDir).catch((err) => {
       log.error('Webchat HTTP handler threw', { err });
       if (!res.headersSent) {
+        // Webchat is single-tenant + auth-gated; surface err.message so
+        // operators get a real diagnostic instead of "Internal error". The
+        // log line above still has the full stack for debugging.
+        const message = err instanceof Error ? err.message : String(err);
         res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Internal error' }));
+        res.end(JSON.stringify({ error: 'Internal error', message }));
       }
     });
   };
@@ -435,6 +450,42 @@ async function handleHttp(
     }
     broadcastRooms();
     return json(res, 200, { ok: true });
+  }
+
+  // ── Engage mode (room-scoped) ──
+  // Controls what `recomputeEngagePatterns` rewrites un-primed wirings to:
+  //   'mention-only' — agents fire only on explicit @-mention (no fallback).
+  //   'broadcast'    — legacy: every wired agent answers every message.
+  // The PWA never sends 'broadcast' (operator preference is mention-only-only),
+  // but the API accepts both for symmetry with the DB schema.
+  const roomEngageMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/engage-mode$/);
+  if (roomEngageMatch && method === 'GET') {
+    const roomId = decodeURIComponent(roomEngageMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    return json(res, 200, { mode: getRoomEngageDefault(roomId) });
+  }
+  if (roomEngageMatch && method === 'PUT') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const roomId = decodeURIComponent(roomEngageMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { mode?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    if (body.mode !== 'mention-only' && body.mode !== 'broadcast') {
+      return json(res, 400, { error: "mode must be 'mention-only' or 'broadcast'" });
+    }
+    setRoomEngageDefault(roomId, body.mode);
+    // Re-run pattern computation so the new mode is reflected in every wiring.
+    // No-op when a prime is set (prime branch takes over). Cheap one-UPDATE-per-wiring.
+    recomputeEngagePatterns(roomId);
+    broadcastRooms();
+    return json(res, 200, { ok: true, mode: body.mode });
   }
 
   const histMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/messages$/);
@@ -896,7 +947,17 @@ export function recomputeEngagePatterns(roomId: string): void {
   const update = getDb().prepare(`UPDATE messaging_group_agents SET engage_pattern = ? WHERE id = ?`);
 
   if (!validPrime) {
-    for (const w of wirings) update.run('.', w.id);
+    // No prime — fall through to the room's engage_default. 'broadcast' is
+    // the legacy behavior (every agent responds to every message). 'mention-only'
+    // makes the room silent until an agent is explicitly @-mentioned, which is
+    // the right model for a many-agent shared room where catch-all responses
+    // would just be noise.
+    const engageDefault = getRoomEngageDefault(roomId);
+    if (engageDefault === 'mention-only') {
+      for (const w of wirings) update.run(`\\B@${ciFolderToken(w.folder)}\\b`, w.id);
+    } else {
+      for (const w of wirings) update.run('.', w.id);
+    }
     return;
   }
 
@@ -1500,24 +1561,39 @@ function deleteAgentHandler(res: ServerResponse, id: string): void {
   const group = getAgentGroup(id);
   if (!group) return json(res, 404, { error: 'Agent not found' });
 
-  // Tear down wiring + room first so referential cleanup is complete before
-  // the agent_groups row is removed. Wirings for OTHER rooms (this agent may
-  // be wired to multiple) get caught by the agent_group_id sweep below;
-  // deleteWebchatRoom only handles the one room with this agent's folder id.
-  const db = getDb();
-  db.prepare(`DELETE FROM messaging_group_agents WHERE agent_group_id = ?`).run(id);
-  // Drop the model assignment too — the agent is going away, no point
-  // keeping a row pointing at a dead agent_group_id.
-  unassignModelFromAgent(id);
-  // Also drop agent_destinations rows owned by this agent — the FK
-  // (agent_destinations.agent_group_id REFERENCES agent_groups.id) would
-  // otherwise block the deleteAgentGroup below. Guarded — a2a module may
-  // not be installed, in which case the table is absent.
-  if (hasTable(db, 'agent_destinations')) {
-    db.prepare(`DELETE FROM agent_destinations WHERE agent_group_id = ?`).run(id);
+  // Snapshot every session this agent owns — home-room and any other rooms
+  // it's wired to. All of them FK to `agent_groups.id`, so all must be torn
+  // down before deleteAgentGroup. Captured before the tx so post-commit
+  // resource cleanup can find them.
+  const sessions = findSessionsByAgentGroup(id);
+
+  try {
+    getDb()
+      .transaction(() => {
+        const db = getDb();
+        for (const s of sessions) deleteSessionDbState(s.sessionId);
+        db.prepare(`DELETE FROM messaging_group_agents WHERE agent_group_id = ?`).run(id);
+        // Drop the model assignment too — the agent is going away, no point
+        // keeping a row pointing at a dead agent_group_id.
+        unassignModelFromAgent(id);
+        // Drop agent_destinations rows owned by this agent — the FK
+        // (agent_destinations.agent_group_id REFERENCES agent_groups.id) would
+        // otherwise block deleteAgentGroup. Guarded — a2a module may not be
+        // installed, in which case the table is absent.
+        if (hasTable(db, 'agent_destinations')) {
+          db.prepare(`DELETE FROM agent_destinations WHERE agent_group_id = ?`).run(id);
+        }
+        // Delete the home room (its own session rows are already gone above).
+        deleteWebchatRoom(group.folder);
+        deleteAgentGroup(id);
+      })();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.error('Webchat: deleteAgentHandler failed', { id, err });
+    return json(res, 500, { error: 'Failed to delete agent', message });
   }
-  deleteWebchatRoom(group.folder);
-  deleteAgentGroup(id);
+
+  void teardownSessionResources(sessions, `webchat agent ${id} deleted`);
 
   const dir = path.resolve(GROUPS_DIR, group.folder);
   try {
@@ -1663,20 +1739,18 @@ async function createRoomHandler(req: IncomingMessage, res: ServerResponse): Pro
     getDb().transaction(() => {
       createWebchatRoom(roomName, roomId);
       for (const id of wireIds) wireAgentToWebchatRoom(roomName, roomId, id);
-      // Auto-prime: the first agent on a freshly-created room becomes
-      // prime by default. Sole agent → engages on every message (same as
-      // no-prime behavior). Multi-agent at creation → first wire is the
-      // default responder; the operator can flip via room settings.
+      // New rooms default to mention-only mode: agents fire on explicit
+      // @-mention; plain text wakes no one. The operator can ★ an agent to
+      // designate a prime fallback later, or PUT engage-mode to switch.
+      // No auto-prime — even a single-agent room starts mention-only so
+      // there's never an implicit "this agent answers everything" surprise.
       // Done inside the transaction so a partial failure doesn't leave a
-      // dangling prime row pointing at a non-wired agent.
-      if (wireIds.length > 0) {
-        setPrimeAgentForWebchatRoom(roomId, wireIds[0]);
-      }
+      // dangling settings row referencing a half-created room.
+      setRoomEngageDefault(roomId, 'mention-only');
     })();
-    // recomputeEngagePatterns reads the current wirings + prime, so it
-    // has to run AFTER the transaction commits. The result for the sole-
-    // agent case is unchanged ('.'), so this is only meaningful for
-    // multi-agent room creation.
+    // recomputeEngagePatterns reads the current wirings + prime + engage_default,
+    // so it has to run AFTER the transaction commits. New room: no prime,
+    // engage_default='mention-only' → every wiring gets `\B@<folder>\b`.
     recomputeEngagePatterns(roomId);
   } catch (err) {
     rollbackBareAgents(createdAgentIds);
@@ -1715,10 +1789,29 @@ function deleteRoomHandler(res: ServerResponse, roomId: string): void {
   const room = getWebchatRoom(roomId);
   if (!room) return json(res, 404, { error: 'Room not found' });
 
-  // deleteWebchatRoom drops messages, wirings, and the messaging_group row.
-  // Agents are deliberately preserved — they may be wired to other rooms,
-  // and DELETE /api/agents/:id is the cascade-to-agent path.
-  deleteWebchatRoom(roomId);
+  const mg = getMessagingGroupByPlatform('webchat', roomId);
+  // Snapshot sessions before the transaction so we can clean up containers
+  // and dirs after it commits (side-effects can't roll back).
+  const sessions: TeardownTarget[] = mg ? findSessionsByMessagingGroup(mg.id) : [];
+
+  try {
+    getDb().transaction(() => {
+      for (const s of sessions) deleteSessionDbState(s.sessionId);
+      // deleteWebchatRoom drops messages, wirings, and the messaging_group row.
+      // Agents are deliberately preserved — they may be wired to other rooms,
+      // and DELETE /api/agents/:id is the cascade-to-agent path.
+      deleteWebchatRoom(roomId);
+    })();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.error('Webchat: deleteRoomHandler failed', { roomId, err });
+    return json(res, 500, { error: 'Failed to delete room', message });
+  }
+
+  // Fire-and-forget: the DB tx committed, so we can respond immediately.
+  // Container kills + dir cleanup are best-effort post-commit hygiene that
+  // the user doesn't need to wait on. Errors are logged inside the helper.
+  void teardownSessionResources(sessions, `webchat room ${roomId} deleted`);
 
   // Remove the room's upload dir. The messaging_group is gone, so the files
   // are unreachable from the API — leaving them is just dead disk space.

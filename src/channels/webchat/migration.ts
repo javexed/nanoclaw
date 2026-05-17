@@ -209,6 +209,41 @@ export const moduleWebchatModels: Migration = {
 };
 
 /**
+ * Per-room engagement-default setting.
+ *
+ * Two values:
+ *   'broadcast'   — legacy default. When no prime is set, every wiring's
+ *                   engage_pattern collapses to '.', i.e. every agent
+ *                   responds to every message. Useful for single-agent
+ *                   rooms; chaotic for many-agent shared rooms.
+ *   'mention-only' — when no prime is set, every wiring is rewritten to
+ *                   `\B@<folder>\b`. Unaddressed messages fall through
+ *                   to nobody — the room is silent unless you @-mention
+ *                   someone. Combine with prime=NULL for a "trading
+ *                   floor" room with no fallback agent.
+ *
+ * When a prime IS set, the prime-mode rewrite logic in `recomputeEngagePatterns`
+ * takes over and engage_default is ignored. This setting only affects the
+ * no-prime branch.
+ *
+ * `room_id` is the messaging_groups.platform_id (same convention as
+ * webchat_room_primes — no FK so the room-delete path can cascade in JS).
+ */
+export const moduleWebchatRoomSettings: Migration = {
+  version: 105,
+  name: 'webchat-room-settings',
+  up(db: Database.Database) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS webchat_room_settings (
+        room_id        TEXT PRIMARY KEY,
+        engage_default TEXT NOT NULL DEFAULT 'broadcast',
+        updated_at     INTEGER NOT NULL
+      );
+    `);
+  },
+};
+
+/**
  * Skill-side index of webchat-bound approvals so the PWA can query
  * "which approvals are for this user?" without depending on a trunk-side
  * stamp on `pending_approvals.channel_type`/`platform_id` (those columns

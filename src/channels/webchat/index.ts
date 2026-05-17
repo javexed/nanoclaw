@@ -32,9 +32,15 @@
  * unified history view; routing/delivery still flows through v2's session
  * DBs (inbound.db / outbound.db) like every other channel.
  */
+// Side-effect import — must run before any transitive webchat import that
+// reads `process.env.WEBCHAT_*` at module load (auth.ts, server.ts, push.ts,
+// drafter.ts). See env-load.ts for the rationale.
+import './env-load.js';
+
 import { randomUUID } from 'crypto';
 
 import { log } from '../../log.js';
+import { getAgentGroup } from '../../db/agent-groups.js';
 import { createMessagingGroup, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import { registerChannelAdapter } from '../channel-registry.js';
 import type { ChannelAdapter, ChannelSetup, OutboundMessage } from '../adapter.js';
@@ -48,6 +54,7 @@ import {
   storeWebchatMessage,
   storeWebchatFileMessage,
   type FileMeta,
+  type WebchatRoomAgent,
 } from './db.js';
 import { pushApprovalToUser } from './state.js';
 import { startReconcileLoop, stopReconcileLoop } from './reconcile.js';
@@ -60,6 +67,9 @@ function isEnabled(): boolean {
 
 function createAdapter(): ChannelAdapter {
   let server: WebchatServer | null = null;
+  // Captured at setup() time so deliver()'s loop-back fan-out can re-enter
+  // the router. Null before setup, immutable after.
+  let adapterConfig: ChannelSetup | null = null;
 
   const adapter: ChannelAdapter = {
     name: 'webchat',
@@ -67,6 +77,7 @@ function createAdapter(): ChannelAdapter {
     supportsThreads: false,
 
     async setup(config: ChannelSetup): Promise<void> {
+      adapterConfig = config;
       server = await startWebchatServer({
         onInbound: (roomId, message) => {
           // Surface the room's display name to the router so messaging_groups
@@ -169,17 +180,21 @@ function createAdapter(): ChannelAdapter {
         log.warn('Webchat deliver: unknown room', { roomId });
         return undefined;
       }
-      // Resolve the producing agent's display name. For 1-agent rooms this
-      // is exact. For multi-agent rooms it's the most-recently-active
-      // session, which the agent-runner bumps right before writing the
-      // response — reliable in practice, fuzzy under simultaneous replies
-      // (acceptable: same agent's name stamping different replies in a
-      // ~second window).
-      const senderName = senderForRoom(roomId);
+      // Resolve the producing agent. Prefer the agent_group_id threaded
+      // through `message.senderAgentGroupId` from delivery.ts — that's the
+      // ground truth (we know exactly which session emitted the message
+      // because we polled its outbound.db). Fall back to the heuristic only
+      // for legacy paths that don't set the field (defensive — should be
+      // populated for all real deliveries after the threading change).
+      let producer = message.senderAgentGroupId ? lookupAgentForMessage(message.senderAgentGroupId) : null;
+      if (!producer) producer = findActiveAgentForWebchatRoom(roomId);
+      const senderName = producer?.name ?? agentDisplayName();
       const text = extractText(message);
+      let storedMessageId: string | null = null;
       if (text !== null && text.length > 0) {
         const stored = storeWebchatMessage(roomId, senderName, 'agent', text);
         server.broadcast(roomId, { type: 'message', ...stored });
+        storedMessageId = stored.id;
       }
       // File attachments: stored as separate file messages so the PWA renders
       // them inline. Each file gets its own message_type='file' row.
@@ -194,6 +209,38 @@ function createAdapter(): ChannelAdapter {
           const stored = storeWebchatFileMessage(roomId, senderName, 'agent', file.filename, meta);
           server.broadcast(roomId, { type: 'message', ...stored });
         }
+      }
+      // Loop-back fan-out: re-enter the router so other wired agents in this
+      // room can react to the producer's text (matches the "agents talk in
+      // the room" mental model). Guarded by:
+      //   • self-exclusion in router (the producer never re-engages itself)
+      //   • prime-skip in router  (catch-all wirings don't fire on agent posts)
+      //   • per-room rate limit   (circuit breaker against pathological chains)
+      // Skipped when producer can't be resolved or there's no text payload
+      // (files alone don't trigger — no @-mention to match against).
+      if (adapterConfig && producer && text !== null && text.length > 0 && shouldLoopBack(roomId)) {
+        const senderAgentGroupId = producer.id;
+        const loopbackId = storedMessageId ?? `webchat-loopback-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        // Display attribution goes through `author.fullName` / `author.userName`
+        // — fields the container-side formatter reads for sender labels but
+        // which the permissions senderResolver ignores for identity (no
+        // `author.userId` set → no fallback user row created). Using a plain
+        // `sender` here would auto-create `webchat:<AgentName>` rows in the
+        // users table on every loop-back, cluttering the permissions tab with
+        // pseudo-users that have no roles or memberships.
+        adapterConfig.onInbound(roomId, null, {
+          id: loopbackId,
+          kind: 'chat',
+          content: {
+            text,
+            author: { fullName: senderName, userName: senderName },
+            senderAgentGroupId,
+          },
+          timestamp: new Date().toISOString(),
+          isMention: false,
+          isGroup: true,
+          senderAgentGroupId,
+        });
       }
       return undefined;
     },
@@ -211,6 +258,46 @@ function createAdapter(): ChannelAdapter {
   };
 
   return adapter;
+}
+
+// Per-room sliding-window rate limiter for agent-authored loop-back events.
+// Circuit breaker for pathological chains that escape self-exclusion and
+// prime-skip (e.g. two agents @-mentioning each other in their replies).
+// 30 events / 60s per room — generous enough that legitimate "FOMC posts,
+// Advisor replies, Executor confirms" multi-hop conversations sail through;
+// tight enough that an infinite ping-pong gets clipped quickly.
+const LOOPBACK_WINDOW_MS = 60_000;
+const LOOPBACK_MAX_PER_WINDOW = 30;
+const loopbackHistory = new Map<string, number[]>();
+
+function shouldLoopBack(roomId: string): boolean {
+  const now = Date.now();
+  const cutoff = now - LOOPBACK_WINDOW_MS;
+  const recent = (loopbackHistory.get(roomId) ?? []).filter((t) => t >= cutoff);
+  if (recent.length >= LOOPBACK_MAX_PER_WINDOW) {
+    log.warn('Webchat: loop-back rate limit hit, dropping agent fan-out', {
+      roomId,
+      windowMs: LOOPBACK_WINDOW_MS,
+      cap: LOOPBACK_MAX_PER_WINDOW,
+    });
+    loopbackHistory.set(roomId, recent);
+    return false;
+  }
+  recent.push(now);
+  loopbackHistory.set(roomId, recent);
+  return true;
+}
+
+/**
+ * Exact lookup of an agent by id, returning the WebchatRoomAgent shape.
+ * Used when delivery.ts threads the producing agent's id through; no
+ * heuristic, no most-recently-active race. Returns null if the agent
+ * vanished between produce-time and deliver-time (shouldn't happen in
+ * practice — agents don't disappear mid-flight).
+ */
+function lookupAgentForMessage(agentGroupId: string): WebchatRoomAgent | null {
+  const ag = getAgentGroup(agentGroupId);
+  return ag ? { id: ag.id, name: ag.name, folder: ag.folder } : null;
 }
 
 function extractText(message: OutboundMessage): string | null {

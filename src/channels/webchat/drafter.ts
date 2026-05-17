@@ -21,6 +21,7 @@ import fs from 'fs';
 import { OneCLI, OneCLIRequestError } from '@onecli-sh/sdk';
 import { ProxyAgent } from 'undici';
 
+import { ONECLI_API_KEY, ONECLI_URL } from '../../config.js';
 import { log } from '../../log.js';
 
 // Reserved agent identifier registered with OneCLI on first draft request.
@@ -69,9 +70,9 @@ const MAX_NAME_LENGTH = 64;
 const MAX_INSTRUCTIONS_LENGTH = 2048;
 
 // Single shared OneCLI client + lazy bootstrap promise — match the trunk
-// pattern in container-runner.ts:48.
-const ONECLI_URL = process.env.ONECLI_URL || 'http://127.0.0.1:10254';
-const ONECLI_API_KEY = process.env.ONECLI_API_KEY || '';
+// pattern in container-runner.ts:48. Pull URL + key from `config.ts` (which
+// uses `readEnvFile`) rather than `process.env` directly so service-managed
+// hosts that don't inherit `.env` still see the right gateway address.
 const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
 
 let bootstrapPromise: Promise<void> | null = null;
@@ -158,9 +159,23 @@ async function buildDrafterTransport(): Promise<{
   const cfg = await onecli.getContainerConfig(DRAFTER_AGENT_ID);
   const rawProxy = cfg.env.HTTPS_PROXY ?? cfg.env.HTTP_PROXY;
   if (!rawProxy) throw new DraftError('OneCLI gateway returned no proxy URL', 503);
-  // replaceAll handles the (rare) case where host.docker.internal appears
-  // in more than one position of the URI, e.g., a redirect query param.
-  const proxyUri = rawProxy.replaceAll('host.docker.internal', '127.0.0.1');
+  // The OneCLI gateway returns `host.docker.internal:<port>` as the proxy
+  // URL because that hostname only resolves inside containers (via
+  // `--add-host=host.docker.internal:host-gateway`). The host process can't
+  // reach it under that name. We rewrite to whatever host portion ONECLI_URL
+  // uses, which by construction is reachable from the host:
+  //   macOS (Docker Desktop): ONECLI_URL=http://127.0.0.1:10254     → rewrite to 127.0.0.1
+  //   Linux (Docker daemon):  ONECLI_URL=http://172.17.0.1:10254    → rewrite to 172.17.0.1
+  // replaceAll handles the (rare) case where the hostname appears more than
+  // once (e.g., a redirect query param).
+  let onecliHost = '127.0.0.1';
+  try {
+    onecliHost = new URL(ONECLI_URL).hostname || '127.0.0.1';
+  } catch {
+    // Bad ONECLI_URL — fall through with the loopback default; surface in the
+    // proxy attempt that follows so the operator gets a real error.
+  }
+  const proxyUri = rawProxy.replaceAll('host.docker.internal', onecliHost);
 
   // Always prefer the inline string — the env path is in-container only.
   // Fall back to reading the path if for some reason caCertificate is empty.
