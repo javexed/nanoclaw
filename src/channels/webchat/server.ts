@@ -509,20 +509,36 @@ async function handleHttp(
   // header in authFetch().
   const uploadMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/upload$/);
   if (uploadMatch && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') {
-      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    }
     const roomId = decodeURIComponent(uploadMatch[1]);
-    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    const csrfOk = req.headers['x-webchat-csrf'] === '1';
+    const accessOk = canAccessRoom(userId, roomId);
+    log.info('Webchat upload (multipart) request', {
+      roomId,
+      userId,
+      contentType: req.headers['content-type'],
+      contentLength: req.headers['content-length'],
+      csrfOk,
+      accessOk,
+    });
+    if (!csrfOk) return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!accessOk) return json(res, 403, { error: 'Access denied' });
     return handleMultipartUpload(req, res, roomId, senderIdentity, userId, hooks);
   }
   const chunkMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/upload\/chunk$/);
   if (chunkMatch && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') {
-      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    }
     const roomId = decodeURIComponent(chunkMatch[1]);
-    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    const csrfOk = req.headers['x-webchat-csrf'] === '1';
+    const accessOk = canAccessRoom(userId, roomId);
+    log.info('Webchat upload (chunked) request', {
+      roomId,
+      userId,
+      contentType: req.headers['content-type'],
+      contentLength: req.headers['content-length'],
+      csrfOk,
+      accessOk,
+    });
+    if (!csrfOk) return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!accessOk) return json(res, 403, { error: 'Access denied' });
     return handleChunkedUpload(req, res, roomId, senderIdentity, userId, hooks);
   }
   const fileMatch = url.pathname.match(/^\/api\/files\/([^/]+)\/([^/]+)$/);

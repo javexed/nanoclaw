@@ -171,6 +171,14 @@ function readBody(req: http.IncomingMessage, maxBytes = MAX_CHUNK_BODY_BYTES): P
   });
 }
 
+// Files at or below this size are inlined into the inbound message as a
+// base64 `attachments[].data` blob, which `extractAttachmentFiles` in the
+// host's session-manager will then stage to `<sessionDir>/inbox/<msgId>/`.
+// Above the threshold we leave a text marker pointing at the served URL —
+// the agent can curl it from the host if it really needs the bytes, but the
+// usual case (phone photos, screenshots) is well under this cap.
+const INLINE_ATTACHMENT_THRESHOLD = 25 * 1024 * 1024;
+
 function inboundForFile(
   _roomId: string,
   messageId: string,
@@ -178,21 +186,54 @@ function inboundForFile(
   caption: string,
   senderIdentity: string,
   senderUserId: string,
+  localFilePath: string,
 ): InboundMessage {
-  const text = caption
-    ? `[File: ${fileMeta.filename} (${fileMeta.mime}, ${fileMeta.size} bytes) at ${fileMeta.url}]\n${caption}`
-    : `[File: ${fileMeta.filename} (${fileMeta.mime}, ${fileMeta.size} bytes) at ${fileMeta.url}]`;
+  const attachmentType = fileMeta.mime.startsWith('image/') ? 'image' : 'file';
+
+  let attachment: { name: string; type: string; data: string; size: number; mime: string } | null = null;
+  if (fileMeta.size <= INLINE_ATTACHMENT_THRESHOLD) {
+    try {
+      const data = fs.readFileSync(localFilePath).toString('base64');
+      attachment = {
+        name: fileMeta.filename,
+        type: attachmentType,
+        data,
+        size: fileMeta.size,
+        mime: fileMeta.mime,
+      };
+    } catch (err) {
+      log.warn('Webchat: failed to inline attachment for inbound', {
+        localFilePath,
+        err: err instanceof Error ? err.message : err,
+      });
+    }
+  }
+
+  // With an attachment, the formatter renders a `[image: name — saved to
+  // /workspace/inbox/<msgId>/name]` line that the agent can Read directly,
+  // so the caption is enough text — no need to duplicate the URL marker.
+  // Without an attachment (oversize / read error), fall back to the URL
+  // hint so the agent at least knows the file exists and where to fetch it.
+  const text = attachment
+    ? caption
+    : caption
+      ? `[File: ${fileMeta.filename} (${fileMeta.mime}, ${fileMeta.size} bytes) at ${fileMeta.url}]\n${caption}`
+      : `[File: ${fileMeta.filename} (${fileMeta.mime}, ${fileMeta.size} bytes) at ${fileMeta.url}]`;
+
+  const content: Record<string, unknown> = {
+    text,
+    sender: senderIdentity,
+    senderId: senderUserId,
+    senderName: senderIdentity,
+  };
+  if (attachment) content.attachments = [attachment];
+
   return {
     id: messageId,
     kind: 'chat',
     timestamp: new Date().toISOString(),
     isGroup: true,
-    content: {
-      text,
-      sender: senderIdentity,
-      senderId: senderUserId,
-      senderName: senderIdentity,
-    },
+    content,
   };
 }
 
@@ -205,6 +246,7 @@ export function handleMultipartUpload(
   hooks: FileHooks,
 ): void {
   if (!getWebchatRoom(roomId)) {
+    log.warn('Webchat upload rejected: room not found', { roomId });
     return json(res, 404, { error: 'Room not found' });
   }
 
@@ -213,13 +255,27 @@ export function handleMultipartUpload(
 
   const contentType = req.headers['content-type'] || '';
   if (!contentType.includes('multipart/form-data')) {
+    log.warn('Webchat upload rejected: bad content-type', { roomId, contentType });
     return json(res, 400, { error: 'Content-Type must be multipart/form-data' });
   }
 
   const busboy = Busboy({ headers: req.headers, limits: { fileSize: MAX_UPLOAD_SIZE, files: 1 } });
-  let fileInfo: { id: string; filename: string; mime: string; size: number; path: string } | null = null;
+  let fileInfo: {
+    id: string;
+    filename: string;
+    mime: string;
+    size: number;
+    path: string;
+    localPath: string;
+  } | null = null;
   let limitHit = false;
   let caption = '';
+  // Promise that resolves once the disk write is fully flushed. `stream.on('end')`
+  // / `busboy.on('finish')` fire when the *read* side ends — the WriteStream
+  // may still be flushing bytes to disk. Reading the file before this resolves
+  // returned an empty buffer for small uploads, which is why JSON paste-ins
+  // were arriving at the agent as 0-byte attachments.
+  let writeDone: Promise<void> = Promise.resolve();
 
   busboy.on('field', (name, value) => {
     if (name === 'caption') caption = value.trim();
@@ -233,6 +289,10 @@ export function handleMultipartUpload(
     let size = 0;
 
     const ws = fs.createWriteStream(filePath);
+    writeDone = new Promise<void>((resolve, reject) => {
+      ws.on('finish', () => resolve());
+      ws.on('error', reject);
+    });
     stream.on('data', (chunk: Buffer) => {
       size += chunk.length;
     });
@@ -256,6 +316,7 @@ export function handleMultipartUpload(
           mime: info.mimeType || 'application/octet-stream',
           size,
           path: `/api/files/${encodeURIComponent(sanitizeId(roomId))}/${safeFilename}`,
+          localPath: filePath,
         };
       }
     });
@@ -263,22 +324,46 @@ export function handleMultipartUpload(
 
   busboy.on('finish', () => {
     if (limitHit) {
+      log.warn('Webchat upload rejected: file size limit hit', { roomId });
       return json(res, 413, {
         error: `File exceeds ${(MAX_UPLOAD_SIZE / 1024 / 1024 / 1024).toFixed(1)}GB limit`,
       });
     }
-    if (!fileInfo) return json(res, 400, { error: 'No file uploaded' });
+    if (!fileInfo) {
+      log.warn('Webchat upload rejected: busboy finished with no file part', { roomId, contentType });
+      return json(res, 400, { error: 'No file uploaded' });
+    }
 
-    const fileMeta: FileMeta = {
-      url: fileInfo.path,
-      filename: fileInfo.filename,
-      mime: fileInfo.mime,
-      size: fileInfo.size,
-    };
-    const stored = storeWebchatFileMessage(roomId, senderIdentity, 'user', caption, fileMeta);
-    broadcast(roomId, { type: 'message', ...stored });
-    hooks.onInbound(roomId, inboundForFile(roomId, stored.id, fileMeta, caption, senderIdentity, senderUserId));
-    json(res, 200, { ...fileInfo, caption });
+    writeDone
+      .then(() => {
+        const finishedFileInfo = fileInfo!;
+        const fileMeta: FileMeta = {
+          url: finishedFileInfo.path,
+          filename: finishedFileInfo.filename,
+          mime: finishedFileInfo.mime,
+          size: finishedFileInfo.size,
+        };
+        const stored = storeWebchatFileMessage(roomId, senderIdentity, 'user', caption, fileMeta);
+        broadcast(roomId, { type: 'message', ...stored });
+        hooks.onInbound(
+          roomId,
+          inboundForFile(
+            roomId,
+            stored.id,
+            fileMeta,
+            caption,
+            senderIdentity,
+            senderUserId,
+            finishedFileInfo.localPath,
+          ),
+        );
+        const { localPath: _localPath, ...publicFileInfo } = finishedFileInfo;
+        json(res, 200, { ...publicFileInfo, caption });
+      })
+      .catch((err) => {
+        log.warn('Webchat upload: write stream errored', { roomId, err: err instanceof Error ? err.message : err });
+        json(res, 500, { error: 'Upload write failed' });
+      });
   });
 
   busboy.on('error', (err) => {
@@ -483,7 +568,10 @@ export async function handleChunkedUpload(
   const caption = parsed.caption || '';
   const stored = storeWebchatFileMessage(roomId, upload.sender, 'user', caption, fileMeta);
   broadcast(roomId, { type: 'message', ...stored });
-  hooks.onInbound(roomId, inboundForFile(roomId, stored.id, fileMeta, caption, upload.sender, upload.senderUserId));
+  hooks.onInbound(
+    roomId,
+    inboundForFile(roomId, stored.id, fileMeta, caption, upload.sender, upload.senderUserId, finalPath),
+  );
 
   return json(res, 200, { ...fileMeta, caption });
 }
