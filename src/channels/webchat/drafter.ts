@@ -144,10 +144,14 @@ function ensureDrafterIdentity(): Promise<void> {
  *     OAuth-style auth path to be accepted.
  *
  * Inside containers `cfg.env.HTTPS_PROXY` points at `host.docker.internal`;
- * on the host that doesn't resolve, so we rewrite to `127.0.0.1`. The
- * `NODE_EXTRA_CA_CERTS` env path likewise points at the in-container path
- * (`/tmp/onecli-gateway-ca.pem`), so we use the inline `cfg.caCertificate`
- * string instead.
+ * on the host that doesn't resolve. The proxy listens on whatever host
+ * OneCLI is bound to — same as the API endpoint we already know from
+ * ONECLI_URL — so we substitute that hostname. macOS Docker Desktop
+ * typically binds to 127.0.0.1; Linux Docker binds to the bridge IP
+ * (172.17.0.1) and not loopback, which is why hardcoding 127.0.0.1 here
+ * broke on Linux. The `NODE_EXTRA_CA_CERTS` env path likewise points at
+ * the in-container path (`/tmp/onecli-gateway-ca.pem`), so we use the
+ * inline `cfg.caCertificate` string instead.
  */
 async function buildDrafterTransport(): Promise<{
   dispatcher: ProxyAgent;
@@ -254,8 +258,10 @@ async function runDraft(prompt: string): Promise<DraftedAgent> {
   } catch (err) {
     // Log full detail server-side so an operator can debug; surface a
     // generic message to the caller so internal IPs / proxy URLs don't
-    // leak through the error response.
-    log.warn('Webchat drafter: fetch threw', { err });
+    // leak through the error response. undici wraps the real network
+    // error in `err.cause` — surface it so "fetch failed" isn't opaque.
+    const cause = (err as { cause?: unknown }).cause;
+    log.warn('Webchat drafter: fetch threw', { err, cause });
     if (err instanceof OneCLIRequestError) {
       throw new DraftError('Drafter call failed (OneCLI gateway error)', err.statusCode || 503);
     }
