@@ -171,6 +171,20 @@ export function recordWebchatApproval(approvalId: string, platformId: string): v
 }
 
 /**
+ * Look up the platform_id (approval inbox) that an approval was indexed
+ * against. The respond endpoint uses this to authorize the responder —
+ * we can't use `pending_approvals.channel_type/platform_id` because trunk's
+ * `requestApproval` doesn't populate those, same constraint that drove the
+ * read path's JOIN against `webchat_approvals_index`.
+ */
+export function getWebchatApprovalPlatformId(approvalId: string): string | null {
+  const row = getDb()
+    .prepare(`SELECT platform_id FROM webchat_approvals_index WHERE approval_id = ?`)
+    .get(approvalId) as { platform_id: string } | undefined;
+  return row?.platform_id ?? null;
+}
+
+/**
  * Pending approvals destined for this webchat user's inbox.
  *
  * We can't filter on `pending_approvals.channel_type`/`platform_id`
@@ -393,9 +407,9 @@ export type EngageDefault = 'broadcast' | 'mention-only';
  * setting see no behavior change.
  */
 export function getRoomEngageDefault(roomId: string): EngageDefault {
-  const row = getDb()
-    .prepare(`SELECT engage_default FROM webchat_room_settings WHERE room_id = ?`)
-    .get(roomId) as { engage_default: EngageDefault } | undefined;
+  const row = getDb().prepare(`SELECT engage_default FROM webchat_room_settings WHERE room_id = ?`).get(roomId) as
+    | { engage_default: EngageDefault }
+    | undefined;
   return row?.engage_default ?? 'broadcast';
 }
 

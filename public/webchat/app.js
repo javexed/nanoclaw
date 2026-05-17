@@ -1713,7 +1713,17 @@ async function respondToApproval(questionId, value, cardEl) {
     if (!r.ok) {
       const body = await r.json().catch(() => ({}));
       console.error('Approval respond failed:', r.status, body);
-      if (cardEl) cardEl.querySelectorAll('button').forEach((b) => (b.disabled = false));
+      if (cardEl) {
+        cardEl.querySelectorAll('button').forEach((b) => (b.disabled = false));
+        // Inline error so the user actually sees why nothing happened.
+        let errEl = cardEl.querySelector('.approval-error');
+        if (!errEl) {
+          errEl = document.createElement('div');
+          errEl.className = 'approval-error';
+          cardEl.appendChild(errEl);
+        }
+        errEl.textContent = `Couldn't respond (${r.status}): ${body.error || r.statusText}`;
+      }
       return;
     }
     pendingApprovals = pendingApprovals.filter((a) => a.questionId !== questionId);
