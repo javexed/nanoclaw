@@ -1072,8 +1072,24 @@ function arrayBufferToBase64(buf) {
   return btoa(binary);
 }
 
+// crypto.randomUUID is only exposed in secure contexts (HTTPS / localhost).
+// Webchat is commonly served over plain HTTP on a tailnet hostname where it
+// is absent — fall back to a getRandomValues-based v4 builder, which IS
+// available in non-secure contexts. Format matches the server's UUID regex
+// in src/channels/webchat/files.ts (handleChunkedUpload).
+function uuidv4() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 async function uploadFileChunked(file, caption) {
-  const uploadId = crypto.randomUUID();
+  const uploadId = uuidv4();
   const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
   const statusMsg = appendSystem(`Uploading ${file.name} (0/${totalChunks})...`);
 
