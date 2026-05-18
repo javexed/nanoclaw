@@ -557,9 +557,18 @@ function connect() {
 
 // iOS/mobile: when the app returns from background, the WebSocket may be
 // silently dead without onclose firing. Force a full reconnect on resume.
+// Also: even when the socket is alive, browsers can throttle a backgrounded
+// tab so that WS-pushed approvals never get rendered. On foreground, refetch
+// the canonical pending-approvals list so anything that arrived while we
+// were hidden surfaces immediately. (If we have to reconnect, fetchApprovals
+// also runs from the system message handler — so this branch is the
+// "WS still up but we may have missed an event" case.)
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && ws && ws.readyState !== WebSocket.OPEN) {
+  if (document.visibilityState !== 'visible') return;
+  if (ws && ws.readyState !== WebSocket.OPEN) {
     connect();
+  } else {
+    fetchApprovals();
   }
 });
 
