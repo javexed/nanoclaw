@@ -130,6 +130,64 @@ async function initApp() {
   } else {
     $('#login-screen').hidden = false;
     $('#app').hidden = true;
+    // Tailor the login subtitle to whichever auth methods the server has
+    // configured. Best-effort: if the endpoint isn't there or the fetch
+    // fails, the static "enter your token" subtitle stands.
+    void applyLoginHint();
+  }
+}
+
+/**
+ * Fetch `/api/auth/info` and rewrite the login subtitle so the user knows
+ * what's expected (Tailscale on this device vs token entry vs server
+ * misconfig) instead of facing a generic token prompt.
+ *
+ * The common failure mode is the client device (this phone / laptop) not
+ * having Tailscale running — the server's almost always fine because the
+ * operator had to install Tailscale to set up this server in the first
+ * place. The copy reflects that.
+ */
+async function applyLoginHint() {
+  let info;
+  try {
+    const r = await fetch('/api/auth/info');
+    if (!r.ok) return;
+    info = await r.json();
+  } catch {
+    return;
+  }
+  const subtitle = $('.login-subtitle');
+  const m = info.methods || {};
+
+  // Hide the token entry path when the server has no bearer method
+  // configured — a tailscale-only or proxy-only deployment shouldn't show
+  // a token field that can never work.
+  if (!m.bearer) {
+    $('#login-form').hidden = true;
+  }
+
+  if (m.tailscale && info.tailscaleHealthy) {
+    // The common case: tailscale is set up on the server; the user just
+    // needs Tailscale running on the device they're reading this on.
+    subtitle.innerHTML =
+      'Tailscale should sign you in automatically. ' +
+      'Make sure Tailscale is installed and running on this device (phone, laptop, etc.) and connected to the right tailnet, then refresh this page.' +
+      (m.bearer ? '<br><br>Or enter a bearer token below.' : '');
+  } else if (m.tailscale && !info.tailscaleHealthy) {
+    // The rare case: server-side Tailscale is actually down.
+    subtitle.innerHTML =
+      "Tailscale sign-in isn't working on this server right now. " +
+      'Whoever set this up will need to take a look.' +
+      (m.bearer ? '<br><br>If you have an access token, you can use it below.' : '');
+  } else if (m.proxy && !m.bearer) {
+    subtitle.innerHTML =
+      "Couldn't sign you in — your reverse proxy didn't pass an identity through. " +
+      'Try refreshing, or ask whoever sent you the link.';
+  } else if (m.bearer) {
+    subtitle.textContent = 'Enter the access token you were given below.';
+  } else {
+    subtitle.textContent = "This server isn't ready to sign anyone in yet. Whoever installed it needs to finish setup.";
+    $('#login-form').hidden = true;
   }
 }
 

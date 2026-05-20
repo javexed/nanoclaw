@@ -106,7 +106,9 @@ import type { InboundMessage, OutboundFile } from '../adapter.js';
 import {
   assertBearerTokenStrength,
   authenticateRequest,
+  getAuthInfo,
   hasExplicitAuth,
+  probeTailscaleHealth,
   requiresExplicitAuth,
   warnIfAutoProxyTrust,
 } from './auth.js';
@@ -217,6 +219,11 @@ export async function startWebchatServer(hooks: WebchatServerHooks): Promise<Web
 
   initWebPush();
   warnIfNoPermissionsModule();
+  // Background probe — finishes before any client can hit /api/auth/info in
+  // practice (boot completes synchronously to listen()), and the endpoint
+  // tolerates the not-yet-probed state by treating it as unhealthy. No await:
+  // failing slow shouldn't delay binding.
+  void probeTailscaleHealth();
 
   if ((tlsCert && !tlsKey) || (!tlsCert && tlsKey)) {
     log.warn('Webchat: both WEBCHAT_TLS_CERT and WEBCHAT_TLS_KEY must be set for HTTPS — falling back to HTTP');
@@ -330,6 +337,14 @@ async function handleHttp(
   }
   if (url.pathname === '/health' && method === 'GET') {
     return json(res, 200, { ok: true, uptime: process.uptime() });
+  }
+  // Pre-auth, public — the login screen reads this so it can tell the user
+  // which methods are configured and whether tailscale is currently working
+  // on the server. Returns only configured-method booleans + a coarse
+  // tailscale-on-server health flag; no tokens, IPs, or detailed failure
+  // reasons. See `getAuthInfo` for why this is safe to expose.
+  if (url.pathname === '/api/auth/info' && method === 'GET') {
+    return json(res, 200, getAuthInfo());
   }
 
   const auth = await authenticateRequest(req);
