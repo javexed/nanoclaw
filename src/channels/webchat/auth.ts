@@ -125,6 +125,75 @@ export function hasExplicitAuth(): boolean {
   return Boolean(WEBCHAT_TOKEN) || TAILSCALE_ENABLED || TRUSTED_PROXY_RAW.length > 0;
 }
 
+// ── Tailscale health probe ──
+// The login screen needs to tell the user *why* their request was rejected.
+// We probe `tailscale status --json` once at server boot — it succeeds only
+// when the binary is on PATH AND the local daemon is logged into a tailnet,
+// so a flipped flag captures both "not installed" and "tailscaled down /
+// logged out" without needing two probes.
+//
+// State:
+//   null  → not probed yet (probe runs once during startWebchatServer)
+//   true  → `tailscale status` succeeded → server can do whois
+//   false → ENOENT, non-zero exit, or timeout → log already emitted
+//
+// Note: this only checks the SERVER. A healthy server can still 401 a
+// client if Tailscale isn't running on the client device — the most common
+// failure pattern. The PWA's login copy reflects that.
+let tailscaleHealthy: boolean | null = null;
+
+export async function probeTailscaleHealth(): Promise<void> {
+  if (!TAILSCALE_ENABLED) {
+    tailscaleHealthy = false;
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    execFile('tailscale', ['status', '--json'], { timeout: 1500 }, (err) => {
+      if (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          log.error(
+            'Webchat: WEBCHAT_TAILSCALE=true but `tailscale` is not on PATH. ' +
+              'Install Tailscale or unset WEBCHAT_TAILSCALE — all tailscale-auth requests will 401.',
+          );
+        } else {
+          log.warn('Webchat: `tailscale status` probe failed at boot — tailscaled may not be running or logged in', {
+            err,
+          });
+        }
+        tailscaleHealthy = false;
+      } else {
+        tailscaleHealthy = true;
+      }
+      resolve();
+    });
+  });
+}
+
+/**
+ * Non-sensitive auth info for the PWA's login screen so it can tailor the
+ * message ("enter your token" vs "Tailscale on this device" vs "ask whoever
+ * set this up"). Exposes which methods are configured and a coarse health
+ * flag for tailscale on the server. Does NOT reveal tokens, IPs, or details
+ * about the failure reason — that goes to the server log only.
+ *
+ * Safe to expose pre-auth: anyone hitting the URL can already infer which
+ * methods exist from the deployment shape (tailnet hostname, presence of a
+ * fronting proxy, etc.).
+ */
+export function getAuthInfo(): {
+  methods: { bearer: boolean; tailscale: boolean; proxy: boolean };
+  tailscaleHealthy: boolean;
+} {
+  return {
+    methods: {
+      bearer: Boolean(WEBCHAT_TOKEN),
+      tailscale: TAILSCALE_ENABLED,
+      proxy: TRUSTED_PROXY_RAW.length > 0,
+    },
+    tailscaleHealthy: tailscaleHealthy === true,
+  };
+}
+
 /**
  * Minimum bearer-token length. Operators sometimes pick a short or memorable
  * value; combined with no rate-limiting (deferred to an upstream module),
