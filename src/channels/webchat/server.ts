@@ -102,6 +102,13 @@ import {
   grantRole as permsGrantRole,
   revokeRole as permsRevokeRole,
 } from '../../modules/permissions/db/user-roles.js';
+// Used by the symmetric "create destination on wire" step in
+// wireAgentToWebchatRoom — see comment there.
+import {
+  createDestination,
+  getDestinationByTarget,
+  normalizeName,
+} from '../../modules/agent-to-agent/db/agent-destinations.js';
 import type { InboundMessage, OutboundFile } from '../adapter.js';
 import {
   assertBearerTokenStrength,
@@ -949,6 +956,31 @@ export function wireAgentToWebchatRoom(roomName: string, platformId: string, age
     priority: 0,
     created_at: new Date().toISOString(),
   });
+  // Mirror the unwire teardown (see `unwireAgentFromWebchatRoom` in db.ts):
+  // create an `agent_destinations` row so the agent has an ACL entry it can
+  // address this room with. Without this, an agent wired into a second room
+  // receives inbound messages from it (via the wiring above) but has no
+  // destination to reply to — its destinations list stays anchored to its
+  // original room and every reply routes there, regardless of which room
+  // the request came from. Idempotent on (agent_group_id, target).
+  //
+  // local_name uses normalizeName(platformId) — a UUID — to guarantee
+  // uniqueness within the agent's namespace (PK is agent_group_id, local_name).
+  // Using the room's display name would be friendlier but collides if two
+  // rooms share a name; backfill (`module-agent-to-agent-destinations.ts`)
+  // handles that case with -2/-3 suffixes — worth aligning in a follow-up.
+  if (hasTable(getDb(), 'agent_destinations')) {
+    const existing = getDestinationByTarget(agentGroupId, 'channel', mg.id);
+    if (!existing) {
+      createDestination({
+        agent_group_id: agentGroupId,
+        local_name: normalizeName(platformId),
+        target_type: 'channel',
+        target_id: mg.id,
+        created_at: new Date().toISOString(),
+      });
+    }
+  }
   // Wirings changed — recompute engage patterns in case this room has a
   // prime configured. No-op when no prime is set (leaves the default '.').
   recomputeEngagePatterns(platformId);
