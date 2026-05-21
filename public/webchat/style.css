@@ -1820,6 +1820,46 @@ button:focus-visible {
 }
 
 @media (max-width: 600px) {
+  /* .agent-detail (= room-detail, agent-detail, model-detail) was sized for
+     desktop (320px panel pinned to left of #chat-body). On phones that gave
+     a partly-overlapping opaque panel with a tiny × at ~x=300 that users
+     couldn't find — and no backdrop tap-to-close fallback. Promote it to a
+     full-screen modal on mobile so the close button lands at the screen
+     edge and respect iOS safe-area insets so the header isn't behind the
+     status bar / dynamic island. z-index sits ABOVE the members panel
+     (which uses 99/100) so the two can't ambiguously layer. */
+  .agent-detail {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    border-right: none;
+    z-index: 110;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  /* Backdrop sibling for the three detail panels. JS toggles `.hidden` in
+     sync with the panels (MutationObserver in app.js). z-index sits below
+     the panel so taps on the dimmed area are caught here, not by chat. */
+  .detail-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 109;
+  }
+  .detail-overlay[hidden] {
+    display: none;
+  }
+  /* The × close button (also used by members-panel + agent/room/model
+     details). Default tap target is ~22×18px — too small on mobile and
+     load-bearing because there's no backdrop-tap-to-close. Bump to
+     roughly 44×44px (Apple/Material minimum). */
+  .members-close {
+    padding: 10px 14px;
+    font-size: 24px;
+    min-width: 44px;
+    min-height: 44px;
+  }
   .members-panel {
     position: fixed;
     bottom: 0;
