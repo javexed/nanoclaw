@@ -1,5 +1,92 @@
+import fs from 'fs';
+import path from 'path';
+
+import { DATA_DIR } from '../../config.js';
+import { restartAgentGroupContainers } from '../../container-restart.js';
 import { getDb } from '../../db/connection.js';
+import { getSessionsByAgentGroup } from '../../db/sessions.js';
+import { log } from '../../log.js';
+import { writeDestinations } from '../../modules/agent-to-agent/write-destinations.js';
 import { registerResource } from '../crud.js';
+
+/**
+ * After a destinations change for `agentGroupId`, force any active session to
+ * see the new destination map immediately. Three things have to happen — only
+ * doing the first is the silent-bug path:
+ *
+ *   1. Project the central agent_destinations rows into each active session's
+ *      inbound.db (`writeDestinations`). This is what `findByName` /
+ *      `findByRouting` read in the agent-runner's formatter.
+ *   2. Archive the claude-code SDK's per-PID session record + jsonl
+ *      transcripts under `.claude-shared/`. Without this, the SDK rediscovers
+ *      the prior session on next spawn — same session ID, same Anthropic
+ *      prompt-cache key, same stale destination list in the LLM's view. The
+ *      LLM keeps replying to whatever destination was current when the cached
+ *      pre-prompt was built. Keep-in-sync with container CWD: the projects
+ *      subdir name is derived from `/workspace/agent` (see `CWD` in
+ *      container/agent-runner/src/index.ts).
+ *   3. Kill any running container so the next message spawns a fresh one
+ *      (which calls `writeDestinations` again on spawn and creates a new
+ *      claude-code session id). The in-flight LLM turn — if any — loses its
+ *      transcript update; that's acceptable, we're invalidating its world
+ *      anyway.
+ *
+ * Idempotent — safe to call when there are no active sessions or no SDK
+ * state files yet.
+ */
+function refreshAgentSessions(agentGroupId: string, reason: string): void {
+  const sessions = getSessionsByAgentGroup(agentGroupId).filter((s) => s.status === 'active');
+  for (const s of sessions) {
+    try {
+      writeDestinations(agentGroupId, s.id);
+    } catch (err) {
+      log.warn('writeDestinations failed; agent will pick up changes on next spawn', {
+        agentGroupId,
+        sessionId: s.id,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  const sharedDir = path.join(DATA_DIR, 'v2-sessions', agentGroupId, '.claude-shared');
+  if (fs.existsSync(sharedDir)) {
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
+    const archiveDir = path.join(sharedDir, `.archive-${stamp}`);
+    let archivedAny = false;
+
+    const sessionsDir = path.join(sharedDir, 'sessions');
+    if (fs.existsSync(sessionsDir)) {
+      for (const f of fs.readdirSync(sessionsDir)) {
+        if (!f.endsWith('.json')) continue;
+        if (!archivedAny) fs.mkdirSync(archiveDir, { recursive: true });
+        fs.renameSync(path.join(sessionsDir, f), path.join(archiveDir, f));
+        archivedAny = true;
+      }
+    }
+
+    const projectsDir = path.join(sharedDir, 'projects', '-workspace-agent');
+    if (fs.existsSync(projectsDir)) {
+      for (const f of fs.readdirSync(projectsDir)) {
+        // Keep `memory/` and any other directories the agent uses for durable
+        // notes; only move the SDK's own jsonl transcripts + session dirs
+        // (which are named after a session UUID).
+        const full = path.join(projectsDir, f);
+        const isJsonl = f.endsWith('.jsonl');
+        const isUuidDir = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(f);
+        if (!isJsonl && !isUuidDir) continue;
+        if (!archivedAny) fs.mkdirSync(archiveDir, { recursive: true });
+        fs.renameSync(full, path.join(archiveDir, f));
+        archivedAny = true;
+      }
+    }
+
+    if (archivedAny) {
+      log.info('Archived claude-code SDK state for fresh session', { agentGroupId, archiveDir, reason });
+    }
+  }
+
+  restartAgentGroupContainers(agentGroupId, reason);
+}
 
 registerResource({
   name: 'destination',
@@ -56,6 +143,7 @@ registerResource({
              VALUES (?, ?, ?, ?, datetime('now'))`,
           )
           .run(agentGroupId, localName, targetType, targetId);
+        refreshAgentSessions(agentGroupId, `destination added: ${localName}`);
         return { agent_group_id: agentGroupId, local_name: localName, target_type: targetType, target_id: targetId };
       },
     },
@@ -71,6 +159,7 @@ registerResource({
           .prepare('DELETE FROM agent_destinations WHERE agent_group_id = ? AND local_name = ?')
           .run(agentGroupId, localName);
         if (result.changes === 0) throw new Error('destination not found');
+        refreshAgentSessions(agentGroupId, `destination removed: ${localName}`);
         return { removed: { agent_group_id: agentGroupId, local_name: localName } };
       },
     },
