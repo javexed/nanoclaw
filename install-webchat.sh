@@ -47,6 +47,7 @@ git checkout "$WEBCHAT_REMOTE/channels-webchat" -- \
   src/modules/agent-to-agent/create-agent.test.ts \
   container/agent-runner/src/destinations.ts \
   src/channels/adapter.ts \
+  src/cli/resources/destinations.ts \
   src/delivery.ts \
   src/index.ts \
   src/router.ts \
