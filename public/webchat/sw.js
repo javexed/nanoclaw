@@ -1,4 +1,4 @@
-const CACHE = 'nanoclaw-chat-v103';
+const CACHE = 'nanoclaw-chat-v105';
 const ASSETS = [
   '/',
   '/index.html',
