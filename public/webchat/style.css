@@ -2706,7 +2706,7 @@ button:focus-visible {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
+  min-height: 0;
   background: var(--bg);
 }
 .perms-empty-state {
@@ -2740,6 +2740,8 @@ button:focus-visible {
   display: none;
 }
 .perms-detail-body {
+  flex: 1;
+  min-height: 0;
   padding: 16px;
   overflow-y: auto;
   display: flex;
@@ -2871,6 +2873,7 @@ button:focus-visible {
 .perms-toggle-list {
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
   border: 1px solid var(--border);
   border-radius: 6px;
   overflow: hidden;
@@ -2962,6 +2965,7 @@ button:focus-visible {
 .perms-matrix {
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
   border: 1px solid var(--border);
   border-radius: 6px;
   overflow: hidden;
