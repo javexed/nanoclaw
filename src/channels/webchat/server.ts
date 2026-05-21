@@ -865,7 +865,16 @@ function servePwa(req: IncomingMessage, res: ServerResponse, publicDir: string):
   const basename = path.basename(filePath);
   const contentType =
     basename === 'manifest.json' ? 'application/manifest+json' : STATIC_MIME[ext] || 'application/octet-stream';
-  res.writeHead(200, { 'Content-Type': contentType });
+  // `no-cache` = browser MAY cache but must revalidate before reuse. Without
+  // this we sent no caching headers; both the browser and any reverse proxy
+  // in front (Azure App Service, Cloudflare, nginx) happily held stale
+  // CSS/JS/HTML across deploys, breaking PWA updates. The SW's network-first
+  // path benefits from this immediately; cache-first served assets still
+  // need an SW reinstall (bump the CACHE constant in sw.js) to evict.
+  res.writeHead(200, {
+    'Content-Type': contentType,
+    'Cache-Control': 'no-cache',
+  });
   res.end(fs.readFileSync(filePath));
   return true;
 }
