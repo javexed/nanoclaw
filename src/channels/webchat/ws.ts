@@ -24,6 +24,7 @@ import { WSClient, clients, addClient, removeClient, broadcast, getMemberList } 
 import {
   deleteWebchatMessage,
   getAllWebchatRooms,
+  getArchivedRoomIdsForUser,
   getWebchatMessages,
   getWebchatRoom,
   storeWebchatMessage,
@@ -150,7 +151,15 @@ export function setupWebSocket(
         // identity. The auth message just confirms the session is established.
         authenticated = true;
         send({ type: 'system', message: `Connected as ${client.identity}` });
-        send({ type: 'rooms', rooms: filterRoomsForUser(client.userId, getAllWebchatRooms()) });
+        // Annotate `archived` so a hard refresh (which hydrates from this
+        // initial WS message, not /api/rooms) preserves each user's archive
+        // state. Mirrors the broadcast path in state.ts:184.
+        const initialRooms = filterRoomsForUser(client.userId, getAllWebchatRooms());
+        const archivedSet = getArchivedRoomIdsForUser(client.userId);
+        send({
+          type: 'rooms',
+          rooms: initialRooms.map((r) => ({ ...r, archived: archivedSet.has(r.id) })),
+        });
         return;
       }
 
