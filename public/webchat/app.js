@@ -1620,6 +1620,32 @@ $('#members-toggle').addEventListener('click', toggleMembersPanel);
 $('#members-close').addEventListener('click', toggleMembersPanel);
 $('#members-overlay').addEventListener('click', toggleMembersPanel);
 
+// ── Detail-panel backdrop (mobile-only via CSS) ─────────────────────────────
+// Shared tap-to-close for #agent-detail / #room-detail / #model-detail. There
+// are 14-ish call sites that toggle `.hidden` on those panels; rather than
+// patch each one, a MutationObserver mirrors panel state onto the backdrop.
+(function () {
+  const overlay = $('#detail-overlay');
+  if (!overlay) return; // index.html older than this build — graceful no-op
+  const panels = ['#agent-detail', '#room-detail', '#model-detail']
+    .map((s) => $(s))
+    .filter(Boolean);
+  const sync = () => {
+    overlay.hidden = panels.every((p) => p.hidden);
+  };
+  const obs = new MutationObserver(sync);
+  for (const p of panels) obs.observe(p, { attributes: true, attributeFilter: ['hidden'] });
+  sync();
+  // Tap on backdrop closes whichever panel(s) are currently open. The close
+  // functions each set their own `.hidden = true`, which fires the observer
+  // and hides the backdrop on the next tick.
+  overlay.addEventListener('click', () => {
+    if (!$('#agent-detail').hidden) closeAgentDetail();
+    if (!$('#room-detail').hidden) closeRoomDetail();
+    if (!$('#model-detail').hidden) closeModelDetail();
+  });
+})();
+
 // ── Sidebar tabs ──────────────────────────────────────────────────────────
 document.querySelectorAll('.sidebar-tab').forEach((tab) => {
   tab.addEventListener('click', () => {
