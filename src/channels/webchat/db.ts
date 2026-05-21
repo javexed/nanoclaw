@@ -245,6 +245,12 @@ export function deleteWebchatRoom(id: string): void {
   if (hasTable(db, 'agent_destinations')) {
     db.prepare(`DELETE FROM agent_destinations WHERE target_type = 'channel' AND target_id = ?`).run(mg.id);
   }
+  // sessions.messaging_group_id has an FK to messaging_groups(id) and is NOT
+  // NULL; any active session for this room would otherwise block the
+  // deleteMessagingGroup below with an FK error. Running containers are
+  // reaped by the host sweep on its next stale-heartbeat tick once the
+  // session row is gone.
+  db.prepare(`DELETE FROM sessions WHERE messaging_group_id = ?`).run(mg.id);
   deleteMessagingGroup(mg.id);
 }
 
