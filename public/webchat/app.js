@@ -537,7 +537,12 @@ function connect() {
       case 'members':
         if (msg.room_id === currentRoom) renderMembers(msg.members);
         break;
-      case 'message':
+      case 'message': {
+        // Snapshot the scroll position BEFORE appending. If we check after,
+        // the newly-inserted message has already pushed the bottom past our
+        // 80px threshold and `isNearBottom()` lies about the user's intent.
+        // That's why long agent replies sometimes silently failed to scroll.
+        const wasNearBottom = isNearBottom();
         // Desktop notification for messages from others when tab is not focused
         if (settings.notifications && document.hidden && msg.sender !== myIdentity) {
           try {
@@ -562,13 +567,25 @@ function connect() {
           appendMessage(msg);
         }
         if (msg.id && msg.room_id === currentRoom) setLastSeenMessageId(msg.id);
-        if (isNearBottom() || (forceScrollCount > 0 && !userScrolledAway)) {
+        const shouldScroll = wasNearBottom || (forceScrollCount > 0 && !userScrolledAway);
+        if (shouldScroll) {
           scrollToBottom();
+          // Follow late-rendering content. Markdown + DOMPurify run sync, but
+          // image loads / code-block toolbars / reflow can grow the message
+          // after the initial scroll. Re-scroll at rAF + 200ms so the bottom
+          // tracks the final height instead of stopping mid-message.
+          requestAnimationFrame(() => {
+            if (!userScrolledAway) scrollToBottom();
+          });
+          setTimeout(() => {
+            if (!userScrolledAway) scrollToBottom();
+          }, 200);
           if (forceScrollCount > 0) forceScrollCount--;
         } else {
           incrementMissedMessages();
         }
         break;
+      }
       case 'typing':
         handleTypingEvent(msg);
         break;
