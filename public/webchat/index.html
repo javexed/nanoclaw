@@ -483,6 +483,49 @@
            Mobile-only (CSS hides it on desktop where panels live in their own column). -->
       <div id="detail-overlay" class="detail-overlay" hidden></div>
 
+      <!-- Image lightbox — fullscreen viewer for attachment images.
+           Tap backdrop, tap ×, ESC, device back gesture all close it.
+           Supports pinch-zoom/drag-pan, prev/next nav, and download. -->
+      <div
+        id="lightbox"
+        class="lightbox"
+        hidden
+        role="dialog"
+        aria-modal="true"
+        aria-label="Image viewer"
+      >
+        <div class="lightbox-toolbar">
+          <a
+            id="lightbox-download"
+            class="lightbox-btn"
+            href="#"
+            download
+            aria-label="Download image"
+            title="Download"
+            >↓</a
+          >
+          <button id="lightbox-close" class="lightbox-btn" aria-label="Close image">&times;</button>
+        </div>
+        <button
+          id="lightbox-prev"
+          class="lightbox-nav lightbox-nav-prev"
+          aria-label="Previous image"
+          hidden
+        >
+          ‹
+        </button>
+        <button
+          id="lightbox-next"
+          class="lightbox-nav lightbox-nav-next"
+          aria-label="Next image"
+          hidden
+        >
+          ›
+        </button>
+        <div id="lightbox-spinner" class="lightbox-spinner" hidden aria-hidden="true"></div>
+        <img id="lightbox-img" class="lightbox-img" alt="" draggable="false" />
+      </div>
+
       <!-- Settings modal -->
       <div id="settings-overlay" class="modal-overlay" hidden>
         <div class="modal">
