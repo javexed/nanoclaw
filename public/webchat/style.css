@@ -946,6 +946,152 @@ button:focus-visible {
 .file-image-preview:hover {
   opacity: 0.9;
 }
+
+/* Image lightbox — fullscreen viewer.
+   z-index sits above modals (200) and toasts (1000). Tap backdrop closes.
+   Pinch-zoom + drag-pan handled in JS via transform on .lightbox-img. */
+.lightbox {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.92);
+  z-index: 1500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+    env(safe-area-inset-left);
+  overflow: hidden;
+  touch-action: none;
+  animation: lightbox-fade-in 0.15s ease-out;
+}
+.lightbox[hidden] {
+  display: none;
+}
+.lightbox.closing {
+  animation: lightbox-fade-out 0.15s ease-in forwards;
+}
+@keyframes lightbox-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes lightbox-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+.lightbox-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+  transform-origin: center center;
+  /* Smooth snap-back when releasing a sub-1x pinch. JS removes/re-adds the
+     dragging class to opt out during active gestures. */
+  transition: transform 0.15s ease-out;
+  will-change: transform;
+  /* JS handles pinch/pan; suppress browser-native zoom on the image surface. */
+  touch-action: none;
+}
+.lightbox-img.dragging {
+  transition: none;
+}
+.lightbox-toolbar {
+  position: absolute;
+  top: calc(env(safe-area-inset-top) + 8px);
+  right: calc(env(safe-area-inset-right) + 8px);
+  display: flex;
+  gap: 8px;
+  z-index: 2;
+}
+.lightbox-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  touch-action: manipulation;
+}
+a.lightbox-btn {
+  font-size: 20px;
+  font-weight: 600;
+}
+#lightbox-close {
+  font-size: 28px;
+}
+.lightbox-btn:hover,
+.lightbox-btn:focus-visible {
+  background: rgba(0, 0, 0, 0.8);
+  outline: none;
+}
+.lightbox-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 44px;
+  height: 64px;
+  border: none;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  font-size: 32px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+  touch-action: manipulation;
+  border-radius: 6px;
+}
+.lightbox-nav-prev {
+  left: calc(env(safe-area-inset-left) + 8px);
+}
+.lightbox-nav-next {
+  right: calc(env(safe-area-inset-right) + 8px);
+}
+.lightbox-nav:hover,
+.lightbox-nav:focus-visible {
+  background: rgba(0, 0, 0, 0.75);
+  outline: none;
+}
+.lightbox-nav[hidden] {
+  display: none;
+}
+/* Loading spinner — shown until the image's load/error fires. */
+.lightbox-spinner {
+  position: absolute;
+  width: 48px;
+  height: 48px;
+  border: 3px solid rgba(255, 255, 255, 0.2);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: lightbox-spin 0.8s linear infinite;
+  z-index: 1;
+  pointer-events: none;
+}
+.lightbox-spinner[hidden] {
+  display: none;
+}
+@keyframes lightbox-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 .file-info {
   display: flex;
   align-items: center;

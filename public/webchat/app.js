@@ -295,6 +295,206 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !$('#settings-overlay').hidden) closeSettings();
 });
 
+// Image lightbox — opened from file-bubble image clicks. Closes via ×, backdrop tap,
+// ESC, or device back gesture. pushState lets the OS back gesture / Android back
+// button dismiss the viewer instead of leaving the app (the common mobile pain).
+//
+// Features: prev/next nav over all images in the current room, pinch-zoom +
+// drag-to-pan on touch, native browser zoom on desktop, loading spinner for
+// slow images, explicit download button, fade-out on close, body-scroll lock.
+let lightboxOpen = false;
+let lightboxImages = []; // [{ url, alt }] snapshot taken on open
+let lightboxIndex = 0;
+let prevBodyOverflow = '';
+let lightboxCloseTimer = null;
+
+// Transform state for pinch-zoom + pan.
+const lightboxXf = { scale: 1, x: 0, y: 0 };
+const lightboxGesture = {
+  startScale: 1,
+  startDist: 0,
+  startX: 0,
+  startY: 0,
+  startTouchX: 0,
+  startTouchY: 0,
+  mode: null, // 'pinch' | 'pan' | null
+};
+
+function applyLightboxTransform() {
+  const img = $('#lightbox-img');
+  img.style.transform = `translate(${lightboxXf.x}px, ${lightboxXf.y}px) scale(${lightboxXf.scale})`;
+}
+function resetLightboxTransform() {
+  lightboxXf.scale = 1;
+  lightboxXf.x = 0;
+  lightboxXf.y = 0;
+  applyLightboxTransform();
+}
+function snapshotRoomImages() {
+  // Snapshot all currently-rendered file-image-previews in DOM (top-to-bottom)
+  // order so prev/next walks the room's image attachments.
+  const imgs = document.querySelectorAll('#messages .file-image-preview');
+  return Array.from(imgs).map((el) => ({ url: el.src, alt: el.alt || '' }));
+}
+function setLightboxImage(idx) {
+  if (idx < 0 || idx >= lightboxImages.length) return;
+  lightboxIndex = idx;
+  const { url, alt } = lightboxImages[idx];
+  const img = $('#lightbox-img');
+  const spinner = $('#lightbox-spinner');
+  resetLightboxTransform();
+  spinner.hidden = false;
+  img.style.visibility = 'hidden';
+  // Assign via property (not addEventListener) so each new load cleanly
+  // replaces the previous handler — rapid next/next doesn't stack callbacks.
+  img.onload = img.onerror = () => {
+    spinner.hidden = true;
+    img.style.visibility = '';
+  };
+  img.src = url;
+  img.alt = alt;
+  // Download href tracks the current image. Filename derived from URL tail.
+  const dl = $('#lightbox-download');
+  dl.href = url;
+  try {
+    const tail = new URL(url, location.href).pathname.split('/').pop();
+    if (tail) dl.setAttribute('download', tail);
+  } catch {
+    dl.setAttribute('download', '');
+  }
+  // Toggle prev/next visibility
+  $('#lightbox-prev').hidden = idx <= 0;
+  $('#lightbox-next').hidden = idx >= lightboxImages.length - 1;
+}
+function openLightbox(url, alt) {
+  // If a previous close is still mid-fade, cancel its pending hide so we
+  // don't slam the freshly-opened lightbox closed 150ms from now.
+  if (lightboxCloseTimer) {
+    clearTimeout(lightboxCloseTimer);
+    lightboxCloseTimer = null;
+  }
+  lightboxImages = snapshotRoomImages();
+  // Find which image was clicked. Match by URL; fall back to a 1-entry list.
+  let idx = lightboxImages.findIndex((it) => it.url === url);
+  if (idx === -1) {
+    lightboxImages = [{ url, alt: alt || '' }];
+    idx = 0;
+  }
+  const overlay = $('#lightbox');
+  overlay.classList.remove('closing');
+  overlay.hidden = false;
+  lightboxOpen = true;
+  prevBodyOverflow = document.body.style.overflow;
+  document.body.style.overflow = 'hidden';
+  setLightboxImage(idx);
+  history.pushState({ lightbox: true }, '');
+  // Defer focus so the dialog is on-screen before focus moves
+  requestAnimationFrame(() => $('#lightbox-close').focus());
+}
+function closeLightbox(fromPopstate = false) {
+  if (!lightboxOpen) return;
+  const overlay = $('#lightbox');
+  lightboxOpen = false;
+  overlay.classList.add('closing');
+  document.body.style.overflow = prevBodyOverflow;
+  lightboxCloseTimer = setTimeout(() => {
+    lightboxCloseTimer = null;
+    overlay.hidden = true;
+    overlay.classList.remove('closing');
+    $('#lightbox-img').src = '';
+    $('#lightbox-img').style.transform = '';
+    $('#lightbox-img').style.visibility = '';
+  }, 150);
+  if (!fromPopstate && history.state && history.state.lightbox) {
+    history.back();
+  }
+}
+function navigateLightbox(delta) {
+  const next = lightboxIndex + delta;
+  if (next < 0 || next >= lightboxImages.length) return;
+  setLightboxImage(next);
+}
+
+$('#lightbox-close').addEventListener('click', () => closeLightbox());
+$('#lightbox-prev').addEventListener('click', (e) => {
+  e.stopPropagation();
+  navigateLightbox(-1);
+});
+$('#lightbox-next').addEventListener('click', (e) => {
+  e.stopPropagation();
+  navigateLightbox(1);
+});
+$('#lightbox-download').addEventListener('click', (e) => e.stopPropagation());
+$('#lightbox').addEventListener('click', (e) => {
+  // Backdrop tap closes; tapping the image, toolbar, nav, or spinner does not.
+  if (e.target === $('#lightbox')) closeLightbox();
+});
+document.addEventListener('keydown', (e) => {
+  if (!lightboxOpen) return;
+  if (e.key === 'Escape') closeLightbox();
+  else if (e.key === 'ArrowLeft') navigateLightbox(-1);
+  else if (e.key === 'ArrowRight') navigateLightbox(1);
+});
+window.addEventListener('popstate', () => {
+  if (lightboxOpen) closeLightbox(true);
+});
+
+// Pinch-zoom + drag-to-pan on the image. Native pinch-zoom on a fixed-position
+// overlay doesn't work reliably on iOS Safari, so we handle touches ourselves.
+function getTouchDist(touches) {
+  const dx = touches[0].clientX - touches[1].clientX;
+  const dy = touches[0].clientY - touches[1].clientY;
+  return Math.hypot(dx, dy);
+}
+const lightboxImg = $('#lightbox-img');
+lightboxImg.addEventListener(
+  'touchstart',
+  (e) => {
+    if (e.touches.length === 2) {
+      e.preventDefault();
+      lightboxGesture.mode = 'pinch';
+      lightboxGesture.startScale = lightboxXf.scale;
+      lightboxGesture.startDist = getTouchDist(e.touches);
+      lightboxGesture.startX = lightboxXf.x;
+      lightboxGesture.startY = lightboxXf.y;
+      lightboxImg.classList.add('dragging');
+    } else if (e.touches.length === 1 && lightboxXf.scale > 1) {
+      e.preventDefault();
+      lightboxGesture.mode = 'pan';
+      lightboxGesture.startTouchX = e.touches[0].clientX;
+      lightboxGesture.startTouchY = e.touches[0].clientY;
+      lightboxGesture.startX = lightboxXf.x;
+      lightboxGesture.startY = lightboxXf.y;
+      lightboxImg.classList.add('dragging');
+    }
+  },
+  { passive: false },
+);
+lightboxImg.addEventListener(
+  'touchmove',
+  (e) => {
+    if (lightboxGesture.mode === 'pinch' && e.touches.length === 2) {
+      e.preventDefault();
+      const dist = getTouchDist(e.touches);
+      const ratio = dist / lightboxGesture.startDist;
+      lightboxXf.scale = Math.max(0.5, Math.min(4, lightboxGesture.startScale * ratio));
+      applyLightboxTransform();
+    } else if (lightboxGesture.mode === 'pan' && e.touches.length === 1) {
+      e.preventDefault();
+      lightboxXf.x = lightboxGesture.startX + (e.touches[0].clientX - lightboxGesture.startTouchX);
+      lightboxXf.y = lightboxGesture.startY + (e.touches[0].clientY - lightboxGesture.startTouchY);
+      applyLightboxTransform();
+    }
+  },
+  { passive: false },
+);
+lightboxImg.addEventListener('touchend', () => {
+  lightboxGesture.mode = null;
+  lightboxImg.classList.remove('dragging');
+  // Snap back to 1x and centered if user zoomed out below ~identity.
+  if (lightboxXf.scale < 1.05) resetLightboxTransform();
+});
+
 // Theme selection
 document.querySelectorAll('#theme-options .setting-option').forEach((btn) => {
   btn.addEventListener('click', () => {
@@ -504,9 +704,13 @@ function connect() {
               .then((r) => r.json())
               .then((missed) => {
                 if (missed.length > 0) {
+                  // Capture before append: if the user was scrolled up reading
+                  // history when the WS dropped, don't yank them down on reconnect.
+                  const wasNearBottom = isNearBottom();
                   missed.forEach(appendMessage);
                   setLastSeenMessageId(missed[missed.length - 1].id);
-                  scrollToBottom();
+                  if (wasNearBottom) scrollToBottom();
+                  else updateScrollButton();
                 }
               })
               .catch(() => {});
@@ -552,6 +756,7 @@ function connect() {
             });
           } catch {}
         }
+        let appendedEl = null;
         if (msg.sender === myIdentity && msg.client_id && pendingMessages.has(msg.client_id)) {
           const el = pendingMessages.get(msg.client_id);
           const status = el.querySelector('.status');
@@ -564,7 +769,7 @@ function connect() {
             addDeleteButton(el, msg.id);
           }
         } else {
-          appendMessage(msg);
+          appendedEl = appendMessage(msg);
         }
         if (msg.id && msg.room_id === currentRoom) setLastSeenMessageId(msg.id);
         const shouldScroll = wasNearBottom || (forceScrollCount > 0 && !userScrolledAway);
@@ -580,6 +785,16 @@ function connect() {
           setTimeout(() => {
             if (!userScrolledAway) scrollToBottom();
           }, 200);
+          // Catch images that load after the 200ms re-scroll window expires
+          // (slow network, large attachments). Multiple images loading in
+          // quick succession coalesce into a single rAF re-scroll so we don't
+          // spam scrollTo calls if a message has many images.
+          if (appendedEl) {
+            appendedEl.querySelectorAll('img').forEach((img) => {
+              if (img.complete) return;
+              img.addEventListener('load', scheduleFollowScroll, { once: true });
+            });
+          }
           if (forceScrollCount > 0) forceScrollCount--;
         } else {
           incrementMissedMessages();
@@ -1005,7 +1220,7 @@ function renderFileBubble(meta) {
     img.alt = meta.filename;
     img.className = 'file-image-preview';
     img.loading = 'lazy';
-    img.addEventListener('click', () => window.open(meta.url, '_blank'));
+    img.addEventListener('click', () => openLightbox(meta.url, meta.filename));
     wrap.appendChild(img);
   }
   const info = document.createElement('div');
@@ -1231,6 +1446,18 @@ function isNearBottom() {
   return elNear && winNear;
 }
 
+// Coalesce multiple image-load re-scroll requests into a single rAF call so
+// many simultaneous loads don't queue up overlapping scrollTo invocations.
+let pendingFollowScroll = false;
+function scheduleFollowScroll() {
+  if (pendingFollowScroll) return;
+  pendingFollowScroll = true;
+  requestAnimationFrame(() => {
+    pendingFollowScroll = false;
+    if (!userScrolledAway) scrollToBottom();
+  });
+}
+
 let missedMsgCount = 0;
 let forceScrollCount = 0; // force scroll for next N incoming messages after send
 let userScrolledAway = false; // true once user scrolls up after sending
@@ -1276,24 +1503,94 @@ $('#messages').addEventListener('click', async (e) => {
   }
 });
 
-// Show/hide scroll-to-bottom button; detect user scrolling away
-$('#messages').addEventListener('scroll', () => {
-  updateScrollButton();
-  if (!isNearBottom()) {
-    userScrolledAway = true;
-    forceScrollCount = 0;
-  } else userScrolledAway = false;
+// Show/hide scroll-to-bottom button; detect user scrolling away.
+//
+// Programmatic scrolls (our scrollToBottom) fire scroll events too. Without
+// gating, those mid-animation events see "not at bottom yet" and flip
+// userScrolledAway=true / forceScrollCount=0 — which then prevents
+// late-arriving thinking bubbles from auto-scrolling. Only treat a scroll
+// event as user-driven if the user actually did something to cause it
+// (wheel, touch, or a scroll-relevant key) recently.
+//
+// Touch is tracked specially: iOS momentum scrolling continues to fire scroll
+// events for up to ~1s after touchend with no touchmove in between. We arm a
+// `momentumUntil` window when a real flick gesture ends so those events still
+// count as user-driven.
+let lastUserScrollAt = 0;
+let touchMovedThisGesture = false;
+let momentumUntil = 0;
+const markUserScroll = () => {
+  lastUserScrollAt = Date.now();
+};
+window.addEventListener('wheel', markUserScroll, { passive: true });
+window.addEventListener(
+  'touchstart',
+  () => {
+    touchMovedThisGesture = false;
+  },
+  { passive: true },
+);
+window.addEventListener(
+  'touchmove',
+  () => {
+    touchMovedThisGesture = true;
+    markUserScroll();
+  },
+  { passive: true },
+);
+window.addEventListener(
+  'touchend',
+  () => {
+    if (touchMovedThisGesture) {
+      momentumUntil = Date.now() + 1000;
+    }
+    touchMovedThisGesture = false;
+  },
+  { passive: true },
+);
+window.addEventListener('keydown', (e) => {
+  // Skip when the user is typing into an input — space, arrows, home/end
+  // are all editing keys there, not scroll intent. Without this gate, every
+  // space typed in the message textarea would mark scroll-intent and trip
+  // the very bug this whole module exists to prevent.
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  if (
+    e.key === 'ArrowUp' ||
+    e.key === 'ArrowDown' ||
+    e.key === 'PageUp' ||
+    e.key === 'PageDown' ||
+    e.key === 'Home' ||
+    e.key === 'End' ||
+    e.key === ' '
+  ) {
+    markUserScroll();
+  }
 });
-window.addEventListener('scroll', () => {
+
+function handleScroll() {
   updateScrollButton();
+  const now = Date.now();
+  const userDriven = now - lastUserScrollAt < 300 || now < momentumUntil;
   if (!isNearBottom()) {
-    userScrolledAway = true;
-    forceScrollCount = 0;
-  } else userScrolledAway = false;
-});
+    if (userDriven) {
+      userScrolledAway = true;
+      forceScrollCount = 0;
+    }
+  } else {
+    // Always reset when we land at bottom — programmatic or not, we're caught up.
+    userScrolledAway = false;
+  }
+}
+$('#messages').addEventListener('scroll', handleScroll);
+window.addEventListener('scroll', handleScroll);
 $('#scroll-bottom').addEventListener('click', () => {
   missedMsgCount = 0;
   userScrolledAway = false;
+  // Clear input markers so the imminent smooth scroll doesn't get tagged as
+  // user-driven by a stale wheel/touch from just before the click.
+  lastUserScrollAt = 0;
+  momentumUntil = 0;
   $('#unread-badge').textContent = '';
   scrollToBottom();
 });
@@ -1327,6 +1624,10 @@ function sendCurrentMessage() {
   pendingMessages.set(clientId, el);
   userScrolledAway = false;
   forceScrollCount = 3; // ensure agent response scrolls into view
+  // Clear input markers so the smooth scroll below isn't mistaken for
+  // user-driven by a stale wheel/touch immediately before send.
+  lastUserScrollAt = 0;
+  momentumUntil = 0;
   scrollToBottom();
   input.value = '';
   input.style.height = 'auto';
@@ -3400,6 +3701,11 @@ function renderTypingIndicator() {
   let bubble = $('#messages .thinking-bubble');
   if (hasAgent) {
     if (!bubble) {
+      // Capture before appending — the bubble is taller than isNearBottom's 80px
+      // tolerance, so checking after append would always see us as scrolled-away.
+      // Also honor forceScrollCount so the bubble follows even when a smooth
+      // scroll from a just-sent message is still mid-animation.
+      const shouldScroll = isNearBottom() || (forceScrollCount > 0 && !userScrolledAway);
       bubble = document.createElement('div');
       bubble.className = 'msg agent thinking-bubble';
       const sender = document.createElement('div');
@@ -3411,7 +3717,7 @@ function renderTypingIndicator() {
       content.innerHTML = '<span class="dots"><span></span><span></span><span></span></span>';
       bubble.appendChild(content);
       $('#messages').appendChild(bubble);
-      if (isNearBottom()) scrollToBottom();
+      if (shouldScroll) scrollToBottom();
     }
   } else if (bubble) {
     bubble.remove();
@@ -3461,7 +3767,9 @@ function updateThinkingBubble(label) {
   let bubble = $('#messages .thinking-bubble');
   const created = !bubble;
   if (created) {
-    const wasNearBottom = isNearBottom();
+    // Same shouldScroll formula as the 'message' handler — honors forceScrollCount
+    // so the bubble follows even when a smooth scroll is still mid-animation.
+    const shouldScroll = isNearBottom() || (forceScrollCount > 0 && !userScrolledAway);
     bubble = document.createElement('div');
     bubble.className = 'msg agent thinking-bubble';
     const sender = document.createElement('div');
@@ -3472,7 +3780,7 @@ function updateThinkingBubble(label) {
     content.innerHTML = '<span class="dots"><span></span><span></span><span></span></span>';
     bubble.appendChild(content);
     $('#messages').appendChild(bubble);
-    if (wasNearBottom) scrollToBottom();
+    if (shouldScroll) scrollToBottom();
   }
   const sender = bubble.querySelector('.sender');
   if (sender) sender.textContent = `🤖 ${agentName || 'Agent'} — ${label}`;
