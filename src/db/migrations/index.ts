@@ -14,13 +14,16 @@ import { migration014 } from './014-container-configs.js';
 import { migration015 } from './015-cli-scope.js';
 import { moduleApprovalsPendingApprovals } from './module-approvals-pending-approvals.js';
 import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js';
+
 import {
   moduleWebchat,
   moduleWebchatDropRooms,
   moduleWebchatRoomPrimes,
   moduleWebchatModels,
+  moduleWebchatRoomSettings,
   moduleWebchatApprovalsIndex,
   moduleWebchatUserArchives,
+  moduleWebchatArchiveSplit,
 } from '../../channels/webchat/migration.js';
 
 export interface Migration {
@@ -49,6 +52,8 @@ const migrations: Migration[] = [
   moduleWebchatModels,
   moduleWebchatApprovalsIndex,
   moduleWebchatUserArchives,
+  moduleWebchatRoomSettings,
+  moduleWebchatArchiveSplit,
 ];
 
 export function runMigrations(db: Database.Database): void {

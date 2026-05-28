@@ -10,6 +10,7 @@
 import { canAccessAgentGroup } from '../../modules/permissions/access.js';
 import { getAgentsForWebchatRoom } from './db.js';
 import type { WebchatRoom } from './db.js';
+import { hasAdminPrivilege, isGlobalAdmin, isOwner } from './roles.js';
 
 export function canAccessRoom(userId: string, roomId: string): boolean {
   const agents = getAgentsForWebchatRoom(roomId);
@@ -22,4 +23,19 @@ export function canAccessRoom(userId: string, roomId: string): boolean {
 
 export function filterRoomsForUser<T extends WebchatRoom>(userId: string, rooms: T[]): T[] {
   return rooms.filter((r) => canAccessRoom(userId, r.id));
+}
+
+/**
+ * Authorize the global-archive / unarchive operation on a room. Wider than
+ * just access (any member can SEE a room) but narrower than full owner-only
+ * — scoped admins of any agent wired to the room can archive too. Owner +
+ * global admin always pass.
+ */
+export function canArchiveRoom(userId: string, roomId: string): boolean {
+  if (isOwner(userId) || isGlobalAdmin(userId)) return true;
+  const agents = getAgentsForWebchatRoom(roomId);
+  for (const a of agents) {
+    if (hasAdminPrivilege(userId, a.id)) return true;
+  }
+  return false;
 }

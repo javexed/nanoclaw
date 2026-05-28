@@ -15,8 +15,8 @@
 import { WebSocket } from 'ws';
 
 import { log } from '../../log.js';
-import { filterRoomsForUser } from './access.js';
-import { getAllWebchatRooms, getArchivedRoomIdsForUser, getWebchatRoom } from './db.js';
+import { canArchiveRoom, filterRoomsForUser } from './access.js';
+import { getAllWebchatRooms, getArchivedRoomIds, getHiddenRoomIdsForUser, getWebchatRoom } from './db.js';
 import { sendPushForMessage } from './push.js';
 import { redactSensitiveData } from './redact.js';
 
@@ -169,11 +169,17 @@ export function pushApprovalToUser(userId: string, askQuestionPayload: Record<st
  */
 export function broadcastRooms(): void {
   const allRooms = getAllWebchatRooms();
+  const archivedSet = getArchivedRoomIds(); // global, computed once per broadcast
   for (const c of clients.values()) {
     if (c.ws.readyState !== WebSocket.OPEN) continue;
     const visible = filterRoomsForUser(c.userId, allRooms);
-    const archivedSet = getArchivedRoomIdsForUser(c.userId);
-    const annotated = visible.map((r) => ({ ...r, archived: archivedSet.has(r.id) }));
+    const hiddenSet = getHiddenRoomIdsForUser(c.userId); // per-user
+    const annotated = visible.map((r) => ({
+      ...r,
+      archived: archivedSet.has(r.id),
+      hidden: hiddenSet.has(r.id),
+      canArchive: canArchiveRoom(c.userId, r.id),
+    }));
     c.ws.send(JSON.stringify({ type: 'rooms', rooms: annotated }));
   }
 }

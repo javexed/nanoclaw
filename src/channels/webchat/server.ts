@@ -17,8 +17,10 @@
  *   GET  /api/rooms/:id/engage-mode              read room's engage default ('mention-only' | 'broadcast')
  *   PUT  /api/rooms/:id/engage-mode              set { mode } for the room  [owner]
  *   GET  /api/rooms/:id/messages                 history (?after_id= for incremental)
- *   POST /api/rooms/:id/archive                  hide from this user's sidebar
- *   POST /api/rooms/:id/unarchive                un-hide for this user
+ *   POST /api/rooms/:id/archive                  mark room archived (owner + admin) — global
+ *   POST /api/rooms/:id/unarchive                clear global archive (owner + admin)
+ *   POST /api/rooms/:id/hide                     hide room from this user's sidebar — per-user
+ *   POST /api/rooms/:id/unhide                   un-hide for this user
  *   POST /api/rooms/:id/upload                   multipart upload
  *   POST /api/rooms/:id/upload/chunk             chunked upload
  *   GET  /api/files/:roomId/:filename            serve uploaded file
@@ -122,7 +124,7 @@ import {
 } from './auth.js';
 import {
   approvalInboxForUser,
-  archiveRoomForUser,
+  archiveRoom,
   assignModelToAgent,
   clearPrimeAgentForWebchatRoom,
   countAgentsForWebchatRoom,
@@ -133,7 +135,8 @@ import {
   getAgentsAssignedToModel,
   getAgentsForWebchatRoom,
   getAllWebchatRooms,
-  getArchivedRoomIdsForUser,
+  getArchivedRoomIds,
+  getHiddenRoomIdsForUser,
   getAssignedModelForAgent,
   getPrimeAgentForWebchatRoom,
   getRoomEngageDefault,
@@ -144,10 +147,12 @@ import {
   getWebchatModel,
   getWebchatPendingApprovalsForUser,
   getWebchatRoom,
+  hideRoomForUser,
   listWebchatModels,
   setPrimeAgentForWebchatRoom,
   storeWebchatFileMessage,
-  unarchiveRoomForUser,
+  unarchiveRoom,
+  unhideRoomForUser,
   unassignModelFromAgent,
   unwireAgentFromWebchatRoom,
   updateWebchatModel,
@@ -168,7 +173,7 @@ import { handleChunkedUpload, handleFileServe, handleMultipartUpload } from './f
 import { initWebPush, isValidPushEndpoint } from './push.js';
 import { redactSensitiveData } from './redact.js';
 import { hasAdminPrivilege, isAnyAdmin, isGlobalAdmin, isOwner, warnIfNoPermissionsModule } from './roles.js';
-import { canAccessRoom, filterRoomsForUser } from './access.js';
+import { canAccessRoom, canArchiveRoom, filterRoomsForUser } from './access.js';
 import { broadcast, broadcastRooms } from './state.js';
 import { setupWebSocket } from './ws.js';
 
@@ -380,11 +385,17 @@ async function handleHttp(
   // converge on the same messaging_groups + messaging_group_agents shape.
   if (url.pathname === '/api/rooms' && method === 'GET') {
     const visible = filterRoomsForUser(userId, getAllWebchatRooms());
-    const archivedSet = getArchivedRoomIdsForUser(userId);
+    const archivedSet = getArchivedRoomIds(); // global
+    const hiddenSet = getHiddenRoomIdsForUser(userId); // per-user
     return json(
       res,
       200,
-      visible.map((r) => ({ ...r, archived: archivedSet.has(r.id) })),
+      visible.map((r) => ({
+        ...r,
+        archived: archivedSet.has(r.id),
+        hidden: hiddenSet.has(r.id),
+        canArchive: canArchiveRoom(userId, r.id),
+      })),
     );
   }
   if (url.pathname === '/api/rooms' && method === 'POST') {
@@ -455,10 +466,11 @@ async function handleHttp(
     return clearRoomPrimeHandler(res, decodeURIComponent(roomPrimeMatch[1]));
   }
 
-  // ── Per-user archive (sidebar hint, not access control) ──
-  // Anyone with access to the room can toggle archive for THEIR sidebar.
-  // Doesn't affect message routing or other users' views. CSRF-guarded
-  // because it's a state-mutating POST.
+  // ── Global archive (owner + admin) ──
+  // Marks the room as closed-to-active-work for EVERYONE. Owners + any
+  // admin (global or scoped admin of an agent wired to the room) can
+  // toggle. Archive is presentation only — routing continues unchanged.
+  // CSRF-guarded because it's a state-mutating POST.
   const roomArchiveMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/(archive|unarchive)$/);
   if (roomArchiveMatch && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') {
@@ -466,11 +478,32 @@ async function handleHttp(
     }
     const roomId = decodeURIComponent(roomArchiveMatch[1]);
     if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    if (!canArchiveRoom(userId, roomId)) return json(res, 403, { error: 'Admin only' });
     if (roomArchiveMatch[2] === 'archive') {
-      archiveRoomForUser(userId, roomId);
+      archiveRoom(roomId, userId);
     } else {
-      unarchiveRoomForUser(userId, roomId);
+      unarchiveRoom(roomId);
+    }
+    broadcastRooms();
+    return json(res, 200, { ok: true });
+  }
+
+  // ── Per-user hide (sidebar preference, no auth beyond room access) ──
+  // Any user with access to the room can hide it from THEIR sidebar.
+  // Doesn't affect anyone else, routing, archive state, or anything
+  // beyond that user's view. CSRF-guarded because it's state-mutating.
+  const roomHideMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/(hide|unhide)$/);
+  if (roomHideMatch && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') {
+      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    }
+    const roomId = decodeURIComponent(roomHideMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    if (roomHideMatch[2] === 'hide') {
+      hideRoomForUser(userId, roomId);
+    } else {
+      unhideRoomForUser(userId, roomId);
     }
     broadcastRooms();
     return json(res, 200, { ok: true });

@@ -635,6 +635,7 @@ const pendingMessages = new Map();
 const typingUsers = new Map();
 const unreadRooms = new Set();
 let showArchived = sessionStorage.getItem('webchat:showArchived') === '1';
+let showHidden = sessionStorage.getItem('webchat:showHidden') === '1';
 let agentName = '';
 let lastSeenMessageId = sessionStorage.getItem('lastSeenMessageId') || null;
 let reconnectDelay = 1000;
@@ -896,11 +897,17 @@ function renderRooms(rooms) {
 
   const sorted = [...rooms].sort(cmp);
 
-  // Partition archived vs active. Archived rooms only render when the
-  // "Show N archived" toggle is on; the toggle itself updates regardless
-  // (it's the affordance that reveals them).
-  const active = sorted.filter((r) => !r.archived);
-  const archived = sorted.filter((r) => r.archived);
+  // Partition into three buckets:
+  //   - hidden (per-user "hide" preference) — dropped from the sidebar
+  //     entirely unless `showHidden` is on. Per-user state.
+  //   - archived (global archive flag) — visible to everyone with access
+  //     but collected in a collapsed "Archived" section at the bottom,
+  //     revealed by the toggle. Same room can be both archived AND
+  //     hidden (by some users) — hidden wins for those users.
+  //   - active — the rest. Always rendered at the top.
+  const visibleRooms = showHidden ? sorted : sorted.filter((r) => !r.hidden);
+  const active = visibleRooms.filter((r) => !r.archived);
+  const archived = visibleRooms.filter((r) => r.archived);
   const toggleBtn = $('#archived-toggle');
   if (archived.length === 0) {
     toggleBtn.hidden = true;
@@ -933,9 +940,17 @@ function renderRooms(rooms) {
       li.appendChild(dot);
     }
 
-    // Kebab — opens a tiny menu with Archive / Unarchive. Click stops
-    // propagation so it doesn't bubble to the `<li>` click (which joins
-    // the room). Only one menu open at a time across the list.
+    // Kebab — opens a tiny menu with up to two actions:
+    //   - Hide / Unhide (per-user sidebar preference) — always present
+    //     for anyone with room access.
+    //   - Archive / Unarchive (global state) — present only when the
+    //     caller can archive this room (owner / global admin / scoped
+    //     admin of a wired agent). Server provides `room.canArchive`.
+    // Archive is ALSO available in Room Settings (the gear icon at the
+    // top of the chat header) for owners/admins; the kebab is the
+    // shortcut.
+    // Click stops propagation so it doesn't bubble to the `<li>` click
+    // (which joins the room). Only one menu open at a time across the list.
     const kebab = document.createElement('button');
     kebab.className = 'room-kebab';
     kebab.type = 'button';
@@ -946,15 +961,29 @@ function renderRooms(rooms) {
       list.querySelectorAll('.room-menu').forEach((m) => m.remove());
       const menu = document.createElement('div');
       menu.className = 'room-menu';
-      const action = document.createElement('button');
-      action.type = 'button';
-      action.textContent = room.archived ? 'Unarchive' : 'Archive';
-      action.addEventListener('click', async (ev) => {
+
+      const hideBtn = document.createElement('button');
+      hideBtn.type = 'button';
+      hideBtn.textContent = room.hidden ? 'Unhide' : 'Hide';
+      hideBtn.addEventListener('click', async (ev) => {
         ev.stopPropagation();
         menu.remove();
-        await toggleRoomArchive(room.id, !room.archived);
+        await toggleRoomHide(room.id, !room.hidden);
       });
-      menu.appendChild(action);
+      menu.appendChild(hideBtn);
+
+      if (room.canArchive) {
+        const archiveBtn = document.createElement('button');
+        archiveBtn.type = 'button';
+        archiveBtn.textContent = room.archived ? 'Unarchive' : 'Archive';
+        archiveBtn.addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          menu.remove();
+          await toggleRoomArchive(room.id, !room.archived);
+        });
+        menu.appendChild(archiveBtn);
+      }
+
       li.appendChild(menu);
       const close = () => {
         menu.remove();
@@ -1018,9 +1047,9 @@ function updateUnreadDots() {
 }
 
 async function toggleRoomArchive(roomId, archive) {
-  // Optimistic: flip locally and re-render immediately so the kebab close
-  // animation isn't broken by the network round-trip. Server-side success
-  // will replay the same state via broadcastRooms; failure rolls back.
+  // GLOBAL archive (owner + admin only). Optimistic: flip locally and
+  // re-render immediately; server success replays the same state via
+  // broadcastRooms; failure rolls back.
   const target = lastRoomsList.find((r) => r.id === roomId);
   if (target) target.archived = archive;
   renderRooms(lastRoomsList);
@@ -1033,6 +1062,26 @@ async function toggleRoomArchive(roomId, archive) {
   } catch (err) {
     console.error('toggleRoomArchive failed:', err);
     if (target) target.archived = !archive; // roll back
+    renderRooms(lastRoomsList);
+  }
+}
+
+async function toggleRoomHide(roomId, hide) {
+  // PER-USER hide. Optimistic flip, same pattern as toggleRoomArchive.
+  // Lives on a separate endpoint and table from archive so the two
+  // concepts don't conflate.
+  const target = lastRoomsList.find((r) => r.id === roomId);
+  if (target) target.hidden = hide;
+  renderRooms(lastRoomsList);
+  try {
+    const res = await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/${hide ? 'hide' : 'unhide'}`, {
+      method: 'POST',
+      headers: { 'X-Webchat-CSRF': '1' },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    console.error('toggleRoomHide failed:', err);
+    if (target) target.hidden = !hide; // roll back
     renderRooms(lastRoomsList);
   }
 }
@@ -3245,6 +3294,17 @@ async function openRoomDetail(roomId) {
   // Hide the add-agent form when opening
   $('#room-add-agent-form').hidden = true;
 
+  // Archive toggle: server tells us per room whether the caller can
+  // archive (owner / admin / scoped-admin-of-wired-agent). Show the
+  // button only when allowed; flip label based on current state.
+  const archiveBtn = $('#room-archive-toggle');
+  if (room && room.canArchive) {
+    archiveBtn.hidden = false;
+    archiveBtn.textContent = room.archived ? 'Unarchive Room' : 'Archive Room';
+  } else {
+    archiveBtn.hidden = true;
+  }
+
   await refreshRoomWiredAgents(roomId);
 
   $('#room-detail').hidden = false;
@@ -3547,6 +3607,14 @@ $('#room-settings-toggle').addEventListener('click', () => {
 });
 $('#room-detail-close').addEventListener('click', closeRoomDetail);
 $('#room-delete').addEventListener('click', deleteCurrentRoom);
+$('#room-archive-toggle').addEventListener('click', async () => {
+  if (!selectedRoomId) return;
+  const room = lastRoomsList.find((r) => r.id === selectedRoomId);
+  if (!room) return;
+  await toggleRoomArchive(selectedRoomId, !room.archived);
+  // Refresh the panel so the button label flips.
+  if (!$('#room-detail').hidden) openRoomDetail(selectedRoomId);
+});
 $('#room-add-agent-toggle').addEventListener('click', () => {
   $('#room-add-agent-form').hidden = !$('#room-add-agent-form').hidden;
 });
