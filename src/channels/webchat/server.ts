@@ -106,6 +106,7 @@ import {
 // wireAgentToWebchatRoom — see comment there.
 import {
   createDestination,
+  getDestinationByName,
   getDestinationByTarget,
   normalizeName,
 } from '../../modules/agent-to-agent/db/agent-destinations.js';
@@ -980,10 +981,66 @@ export function wireAgentToWebchatRoom(roomName: string, platformId: string, age
         created_at: new Date().toISOString(),
       });
     }
+
+    // Co-resident a2a destinations: any agents already wired to this room
+    // should be addressable by the new agent, and vice versa. PWA "+ Add
+    // agent" only creates the room wiring above; without this block, agents
+    // sharing a room can't `<message to="…">` each other by name — the main
+    // agent in the room sees the newcomer as inbound traffic but has no
+    // local_name to address it back. The agent's typical workaround
+    // (spawning its own via `create_agent`) results in a duplicate agent.
+    // The `create_agent` MCP tool already creates bidirectional rows; this
+    // brings the PWA "add agent to room" path to parity.
+    const peers = getDb()
+      .prepare(
+        `SELECT ag.id, ag.folder FROM messaging_group_agents mga
+         JOIN agent_groups ag ON ag.id = mga.agent_group_id
+         WHERE mga.messaging_group_id = ? AND mga.agent_group_id != ?`,
+      )
+      .all(mg.id, agentGroupId) as { id: string; folder: string }[];
+    const newAgent = getDb().prepare(`SELECT folder FROM agent_groups WHERE id = ?`).get(agentGroupId) as
+      | { folder: string }
+      | undefined;
+    for (const peer of peers) {
+      ensureA2aDestination(agentGroupId, peer.id, peer.folder);
+      if (newAgent) ensureA2aDestination(peer.id, agentGroupId, newAgent.folder);
+    }
   }
   // Wirings changed — recompute engage patterns in case this room has a
   // prime configured. No-op when no prime is set (leaves the default '.').
   recomputeEngagePatterns(platformId);
+}
+
+/**
+ * Idempotently create an a2a destination `owner → target` named after
+ * `targetFolder`. If that name collides with an existing destination on the
+ * owner (typical: same-named channel destination for a room sharing the
+ * agent's folder slug), fall back to `<folder>-agent`. If both are taken,
+ * log + skip — the operator can add a hand-picked name via `ncl destinations
+ * add` if they want one. Always skips if an a2a destination to this target
+ * already exists (irrespective of name).
+ */
+function ensureA2aDestination(ownerAgentId: string, targetAgentId: string, targetFolder: string): void {
+  if (getDestinationByTarget(ownerAgentId, 'agent', targetAgentId)) return;
+  const base = normalizeName(targetFolder);
+  const candidates = [base, `${base}-agent`];
+  for (const name of candidates) {
+    if (!getDestinationByName(ownerAgentId, name)) {
+      createDestination({
+        agent_group_id: ownerAgentId,
+        local_name: name,
+        target_type: 'agent',
+        target_id: targetAgentId,
+        created_at: new Date().toISOString(),
+      });
+      return;
+    }
+  }
+  log.warn('Could not auto-create a2a destination — local_name collisions; operator may set one manually', {
+    ownerAgentId,
+    targetAgentId,
+    tried: candidates,
+  });
 }
 
 /**
