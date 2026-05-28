@@ -167,7 +167,7 @@ import {
 import { handleChunkedUpload, handleFileServe, handleMultipartUpload } from './files.js';
 import { initWebPush, isValidPushEndpoint } from './push.js';
 import { redactSensitiveData } from './redact.js';
-import { hasAdminPrivilege, isOwner, warnIfNoPermissionsModule } from './roles.js';
+import { hasAdminPrivilege, isAnyAdmin, isGlobalAdmin, isOwner, warnIfNoPermissionsModule } from './roles.js';
 import { canAccessRoom, filterRoomsForUser } from './access.js';
 import { broadcast, broadcastRooms } from './state.js';
 import { setupWebSocket } from './ws.js';
@@ -581,7 +581,7 @@ async function handleHttp(
   // (which would otherwise match 'draft' as an id) AND before the bare
   // /api/agents POST so the literal-path handlers stay distinct.
   if (url.pathname === '/api/agents/draft' && method === 'POST') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin only' });
     if (req.headers['x-webchat-csrf'] !== '1') {
       return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     }
@@ -592,8 +592,8 @@ async function handleHttp(
     if (req.headers['x-webchat-csrf'] !== '1') {
       return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     }
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return createAgentHandler(req, res);
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin only' });
+    return createAgentHandler(req, res, userId);
   }
 
   const agentMatch = url.pathname.match(/^\/api\/agents\/([^/]+)$/);
@@ -1603,7 +1603,7 @@ function revokePermissionHandler(res: ServerResponse, body: GrantBody): void {
   return json(res, 200, { ok: true });
 }
 
-async function createAgentHandler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function createAgentHandler(req: IncomingMessage, res: ServerResponse, creatorUserId: string): Promise<void> {
   const raw = await readJsonBody(req, res);
   if (raw === null) return;
   let body: {
@@ -1634,6 +1634,7 @@ async function createAgentHandler(req: IncomingMessage, res: ServerResponse): Pr
       instructions: typeof body.instructions === 'string' ? body.instructions : undefined,
     });
     if ('error' in result) return json(res, result.status, { error: result.error });
+    grantCreatorAdmin(creatorUserId, result.group.id);
     return json(res, 200, { ok: true, agentGroup: result.group, roomId: null });
   }
 
@@ -1643,12 +1644,46 @@ async function createAgentHandler(req: IncomingMessage, res: ServerResponse): Pr
     instructions: typeof body.instructions === 'string' ? body.instructions : undefined,
   });
   if ('error' in provisioned) return json(res, provisioned.status, { error: provisioned.error });
+  grantCreatorAdmin(creatorUserId, provisioned.group.id);
   broadcastRooms();
   return json(res, 200, {
     ok: true,
     agentGroup: provisioned.group,
     roomId: provisioned.group.folder,
   });
+}
+
+/**
+ * Auto-grant the creator scoped admin on the agent they just created.
+ *
+ * Agent creation is gated on `isAnyAdmin` (owner, global admin, or scoped
+ * admin of *some* group). A scoped admin creating a new agent would otherwise
+ * immediately lose access to it — `listAgentsForUser` and the per-agent admin
+ * checks filter to owner / `hasAdminPrivilege(group)`, and the new group isn't
+ * one they administer. Granting them scoped admin on the new group closes
+ * that gap so "you can create it" implies "you can manage it".
+ *
+ * Skipped for owners and global admins — they already have authority over
+ * every group, so a scoped row would be redundant noise in `user_roles`.
+ * No-op if the permissions module isn't installed.
+ */
+function grantCreatorAdmin(creatorUserId: string, agentGroupId: string): void {
+  if (isOwner(creatorUserId) || isGlobalAdmin(creatorUserId)) return;
+  try {
+    permsGrantRole({
+      user_id: creatorUserId,
+      role: 'admin',
+      agent_group_id: agentGroupId,
+      granted_by: creatorUserId,
+      granted_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    log.warn('Failed to auto-grant creator admin on new agent', {
+      creatorUserId,
+      agentGroupId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 async function updateAgentHandler(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
