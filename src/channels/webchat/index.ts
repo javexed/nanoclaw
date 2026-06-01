@@ -220,7 +220,8 @@ function createAdapter(): ChannelAdapter {
       // (files alone don't trigger — no @-mention to match against).
       if (adapterConfig && producer && text !== null && text.length > 0 && shouldLoopBack(roomId)) {
         const senderAgentGroupId = producer.id;
-        const loopbackId = storedMessageId ?? `webchat-loopback-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        const loopbackId =
+          storedMessageId ?? `webchat-loopback-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
         // Display attribution goes through `author.fullName` / `author.userName`
         // — fields the container-side formatter reads for sender labels but
         // which the permissions senderResolver ignores for identity (no

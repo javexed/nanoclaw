@@ -38,7 +38,13 @@ beforeEach(() => {
   // is what previously confused the heuristic: which agent gets credit
   // when both are 'running' and have recently-bumped `last_active`?
   createAgentGroup({ id: 'ag-news', name: 'Financial News', folder: 'news', agent_provider: null, created_at: now() });
-  createAgentGroup({ id: 'ag-exec', name: 'Trade Executor', folder: 'executor', agent_provider: null, created_at: now() });
+  createAgentGroup({
+    id: 'ag-exec',
+    name: 'Trade Executor',
+    folder: 'executor',
+    agent_provider: null,
+    created_at: now(),
+  });
   createMessagingGroup({
     id: 'mg-floor',
     channel_type: 'webchat',
@@ -113,9 +119,10 @@ describe('sender attribution — with threading (exact)', () => {
     // Round-trip: store with News as the sender, verify the row reflects it.
     // In the buggy heuristic path this would have come out as "Trade Executor".
     const stored = storeWebchatMessage('floor', 'Financial News', 'agent', 'morning briefing text');
-    const row = getDb()
-      .prepare('SELECT sender, sender_type FROM webchat_messages WHERE id = ?')
-      .get(stored.id) as { sender: string; sender_type: string };
+    const row = getDb().prepare('SELECT sender, sender_type FROM webchat_messages WHERE id = ?').get(stored.id) as {
+      sender: string;
+      sender_type: string;
+    };
     expect(row.sender).toBe('Financial News');
     expect(row.sender_type).toBe('agent');
   });
