@@ -1997,8 +1997,17 @@ $('#members-overlay').addEventListener('click', toggleMembersPanel);
   const panels = ['#agent-detail', '#room-detail', '#model-detail']
     .map((s) => $(s))
     .filter(Boolean);
+  const app = $('#app');
   const sync = () => {
-    overlay.hidden = panels.every((p) => p.hidden);
+    const allHidden = panels.every((p) => p.hidden);
+    overlay.hidden = allHidden;
+    // The three detail panels are nested inside <section id="chat">, which
+    // mobile CSS hides (`display: none`) unless `#app.in-room`. Without this
+    // class the panels stay invisible while the backdrop (a sibling of #chat)
+    // dims the screen — looked like a frozen grey UI when opened from a
+    // sidebar tab. Toggling `detail-open` keeps #chat displayed for the
+    // panel's lifetime.
+    if (app) app.classList.toggle('detail-open', !allHidden);
   };
   const obs = new MutationObserver(sync);
   for (const p of panels) obs.observe(p, { attributes: true, attributeFilter: ['hidden'] });

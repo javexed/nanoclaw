@@ -779,6 +779,15 @@ button:focus-visible {
     display: none;
   }
 
+  /* Detail panels (#agent-detail / #room-detail / #model-detail) live inside
+     #chat. Sidebar tabs (Rooms/Agents/Models) open them via "+ New …" or by
+     tapping an existing item — but on mobile #chat is display:none unless we
+     keep it shown. JS adds `.detail-open` to #app while any panel is open. */
+  #app.detail-open #chat {
+    display: flex;
+    flex: 1;
+  }
+
   /* Dashboard mode on mobile */
   #app.in-dashboard #sidebar {
     display: none;
