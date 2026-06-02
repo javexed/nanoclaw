@@ -35,26 +35,76 @@ if [ -z "$WEBCHAT_REMOTE" ]; then
 fi
 echo "→ Using remote: $WEBCHAT_REMOTE"
 
-# ── 2. Fetch + check out channel-owned files ─────────────────────────────
+# ── 2. Fetch the channel branch ──────────────────────────────────────────
 echo "→ Fetching $WEBCHAT_REMOTE/channels-webchat …"
 git fetch "$WEBCHAT_REMOTE" channels-webchat
+BR="$WEBCHAT_REMOTE/channels-webchat"
+# Fork point of the channel branch from your trunk — the basis every webchat
+# hook is computed against. `git diff $BASE $BR -- <file>` is exactly the
+# webchat delta for that file, independent of how far your trunk has moved.
+BASE=$(git merge-base "$BR" HEAD)
 
-echo "→ Checking out webchat-owned source files …"
-git checkout "$WEBCHAT_REMOTE/channels-webchat" -- \
-  src/channels/webchat/ \
-  public/webchat/ \
-  src/modules/agent-to-agent/create-agent.ts \
-  src/modules/agent-to-agent/create-agent.test.ts \
-  container/agent-runner/src/destinations.ts \
-  src/channels/adapter.ts \
-  src/cli/resources/destinations.ts \
-  src/delivery.ts \
-  src/index.ts \
-  src/router.ts \
-  src/session-teardown.ts \
-  src/session-teardown.test.ts \
-  src/router.agent-loopback.test.ts \
+# ── 2a. Webchat-owned NEW files: copy in wholesale ───────────────────────
+# These do not exist upstream, so copying them clobbers nothing and uninstall
+# is a plain remove. Source-of-truth stays on the channel branch (buildable,
+# testable, reviewable) — same model as every other /add-<channel> skill.
+NEW_PATHS=(
+  src/channels/webchat
+  public/webchat
+  src/modules/agent-to-agent/create-agent.test.ts
+  src/session-teardown.ts
+  src/session-teardown.test.ts
+  src/router.agent-loopback.test.ts
   src/router.backtick-escape.test.ts
+)
+echo "→ Copying webchat-owned files …"
+git checkout "$BR" -- "${NEW_PATHS[@]}"
+
+# ── 2b. Core-file hooks: guarded, reversible 3-way patch ─────────────────
+# Each of these files EXISTS upstream and webchat only adds hooks to it. We
+# never overwrite your copy (which would silently drop your local changes or
+# upstream improvements). Instead we compute the webchat delta and apply it:
+#   • reverse-check first  → already applied? skip (idempotent re-runs)
+#   • git apply --3way     → merges the hook around your version, tolerating
+#                            upstream drift
+#   • on conflict          → revert the file and report it; never leave
+#                            conflict markers that would break the build
+# uninstall-webchat.sh reverses exactly these same deltas.
+HOOK_FILES=(
+  src/modules/agent-to-agent/create-agent.ts
+  container/agent-runner/src/destinations.ts
+  src/channels/adapter.ts
+  src/cli/resources/destinations.ts
+  src/delivery.ts
+  src/index.ts
+  src/router.ts
+)
+CONFLICTS=()
+echo "→ Applying webchat core-file hooks …"
+for f in "${HOOK_FILES[@]}"; do
+  PATCH=$(mktemp)
+  git diff "$BASE" "$BR" -- "$f" > "$PATCH"
+  if [ ! -s "$PATCH" ]; then
+    echo "  = $f: no webchat delta (skip)"
+  elif git apply --reverse --check "$PATCH" 2>/dev/null; then
+    echo "  = $f: hook already applied (skip)"
+  elif git apply --3way "$PATCH" 2>/dev/null; then
+    echo "  → $f: hook applied"
+  else
+    # 3-way could not reconcile — restore the file (clearing any unmerged
+    # index state from the failed apply) and flag for the human.
+    git checkout HEAD -- "$f" 2>/dev/null || true
+    CONFLICTS+=("$f")
+    echo "  !! $f: webchat hook conflicts with your version — left unchanged" >&2
+  fi
+  rm -f "$PATCH"
+done
+
+# ── 2c. Leave all changes unstaged ───────────────────────────────────────
+# `git checkout <ref> --` and `git apply --3way` both stage their changes.
+# Unstage the webchat paths so you review a plain working-tree diff and choose
+# what to commit — and so a later uninstall reverses to a clean tree.
+git reset -q -- "${NEW_PATHS[@]}" "${HOOK_FILES[@]}" 2>/dev/null || true
 
 # ── 3. Channels barrel: idempotent append ───────────────────────────────
 if ! grep -qF "'./webchat/index.js'" src/channels/index.ts; then
@@ -139,6 +189,20 @@ if (changed) {
 NODE_EOF
 node "$TMPFILE"
 rm -f "$TMPFILE"
+
+# ── 4b. Surface any unresolved hooks before the build ────────────────────
+# A conflicted hook was reverted to your version, so the webchat code that
+# depends on it will fail to typecheck in step 6. Warn loudly and point at
+# the cause: the channel branch is stale relative to your trunk for this
+# file and needs rebasing.
+if [ "${#CONFLICTS[@]}" -gt 0 ]; then
+  echo "" >&2
+  echo "⚠  ${#CONFLICTS[@]} webchat hook(s) could not auto-apply (upstream drift):" >&2
+  for f in "${CONFLICTS[@]}"; do echo "     - $f" >&2; done
+  echo "   They were left at your version. The build below will fail until these" >&2
+  echo "   files are reconciled — rebase $BR onto your trunk for them, then re-run." >&2
+  echo "" >&2
+fi
 
 # ── 5. Install pinned packages ──────────────────────────────────────────
 echo "→ Installing webchat dependencies …"
