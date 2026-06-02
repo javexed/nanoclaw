@@ -24,8 +24,10 @@ describe('moduleWebchat migration', () => {
     //   webchat-drop-rooms       → drops webchat_rooms (data moved to messaging_groups)
     //   webchat-room-primes      → adds webchat_room_primes
     //   webchat-models           → adds webchat_models, webchat_agent_models
+    //   webchat-room-settings    → adds webchat_room_settings
     //   webchat-approvals-index  → adds webchat_approvals_index
     //   webchat-user-archives    → adds webchat_user_room_archives
+    //   webchat-archive-split    → adds webchat_room_archives, renames webchat_user_room_archives → webchat_user_room_hides
     const tables = getDb()
       .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'webchat_%' ORDER BY name`)
       .all() as { name: string }[];
@@ -35,8 +37,10 @@ describe('moduleWebchat migration', () => {
       'webchat_messages',
       'webchat_models',
       'webchat_push_subscriptions',
+      'webchat_room_archives',
       'webchat_room_primes',
-      'webchat_user_room_archives',
+      'webchat_room_settings',
+      'webchat_user_room_hides',
     ]);
   });
 
@@ -51,7 +55,7 @@ describe('moduleWebchat migration', () => {
         'idx_webchat_approvals_platform',
         'idx_webchat_messages_room',
         'idx_webchat_push_identity',
-        'idx_webchat_user_archives_user',
+        'idx_webchat_user_hides_user',
       ].sort(),
     );
   });
@@ -63,10 +67,12 @@ describe('moduleWebchat migration', () => {
     }[];
     expect(rows.map((r) => r.name)).toEqual([
       'webchat-approvals-index',
+      'webchat-archive-split',
       'webchat-drop-rooms',
       'webchat-initial',
       'webchat-models',
       'webchat-room-primes',
+      'webchat-room-settings',
       'webchat-user-archives',
     ]);
   });

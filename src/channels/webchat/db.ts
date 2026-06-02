@@ -239,7 +239,8 @@ export function deleteWebchatRoom(id: string): void {
   db.prepare(`DELETE FROM webchat_messages WHERE room_id = ?`).run(id);
   db.prepare(`DELETE FROM messaging_group_agents WHERE messaging_group_id = ?`).run(mg.id);
   db.prepare(`DELETE FROM webchat_room_primes WHERE room_id = ?`).run(id);
-  db.prepare(`DELETE FROM webchat_user_room_archives WHERE room_id = ?`).run(id);
+  db.prepare(`DELETE FROM webchat_user_room_hides WHERE room_id = ?`).run(id);
+  db.prepare(`DELETE FROM webchat_room_archives WHERE room_id = ?`).run(id);
   // Drop any agent_destinations rows pointing at this room. target_id has no
   // FK so they wouldn't block, just rot. Guarded — a2a module may not be installed.
   if (hasTable(db, 'agent_destinations')) {
@@ -653,38 +654,74 @@ export function unassignModelFromAgent(agentGroupId: string): void {
   getDb().prepare(`DELETE FROM webchat_agent_models WHERE agent_group_id = ?`).run(agentGroupId);
 }
 
-// ── Per-user room archive ──
+// ── Room state: global archive + per-user hide ──
 //
-// Sidebar-only state. The room still routes messages normally; only the
-// archiving user's sidebar surfacing changes. `room_id` is the
-// messaging_groups.platform_id (consistent with webchat_room_primes etc.).
+// `archive` is now a GLOBAL room state — settable by owners/admins,
+// visible to every user with access. The room still routes messages
+// normally; archive is presentation only ("closed-to-active-work" hint).
+//
+// `hide` is a PER-USER sidebar preference (renamed from the previous
+// "archive for user X"). Affects only that user's view; doesn't change
+// anything for other users.
+//
+// `room_id` is `messaging_groups.platform_id` (consistent with
+// webchat_room_primes etc.). Both tables intentionally have no FK
+// to `messaging_groups` — cascade-on-room-delete is handled in app code
+// (clearArchiveForRoom / clearHidesForRoom called from deleteWebchatRoom).
 
-export function archiveRoomForUser(userId: string, roomId: string): void {
+// ── Global archive (settable by owners + admins) ──
+
+export function archiveRoom(roomId: string, archivedBy: string | null): void {
   getDb()
     .prepare(
-      `INSERT INTO webchat_user_room_archives (user_id, room_id, archived_at)
+      `INSERT INTO webchat_room_archives (room_id, archived_at, archived_by)
+       VALUES (?, ?, ?)
+       ON CONFLICT(room_id) DO NOTHING`,
+    )
+    .run(roomId, new Date().toISOString(), archivedBy);
+}
+
+export function unarchiveRoom(roomId: string): void {
+  getDb().prepare(`DELETE FROM webchat_room_archives WHERE room_id = ?`).run(roomId);
+}
+
+export function isRoomArchived(roomId: string): boolean {
+  const row = getDb().prepare(`SELECT 1 FROM webchat_room_archives WHERE room_id = ?`).get(roomId);
+  return !!row;
+}
+
+export function getArchivedRoomIds(): Set<string> {
+  const rows = getDb().prepare(`SELECT room_id FROM webchat_room_archives`).all() as { room_id: string }[];
+  return new Set(rows.map((r) => r.room_id));
+}
+
+export function clearArchiveForRoom(roomId: string): void {
+  getDb().prepare(`DELETE FROM webchat_room_archives WHERE room_id = ?`).run(roomId);
+}
+
+// ── Per-user hide (any user, on rooms they can access) ──
+
+export function hideRoomForUser(userId: string, roomId: string): void {
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_user_room_hides (user_id, room_id, archived_at)
        VALUES (?, ?, ?)
        ON CONFLICT(user_id, room_id) DO NOTHING`,
     )
     .run(userId, roomId, new Date().toISOString());
 }
 
-export function unarchiveRoomForUser(userId: string, roomId: string): void {
-  getDb().prepare(`DELETE FROM webchat_user_room_archives WHERE user_id = ? AND room_id = ?`).run(userId, roomId);
+export function unhideRoomForUser(userId: string, roomId: string): void {
+  getDb().prepare(`DELETE FROM webchat_user_room_hides WHERE user_id = ? AND room_id = ?`).run(userId, roomId);
 }
 
-export function getArchivedRoomIdsForUser(userId: string): Set<string> {
-  const rows = getDb().prepare(`SELECT room_id FROM webchat_user_room_archives WHERE user_id = ?`).all(userId) as {
+export function getHiddenRoomIdsForUser(userId: string): Set<string> {
+  const rows = getDb().prepare(`SELECT room_id FROM webchat_user_room_hides WHERE user_id = ?`).all(userId) as {
     room_id: string;
   }[];
   return new Set(rows.map((r) => r.room_id));
 }
 
-/**
- * Drop all archive rows for a room (called when the room is deleted —
- * webchat_user_room_archives has no FK, so we clean up explicitly to
- * avoid orphan rows accumulating across many user accounts).
- */
-export function clearArchivesForRoom(roomId: string): void {
-  getDb().prepare(`DELETE FROM webchat_user_room_archives WHERE room_id = ?`).run(roomId);
+export function clearHidesForRoom(roomId: string): void {
+  getDb().prepare(`DELETE FROM webchat_user_room_hides WHERE room_id = ?`).run(roomId);
 }

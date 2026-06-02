@@ -17,8 +17,10 @@
  *   GET  /api/rooms/:id/engage-mode              read room's engage default ('mention-only' | 'broadcast')
  *   PUT  /api/rooms/:id/engage-mode              set { mode } for the room  [owner]
  *   GET  /api/rooms/:id/messages                 history (?after_id= for incremental)
- *   POST /api/rooms/:id/archive                  hide from this user's sidebar
- *   POST /api/rooms/:id/unarchive                un-hide for this user
+ *   POST /api/rooms/:id/archive                  mark room archived (owner + admin) — global
+ *   POST /api/rooms/:id/unarchive                clear global archive (owner + admin)
+ *   POST /api/rooms/:id/hide                     hide room from this user's sidebar — per-user
+ *   POST /api/rooms/:id/unhide                   un-hide for this user
  *   POST /api/rooms/:id/upload                   multipart upload
  *   POST /api/rooms/:id/upload/chunk             chunked upload
  *   GET  /api/files/:roomId/:filename            serve uploaded file
@@ -106,6 +108,7 @@ import {
 // wireAgentToWebchatRoom — see comment there.
 import {
   createDestination,
+  getDestinationByName,
   getDestinationByTarget,
   normalizeName,
 } from '../../modules/agent-to-agent/db/agent-destinations.js';
@@ -121,7 +124,7 @@ import {
 } from './auth.js';
 import {
   approvalInboxForUser,
-  archiveRoomForUser,
+  archiveRoom,
   assignModelToAgent,
   clearPrimeAgentForWebchatRoom,
   countAgentsForWebchatRoom,
@@ -132,7 +135,8 @@ import {
   getAgentsAssignedToModel,
   getAgentsForWebchatRoom,
   getAllWebchatRooms,
-  getArchivedRoomIdsForUser,
+  getArchivedRoomIds,
+  getHiddenRoomIdsForUser,
   getAssignedModelForAgent,
   getPrimeAgentForWebchatRoom,
   getRoomEngageDefault,
@@ -143,10 +147,12 @@ import {
   getWebchatModel,
   getWebchatPendingApprovalsForUser,
   getWebchatRoom,
+  hideRoomForUser,
   listWebchatModels,
   setPrimeAgentForWebchatRoom,
   storeWebchatFileMessage,
-  unarchiveRoomForUser,
+  unarchiveRoom,
+  unhideRoomForUser,
   unassignModelFromAgent,
   unwireAgentFromWebchatRoom,
   updateWebchatModel,
@@ -166,8 +172,8 @@ import {
 import { handleChunkedUpload, handleFileServe, handleMultipartUpload } from './files.js';
 import { initWebPush, isValidPushEndpoint } from './push.js';
 import { redactSensitiveData } from './redact.js';
-import { hasAdminPrivilege, isOwner, warnIfNoPermissionsModule } from './roles.js';
-import { canAccessRoom, filterRoomsForUser } from './access.js';
+import { hasAdminPrivilege, isAnyAdmin, isGlobalAdmin, isOwner, warnIfNoPermissionsModule } from './roles.js';
+import { canAccessRoom, canArchiveRoom, filterRoomsForUser } from './access.js';
 import { broadcast, broadcastRooms } from './state.js';
 import { setupWebSocket } from './ws.js';
 
@@ -379,11 +385,17 @@ async function handleHttp(
   // converge on the same messaging_groups + messaging_group_agents shape.
   if (url.pathname === '/api/rooms' && method === 'GET') {
     const visible = filterRoomsForUser(userId, getAllWebchatRooms());
-    const archivedSet = getArchivedRoomIdsForUser(userId);
+    const archivedSet = getArchivedRoomIds(); // global
+    const hiddenSet = getHiddenRoomIdsForUser(userId); // per-user
     return json(
       res,
       200,
-      visible.map((r) => ({ ...r, archived: archivedSet.has(r.id) })),
+      visible.map((r) => ({
+        ...r,
+        archived: archivedSet.has(r.id),
+        hidden: hiddenSet.has(r.id),
+        canArchive: canArchiveRoom(userId, r.id),
+      })),
     );
   }
   if (url.pathname === '/api/rooms' && method === 'POST') {
@@ -454,10 +466,11 @@ async function handleHttp(
     return clearRoomPrimeHandler(res, decodeURIComponent(roomPrimeMatch[1]));
   }
 
-  // ── Per-user archive (sidebar hint, not access control) ──
-  // Anyone with access to the room can toggle archive for THEIR sidebar.
-  // Doesn't affect message routing or other users' views. CSRF-guarded
-  // because it's a state-mutating POST.
+  // ── Global archive (owner + admin) ──
+  // Marks the room as closed-to-active-work for EVERYONE. Owners + any
+  // admin (global or scoped admin of an agent wired to the room) can
+  // toggle. Archive is presentation only — routing continues unchanged.
+  // CSRF-guarded because it's a state-mutating POST.
   const roomArchiveMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/(archive|unarchive)$/);
   if (roomArchiveMatch && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') {
@@ -465,11 +478,32 @@ async function handleHttp(
     }
     const roomId = decodeURIComponent(roomArchiveMatch[1]);
     if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    if (!canArchiveRoom(userId, roomId)) return json(res, 403, { error: 'Admin only' });
     if (roomArchiveMatch[2] === 'archive') {
-      archiveRoomForUser(userId, roomId);
+      archiveRoom(roomId, userId);
     } else {
-      unarchiveRoomForUser(userId, roomId);
+      unarchiveRoom(roomId);
+    }
+    broadcastRooms();
+    return json(res, 200, { ok: true });
+  }
+
+  // ── Per-user hide (sidebar preference, no auth beyond room access) ──
+  // Any user with access to the room can hide it from THEIR sidebar.
+  // Doesn't affect anyone else, routing, archive state, or anything
+  // beyond that user's view. CSRF-guarded because it's state-mutating.
+  const roomHideMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/(hide|unhide)$/);
+  if (roomHideMatch && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') {
+      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    }
+    const roomId = decodeURIComponent(roomHideMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    if (roomHideMatch[2] === 'hide') {
+      hideRoomForUser(userId, roomId);
+    } else {
+      unhideRoomForUser(userId, roomId);
     }
     broadcastRooms();
     return json(res, 200, { ok: true });
@@ -580,7 +614,7 @@ async function handleHttp(
   // (which would otherwise match 'draft' as an id) AND before the bare
   // /api/agents POST so the literal-path handlers stay distinct.
   if (url.pathname === '/api/agents/draft' && method === 'POST') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin only' });
     if (req.headers['x-webchat-csrf'] !== '1') {
       return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     }
@@ -591,8 +625,8 @@ async function handleHttp(
     if (req.headers['x-webchat-csrf'] !== '1') {
       return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     }
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return createAgentHandler(req, res);
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin only' });
+    return createAgentHandler(req, res, userId);
   }
 
   const agentMatch = url.pathname.match(/^\/api\/agents\/([^/]+)$/);
@@ -980,10 +1014,66 @@ export function wireAgentToWebchatRoom(roomName: string, platformId: string, age
         created_at: new Date().toISOString(),
       });
     }
+
+    // Co-resident a2a destinations: any agents already wired to this room
+    // should be addressable by the new agent, and vice versa. PWA "+ Add
+    // agent" only creates the room wiring above; without this block, agents
+    // sharing a room can't `<message to="…">` each other by name — the main
+    // agent in the room sees the newcomer as inbound traffic but has no
+    // local_name to address it back. The agent's typical workaround
+    // (spawning its own via `create_agent`) results in a duplicate agent.
+    // The `create_agent` MCP tool already creates bidirectional rows; this
+    // brings the PWA "add agent to room" path to parity.
+    const peers = getDb()
+      .prepare(
+        `SELECT ag.id, ag.folder FROM messaging_group_agents mga
+         JOIN agent_groups ag ON ag.id = mga.agent_group_id
+         WHERE mga.messaging_group_id = ? AND mga.agent_group_id != ?`,
+      )
+      .all(mg.id, agentGroupId) as { id: string; folder: string }[];
+    const newAgent = getDb().prepare(`SELECT folder FROM agent_groups WHERE id = ?`).get(agentGroupId) as
+      | { folder: string }
+      | undefined;
+    for (const peer of peers) {
+      ensureA2aDestination(agentGroupId, peer.id, peer.folder);
+      if (newAgent) ensureA2aDestination(peer.id, agentGroupId, newAgent.folder);
+    }
   }
   // Wirings changed — recompute engage patterns in case this room has a
   // prime configured. No-op when no prime is set (leaves the default '.').
   recomputeEngagePatterns(platformId);
+}
+
+/**
+ * Idempotently create an a2a destination `owner → target` named after
+ * `targetFolder`. If that name collides with an existing destination on the
+ * owner (typical: same-named channel destination for a room sharing the
+ * agent's folder slug), fall back to `<folder>-agent`. If both are taken,
+ * log + skip — the operator can add a hand-picked name via `ncl destinations
+ * add` if they want one. Always skips if an a2a destination to this target
+ * already exists (irrespective of name).
+ */
+function ensureA2aDestination(ownerAgentId: string, targetAgentId: string, targetFolder: string): void {
+  if (getDestinationByTarget(ownerAgentId, 'agent', targetAgentId)) return;
+  const base = normalizeName(targetFolder);
+  const candidates = [base, `${base}-agent`];
+  for (const name of candidates) {
+    if (!getDestinationByName(ownerAgentId, name)) {
+      createDestination({
+        agent_group_id: ownerAgentId,
+        local_name: name,
+        target_type: 'agent',
+        target_id: targetAgentId,
+        created_at: new Date().toISOString(),
+      });
+      return;
+    }
+  }
+  log.warn('Could not auto-create a2a destination — local_name collisions; operator may set one manually', {
+    ownerAgentId,
+    targetAgentId,
+    tried: candidates,
+  });
 }
 
 /**
@@ -1546,7 +1636,7 @@ function revokePermissionHandler(res: ServerResponse, body: GrantBody): void {
   return json(res, 200, { ok: true });
 }
 
-async function createAgentHandler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function createAgentHandler(req: IncomingMessage, res: ServerResponse, creatorUserId: string): Promise<void> {
   const raw = await readJsonBody(req, res);
   if (raw === null) return;
   let body: {
@@ -1577,6 +1667,7 @@ async function createAgentHandler(req: IncomingMessage, res: ServerResponse): Pr
       instructions: typeof body.instructions === 'string' ? body.instructions : undefined,
     });
     if ('error' in result) return json(res, result.status, { error: result.error });
+    grantCreatorAdmin(creatorUserId, result.group.id);
     return json(res, 200, { ok: true, agentGroup: result.group, roomId: null });
   }
 
@@ -1586,12 +1677,46 @@ async function createAgentHandler(req: IncomingMessage, res: ServerResponse): Pr
     instructions: typeof body.instructions === 'string' ? body.instructions : undefined,
   });
   if ('error' in provisioned) return json(res, provisioned.status, { error: provisioned.error });
+  grantCreatorAdmin(creatorUserId, provisioned.group.id);
   broadcastRooms();
   return json(res, 200, {
     ok: true,
     agentGroup: provisioned.group,
     roomId: provisioned.group.folder,
   });
+}
+
+/**
+ * Auto-grant the creator scoped admin on the agent they just created.
+ *
+ * Agent creation is gated on `isAnyAdmin` (owner, global admin, or scoped
+ * admin of *some* group). A scoped admin creating a new agent would otherwise
+ * immediately lose access to it — `listAgentsForUser` and the per-agent admin
+ * checks filter to owner / `hasAdminPrivilege(group)`, and the new group isn't
+ * one they administer. Granting them scoped admin on the new group closes
+ * that gap so "you can create it" implies "you can manage it".
+ *
+ * Skipped for owners and global admins — they already have authority over
+ * every group, so a scoped row would be redundant noise in `user_roles`.
+ * No-op if the permissions module isn't installed.
+ */
+function grantCreatorAdmin(creatorUserId: string, agentGroupId: string): void {
+  if (isOwner(creatorUserId) || isGlobalAdmin(creatorUserId)) return;
+  try {
+    permsGrantRole({
+      user_id: creatorUserId,
+      role: 'admin',
+      agent_group_id: agentGroupId,
+      granted_by: creatorUserId,
+      granted_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    log.warn('Failed to auto-grant creator admin on new agent', {
+      creatorUserId,
+      agentGroupId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 async function updateAgentHandler(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {

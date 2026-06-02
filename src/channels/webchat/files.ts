@@ -174,9 +174,10 @@ function readBody(req: http.IncomingMessage, maxBytes = MAX_CHUNK_BODY_BYTES): P
 // Files at or below this size are inlined into the inbound message as a
 // base64 `attachments[].data` blob, which `extractAttachmentFiles` in the
 // host's session-manager will then stage to `<sessionDir>/inbox/<msgId>/`.
-// Above the threshold we leave a text marker pointing at the served URL —
-// the agent can curl it from the host if it really needs the bytes, but the
-// usual case (phone photos, screenshots) is well under this cap.
+// Above the threshold we pass a `hostPath` attachment (no base64 encoding)
+// so session-manager copies the file directly — avoids constructing a URL
+// that containers can't resolve (Docker containers can't reach webchat's
+// bound address by hostname).
 const INLINE_ATTACHMENT_THRESHOLD = 25 * 1024 * 1024;
 
 function inboundForFile(
@@ -190,7 +191,11 @@ function inboundForFile(
 ): InboundMessage {
   const attachmentType = fileMeta.mime.startsWith('image/') ? 'image' : 'file';
 
-  let attachment: { name: string; type: string; data: string; size: number; mime: string } | null = null;
+  let attachment:
+    | { name: string; type: string; data: string; size: number; mime: string }
+    | { name: string; type: string; hostPath: string; size: number; mime: string }
+    | null = null;
+
   if (fileMeta.size <= INLINE_ATTACHMENT_THRESHOLD) {
     try {
       const data = fs.readFileSync(localFilePath).toString('base64');
@@ -207,12 +212,22 @@ function inboundForFile(
         err: err instanceof Error ? err.message : err,
       });
     }
+  } else {
+    // Large file: pass the host-side path so session-manager can copy it
+    // into the session inbox without base64 encoding.
+    attachment = {
+      name: fileMeta.filename,
+      type: attachmentType,
+      hostPath: localFilePath,
+      size: fileMeta.size,
+      mime: fileMeta.mime,
+    };
   }
 
   // With an attachment, the formatter renders a `[image: name — saved to
   // /workspace/inbox/<msgId>/name]` line that the agent can Read directly,
   // so the caption is enough text — no need to duplicate the URL marker.
-  // Without an attachment (oversize / read error), fall back to the URL
+  // Without an attachment (read error on small file), fall back to the URL
   // hint so the agent at least knows the file exists and where to fetch it.
   const text = attachment
     ? caption

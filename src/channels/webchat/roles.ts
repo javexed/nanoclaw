@@ -47,6 +47,33 @@ export function hasAdminPrivilege(userId: string, agentGroupId: string): boolean
   return !!row;
 }
 
+/** Global admin: role='admin' with no group scope (admin of every group). */
+export function isGlobalAdmin(userId: string): boolean {
+  const db = getDb();
+  if (!hasTable(db, 'user_roles')) return true;
+  const row = db
+    .prepare(`SELECT 1 FROM user_roles WHERE user_id = ? AND role = 'admin' AND agent_group_id IS NULL`)
+    .get(userId);
+  return !!row;
+}
+
+/**
+ * Any admin authority at all — owner, global admin, OR scoped admin of at
+ * least one group. Used to gate agent *creation*, which produces a brand-new
+ * group that has no id to scope against, so the per-group `hasAdminPrivilege`
+ * check can't apply. The creating admin is auto-granted scoped admin on the
+ * new group (see `createAgentHandler`), so creation authority stays bounded
+ * to people who already administer something.
+ */
+export function isAnyAdmin(userId: string): boolean {
+  const db = getDb();
+  if (!hasTable(db, 'user_roles')) return true;
+  const row = db
+    .prepare(`SELECT 1 FROM user_roles WHERE user_id = ? AND role IN ('owner', 'admin') LIMIT 1`)
+    .get(userId);
+  return !!row;
+}
+
 /**
  * When permissions is installed and there is no owner yet, promote this
  * caller. This is the v2 replacement for v1's "main group" — first

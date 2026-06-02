@@ -308,3 +308,70 @@ export const moduleWebchatUserArchives: Migration = {
     `);
   },
 };
+
+/**
+ * Split the per-user "archive" concept into two:
+ *
+ *   - `webchat_room_archives` — global archive flag per room, settable by
+ *     owners + admins. Indicates a room is closed-to-active-work; appears
+ *     in a collapsed "Archived" section in everyone's sidebar but still
+ *     routes messages normally (archive is presentation, not silencing).
+ *
+ *   - `webchat_user_room_hides` — renamed from `webchat_user_room_archives`.
+ *     Per-user sidebar preference. Hides a room from one user's view only,
+ *     no effect on anyone else.
+ *
+ * Migration steps (atomic — runs in a single transaction per the migrate
+ * loop):
+ *
+ *   1. Create the new global-archive table.
+ *   2. Promote existing per-user "archive" rows → one global-archive row per
+ *      room (earliest archived_at wins; archived_by null because they came
+ *      from possibly multiple users and the legacy table didn't track it).
+ *   3. ALTER TABLE rename `webchat_user_room_archives` → `webchat_user_room_hides`.
+ *      SQLite preserves indexes through ALTER TABLE RENAME; we drop+recreate
+ *      the index under the new name for clarity, so DB inspection makes
+ *      sense.
+ *   4. Truncate the new `webchat_user_room_hides` table — the migrated rows
+ *      represented archive intent, not hide intent, and were promoted to
+ *      globals in step 2. Hides starts empty for everyone.
+ *
+ * Forward-only: there is no down-migration. Reverting would conflate
+ * promoted-global-archives with original-per-user-archives, which can't be
+ * separated cleanly.
+ */
+export const moduleWebchatArchiveSplit: Migration = {
+  version: 106,
+  name: 'webchat-archive-split',
+  up(db: Database.Database) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS webchat_room_archives (
+        room_id      TEXT PRIMARY KEY,
+        archived_at  TEXT NOT NULL,
+        archived_by  TEXT
+      );
+    `);
+
+    // Step 2 + 3 + 4 depend on the legacy table existing. On fresh installs
+    // it exists because version 105 ran first (registered earlier in the
+    // migrations array). Guard defensively in case of reordering.
+    const hasLegacy = db
+      .prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='webchat_user_room_archives'`)
+      .get();
+    if (!hasLegacy) return;
+
+    db.exec(`
+      INSERT OR IGNORE INTO webchat_room_archives (room_id, archived_at, archived_by)
+        SELECT room_id, MIN(archived_at), NULL
+          FROM webchat_user_room_archives
+         GROUP BY room_id;
+
+      ALTER TABLE webchat_user_room_archives RENAME TO webchat_user_room_hides;
+      DROP INDEX IF EXISTS idx_webchat_user_archives_user;
+      CREATE INDEX IF NOT EXISTS idx_webchat_user_hides_user
+        ON webchat_user_room_hides(user_id);
+
+      DELETE FROM webchat_user_room_hides;
+    `);
+  },
+};

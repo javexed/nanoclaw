@@ -1,16 +1,29 @@
 /**
- * Tests for per-user room archive helpers.
+ * Tests for the room-state helpers, split across two concepts:
  *
- * The archive table is sidebar-presentation state; routing/access are not
- * affected. These tests cover round-trips (archive/unarchive), idempotency,
- * per-user isolation, and cleanup on room delete.
+ *   - Global archive (owner/admin sets, visible to everyone) — covered by
+ *     `archive (global)` group below.
+ *   - Per-user hide (any user sets for themselves) — covered by `hide
+ *     (per-user)` group below.
+ *
+ * Both are sidebar-presentation state; routing/access are not affected.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 import { initTestDb, closeDb, getDb } from '../../db/connection.js';
 import { runMigrations } from '../../db/migrations/index.js';
 
-import { archiveRoomForUser, clearArchivesForRoom, getArchivedRoomIdsForUser, unarchiveRoomForUser } from './db.js';
+import {
+  archiveRoom,
+  clearArchiveForRoom,
+  clearHidesForRoom,
+  getArchivedRoomIds,
+  getHiddenRoomIdsForUser,
+  hideRoomForUser,
+  isRoomArchived,
+  unarchiveRoom,
+  unhideRoomForUser,
+} from './db.js';
 
 beforeEach(() => {
   initTestDb();
@@ -21,42 +34,92 @@ afterEach(() => {
   closeDb();
 });
 
-describe('per-user room archive', () => {
+describe('archive (global)', () => {
   it('archive then read back returns the room id', () => {
-    archiveRoomForUser('webchat:alice', 'room-1');
-    expect(getArchivedRoomIdsForUser('webchat:alice').has('room-1')).toBe(true);
+    archiveRoom('room-1', 'webchat:alice');
+    expect(isRoomArchived('room-1')).toBe(true);
+    expect(getArchivedRoomIds().has('room-1')).toBe(true);
   });
 
   it('unarchive removes the row', () => {
-    archiveRoomForUser('webchat:alice', 'room-1');
-    unarchiveRoomForUser('webchat:alice', 'room-1');
-    expect(getArchivedRoomIdsForUser('webchat:alice').has('room-1')).toBe(false);
+    archiveRoom('room-1', 'webchat:alice');
+    unarchiveRoom('room-1');
+    expect(isRoomArchived('room-1')).toBe(false);
   });
 
   it('archive is idempotent (no PK conflict on re-archive)', () => {
-    archiveRoomForUser('webchat:alice', 'room-1');
-    expect(() => archiveRoomForUser('webchat:alice', 'room-1')).not.toThrow();
-    expect(getArchivedRoomIdsForUser('webchat:alice').size).toBe(1);
+    archiveRoom('room-1', 'webchat:alice');
+    expect(() => archiveRoom('room-1', 'webchat:bob')).not.toThrow();
+    expect(getArchivedRoomIds().size).toBe(1);
   });
 
   it('unarchive is idempotent (no error if not archived)', () => {
-    expect(() => unarchiveRoomForUser('webchat:alice', 'room-1')).not.toThrow();
+    expect(() => unarchiveRoom('room-1')).not.toThrow();
   });
 
-  it('archive is per-user — alice archiving does not affect bob', () => {
-    archiveRoomForUser('webchat:alice', 'room-1');
-    expect(getArchivedRoomIdsForUser('webchat:alice').has('room-1')).toBe(true);
-    expect(getArchivedRoomIdsForUser('webchat:bob').has('room-1')).toBe(false);
+  it('clearArchiveForRoom drops the global archive (called on room delete)', () => {
+    archiveRoom('room-1', 'webchat:alice');
+    archiveRoom('room-2', 'webchat:alice');
+    clearArchiveForRoom('room-1');
+    expect(isRoomArchived('room-1')).toBe(false);
+    expect(isRoomArchived('room-2')).toBe(true);
+  });
+});
+
+describe('hide (per-user)', () => {
+  it('hide then read back returns the room id', () => {
+    hideRoomForUser('webchat:alice', 'room-1');
+    expect(getHiddenRoomIdsForUser('webchat:alice').has('room-1')).toBe(true);
   });
 
-  it('clearArchivesForRoom drops every user’s archive of that room', () => {
-    archiveRoomForUser('webchat:alice', 'room-1');
-    archiveRoomForUser('webchat:bob', 'room-1');
-    archiveRoomForUser('webchat:alice', 'room-2');
-    clearArchivesForRoom('room-1');
-    expect(getArchivedRoomIdsForUser('webchat:alice').has('room-1')).toBe(false);
-    expect(getArchivedRoomIdsForUser('webchat:bob').has('room-1')).toBe(false);
-    // Unrelated archives survive
-    expect(getArchivedRoomIdsForUser('webchat:alice').has('room-2')).toBe(true);
+  it('unhide removes the row', () => {
+    hideRoomForUser('webchat:alice', 'room-1');
+    unhideRoomForUser('webchat:alice', 'room-1');
+    expect(getHiddenRoomIdsForUser('webchat:alice').has('room-1')).toBe(false);
+  });
+
+  it('hide is idempotent (no PK conflict on re-hide)', () => {
+    hideRoomForUser('webchat:alice', 'room-1');
+    expect(() => hideRoomForUser('webchat:alice', 'room-1')).not.toThrow();
+    expect(getHiddenRoomIdsForUser('webchat:alice').size).toBe(1);
+  });
+
+  it('unhide is idempotent (no error if not hidden)', () => {
+    expect(() => unhideRoomForUser('webchat:alice', 'room-1')).not.toThrow();
+  });
+
+  it('hide is per-user — alice hiding does not affect bob', () => {
+    hideRoomForUser('webchat:alice', 'room-1');
+    expect(getHiddenRoomIdsForUser('webchat:alice').has('room-1')).toBe(true);
+    expect(getHiddenRoomIdsForUser('webchat:bob').has('room-1')).toBe(false);
+  });
+
+  it('clearHidesForRoom drops every user’s hide of that room', () => {
+    hideRoomForUser('webchat:alice', 'room-1');
+    hideRoomForUser('webchat:bob', 'room-1');
+    hideRoomForUser('webchat:alice', 'room-2');
+    clearHidesForRoom('room-1');
+    expect(getHiddenRoomIdsForUser('webchat:alice').has('room-1')).toBe(false);
+    expect(getHiddenRoomIdsForUser('webchat:bob').has('room-1')).toBe(false);
+    // Unrelated hides survive
+    expect(getHiddenRoomIdsForUser('webchat:alice').has('room-2')).toBe(true);
+  });
+});
+
+describe('archive + hide are orthogonal', () => {
+  it('a globally archived room can also be hidden by a user', () => {
+    archiveRoom('room-1', 'webchat:alice');
+    hideRoomForUser('webchat:bob', 'room-1');
+    expect(isRoomArchived('room-1')).toBe(true);
+    expect(getHiddenRoomIdsForUser('webchat:bob').has('room-1')).toBe(true);
+    expect(getHiddenRoomIdsForUser('webchat:alice').has('room-1')).toBe(false);
+  });
+
+  it('unarchive does not clear per-user hides', () => {
+    archiveRoom('room-1', 'webchat:alice');
+    hideRoomForUser('webchat:bob', 'room-1');
+    unarchiveRoom('room-1');
+    expect(isRoomArchived('room-1')).toBe(false);
+    expect(getHiddenRoomIdsForUser('webchat:bob').has('room-1')).toBe(true);
   });
 });
