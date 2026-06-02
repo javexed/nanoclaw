@@ -92,30 +92,21 @@ TMPFILE=$(mktemp --suffix=.mjs)
 cat > "$TMPFILE" <<'NODE_EOF'
 import { readFileSync, writeFileSync } from 'node:fs';
 
-const SYMBOLS = [
-  'moduleWebchat',
-  'moduleWebchatDropRooms',
-  'moduleWebchatRoomPrimes',
-  'moduleWebchatModels',
-  'moduleWebchatRoomSettings',
-  'moduleWebchatApprovalsIndex',
-  'moduleWebchatUserArchives',
-];
-
 const target = 'src/db/migrations/index.ts';
 let src = readFileSync(target, 'utf8');
 const before = src;
 
-// Drop the import block (whole `import { ... } from '.../webchat/migration.js';`).
+// Drop the whole webchat import block.
 src = src.replace(
   /import \{[^}]*\} from ['"]\.\.\/\.\.\/channels\/webchat\/migration\.js['"];\n*/,
   '',
 );
 
-// Drop each symbol's entry from the migrations array (one `  symbol,` line each).
-for (const s of SYMBOLS) {
-  src = src.replace(new RegExp('^\\s*' + s + ',\\n', 'm'), '');
-}
+// Drop every webchat entry from the migrations array. Match any
+// `moduleWebchat*,` line generically — no hand-maintained list to drift,
+// and no dependency on the (already-removed) module source. Mirrors install
+// step 4's auto-derive.
+src = src.replace(/^\s*moduleWebchat[A-Za-z0-9]*,\n/gm, '');
 
 if (before !== src) {
   writeFileSync(target, src);

@@ -116,24 +116,28 @@ else
   echo "= Channel adapter already registered (skip)"
 fi
 
-# ── 4. Migrations index: idempotent upgrade-safe insertion ──────────────
-# Each symbol is checked independently against the array body, so installing
-# v2 of webchat on top of v1 (different symbol count) adds only the new
-# entries. Uses a heredoc'd temp script to dodge bash-escape gymnastics in
-# the regex literals.
+# ── 4. Migrations index: idempotent, auto-derived registration ──────────
+# The set AND order of webchat migrations are read straight from the channel
+# branch's own migrations array — the single source of truth. There is no
+# hardcoded symbol list to drift when webchat adds a migration; a new one
+# just appears here automatically. Each symbol is then checked independently
+# against the user's array body, so re-installs / upgrades add only what's
+# missing. (Heredoc'd temp script to dodge bash-escape gymnastics in the
+# regex literals.)
+WEBCHAT_SYMBOLS=$(git show "$BR:src/db/migrations/index.ts" \
+  | sed -n '/const migrations: Migration\[\] = \[/,/\];/p' \
+  | grep -oE 'moduleWebchat[A-Za-z0-9]*')
+if [ -z "$WEBCHAT_SYMBOLS" ]; then
+  echo "install-webchat: no webchat migrations found on $BR — aborting" >&2
+  exit 1
+fi
 TMPFILE=$(mktemp --suffix=.mjs)
 cat > "$TMPFILE" <<'NODE_EOF'
 import { readFileSync, writeFileSync } from 'node:fs';
 
-const SYMBOLS = [
-  'moduleWebchat',
-  'moduleWebchatDropRooms',
-  'moduleWebchatRoomPrimes',
-  'moduleWebchatModels',
-  'moduleWebchatRoomSettings',
-  'moduleWebchatApprovalsIndex',
-  'moduleWebchatUserArchives',
-];
+// Symbols + order come from the channel branch (via $WEBCHAT_SYMBOLS), so this
+// list can never fall out of sync with what webchat actually ships.
+const SYMBOLS = process.env.WEBCHAT_SYMBOLS.trim().split(/\s+/);
 
 const target = 'src/db/migrations/index.ts';
 let src = readFileSync(target, 'utf8');
@@ -189,7 +193,7 @@ if (changed) {
   console.log(`= Migrations already registered (skip)`);
 }
 NODE_EOF
-node "$TMPFILE"
+WEBCHAT_SYMBOLS="$WEBCHAT_SYMBOLS" node "$TMPFILE"
 rm -f "$TMPFILE"
 
 # ── 4b. Surface any unresolved hooks before the build ────────────────────
