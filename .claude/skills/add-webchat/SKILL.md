@@ -57,7 +57,12 @@ git checkout "$WEBCHAT_REMOTE/channels-webchat" -- install-webchat.sh configure-
 WEBCHAT_REMOTE="$WEBCHAT_REMOTE" ./install-webchat.sh
 ```
 
-This single script does the deterministic work: checks out webchat-owned source paths from the branch, appends the channels-barrel import, idempotently registers the webchat migrations in `src/db/migrations/index.ts` (upgrade-safe — adds only entries that are missing, so installing a newer webchat version on an existing install just adds the new symbols), runs `pnpm add` for the four pinned deps + their `@types`, runs `pnpm run build`, and rebuilds the agent container image.
+This single script does the deterministic work:
+
+- **Copies webchat-owned new files** (the `src/channels/webchat/` module, `public/webchat/` UI, and the new test files) from the branch — these don't exist upstream, so nothing is overwritten. Left unstaged so you review a plain `git diff`.
+- **Applies the core-file hooks** to the handful of trunk files webchat extends (`index.ts`, `router.ts`, `delivery.ts`, `channels/adapter.ts`, `agent-to-agent/create-agent.ts`, `cli/resources/destinations.ts`, `agent-runner/destinations.ts`). Rather than overwriting your copy, it applies the webchat delta as a **guarded 3-way patch**: it skips files already hooked (idempotent re-runs), tolerates upstream drift via 3-way merge, and on a genuine conflict it reverts the file and reports it loudly instead of leaving broken markers. Fully reversible — see "Removing webchat" below.
+- Appends the channels-barrel import and idempotently registers the webchat migrations in `src/db/migrations/index.ts` (upgrade-safe — adds only missing entries, so installing a newer webchat version just adds the new symbols).
+- Runs `pnpm add` for the pinned deps + their `@types`, `pnpm run build`, and rebuilds the agent container image.
 
 Skip the container image step (e.g., in CI) with `SKIP_CONTAINER_BUILD=1`.
 
