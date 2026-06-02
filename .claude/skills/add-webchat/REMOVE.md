@@ -1,6 +1,8 @@
 # Remove Webchat
 
-Reverses the `add-webchat` install. Each step is idempotent.
+The install ships a matching `uninstall-webchat.sh` on the `channels-webchat`
+branch. It is the exact reverse of `install-webchat.sh` and is idempotent —
+safe to run even on a partially-installed tree.
 
 ## 1. Stop the host
 
@@ -12,102 +14,45 @@ launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
 systemctl --user stop nanoclaw
 ```
 
-## 2. Disable the channel
-
-In `.env`, set:
+## 2. Run the uninstaller
 
 ```bash
-WEBCHAT_ENABLED=false
+# Detect the remote that carries the webchat branches (same as install)
+WEBCHAT_REMOTE=$(git branch -r | grep -E '/skill/webchat$' | awk -F'/' '{print $1}' | sort -u | head -1 | xargs)
+git checkout "$WEBCHAT_REMOTE/channels-webchat" -- uninstall-webchat.sh
+WEBCHAT_REMOTE="$WEBCHAT_REMOTE" ./uninstall-webchat.sh
 ```
 
-This alone is enough to quietly disable the channel without removing files. The remaining steps fully uninstall.
+This:
 
-## 3. Remove the channel registration
+- **Reverses the core-file hooks** (`index.ts`, `router.ts`, `delivery.ts`, `channels/adapter.ts`, `agent-to-agent/create-agent.ts`, `cli/resources/destinations.ts`, `agent-runner/destinations.ts`) by applying each webchat delta in reverse. A hook that isn't currently applied is skipped, so the file returns exactly to your pre-webchat version.
+- **Removes the webchat-owned files** — `src/channels/webchat/`, `public/webchat/`, and the new test files (`create-agent.test.ts`, `session-teardown.ts`/`.test.ts`, `router.agent-loopback.test.ts`, `router.backtick-escape.test.ts`).
+- **Unwires the channels barrel** (removes the `import './webchat/index.js';` line) and **unregisters the migrations** (drops the import block + the seven `moduleWebchat*` symbols from `src/db/migrations/index.ts`).
+- Runs `pnpm remove` for the webchat deps, `pnpm run build`, and rebuilds the agent container image.
 
-In `src/channels/index.ts`, **delete** the line (don't comment — the install step's grep guard would treat a commented line as "already installed" and skip re-adding on a future re-install):
+Skip the container rebuild (e.g. in CI) with `SKIP_CONTAINER_BUILD=1`.
 
-```typescript
-import './webchat/index.js';
-```
+After it finishes, `git status` shows the reversal as a clean working-tree
+diff — install→uninstall is a verified no-op on tracked files.
 
-## 4. Remove the migration registration
-
-Edit `src/db/migrations/index.ts` and remove **all** of the following in the same edit (TypeScript will fail to compile in the in-between state — symbols are dangling or unused):
-
-1. The import line — remove the entire import block:
-
-   ```typescript
-   import {
-     moduleWebchat,
-     moduleWebchatDropRooms,
-     moduleWebchatRoomPrimes,
-     moduleWebchatModels,
-     moduleWebchatApprovalsIndex,
-     moduleWebchatUserArchives,
-   } from '../../channels/webchat/migration.js';
-   ```
-
-2. All six entries inside the `migrations` array:
-
-   ```typescript
-   moduleWebchat,
-   moduleWebchatDropRooms,
-   moduleWebchatRoomPrimes,
-   moduleWebchatModels,
-   moduleWebchatApprovalsIndex,
-   moduleWebchatUserArchives,
-   ```
-
-Do not run `pnpm run build` until both edits are done.
-
-The `webchat_*` tables remain in the central DB. SQLite has no auto-rollback for migrations; each migration's `up()` is idempotent (`CREATE TABLE IF NOT EXISTS`), so re-installing later is safe whether or not you drop the tables now. If you want a clean wipe:
+## 3. Restart the host
 
 ```bash
-sqlite3 data/v2.db <<'EOF'
--- Tables (7 total — all six migrations' targets)
-DROP TABLE IF EXISTS webchat_approvals_index;
-DROP TABLE IF EXISTS webchat_agent_models;
-DROP TABLE IF EXISTS webchat_models;
-DROP TABLE IF EXISTS webchat_room_primes;
-DROP TABLE IF EXISTS webchat_messages;
-DROP TABLE IF EXISTS webchat_push_subscriptions;
-DROP TABLE IF EXISTS webchat_user_room_archives;
--- Note: webchat_rooms is intentionally absent — it was dropped by the
--- webchat-drop-rooms migration itself, leaving the data on messaging_groups.
--- Schema-version rows (6 total)
-DELETE FROM schema_version WHERE name IN (
-  'webchat-initial',
-  'webchat-drop-rooms',
-  'webchat-room-primes',
-  'webchat-models',
-  'webchat-approvals-index',
-  'webchat-user-archives'
-);
-EOF
+# macOS
+launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
+
+# Linux
+systemctl --user start nanoclaw
 ```
 
-## 5. Remove source files
+---
 
-```bash
-rm -rf src/channels/webchat
-rm -rf public/webchat
-rm -f src/modules/agent-to-agent/create-agent.test.ts
-```
+## What the uninstaller intentionally leaves
 
-`create-agent.test.ts` was added by step 1 of install. Don't `rm -rf
-src/modules/agent-to-agent` — that directory belongs to trunk and other
-files in it are pre-existing.
+These are **not** removed automatically — they're either data you may want to
+keep or config that's cheap to leave. Clean them up by hand for a total wipe.
 
-## 6. Uninstall packages
-
-```bash
-pnpm remove ws busboy web-push undici
-pnpm remove -D @types/ws @types/busboy @types/web-push
-```
-
-## 7. Drop env entries
-
-In `.env`, remove (or comment out):
+### `.env` entries
 
 ```
 WEBCHAT_ENABLED
@@ -125,47 +70,49 @@ WEBCHAT_VAPID_SUBJECT
 WEBCHAT_PUBLIC_DIR
 ```
 
-## 8. Optional: drop user_roles webchat owners
+Just setting `WEBCHAT_ENABLED=false` quietly disables the channel without
+removing anything — a lighter alternative to a full uninstall.
 
-If you removed the permissions module entirely, the `user_roles` rows webchat created (`webchat:owner`, `webchat:local-owner`, etc.) become orphaned. You can leave them — they're harmless without the channel — or clean them up:
+### Central-DB tables
+
+The migrations already ran; uninstall only unregisters them so they don't
+re-run on a fresh DB. Each migration's `up()` is idempotent
+(`CREATE TABLE IF NOT EXISTS`), so re-installing later is safe whether or not
+you drop the tables now. For a clean wipe:
 
 ```bash
-sqlite3 data/v2.db "DELETE FROM user_roles WHERE user_id LIKE 'webchat:%';"
-sqlite3 data/v2.db "DELETE FROM users WHERE id LIKE 'webchat:%';"
+pnpm exec tsx scripts/q.ts data/v2.db "
+DROP TABLE IF EXISTS webchat_approvals_index;
+DROP TABLE IF EXISTS webchat_agent_models;
+DROP TABLE IF EXISTS webchat_models;
+DROP TABLE IF EXISTS webchat_room_primes;
+DROP TABLE IF EXISTS webchat_room_settings;
+DROP TABLE IF EXISTS webchat_messages;
+DROP TABLE IF EXISTS webchat_push_subscriptions;
+DROP TABLE IF EXISTS webchat_user_room_archives;
+DELETE FROM schema_version WHERE name IN (
+  'webchat-initial','webchat-drop-rooms','webchat-room-primes','webchat-models',
+  'webchat-room-settings','webchat-approvals-index','webchat-user-archives'
+);"
 ```
 
-## 9. Optional: drop uploaded files
+(`webchat_rooms` is intentionally absent — the `webchat-drop-rooms` migration
+removed it, leaving the data on `messaging_groups`.)
+
+### Webchat owners + uploads
 
 ```bash
+pnpm exec tsx scripts/q.ts data/v2.db "DELETE FROM user_roles WHERE user_id LIKE 'webchat:%'; DELETE FROM users WHERE id LIKE 'webchat:%';"
 rm -rf data/webchat/
 ```
 
-## 10. Restore the unpatched upstream versions of patched files
+---
 
-Webchat fully owns `create-agent.ts` and `destinations.ts` while installed (via sentinel-bounded blocks). To revert both to the unpatched upstream version, fetch and check them out from `main`:
+## Manual fallback
 
-```bash
-git fetch upstream main
-git checkout upstream/main -- \
-  src/modules/agent-to-agent/create-agent.ts \
-  container/agent-runner/src/destinations.ts
-```
-
-Idempotent — running it on already-unpatched files is a no-op (the upstream version overwrites with identical content).
-
-## 11. Rebuild the agent container image
-
-Required for the unpatched `destinations.ts` to take effect on running
-agents:
-
-```bash
-./container/build.sh
-```
-
-## 12. Rebuild host & restart
-
-```bash
-pnpm run build
-launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist   # macOS
-systemctl --user start nanoclaw                            # Linux
-```
+If you can't run the script (e.g. the branch isn't reachable), reverse the
+install by hand: restore the seven hooked core files from your trunk
+(`git checkout <upstream>/main -- <file>` for each), `rm -rf` the webchat-owned
+files listed above, delete the barrel import line, remove the migration import
+block + symbols, `pnpm remove ws busboy web-push undici @types/ws @types/busboy
+@types/web-push`, then `pnpm run build` and `./container/build.sh`.
