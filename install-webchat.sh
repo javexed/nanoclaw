@@ -73,11 +73,13 @@ git checkout "$BR" -- "${NEW_PATHS[@]}"
 HOOK_FILES=(
   src/modules/agent-to-agent/create-agent.ts
   container/agent-runner/src/destinations.ts
+  container/agent-runner/src/poll-loop.ts
   src/channels/adapter.ts
   src/cli/resources/destinations.ts
   src/delivery.ts
   src/index.ts
   src/router.ts
+  src/session-manager.ts
 )
 CONFLICTS=()
 echo "→ Applying webchat core-file hooks …"

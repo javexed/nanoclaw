@@ -40,11 +40,13 @@ BASE=$(git merge-base "$BR" HEAD)
 HOOK_FILES=(
   src/modules/agent-to-agent/create-agent.ts
   container/agent-runner/src/destinations.ts
+  container/agent-runner/src/poll-loop.ts
   src/channels/adapter.ts
   src/cli/resources/destinations.ts
   src/delivery.ts
   src/index.ts
   src/router.ts
+  src/session-manager.ts
 )
 echo "→ Reversing webchat core-file hooks …"
 for f in "${HOOK_FILES[@]}"; do
