@@ -7,6 +7,8 @@ description: Add an embedded HTTP + WebSocket chat server with PWA frontend. Pro
 
 Adds an in-process chat server + PWA. Runs on its own port (default 3100); doesn't share with `webhook-server`. The PWA talks to v2's agent groups via webchat-owned room metadata, and pipes inbound chat through the standard channel-adapter path so the existing router / sessions / outbound delivery flow handles it like any other channel.
 
+> **Maintainers:** publishing a change to webchat (review remote → public mirror)? Follow [PUBLISHING.md](PUBLISHING.md) — step 2 is the `verify-webchat-publish.sh` gate.
+
 ## Prerequisites
 
 Webchat layers on top of a working v2 install — it does not replicate `/setup`. Before installing, make sure these are in place. (`/setup` handles all of them; if you ran `/setup` end-to-end, skip this section.)
