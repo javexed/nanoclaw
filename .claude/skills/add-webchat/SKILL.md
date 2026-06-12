@@ -312,6 +312,17 @@ pnpm run dev
 
 The underlying single-instance guard in v2 trunk is tracked separately — when it lands, the second `pnpm run dev` will refuse to start at all instead of half-starting.
 
+## Optional add-on: secure shared-room BYOK
+
+Webchat supports **bring-your-own-key (BYOK)** — several people in one room and conversation, each billing *their own turns* to *their own* account: an Anthropic **API key** or their Claude **subscription** (OAuth). Each member's turn runs in its own container under their own OneCLI identity, so a compromised agent can't spend anyone else's key; the agent still sees the full shared conversation. It's a separate, opt-in skill and is **off by default** (rooms start with BYOK disabled).
+
+**Offer it now — ask the operator** whether they want secure shared-room BYOK:
+
+- If **yes**: run `/add-byok`. It requires **OneCLI** (the credential vault) — if that's not set up yet, run `/init-onecli` first. After install, BYOK is enabled per-room from Room settings.
+- If **no / unsure**: skip it — they can run `/add-byok` any time later. No webchat reconfiguration is needed to add it.
+
+Don't auto-install it; only proceed when the operator opts in.
+
 ## Next Steps
 
 If you're in the middle of `/setup`, return to the setup flow now. Otherwise:
