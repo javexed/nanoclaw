@@ -250,7 +250,6 @@ systemctl --user restart nanoclaw
 
 This skill is upstream-PR scope; the following are known follow-ups:
 
-- **PWA shape**: the shipped PWA still uses v1 field shapes inside the response envelope (`jid`, `isMain`, etc.) on `/api/agents`. Endpoint paths are v2-native; the response object keys are not. Stubs for `/api/stats` / `/api/routes` / `/api/tasks` keep the v1 dashboard pages from crashing. Cleaning the response shape (and dropping the dashboard stubs) is a follow-up.
 - **Orphan-room reconciliation interaction**: the PWA's WS auth handshake calls `reconcileOrphanAgents`, which provisions a 1:1 room for any agent without one. If you delete a room but leave the agents, the next PWA connect will recreate per-agent 1:1 rooms for them. Delete the agents too if you want them gone, or accept the auto-room as the v2 default.
 - **File mounts**: uploaded files land under `data/webchat/uploads/<roomId>/`. They are served via HTTP, not mounted into agent containers (v1 wrote files into the agent's group folder so the agent could `cat` them; that path doesn't generalise to v2's fan-out model). Agents that need file bytes can fetch the URL.
 - **Agent creation via chat** (v1's `/api/bots/create-from-chat` "ask main to register") is dropped. Use `POST /api/agents` (agent-first) or `POST /api/rooms` (room-first) directly from the PWA.
