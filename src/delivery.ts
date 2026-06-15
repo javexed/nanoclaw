@@ -60,6 +60,9 @@ export interface ChannelDeliveryAdapter {
     /** Delivering adapter instance (defaults to channelType downstream).
      *  Host-internal only — containers never see instance. */
     instance?: string,
+    /** Producing session/agent — webchat threads this to the adapter as
+     *  senderSessionId/senderAgentGroupId for a2a loop-back attribution. */
+    source?: { sessionId: string; agentGroupId: string },
   ): Promise<string | undefined>;
   setTyping?(channelType: string, platformId: string, threadId: string | null, instance?: string): Promise<void>;
 }
@@ -375,6 +378,7 @@ async function deliverMessage(
     msg.content,
     files,
     deliverInstance,
+    { sessionId: session.id, agentGroupId: session.agent_group_id },
   );
   log.info('Message delivered', {
     id: msg.id,

@@ -82,13 +82,22 @@ export function createChannelDeliveryAdapter(): ChannelDeliveryAdapter {
       content: string,
       files?: OutboundFile[],
       instance?: string,
+      // webchat hook: thread the producing session/agent so adapters can do
+      // a2a loop-back attribution (senderAgentGroupId). Reversed by uninstall.
+      source?: { sessionId: string; agentGroupId: string },
     ): Promise<string | undefined> {
       const adapter = getChannelAdapterExact(instance ?? channelType);
       if (!adapter) {
         log.warn('No adapter for channel type', { channelType, instance });
         return;
       }
-      return adapter.deliver(platformId, threadId, { kind, content: JSON.parse(content), files });
+      return adapter.deliver(platformId, threadId, {
+        kind,
+        content: JSON.parse(content),
+        files,
+        senderSessionId: source?.sessionId,
+        senderAgentGroupId: source?.agentGroupId,
+      });
     },
     async setTyping(
       channelType: string,

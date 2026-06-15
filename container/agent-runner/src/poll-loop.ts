@@ -1,6 +1,6 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
-import { writeMessageOut } from './db/messages-out.js';
+import { writeMessageOut, getMaxOutboundSeq } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
 import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
@@ -225,21 +225,20 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
-    const query = config.provider.query({
-      prompt,
-      continuation,
-      cwd: config.cwd,
-      systemContext: config.systemContext,
-    });
-
     // Process the query while concurrently polling for new messages
     const skippedSet = new Set(skipped);
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
     // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
     // can stamp it on outbound rows — needed for a2a return-path routing.
     setCurrentInReplyTo(routing.inReplyTo);
+    const query = config.provider.query({
+      prompt,
+      continuation,
+      cwd: config.cwd,
+      systemContext: config.systemContext,
+    });
     try {
-      const result = await processQuery(
+      let result = await processQuery(
         query,
         routing,
         processingIds,
@@ -248,9 +247,59 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         prompt,
         continuation,
       );
+
+      // Self-heal a dead/stale continuation. Unlike a thrown error (recovered
+      // in the catch block below), an unusable resume id surfaces as a
+      // terminal-error RESULT ("No conversation found …") and would otherwise be
+      // shown to the user every turn forever. Clear the continuation and retry
+      // the turn ONCE with a fresh session, so a single dead conversation fails
+      // silently-and-recovers instead of erroring this turn (or every turn after).
+      if (result.terminalError && continuation && config.provider.isSessionInvalid(result.terminalError.message)) {
+        log(`Dead continuation in terminal error (${continuation}) — clearing and retrying fresh`);
+        continuation = undefined;
+        clearContinuation(config.providerName);
+        result = await processQuery(
+          config.provider.query({
+            prompt,
+            continuation: undefined,
+            cwd: config.cwd,
+            systemContext: config.systemContext,
+          }),
+          routing,
+          processingIds,
+          config.providerName,
+          config.provider.onExchangeComplete?.bind(config.provider),
+          prompt,
+          undefined,
+        );
+      }
+
+
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
+      }
+
+      // (A) Non-quota terminal error (model not found, backend unreachable, an
+      // error result, or the SDK dying mid-stream): surface it to the user
+      // instead of dropping the turn. The quota case writes its own message
+      // inline, so it never reaches here.
+      if (result.terminalError) {
+        surfaceTerminalError(routing, result.terminalError);
+        result.producedOutput = true;
+      }
+
+      // (B) Empty-turn safety net. Neither result text nor an MCP send nor an
+      // error message went out, and no terminal error was surfaced — true
+      // silence, almost always a model/config problem the user must be told
+      // about rather than left staring at nothing.
+      if (!result.producedOutput && !result.terminalError) {
+        log('Turn produced no output and no error — writing empty-turn fallback');
+        writeUserText(
+          routing,
+          "I wasn't able to produce a response — this usually means a model or " +
+            'configuration problem; an admin may need to check this agent.',
+        );
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -266,14 +315,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       }
 
       // Write error response so the user knows something went wrong
-      writeMessageOut({
-        id: generateId(),
-        kind: 'chat',
-        platform_id: routing.platformId,
-        channel_type: routing.channelType,
-        thread_id: routing.threadId,
-        content: JSON.stringify({ text: `Error: ${errMsg}` }),
-      });
+      writeUserText(routing, `Error: ${errMsg}`);
     } finally {
       clearCurrentInReplyTo();
     }
@@ -283,6 +325,34 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     markCompleted(processingIds);
     log(`Completed ${ids.length} message(s)`);
   }
+}
+
+/** Write a plain chat message to the batch's origin routing. */
+function writeUserText(routing: RoutingContext, text: string): void {
+  writeMessageOut({
+    id: generateId(),
+    kind: 'chat',
+    platform_id: routing.platformId,
+    channel_type: routing.channelType,
+    thread_id: routing.threadId,
+    content: JSON.stringify({ text }),
+  });
+}
+
+/**
+ * (A) Surface a non-quota terminal error to the user. The user-facing text
+ * stays generic for `config` (the raw model error is rarely actionable for
+ * them) but includes the detail otherwise.
+ */
+function surfaceTerminalError(routing: RoutingContext, err: TerminalError | undefined): void {
+  if (!err) return;
+  const text =
+    err.classification === 'config'
+      ? `I couldn't reach the configured model (${err.message}). An admin may need to check this agent's model setting.`
+      : err.classification === 'network'
+        ? `I couldn't reach the model backend (${err.message}). An admin may need to check the connection.`
+        : `Something went wrong: ${err.message}`;
+  writeUserText(routing, text);
 }
 
 /**
@@ -319,8 +389,26 @@ function formatMessagesWithCommands(messages: MessageInRow[], nativeSlashCommand
   return parts.join('\n\n');
 }
 
+interface TerminalError {
+  message: string;
+  classification?: string;
+}
+
 interface QueryResult {
   continuation?: string;
+  /**
+   * Set when the turn ended on a non-retryable, NON-quota provider error (the
+   * quota case is handled inline — it writes its own user-facing message). The
+   * outer loop surfaces this to the user (A).
+   */
+  terminalError?: TerminalError;
+  /**
+   * True if the turn wrote anything outbound (an MCP send, dispatched result
+   * text, or an inline error message). Measured via an outbound-seq delta, so
+   * it's robust to MCP sends the poll-loop never sees. A turn that produced no
+   * output AND no terminalError is true silence → empty-turn safety net (B).
+   */
+  producedOutput: boolean;
 }
 
 async function processQuery(
@@ -340,6 +428,15 @@ async function processQuery(
   // the same prompt again. Unused (and unmaintained) when the provider
   // doesn't implement `onExchangeComplete`.
   const archivePrompts: string[] = [initialPrompt];
+
+  // Capture the outbound high-water mark before the turn. Any write during the
+  // turn (MCP send, dispatched result text, inline error message) advances it;
+  // the delta after the turn tells us whether the agent produced ANY output.
+  // This is the empty-turn detector: a zero delta with no terminalError is
+  // true silence. See db/messages-out.ts getMaxOutboundSeq().
+  const outboundSeqBefore = getMaxOutboundSeq();
+
+  let terminalError: TerminalError | undefined;
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -473,6 +570,25 @@ async function processQuery(
         // effectively orphaned and the next message started a blank
         // Claude session with no prior context.
         setContinuation(providerName, event.continuation);
+      } else if (event.type === 'error' && event.classification === 'quota') {
+        markCompleted(initialBatchIds);
+        writeMessageOut({
+          id: generateId(),
+          kind: 'chat',
+          platform_id: routing.platformId,
+          channel_type: routing.channelType,
+          thread_id: routing.threadId,
+          content: JSON.stringify({
+            text: "I've hit an API usage limit. You may have run out of credits on your Anthropic account — check console.anthropic.com/settings/billing.",
+          }),
+        });
+      } else if (event.type === 'error' && !event.retryable) {
+        // A non-retryable, non-quota terminal error (model not found, backend
+        // unreachable, SDK died mid-stream, an error-result subtype). Don't
+        // write here — the outer loop surfaces it to the user (A). Record the
+        // LAST one seen and let the stream finish draining.
+        terminalError = { message: event.message, classification: event.classification };
+        markCompleted(initialBatchIds);
       } else if (event.type === 'result') {
         // A result — with or without text — means the turn is done. Mark
         // the initial batch completed now so the host sweep doesn't see
@@ -523,7 +639,13 @@ async function processQuery(
     clearInterval(pollHandle);
   }
 
-  return { continuation: queryContinuation };
+  // Did the turn write anything outbound? Compare the high-water mark now vs.
+  // before. A non-quota terminalError wrote nothing here (deferred to the outer
+  // loop), so a delta of zero with a terminalError is expected; a delta of zero
+  // with NO terminalError is true silence.
+  const producedOutput = getMaxOutboundSeq() > outboundSeqBefore;
+
+  return { continuation: queryContinuation, terminalError, producedOutput };
 }
 
 function notifyExchangeComplete(

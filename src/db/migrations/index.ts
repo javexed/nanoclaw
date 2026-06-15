@@ -16,6 +16,18 @@ import { migration016 } from './016-messaging-group-instance.js';
 import { moduleApprovalsPendingApprovals } from './module-approvals-pending-approvals.js';
 import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js';
 
+import {
+  moduleWebchat,
+  moduleWebchatDropRooms,
+  moduleWebchatRoomPrimes,
+  moduleWebchatModels,
+  moduleWebchatRoomSettings,
+  moduleWebchatApprovalsIndex,
+  moduleWebchatUserArchives,
+  moduleWebchatArchiveSplit,
+  moduleWebchatApprovalsIndexFanout,
+} from '../../channels/webchat/migration.js';
+
 export interface Migration {
   version: number;
   name: string;
@@ -46,6 +58,15 @@ export const migrations: Migration[] = [
   migration014,
   migration015,
   migration016,
+  moduleWebchat,
+  moduleWebchatDropRooms,
+  moduleWebchatRoomPrimes,
+  moduleWebchatModels,
+  moduleWebchatApprovalsIndex,
+  moduleWebchatUserArchives,
+  moduleWebchatRoomSettings,
+  moduleWebchatArchiveSplit,
+  moduleWebchatApprovalsIndexFanout,
 ];
 
 /** Row shape of PRAGMA foreign_key_check. Child rowids are stable across a

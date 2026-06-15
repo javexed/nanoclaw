@@ -328,6 +328,52 @@ const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WIN
  */
 const STALE_SESSION_RE = /no conversation found|ENOENT.*\.jsonl|session.*not found/i;
 
+/**
+ * Classify a terminal error's text so the poll-loop can react precisely:
+ *
+ *  - `'config'` — the model itself is unusable: not found, invalid, rejected,
+ *    or an auth failure that means the configured model/backend is wrong
+ *    (model-not-found, invalid-model, 401/404, unauthorized). These are the
+ *    cases worth retrying against the SDK default model.
+ *  - `'network'` — the backend was unreachable (connection refused, fetch
+ *    failed, timed out). Retrying the same broken endpoint won't help.
+ *  - `undefined` — unclassified; surfaced verbatim, no special handling.
+ *
+ * Patterns are intentionally broad/lowercased — SDK and Ollama error text
+ * varies, and a false `config` only costs one extra (cheap) default-model try.
+ */
+export function classifyTerminalError(text: string): 'config' | 'network' | undefined {
+  const t = text.toLowerCase();
+
+  // Network first: an ECONNREFUSED to a custom base URL can also mention the
+  // model, but the actionable fault is the unreachable endpoint.
+  if (
+    t.includes('econnrefused') ||
+    t.includes('connection refused') ||
+    t.includes('fetch failed') ||
+    t.includes('etimedout') ||
+    t.includes('timed out')
+  ) {
+    return 'network';
+  }
+
+  if (
+    t.includes('model not found') ||
+    t.includes('not found') && t.includes('model') ||
+    t.includes('invalid model') ||
+    t.includes('invalid_model') ||
+    t.includes('unknown model') ||
+    t.includes('unauthorized') ||
+    t.includes('401') ||
+    t.includes('404') ||
+    (t.includes('model') && (t.includes('reject') || t.includes('does not exist') || t.includes('not supported')))
+  ) {
+    return 'config';
+  }
+
+  return undefined;
+}
+
 export class ClaudeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = true;
 
@@ -430,30 +476,73 @@ export class ClaudeProvider implements AgentProvider {
 
     async function* translateEvents(): AsyncGenerator<ProviderEvent> {
       let messageCount = 0;
-      for await (const message of sdkResult) {
-        if (aborted) return;
-        messageCount++;
+      try {
+        for await (const message of sdkResult) {
+          if (aborted) return;
+          messageCount++;
 
-        // Yield activity for every SDK event so the poll loop knows the agent is working
-        yield { type: 'activity' };
+          // Yield activity for every SDK event so the poll loop knows the agent is working
+          yield { type: 'activity' };
 
-        if (message.type === 'system' && message.subtype === 'init') {
-          yield { type: 'init', continuation: message.session_id };
-        } else if (message.type === 'result') {
-          const text = 'result' in message ? (message as { result?: string }).result ?? null : null;
-          yield { type: 'result', text };
-        } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
-          yield { type: 'error', message: 'API retry', retryable: true };
-        } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'rate_limit_event') {
-          yield { type: 'error', message: 'Rate limit', retryable: false, classification: 'quota' };
-        } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
-          const meta = (message as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;
-          const detail = meta?.pre_tokens ? ` (${meta.pre_tokens.toLocaleString()} tokens compacted)` : '';
-          yield { type: 'result', text: `Context compacted${detail}.` };
-        } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
-          const tn = message as { summary?: string };
-          yield { type: 'progress', message: tn.summary || 'Task notification' };
+          if (message.type === 'system' && message.subtype === 'init') {
+            yield { type: 'init', continuation: message.session_id };
+          } else if (message.type === 'result') {
+            // A result message can itself be an error — the SDK signals this via
+            // an `is_error` flag and/or an error-ish `subtype` (e.g.
+            // 'error_during_execution', 'error_max_turns'). The human-readable
+            // detail, when present, lives in the same `result` field as success
+            // text. Surface these as terminal errors instead of an empty result
+            // (which the poll-loop would otherwise treat as a silent completion).
+            const resultMsg = message as { result?: string; subtype?: string; is_error?: boolean };
+            const text = typeof resultMsg.result === 'string' ? resultMsg.result : null;
+            const subtype = resultMsg.subtype;
+            // `error_max_turns` is excepted: its `result` field still carries the
+            // agent's partial output (possibly <message> blocks), so dispatch it
+            // as a normal result like before rather than swallowing it as an
+            // error. Genuine faults (error_during_execution, is_error) surface.
+            const isErrorResult =
+              subtype !== 'error_max_turns' &&
+              (resultMsg.is_error === true || (typeof subtype === 'string' && subtype.startsWith('error')));
+            if (isErrorResult) {
+              const detail = text || subtype || 'unknown error';
+              yield {
+                type: 'error',
+                message: detail,
+                retryable: false,
+                classification: classifyTerminalError(detail),
+              };
+            } else {
+              yield { type: 'result', text };
+            }
+          } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
+            yield { type: 'error', message: 'API retry', retryable: true };
+          } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'rate_limit_event') {
+            yield { type: 'error', message: 'Rate limit', retryable: false, classification: 'quota' };
+          } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
+            const meta = (message as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;
+            const detail = meta?.pre_tokens ? ` (${meta.pre_tokens.toLocaleString()} tokens compacted)` : '';
+            yield { type: 'result', text: `Context compacted${detail}.` };
+          } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
+            const tn = message as { summary?: string };
+            yield { type: 'progress', message: tn.summary || 'Task notification' };
+          }
         }
+      } catch (err) {
+        // A THROWN SDK failure — model not found, backend unreachable, the
+        // subprocess dying mid-stream — would otherwise escape the generator
+        // and surface as an opaque rejection (or, on the follow-up path,
+        // silence). Re-emit it as a non-retryable terminal error so the
+        // poll-loop can surface it / fall back, then end the stream.
+        if (aborted) return;
+        const detail = err instanceof Error ? err.message : String(err);
+        log(`SDK stream threw: ${detail}`);
+        yield {
+          type: 'error',
+          message: detail,
+          retryable: false,
+          classification: classifyTerminalError(detail),
+        };
+        return;
       }
       log(`Query completed after ${messageCount} SDK messages`);
     }

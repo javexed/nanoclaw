@@ -23,6 +23,7 @@ import path from 'path';
 
 import { isSafeAttachmentName } from '../../attachment-safety.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
+import { getDb, hasTable } from '../../db/connection.js';
 import { getInboundSourceSessionId, getMostRecentPeerSourceSessionId } from '../../db/session-db.js';
 import { getSession } from '../../db/sessions.js';
 import { wakeContainer } from '../../container-runner.js';
@@ -224,6 +225,23 @@ export async function routeAgentMessage(msg: RoutableAgentMessage, session: Sess
     throw new Error(`target agent group ${targetAgentGroupId} not found for message ${msg.id}`);
   }
   const targetSession = resolveTargetSession(msg, session, targetAgentGroupId);
+
+  // Loop guard: an agent must never route a message back into the SAME session
+  // it came from. Routing to one's own session is a no-op, but because a
+  // terminal-error turn re-emits the error as a reply (poll-loop
+  // surfaceTerminalError), self-routing turns a single failure into an infinite
+  // wake loop — observed in production when a stale Claude continuation flooded
+  // a session with "No conversation found" ~every 2.5s (tens of thousands of
+  // messages). Drop the self-route; a dead conversation now fails once, quietly.
+  if (targetSession.id === session.id) {
+    log.warn('a2a route skipped: target is the source session (self-loop guard)', {
+      agentGroup: session.agent_group_id,
+      session: session.id,
+      msgId: msg.id,
+    });
+    return;
+  }
+
   const a2aMsgId = `a2a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   // If the source message references files (via `send_file`), forward the
@@ -250,6 +268,20 @@ export async function routeAgentMessage(msg: RoutableAgentMessage, session: Sess
     a2aMsgId,
     forwardedFileCount: countForwardedFiles(forwardedContent),
   });
+
+  // Side-channel visibility (webchat): if both agents are wired to the same
+  // webchat room, surface a read-only copy of this message there so humans can
+  // watch the exchange. Best-effort — guarded so non-webchat installs (no
+  // table) and any failure never block agent routing.
+  try {
+    if (hasTable(getDb(), 'webchat_messages')) {
+      const { surfaceA2aMessage } = await import('../../channels/webchat/state.js');
+      surfaceA2aMessage(session.agent_group_id, targetAgentGroupId, msg.content);
+    }
+  } catch (err) {
+    log.warn('a2a webchat room surfacing failed', { err: err instanceof Error ? err.message : String(err) });
+  }
+
   const fresh = getSession(targetSession.id);
   if (fresh) await wakeContainer(fresh);
 }

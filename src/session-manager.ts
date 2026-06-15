@@ -290,7 +290,9 @@ function extractAttachmentFiles(
 
   let changed = false;
   for (const att of attachments) {
-    if (typeof att.data !== 'string') continue;
+    const hasData = typeof att.data === 'string';
+    const hasHostPath = typeof att.hostPath === 'string';
+    if (!hasData && !hasHostPath) continue;
 
     const rawName = deriveAttachmentName(att);
     const filename = isSafeAttachmentName(rawName) ? rawName : `attachment-${Date.now()}`;
@@ -331,10 +333,16 @@ function extractAttachmentFiles(
 
     const filePath = path.join(inboxDir, filename);
     try {
-      // wx = exclusive create. Refuses to follow a pre existing symlink or
-      // overwrite any existing file. The host expects to be the sole writer
-      // of these attachments.
-      fs.writeFileSync(filePath, Buffer.from(att.data as string, 'base64'), { flag: 'wx' });
+      if (hasData) {
+        // wx = exclusive create. Refuses to follow a pre existing symlink or
+        // overwrite any existing file. The host expects to be the sole writer
+        // of these attachments.
+        fs.writeFileSync(filePath, Buffer.from(att.data as string, 'base64'), { flag: 'wx' });
+      } else {
+        // Large file: copy from host upload path rather than decoding base64.
+        // copyFileSync with COPYFILE_EXCL refuses to overwrite an existing file.
+        fs.copyFileSync(att.hostPath as string, filePath, fs.constants.COPYFILE_EXCL);
+      }
     } catch (err: unknown) {
       const e = err as NodeJS.ErrnoException;
       if (e.code === 'EEXIST') {
@@ -350,6 +358,7 @@ function extractAttachmentFiles(
     att.name = filename;
     att.localPath = `inbox/${messageId}/${filename}`;
     delete att.data;
+    delete att.hostPath;
     changed = true;
     log.debug('Saved attachment to inbox', { messageId, filename, size: att.size });
   }

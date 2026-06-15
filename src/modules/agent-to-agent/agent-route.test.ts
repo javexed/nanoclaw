@@ -221,6 +221,37 @@ describe('routeAgentMessage return-path', () => {
     expect(s2Rows).toHaveLength(0);
   });
 
+  it('self-loop guard: drops a route whose target session is the source session', async () => {
+    // Reproduce the production loop: a prior self-a2a left a row in S1 stamped
+    // with source_session_id = S1, so S1's reply to it resolves back to S1.
+    // Without the guard this re-wakes S1 forever (a terminal error re-emits as
+    // a reply each turn). The guard drops the self-route.
+    writeSessionMessage(A, S1.id, {
+      id: 'self-seed',
+      kind: 'chat',
+      timestamp: now(),
+      platformId: A,
+      channelType: 'agent',
+      threadId: null,
+      content: JSON.stringify({ text: 'seed' }),
+      sourceSessionId: S1.id, // return address points back at S1 itself
+    });
+    const before = readInbound(A, S1.id).length;
+
+    await routeAgentMessage(
+      {
+        id: 'msg-self-error',
+        platform_id: A, // target group = own group
+        content: JSON.stringify({ text: 'Something went wrong: No conversation found' }),
+        in_reply_to: 'self-seed', // resolves target → S1 (= source)
+      },
+      S1,
+    );
+
+    // No new row written to S1 — the self-route was dropped, breaking the loop.
+    expect(readInbound(A, S1.id).length).toBe(before);
+  });
+
   it('fallback: a2a with no in_reply_to falls through to newest-session lookup', async () => {
     // No prior conversation. B initiates an a2a to A out of the blue.
     await routeAgentMessage(

@@ -131,6 +131,17 @@ export function getRoutingBySeq(
   return outRow ?? null;
 }
 
+/**
+ * Highest seq currently in messages_out (0 if empty). The poll-loop captures
+ * this before a turn and compares after: since writeMessageOut() is the single
+ * write path (sendToDestination, the /clear reply, every error writer all go
+ * through it), a zero delta across a turn means the agent produced NO output at
+ * all — true silence — which drives the empty-turn safety net.
+ */
+export function getMaxOutboundSeq(): number {
+  return (getOutboundDb().prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_out').get() as { m: number }).m;
+}
+
 /** Get undelivered messages (for host polling — reads from outbound.db). */
 export function getUndeliveredMessages(): MessageOutRow[] {
   return getOutboundDb()

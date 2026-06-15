@@ -22,7 +22,6 @@
  * if either module becomes genuinely optional (see REFACTOR_PLAN open q #3).
  */
 import { normalizeOptions, type RawOption } from '../../channels/ask-question.js';
-import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { createPendingApproval, getSession } from '../../db/sessions.js';
 import { getDeliveryAdapter } from '../../delivery.js';
 import { wakeContainer } from '../../container-runner.js';
@@ -111,6 +110,40 @@ export async function notifyApprovalResolved(event: ApprovalResolvedEvent): Prom
   }
 }
 
+// ── Approval-requested listeners ── (webchat)
+// Fired when an approval is created, so a channel can surface an actionable
+// card into the agent's OWN room (in addition to the per-approver inboxes).
+// Best-effort — exceptions are logged and swallowed.
+
+export interface ApprovalRequestedEvent {
+  approvalId: string;
+  session: Session;
+  action: string;
+  title: string;
+  question: string;
+  options: RawOption[];
+  /** Eligible approver user IDs — a channel uses this to gate who can act. */
+  approvers: string[];
+  agentName?: string;
+}
+export type ApprovalRequestedListener = (e: ApprovalRequestedEvent) => void;
+
+const approvalRequestedListeners: ApprovalRequestedListener[] = [];
+
+export function registerApprovalRequestedListener(cb: ApprovalRequestedListener): void {
+  approvalRequestedListeners.push(cb);
+}
+
+export function notifyApprovalRequested(e: ApprovalRequestedEvent): void {
+  for (const cb of approvalRequestedListeners) {
+    try {
+      cb(e);
+    } catch (err) {
+      log.error('approvalRequested listener threw', { approvalId: e.approvalId, err });
+    }
+  }
+}
+
 // ── Approver picking ──
 
 /**
@@ -160,6 +193,28 @@ export async function pickApprovalDelivery(
     if (mg) return { userId, messagingGroup: mg };
   }
   return null;
+}
+
+/**
+ * Resolve every reachable approver in the list, deduped by user id. Used by
+ * the fan-out delivery path in `requestApproval` — every eligible admin gets a
+ * copy of the approval card and the first response wins. Each entry uses
+ * `ensureUserDm` (may openDM on cache miss); failed resolutions are skipped so
+ * one unreachable approver doesn't block the rest.
+ */
+export async function pickAllApprovalDeliveries(
+  approvers: string[],
+): Promise<Array<{ userId: string; messagingGroup: MessagingGroup }>> {
+  const results: Array<{ userId: string; messagingGroup: MessagingGroup }> = [];
+  for (const userId of approvers) {
+    try {
+      const mg = await ensureUserDm(userId);
+      if (mg) results.push({ userId, messagingGroup: mg });
+    } catch (err) {
+      log.warn('ensureUserDm failed for approver — skipping', { userId, err });
+    }
+  }
+  return results;
 }
 
 function channelTypeOf(userId: string): string {
@@ -214,12 +269,8 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
     return;
   }
 
-  const originChannelType = session.messaging_group_id
-    ? (getMessagingGroup(session.messaging_group_id)?.channel_type ?? '')
-    : '';
-
-  const target = await pickApprovalDelivery(approvers, originChannelType);
-  if (!target) {
+  const targets = await pickAllApprovalDeliveries(approvers);
+  if (targets.length === 0) {
     notifyAgent(session, `${action} failed: no DM channel found for any eligible approver.`);
     return;
   }
@@ -237,28 +288,52 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
     options_json: JSON.stringify(normalizedOptions),
   });
 
+  // Fire the requested-event so a channel can surface an ACTIONABLE card into
+  // the agent's own room (in addition to the per-approver inboxes below).
+  notifyApprovalRequested({
+    approvalId,
+    session,
+    action,
+    title,
+    question,
+    options: APPROVAL_OPTIONS,
+    approvers,
+    agentName,
+  });
+
   const adapter = getDeliveryAdapter();
   if (adapter) {
-    try {
-      await adapter.deliver(
-        target.messagingGroup.channel_type,
-        target.messagingGroup.platform_id,
-        null,
-        'chat-sdk',
-        JSON.stringify({
-          type: 'ask_question',
-          questionId: approvalId,
-          title,
-          question,
-          options: APPROVAL_OPTIONS,
-        }),
-      );
-    } catch (err) {
-      log.error('Failed to deliver approval card', { action, approvalId, err });
-      notifyAgent(session, `${action} failed: could not deliver approval request to ${target.userId}.`);
+    const cardJson = JSON.stringify({
+      type: 'ask_question',
+      questionId: approvalId,
+      title,
+      question,
+      options: APPROVAL_OPTIONS,
+    });
+    // Fan-out: deliver the same card (one approvalId) to every reachable
+    // approver. The first to respond wins; the rest get cleared in real time
+    // by the channel's approval-resolved listener. A per-target failure is
+    // logged but doesn't abort the others.
+    const delivered: string[] = [];
+    for (const target of targets) {
+      try {
+        await adapter.deliver(
+          target.messagingGroup.channel_type,
+          target.messagingGroup.platform_id,
+          null,
+          'chat-sdk',
+          cardJson,
+        );
+        delivered.push(target.userId);
+      } catch (err) {
+        log.error('Failed to deliver approval card to approver', { action, approvalId, approver: target.userId, err });
+      }
+    }
+    if (delivered.length === 0) {
+      notifyAgent(session, `${action} failed: could not deliver approval request to any approver.`);
       return;
     }
   }
 
-  log.info('Approval requested', { action, approvalId, agentName, approver: target.userId });
+  log.info('Approval requested', { action, approvalId, agentName, approvers: targets.map((t) => t.userId) });
 }
