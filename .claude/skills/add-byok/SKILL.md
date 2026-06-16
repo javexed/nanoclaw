@@ -62,6 +62,39 @@ the member's container at spawn, with the Anthropic leg bypassing OneCLI
 API-key path, the host *can* decrypt these tokens. See
 [docs/design/byok-oauth.md](../../../docs/design/byok-oauth.md).
 
+## Security review & residual risks
+
+This architecture passed an adversarial security review — per-member isolation,
+the no-per-turn-token model, fan-out discipline, approval routing, and own-key
+onboarding all held up. One credential-hygiene finding was fixed: `onecli` exec
+errors are now scrubbed, so a member's key can never reach the host log through
+an error message.
+
+None of the items below are cross-member key theft, but an operator should know
+them when deciding how far to harden:
+
+- **API key briefly in the process list during onboarding.** `onecli` (1.2.x)
+  takes the secret as a `--value` argument, so the key is momentarily visible in
+  `ps` / `/proc` on the host while it's stored. Fine on a single-operator host;
+  on a shared host, restrict who can read other users' processes.
+- **OAuth tokens are host-decryptable.** Unlike API keys (OneCLI-vault only), a
+  connected Claude **subscription** token is stored encrypted at
+  `data/byok-oauth.key` (AES-256-GCM, mode 0600). That key file is the crown
+  jewel — keep its filesystem perms tight, include it in your (encrypted)
+  backups, and treat host compromise as token compromise. Rotation = the member
+  reconnects; *Disconnect* wipes the stored token.
+- **The OAuth leg bypasses the OneCLI gateway.** For subscription members,
+  `NO_PROXY=api.anthropic.com` sends that one host straight to Anthropic with the
+  member's token, so egress-lockdown / gateway policy doesn't cover it. The
+  bypass is scoped to `api.anthropic.com` only — keep it that way.
+- **Revoke stops resolution; it doesn't delete the identity.** Disconnecting
+  wipes the member's secret/token; the per-member OneCLI agent lingers but is
+  inert (the session simply stops resolving to it). Revoke is the offboarding
+  lever.
+- **Trust anchor: OneCLI.** The whole model rests on the OneCLI gateway
+  enforcing per-identity secret isolation. Confirm that holds for your deployed
+  OneCLI version before relying on BYOK in a hostile room.
+
 ## Uninstall
 
 ```bash
@@ -81,5 +114,5 @@ unit-tested with a fake admin).
 
 ## Files
 
-- **BYOK-owned (copied):** `src/modules/byok/` (identity, db, onecli-admin, onboard, fanout, crypto, index), `src/db/migrations/016-byok-credentials.ts`, `src/db/migrations/017-byok-oauth.ts`.
+- **BYOK-owned (copied):** `src/modules/byok/` (identity, db, onecli-admin, onboard, fanout, crypto, index), `src/db/migrations/020-byok-credentials.ts`, `src/db/migrations/021-byok-oauth.ts`.
 - **Hooks (reversible 3-way patch):** `src/session-manager.ts`, `src/router.ts`, `src/container-runtime.ts`, `src/container-runner.ts`, `src/modules/index.ts`, `src/modules/approvals/onecli-approvals.ts`, `src/db/migrations/index.ts`, and the webchat files `migration.ts`, `migration.test.ts`, `db.ts`, `server.ts`, `public/webchat/{app.js,index.html,style.css}`. (No agent-runner files.)
