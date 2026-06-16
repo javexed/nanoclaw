@@ -1,0 +1,72 @@
+/**
+ * BYOK module — secure shared-room bring-your-own-key.
+ *
+ * Self-registers a session-key resolver so that, in a webchat room opted into
+ * a non-disabled credential mode, a member who has connected their own
+ * Anthropic key gets their OWN per-member session (keyed by userId). That
+ * session's container spawns under the member's OneCLI identity, so the
+ * gateway injects their key — no shared per-turn token, nothing to replay.
+ *
+ * Imported for side effects by src/modules/index.js (added by the installer).
+ */
+import { registerSessionKeyResolver, registerPerMemberInboundWriter } from '../../session-manager.js';
+import { registerAgentIdentityResolver, registerContainerEnvResolver } from '../../container-runtime.js';
+import { writeMemberTranscript } from './fanout.js';
+import { getDb, hasTable } from '../../db/connection.js';
+import { registerApprovalAgentGroupFallback } from '../approvals/onecli-approvals.js';
+import { getRoomCredentialMode, getRoomOauthAllowed } from '../../channels/webchat/db.js';
+import { userHasActiveKey, agentGroupForByokAgent, getOauthToken } from './db.js';
+import { byokAgentIdentifier } from './identity.js';
+
+registerSessionKeyResolver((mg, agentGroupId, userId) => {
+  // BYOK is webchat-only and opt-in per room. Fail safe to no override.
+  if (mg.channel_type !== 'webchat' || !userId) return null;
+  if (!hasTable(getDb(), 'webchat_room_settings')) return null;
+  const mode = getRoomCredentialMode(mg.platform_id);
+  const oauthAllowed = getRoomOauthAllowed(mg.platform_id);
+  // BYOK entirely off for this room (no API-key mode AND no OAuth) → no override.
+  if (mode === 'disabled' && !oauthAllowed) return null;
+  // A member with their own credential — API key OR OAuth subscription — gets
+  // their own per-member session keyed by userId. (An OAuth-only room has
+  // mode='disabled' but oauthAllowed=true, so this must not gate on mode.)
+  if (userHasActiveKey(userId, agentGroupId)) {
+    return { sessionMode: 'per-thread', threadId: userId };
+  }
+  // No key: API-key 'required' rooms decline with guidance; otherwise (optional,
+  // or OAuth-only) fall back to the shared session (no override).
+  if (mode === 'required') {
+    return { block: 'This room requires your own Anthropic key — connect it in the banner above the chat.' };
+  }
+  return null;
+});
+
+// A per-member session (thread_id = userId) whose member has an active key
+// spawns under the member's own OneCLI identity → gateway injects THEIR key.
+registerAgentIdentityResolver((agentGroupId, threadId) => {
+  if (threadId && userHasActiveKey(threadId, agentGroupId)) {
+    return byokAgentIdentifier(agentGroupId, threadId);
+  }
+  return null;
+});
+
+// OAuth members: inject the member's Claude subscription token into their
+// per-member container and carve the Anthropic leg out of the OneCLI proxy so
+// the SDK authenticates directly on their subscription (OneCLI can't carry an
+// OAuth token). API-key members get {} here — their key flows via OneCLI.
+registerContainerEnvResolver((agentGroupId, threadId): Record<string, string> => {
+  if (!threadId) return {};
+  const token = getOauthToken(threadId, agentGroupId);
+  if (!token) return {};
+  return { CLAUDE_CODE_OAUTH_TOKEN: token, NO_PROXY: 'api.anthropic.com' };
+});
+
+// Approval routing: reverse a BYOK per-member identity back to its agent group
+// so credentialed-action approvals from a member's container reach the group's
+// approvers.
+registerApprovalAgentGroupFallback((externalId) => agentGroupForByokAgent(externalId));
+
+// Shared context: on a per-member wake, write the full room transcript into the
+// member's session (current → trigger=1, rest → trigger=0).
+registerPerMemberInboundWriter(writeMemberTranscript);
+
+export {};

@@ -493,6 +493,53 @@ export function setRoomEngageDefault(roomId: string, mode: EngageDefault): void 
     .run(roomId, mode, Date.now());
 }
 
+// ── BYOK: per-room credential mode ──
+export type CredentialMode = 'disabled' | 'optional' | 'required';
+
+/** Secure by default: rooms with no settings row read as 'disabled'. */
+export function getRoomCredentialMode(roomId: string): CredentialMode {
+  const row = getDb().prepare(`SELECT credential_mode FROM webchat_room_settings WHERE room_id = ?`).get(roomId) as
+    | { credential_mode: CredentialMode }
+    | undefined;
+  return row?.credential_mode ?? 'disabled';
+}
+
+export function setRoomCredentialMode(roomId: string, mode: CredentialMode): void {
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_room_settings (room_id, engage_default, credential_mode, updated_at)
+       VALUES (?, 'broadcast', ?, ?)
+       ON CONFLICT(room_id) DO UPDATE SET credential_mode = excluded.credential_mode, updated_at = excluded.updated_at`,
+    )
+    .run(roomId, mode, Date.now());
+}
+
+/**
+ * BYOK OAuth per-room toggle (subscription tokens). Off by default; orthogonal
+ * to credential_mode. The column is absent until its migration runs, so read
+ * defensively and treat any error/missing value as not-allowed.
+ */
+export function getRoomOauthAllowed(roomId: string): boolean {
+  try {
+    const row = getDb().prepare(`SELECT oauth_allowed FROM webchat_room_settings WHERE room_id = ?`).get(roomId) as
+      | { oauth_allowed: number }
+      | undefined;
+    return (row?.oauth_allowed ?? 0) === 1;
+  } catch {
+    return false;
+  }
+}
+
+export function setRoomOauthAllowed(roomId: string, allowed: boolean): void {
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_room_settings (room_id, engage_default, oauth_allowed, updated_at)
+       VALUES (?, 'broadcast', ?, ?)
+       ON CONFLICT(room_id) DO UPDATE SET oauth_allowed = excluded.oauth_allowed, updated_at = excluded.updated_at`,
+    )
+    .run(roomId, allowed ? 1 : 0, Date.now());
+}
+
 // ── Messages ──
 
 function rowToMessage(row: WebchatMessageRow): WebchatMessage {

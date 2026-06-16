@@ -1275,6 +1275,7 @@ function joinRoom(roomId, roomName, jumpMessageId) {
   currentRoom = roomId;
   unreadRooms.delete(roomId);
   updateUnreadDots();
+  updateByokBanner(roomId);
   // Set agent name for thinking bubble from the agent wired to this room.
   const roomAgent = allAgents.find((b) => b.room_id === roomId);
   if (roomAgent) agentName = roomAgent.name;
@@ -1805,6 +1806,172 @@ async function jumpToMessage(messageId) {
  * 'error'. Errors linger longer and must be dismissed-or-time-out; all toasts
  * are click-to-dismiss. Returns the element so callers can remove it early.
  */
+// ── BYOK: per-member key banner ───────────────────────────────────────────
+// Shown in a room whose credential_mode is optional/required when the current
+// user hasn't connected their own Anthropic key. Connecting onboards the key
+// into the OneCLI vault (host-side) so the member's turns bill their account.
+async function updateByokBanner(roomId) {
+  const banner = $('#byok-banner');
+  const chip = $('#byok-chip');
+  if (!banner || !roomId) return;
+  const hideAll = () => {
+    banner.hidden = true;
+    if (chip) chip.hidden = true;
+  };
+  try {
+    const r = await authFetch(`/api/byok/credential?roomId=${encodeURIComponent(roomId)}`);
+    if (!r.ok) {
+      hideAll();
+      return;
+    }
+    const { connected, mode, credType, oauthAllowed } = await r.json();
+    // BYOK is surfaced when the room takes personal keys OR allows subscriptions.
+    if (mode === 'disabled' && !oauthAllowed) {
+      hideAll();
+      return;
+    }
+
+    // Connected → collapse to a small key chip in the header; the full banner
+    // is only the actionable "connect" prompt, which is done once connected.
+    if (connected) {
+      banner.hidden = true;
+      if (chip) {
+        chip.hidden = false;
+        chip.title =
+          credType === 'oauth_token'
+            ? 'Billing your Claude subscription · click to disconnect'
+            : 'Billing your personal Anthropic key · click to disconnect';
+      }
+      return;
+    }
+
+    // Not connected → show the actionable banner, hide the chip.
+    if (chip) chip.hidden = true;
+    const text = $('#byok-banner-text');
+    const connectBtn = $('#byok-connect-btn');
+    const oauthBtn = $('#byok-oauth-btn');
+    const input = $('#byok-key-input');
+    const oauthForm = $('#byok-oauth-form');
+    banner.hidden = false;
+    input.hidden = true;
+    input.value = '';
+    if (oauthForm) oauthForm.hidden = true;
+    // Describe only what this room actually offers, so the text matches the
+    // buttons shown (API key via "Connect your key"; subscription via the
+    // separate "Use my Claude subscription" button).
+    const apiOffered = mode !== 'disabled';
+    const what =
+      apiOffered && oauthAllowed
+        ? 'your Anthropic key or Claude subscription'
+        : oauthAllowed
+          ? 'your Claude subscription'
+          : 'your Anthropic key';
+    if (text)
+      text.textContent =
+        mode === 'required'
+          ? `This room requires ${what}.`
+          : `Connect ${what} to bill this room to your own account.`;
+    connectBtn.hidden = !apiOffered;
+    if (oauthBtn) oauthBtn.hidden = !oauthAllowed;
+  } catch {
+    hideAll();
+  }
+}
+
+$('#byok-connect-btn')?.addEventListener('click', async () => {
+  const input = $('#byok-key-input');
+  // First click reveals the input; second (with a value) submits.
+  if (input.hidden) {
+    input.hidden = false;
+    input.focus();
+    return;
+  }
+  const apiKey = input.value.trim();
+  if (!apiKey) return;
+  const r = await authFetch('/api/byok/credential', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+    body: JSON.stringify({ roomId: currentRoom, apiKey }),
+  });
+  if (r.ok) {
+    showToast('Connected your Anthropic key.', { kind: 'success' });
+    await updateByokBanner(currentRoom);
+  } else {
+    const err = await r.json().catch(() => ({}));
+    showToast('Failed to connect key: ' + (err.error || r.statusText), { kind: 'error' });
+  }
+});
+
+$('#byok-key-input')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('#byok-connect-btn').click();
+});
+
+async function disconnectByok() {
+  const r = await authFetch('/api/byok/credential', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+    body: JSON.stringify({ roomId: currentRoom }),
+  });
+  if (r.ok) {
+    showToast('Disconnected your key from this room.', { kind: 'success' });
+    await updateByokBanner(currentRoom);
+  } else {
+    const err = await r.json().catch(() => ({}));
+    showToast('Failed to disconnect: ' + (err.error || r.statusText), { kind: 'error' });
+  }
+}
+
+// The connected state lives as a compact key chip in the header; clicking it
+// disconnects (after a confirm), so the full banner no longer sits over the chat.
+$('#byok-chip')?.addEventListener('click', async () => {
+  const confirmed = await showConfirmModal({
+    title: 'Disconnect your credential?',
+    body: 'Your turns in this room will stop billing your own account and fall back to the shared key (or be declined if the room requires your own).',
+    confirmLabel: 'Disconnect',
+    destructive: true,
+  });
+  if (confirmed) await disconnectByok();
+});
+
+// ── BYOK OAuth: connect a Claude subscription token ────────────────────────
+$('#byok-oauth-btn')?.addEventListener('click', () => {
+  const form = $('#byok-oauth-form');
+  if (!form) return;
+  form.hidden = false;
+  $('#byok-oauth-input')?.focus();
+});
+
+$('#byok-oauth-cancel')?.addEventListener('click', () => {
+  const form = $('#byok-oauth-form');
+  if (form) form.hidden = true;
+  const input = $('#byok-oauth-input');
+  if (input) input.value = '';
+  const ack = $('#byok-oauth-ack');
+  if (ack) ack.checked = false;
+});
+
+$('#byok-oauth-submit')?.addEventListener('click', async () => {
+  const token = ($('#byok-oauth-input')?.value || '').trim();
+  const acknowledged = !!$('#byok-oauth-ack')?.checked;
+  if (!token) return;
+  if (!acknowledged) {
+    showToast('Please tick the acknowledgment to continue.', { kind: 'error' });
+    return;
+  }
+  const r = await authFetch('/api/byok/credential', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+    body: JSON.stringify({ roomId: currentRoom, type: 'oauth_token', token, acknowledged }),
+  });
+  if (r.ok) {
+    showToast('Connected your Claude subscription.', { kind: 'success' });
+    await updateByokBanner(currentRoom);
+  } else {
+    const err = await r.json().catch(() => ({}));
+    showToast('Failed to connect subscription: ' + (err.error || r.statusText), { kind: 'error' });
+  }
+});
+
 function showToast(message, { kind = 'info', timeout } = {}) {
   const container = $('#toasts');
   if (!container) return null;
@@ -4725,6 +4892,29 @@ async function openRoomDetail(roomId) {
 
   await refreshRoomWiredAgents(roomId);
 
+  // BYOK credential-mode selector — admin/owner only (canArchive implies that).
+  const credSection = $('#room-credential-mode-section');
+  if (credSection) {
+    if (room && room.canArchive) {
+      credSection.hidden = false;
+      authFetch(`/api/rooms/${encodeURIComponent(roomId)}/credential-mode`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (d) $('#room-credential-mode').value = d.mode;
+        })
+        .catch(() => {});
+      authFetch(`/api/rooms/${encodeURIComponent(roomId)}/oauth-allowed`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          const cb = $('#room-oauth-allowed');
+          if (d && cb) cb.checked = !!d.allowed;
+        })
+        .catch(() => {});
+    } else {
+      credSection.hidden = true;
+    }
+  }
+
   $('#room-detail').hidden = false;
   $('#members-panel').hidden = true;
   $('#agent-detail').hidden = true;
@@ -5047,6 +5237,39 @@ $('#room-name').addEventListener('keydown', (e) => {
 });
 $('#room-detail-close').addEventListener('click', closeRoomDetail);
 $('#room-delete').addEventListener('click', deleteCurrentRoom);
+$('#room-credential-mode')?.addEventListener('change', async (e) => {
+  if (!selectedRoomId) return;
+  const mode = e.target.value;
+  const r = await authFetch(`/api/rooms/${encodeURIComponent(selectedRoomId)}/credential-mode`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+    body: JSON.stringify({ mode }),
+  });
+  if (r.ok) {
+    showToast(`Personal-key mode set to "${mode}".`, { kind: 'success' });
+    if (selectedRoomId === currentRoom) updateByokBanner(currentRoom);
+  } else {
+    const err = await r.json().catch(() => ({}));
+    showToast('Failed to set mode: ' + (err.error || r.statusText), { kind: 'error' });
+  }
+});
+$('#room-oauth-allowed')?.addEventListener('change', async (e) => {
+  if (!selectedRoomId) return;
+  const allowed = !!e.target.checked;
+  const r = await authFetch(`/api/rooms/${encodeURIComponent(selectedRoomId)}/oauth-allowed`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+    body: JSON.stringify({ allowed }),
+  });
+  if (r.ok) {
+    showToast(`Subscription (OAuth) connections ${allowed ? 'allowed' : 'disallowed'}.`, { kind: 'success' });
+    if (selectedRoomId === currentRoom) updateByokBanner(currentRoom);
+  } else {
+    e.target.checked = !allowed; // revert on failure
+    const err = await r.json().catch(() => ({}));
+    showToast('Failed to update: ' + (err.error || r.statusText), { kind: 'error' });
+  }
+});
 $('#room-archive-toggle').addEventListener('click', async () => {
   if (!selectedRoomId) return;
   const room = lastRoomsList.find((r) => r.id === selectedRoomId);

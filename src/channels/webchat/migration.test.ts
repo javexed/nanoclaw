@@ -80,6 +80,8 @@ describe('moduleWebchat migration', () => {
       'webchat-initial',
       'webchat-message-fts',
       'webchat-models',
+      'webchat-room-credential-mode',
+      'webchat-room-oauth-allowed',
       'webchat-room-primes',
       'webchat-room-reads',
       'webchat-room-settings',

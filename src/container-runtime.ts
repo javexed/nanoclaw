@@ -11,6 +11,47 @@ import { log } from './log.js';
 /** The container runtime binary name. */
 export const CONTAINER_RUNTIME_BIN = 'docker';
 
+/**
+ * Optional override for a session's OneCLI agent identity, registered by an
+ * installed module (BYOK). Lets a per-member session spawn under the member's
+ * own OneCLI agent (so the gateway injects THEIR key) instead of the agent
+ * group's default identity. Core ships with no resolver → identity stays
+ * `agentGroup.id`. (threadId is the per-member session's key = the userId.)
+ */
+type AgentIdentityResolver = (agentGroupId: string, threadId: string | null) => string | null;
+let agentIdentityResolver: AgentIdentityResolver | null = null;
+export function registerAgentIdentityResolver(fn: AgentIdentityResolver): void {
+  agentIdentityResolver = fn;
+}
+export function resolveAgentIdentity(agentGroupId: string, threadId: string | null): string | null {
+  try {
+    return agentIdentityResolver ? agentIdentityResolver(agentGroupId, threadId) : null;
+  } catch {
+    return null; // a resolver bug must never break spawning
+  }
+}
+
+/**
+ * Extra container env vars contributed by an installed module for a specific
+ * (agent group, session) — e.g. BYOK injects CLAUDE_CODE_OAUTH_TOKEN +
+ * NO_PROXY for an OAuth member so the SDK authenticates directly on the
+ * member's subscription, bypassing OneCLI for the Anthropic leg only. These are
+ * applied AFTER the OneCLI gateway env so they take precedence (last `-e` wins).
+ * Core ships with no resolver → {}.
+ */
+type ContainerEnvResolver = (agentGroupId: string, threadId: string | null) => Record<string, string>;
+let containerEnvResolver: ContainerEnvResolver | null = null;
+export function registerContainerEnvResolver(fn: ContainerEnvResolver): void {
+  containerEnvResolver = fn;
+}
+export function resolveContainerEnv(agentGroupId: string, threadId: string | null): Record<string, string> {
+  try {
+    return containerEnvResolver ? containerEnvResolver(agentGroupId, threadId) : {};
+  } catch {
+    return {}; // a resolver bug must never break spawning
+  }
+}
+
 /** CLI args needed for the container to resolve the host gateway. */
 export function hostGatewayArgs(): string[] {
   // On Linux, host.docker.internal isn't built-in — add it explicitly

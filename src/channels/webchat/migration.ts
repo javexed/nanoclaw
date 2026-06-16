@@ -501,3 +501,38 @@ export const moduleWebchatRoomReads: Migration = {
     `);
   },
 };
+
+/**
+ * BYOK: per-room credential mode.
+ *   disabled (default) — one shared session/agent; no per-member sessions.
+ *   optional           — members with a connected key get their own per-member
+ *                        session billed to them; others use the shared agent.
+ *   required           — every member must connect their own key.
+ * Secure-by-default: rooms start 'disabled' until an admin opts in.
+ */
+export const moduleWebchatRoomCredentialMode: Migration = {
+  version: 108,
+  name: 'webchat-room-credential-mode',
+  up(db: Database.Database) {
+    db.exec(`
+      ALTER TABLE webchat_room_settings ADD COLUMN credential_mode TEXT NOT NULL DEFAULT 'disabled';
+    `);
+  },
+};
+
+
+/**
+ * BYOK OAuth: per-room toggle allowing members to connect a Claude *subscription*
+ * (OAuth) token, orthogonal to `credential_mode` (which governs API-key BYOK).
+ * Off by default — a room never accepts OAuth tokens until an owner/admin opts
+ * in. See docs/design/byok-oauth.md.
+ */
+export const moduleWebchatRoomOauthAllowed: Migration = {
+  version: 109,
+  name: 'webchat-room-oauth-allowed',
+  up(db: Database.Database) {
+    db.exec(`
+      ALTER TABLE webchat_room_settings ADD COLUMN oauth_allowed INTEGER NOT NULL DEFAULT 0;
+    `);
+  },
+};

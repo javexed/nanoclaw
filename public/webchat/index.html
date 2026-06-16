@@ -110,9 +110,31 @@
         <div id="chat-header">
           <button id="mobile-back" class="mobile-back" aria-label="Back to rooms"><svg class="icon" aria-hidden="true"><use href="#i-chevron-left"></use></svg></button>
           <span id="room-name" role="button" tabindex="0" title="Room settings">Select a room</span>
+          <button id="byok-chip" class="byok-chip" hidden aria-label="Your personal credential — click to disconnect" title="Your personal credential">🔑</button>
           <button id="members-toggle" class="members-toggle" hidden aria-label="Show room members">0</button>
         </div>
         <div id="connection-banner" class="connection-banner">Connection lost. Reconnecting…</div>
+        <div id="byok-banner" class="byok-banner" hidden>
+          <span id="byok-banner-text">This room uses personal Anthropic keys.</span>
+          <input id="byok-key-input" type="password" placeholder="sk-ant-…" autocomplete="off" spellcheck="false" hidden />
+          <button id="byok-connect-btn" type="button">Connect your key</button>
+          <button id="byok-oauth-btn" type="button" hidden>Use my Claude subscription</button>
+          <div id="byok-oauth-form" class="byok-oauth-form" hidden>
+            <p class="byok-oauth-help">
+              Run <code>claude setup-token</code> in your terminal, then paste the
+              <code>sk-ant-oat…</code> token below. It bills <strong>your</strong> Claude subscription.
+            </p>
+            <input id="byok-oauth-input" type="password" placeholder="sk-ant-oat…" autocomplete="off" spellcheck="false" />
+            <label class="byok-oauth-ack">
+              <input id="byok-oauth-ack" type="checkbox" />
+              I'm connecting <strong>my own</strong> Claude subscription for <strong>my own</strong> use.
+            </label>
+            <div class="byok-oauth-actions">
+              <button id="byok-oauth-submit" type="button">Connect subscription</button>
+              <button id="byok-oauth-cancel" type="button" class="secondary">Cancel</button>
+            </div>
+          </div>
+        </div>
         <div id="chat-body">
           <div id="chat-content">
             <div

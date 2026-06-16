@@ -180,6 +180,15 @@ import { initWebPush, isValidPushEndpoint } from './push.js';
 import { redactSensitiveData } from './redact.js';
 import { hasAdminPrivilege, isAnyAdmin, isGlobalAdmin, isOwner, warnIfNoPermissionsModule } from './roles.js';
 import { canAccessRoom, canArchiveRoom, filterRoomsForUser } from './access.js';
+import {
+  getRoomCredentialMode,
+  setRoomCredentialMode,
+  getRoomOauthAllowed,
+  setRoomOauthAllowed,
+} from './db.js';
+import { onboardByokCredential, onboardByokOauth, revokeByokCredential } from '../../modules/byok/onboard.js';
+import { realOnecliAdmin } from '../../modules/byok/onecli-admin.js';
+import { userHasActiveKey, getByokCredential } from '../../modules/byok/db.js';
 import { broadcast, broadcastRooms } from './state.js';
 import { setupWebSocket } from './ws.js';
 
@@ -460,6 +469,127 @@ async function handleHttp(
     // anything; a scoped admin may wire an agent THEY administer to a room
     // they can access.
     return addAgentToRoomHandler(req, res, decodeURIComponent(roomAgentsMatch[1]), userId);
+  }
+
+  // ── BYOK: per-room credential mode (admin) ────────────────────────────────
+  const roomCredModeMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/credential-mode$/);
+  if (roomCredModeMatch && method === 'GET') {
+    const roomId = decodeURIComponent(roomCredModeMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    return json(res, 200, { mode: getRoomCredentialMode(roomId) });
+  }
+  if (roomCredModeMatch && method === 'PUT') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const roomId = decodeURIComponent(roomCredModeMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    // Owner, or an admin over ANY agent wired to this room.
+    const allowed = isOwner(userId) || getAgentsForWebchatRoom(roomId).some((a) => hasAdminPrivilege(userId, a.id));
+    if (!allowed) return json(res, 403, { error: 'Admin privilege required' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { mode?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    if (body.mode !== 'disabled' && body.mode !== 'optional' && body.mode !== 'required') {
+      return json(res, 400, { error: "mode must be 'disabled', 'optional', or 'required'" });
+    }
+    setRoomCredentialMode(roomId, body.mode);
+    return json(res, 200, { ok: true, mode: body.mode });
+  }
+
+  // ── BYOK OAuth: per-room toggle allowing subscription tokens (admin) ───────
+  const roomOauthMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/oauth-allowed$/);
+  if (roomOauthMatch && method === 'GET') {
+    const roomId = decodeURIComponent(roomOauthMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    return json(res, 200, { allowed: getRoomOauthAllowed(roomId) });
+  }
+  if (roomOauthMatch && method === 'PUT') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const roomId = decodeURIComponent(roomOauthMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    const allowed = isOwner(userId) || getAgentsForWebchatRoom(roomId).some((a) => hasAdminPrivilege(userId, a.id));
+    if (!allowed) return json(res, 403, { error: 'Admin privilege required' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { allowed?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    if (typeof body.allowed !== 'boolean') return json(res, 400, { error: 'allowed must be a boolean' });
+    setRoomOauthAllowed(roomId, body.allowed);
+    return json(res, 200, { ok: true, allowed: body.allowed });
+  }
+
+  // ── BYOK: a member connects / disconnects THEIR own Anthropic key ──────────
+  // userId is the server-resolved caller — a user can only manage their own key.
+  if (url.pathname === '/api/byok/credential' && (method === 'POST' || method === 'DELETE' || method === 'GET')) {
+    const reqRoomId =
+      method === 'GET'
+        ? (url.searchParams.get('roomId') ?? '')
+        : undefined; // POST/DELETE read roomId from the body below
+    if (method === 'GET') {
+      const roomId = decodeURIComponent(reqRoomId ?? '');
+      if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+      if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+      const groups = getAgentsForWebchatRoom(roomId);
+      const connected = groups.length > 0 && groups.every((g) => userHasActiveKey(userId, g.id));
+      // Report the connected credential type so the UI shows the right banner.
+      const credType =
+        connected && groups[0] ? (getByokCredential(userId, groups[0].id)?.cred_type ?? null) : null;
+      return json(res, 200, {
+        connected,
+        credType,
+        mode: getRoomCredentialMode(roomId),
+        oauthAllowed: getRoomOauthAllowed(roomId),
+      });
+    }
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { roomId?: unknown; apiKey?: unknown; type?: unknown; token?: unknown; acknowledged?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    const roomId = typeof body.roomId === 'string' ? body.roomId : '';
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    const groups = getAgentsForWebchatRoom(roomId);
+    if (groups.length === 0) return json(res, 400, { error: 'Room has no wired agent' });
+    const credType = body.type === 'oauth_token' ? 'oauth_token' : 'api_key';
+    try {
+      if (method === 'POST' && credType === 'oauth_token') {
+        // Gate 1: the room must allow OAuth (owner/admin opt-in).
+        if (!getRoomOauthAllowed(roomId))
+          return json(res, 403, { error: 'This room does not allow subscription (OAuth) connections.' });
+        // Gate 2: explicit own-use acknowledgment.
+        if (body.acknowledged !== true)
+          return json(res, 400, { error: 'You must acknowledge this connects your own subscription for your own use.' });
+        const token = typeof body.token === 'string' ? body.token.trim() : '';
+        if (!/^sk-ant-oat/.test(token))
+          return json(res, 400, { error: 'Expected a Claude subscription token from `claude setup-token` (sk-ant-oat…)' });
+        for (const g of groups) await onboardByokOauth(realOnecliAdmin, userId, g.id, userId, token);
+      } else if (method === 'POST') {
+        const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
+        if (!/^sk-ant-/.test(apiKey)) return json(res, 400, { error: 'Expected an Anthropic API key (sk-ant-…)' });
+        for (const g of groups) await onboardByokCredential(realOnecliAdmin, userId, g.id, userId, apiKey);
+      } else {
+        for (const g of groups) await revokeByokCredential(realOnecliAdmin, userId, g.id);
+      }
+    } catch (err) {
+      log.error('BYOK onboard/revoke failed', { userId, roomId, err: err instanceof Error ? err.message : err });
+      return json(res, 502, { error: 'Credential setup failed — check OneCLI is running.' });
+    }
+    return json(res, 200, { ok: true });
   }
 
   const roomAgentMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/agents\/([^/]+)$/);
