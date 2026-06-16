@@ -38,6 +38,7 @@ BASE=$(git merge-base "$BR" HEAD)
 # Same deltas install applied. reverse-check guards idempotency: if a hook
 # isn't currently applied (already removed, or never applied), skip it.
 HOOK_FILES=(
+  CLAUDE.md
   src/modules/agent-to-agent/create-agent.ts
   src/modules/agent-to-agent/agent-route.ts
   src/modules/approvals/primitive.ts
@@ -53,6 +54,9 @@ HOOK_FILES=(
   src/delivery.ts
   src/index.ts
   src/router.ts
+  src/types.ts
+  src/db/agent-groups.ts
+  pnpm-workspace.yaml
   src/session-manager.ts
 )
 echo "→ Reversing webchat core-file hooks …"
@@ -79,6 +83,7 @@ rm -rf \
   src/session-teardown.ts \
   src/session-teardown.test.ts \
   src/router.agent-loopback.test.ts \
+  src/router.agent-status.test.ts \
   src/router.backtick-escape.test.ts \
   container/agent-runner/src/graceful-degradation.test.ts
 

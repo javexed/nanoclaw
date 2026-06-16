@@ -343,6 +343,8 @@ $('#overflow-menu')?.addEventListener('click', (e) => {
   const action = item.dataset.action;
   if (action === 'agents') openManage('agents');
   else if (action === 'models') openManage('models');
+  else if (action === 'topology') toggleTopology();
+  else if (action === 'matrix') toggleMatrix();
   else if (action === 'dashboard') toggleDashboard();
   else if (action === 'permissions') togglePermissions();
   else if (action === 'settings') openSettings();
@@ -630,10 +632,11 @@ $('#notif-toggle').addEventListener('change', async () => {
         $('#notif-toggle').checked = false;
         settings.notifications = false;
         saveSettings(settings);
+        showToast('Notifications need browser permission to turn on', { kind: 'info' });
         return;
       }
     }
-    await enableWebPush();
+    await enableWebPush({ interactive: true });
   } else {
     await disableWebPush();
   }
@@ -650,59 +653,56 @@ function urlBase64ToUint8Array(base64String) {
   return buf;
 }
 
-async function enableWebPush() {
+// Push setup is operational, not conversational — it must NOT write to the chat
+// transcript (see DESIGN.md §4). Step-by-step progress goes to the console;
+// only outcomes surface, and only for an explicit user action (the Settings
+// toggle, interactive=true) via toast. The silent auto-resubscribe on reload
+// stays quiet on success and logs failures to the console.
+async function enableWebPush({ interactive = false } = {}) {
+  const fail = (msg, err) => {
+    console.warn('[push]', msg, err ?? '');
+    if (interactive) showToast(msg, { kind: 'error' });
+  };
   try {
-    if (!('serviceWorker' in navigator)) {
-      appendSystem('Push: service worker not supported');
-      return;
-    }
+    if (!('serviceWorker' in navigator)) return fail('Notifications aren’t supported in this browser');
     if (!('PushManager' in window)) {
-      appendSystem(
-        'Push: PushManager not supported. On iOS, install this PWA to the home screen and launch it from there.',
-      );
+      console.warn('[push] PushManager unavailable');
+      if (interactive) {
+        showToast('To enable notifications on iOS, add this app to your home screen and open it from there', {
+          kind: 'info',
+          timeout: 6000,
+        });
+      }
       return;
     }
-    appendSystem('Push: fetching VAPID key…');
+    console.log('[push] fetching VAPID key');
     const keyRes = await authFetch('/api/push/vapid-public');
-    if (!keyRes.ok) {
-      appendSystem('Push: server missing VAPID key (status ' + keyRes.status + ')');
-      return;
-    }
+    if (!keyRes.ok) return fail('Couldn’t enable notifications — the server has no push key');
     const { key } = await keyRes.json();
-    if (!key) {
-      appendSystem('Push: empty VAPID key');
-      return;
-    }
+    if (!key) return fail('Couldn’t enable notifications — the server has no push key');
 
-    appendSystem('Push: waiting for service worker…');
     const reg = await navigator.serviceWorker.ready;
-
     let sub = await reg.pushManager.getSubscription();
     if (!sub) {
-      appendSystem('Push: subscribing (accept the prompt)…');
+      console.log('[push] subscribing');
       sub = await reg.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: urlBase64ToUint8Array(key),
       });
     } else {
-      appendSystem('Push: reusing existing subscription');
+      console.log('[push] reusing existing subscription');
     }
 
-    appendSystem('Push: saving subscription on server…');
     const res = await authFetch('/api/push/subscribe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(sub.toJSON()),
     });
-    if (!res.ok) {
-      appendSystem('Push: server rejected subscription (status ' + res.status + ')');
-      return;
-    }
-    appendSystem('Push: subscribed ✓ (endpoint ' + sub.endpoint.slice(-24) + ')');
-    console.log('[push] subscribed');
+    if (!res.ok) return fail('Couldn’t save your notification subscription');
+    console.log('[push] subscribed', sub.endpoint.slice(-24));
+    if (interactive) showToast('Notifications enabled', { kind: 'success' });
   } catch (err) {
-    console.error('[push] subscribe failed:', err);
-    appendSystem('Push: ' + (err && err.message ? err.message : String(err)));
+    fail('Couldn’t enable notifications', err);
   }
 }
 
@@ -805,7 +805,7 @@ function connect() {
                   // Capture before append: if the user was scrolled up reading
                   // history when the WS dropped, don't yank them down on reconnect.
                   const wasNearBottom = isNearBottom();
-                  missed.forEach(appendMessage);
+                  missed.forEach((m) => appendMessage(m));
                   setLastSeenMessageId(missed[missed.length - 1].id);
                   if (wasNearBottom) scrollToBottom();
                   else updateScrollButton();
@@ -823,7 +823,13 @@ function connect() {
         break;
       case 'history':
         $('#messages').innerHTML = '';
-        msg.messages.forEach(appendMessage);
+        msg.messages.forEach((m) => appendMessage(m));
+        // Reset scroll-back pagination for the freshly loaded room. The oldest
+        // rendered id anchors the first ?before_id= fetch; a window shorter than
+        // the server's initial page (50) means there's nothing older to load.
+        oldestMessageId = msg.messages.length ? msg.messages[0].id : null;
+        noMoreOlder = msg.messages.length < 50;
+        loadingOlder = false;
         if (msg.messages.length === 0) {
           $('#messages').innerHTML = '<div class="empty-state">No messages yet. Start the conversation!</div>';
         }
@@ -1211,7 +1217,7 @@ function joinRoom(roomId, roomName) {
   $('#members-panel').hidden = true;
   $('#members-overlay').classList.remove('visible');
   renderMembers([]);
-  $('#messages').innerHTML = '<div class="empty-state">Loading...</div>';
+  $('#messages').innerHTML = '<div class="empty-state">Loading…</div>';
   ws.send(JSON.stringify({ type: 'join', room_id: roomId }));
   sessionStorage.setItem('lastRoom', roomId);
   $('#room-name').textContent = `#${roomId}`;
@@ -1225,6 +1231,79 @@ function joinRoom(roomId, roomName) {
   // doesn't have to wait on a fetch.
   refreshWiredAgentsForCurrentRoom();
 }
+
+// ── Message search (FTS) ────────────────────────────────────────────────────
+// Sidebar search across the user's accessible rooms. Results replace the room
+// list while a query is active; clearing the box (or picking a result) restores
+// it. Backend: GET /api/search (scoped server-side to rooms the user can see).
+let searchDebounce = null;
+
+function clearRoomSearch() {
+  const list = $('#search-results');
+  if (list) {
+    list.hidden = true;
+    list.innerHTML = '';
+  }
+  const roomList = $('#room-list');
+  if (roomList) roomList.hidden = false;
+}
+
+function renderSearchResults(results) {
+  const list = $('#search-results');
+  if (!list) return;
+  if (!results || results.length === 0) {
+    list.innerHTML = '<li class="search-empty">No matches</li>';
+  } else {
+    list.innerHTML = results
+      .map((r) => {
+        // snippet carries «…» highlight delimiters from FTS5 — escape the text
+        // first (XSS-safe), then turn the markers into <mark>.
+        const snip = esc(r.snippet || '')
+          .replace(/«/g, '<mark>')
+          .replace(/»/g, '</mark>');
+        return `<li class="search-result" data-room-id="${esc(r.roomId)}" data-room-name="${esc(r.roomName)}">
+            <div class="search-result-head">
+              <span class="search-result-room">#${esc(r.roomName)}</span>
+              <span class="search-result-time">${esc(relativeTime(r.createdAt))}</span>
+            </div>
+            <div class="search-result-snip"><span class="search-result-sender">${esc(r.sender)}:</span> ${snip}</div>
+          </li>`;
+      })
+      .join('');
+  }
+  list.hidden = false;
+  const roomList = $('#room-list');
+  if (roomList) roomList.hidden = true;
+}
+
+$('#room-search')?.addEventListener('input', (e) => {
+  const q = e.target.value.trim();
+  clearTimeout(searchDebounce);
+  if (!q) {
+    clearRoomSearch();
+    return;
+  }
+  searchDebounce = setTimeout(async () => {
+    try {
+      const r = await authFetch(`/api/search?q=${encodeURIComponent(q)}`);
+      if (!r.ok) return renderSearchResults([]); // e.g. backend without the route yet
+      const body = await r.json();
+      renderSearchResults(body.results || []);
+    } catch {
+      renderSearchResults([]);
+    }
+  }, 250);
+});
+
+$('#search-results')?.addEventListener('click', (e) => {
+  const li = e.target.closest('.search-result');
+  if (!li) return;
+  const { roomId, roomName } = li.dataset;
+  const input = $('#room-search');
+  if (input) input.value = '';
+  clearRoomSearch();
+  joinRoom(roomId, roomName);
+});
 
 // ── Messages ──────────────────────────────────────────────────────────────
 function createDeleteButton(messageId) {
@@ -1286,7 +1365,7 @@ function formatTime(ts) {
 // users in the card's `approvers` list — others see a read-only "pending" note.
 // A resolved card renders as a static note. Tagged with data-question-id so the
 // approval_resolved handler can update it in place.
-function appendApprovalCard(msg) {
+function appendApprovalCard(msg, beforeNode) {
   let data = {};
   try {
     data = JSON.parse(msg.content) || {};
@@ -1318,11 +1397,14 @@ function appendApprovalCard(msg) {
     wrap.appendChild(note);
   }
   const tb = $('#messages .thinking-bubble');
-  if (tb) $('#messages').insertBefore(wrap, tb);
+  if (beforeNode) $('#messages').insertBefore(wrap, beforeNode);
+  else if (tb) $('#messages').insertBefore(wrap, tb);
   else $('#messages').appendChild(wrap);
 }
 
-function appendMessage(msg, statusText) {
+// `beforeNode`, when given, inserts the message before that node instead of at
+// the bottom — used to PREPEND older messages during scroll-back pagination.
+function appendMessage(msg, statusText, beforeNode) {
   if (msg.type === 'system') {
     appendSystem(msg.message);
     return;
@@ -1330,7 +1412,7 @@ function appendMessage(msg, statusText) {
   // In-room approval cards (actionable for eligible approvers; the action still
   // posts to the same /respond endpoint, and resolution clears it everywhere).
   if (msg.message_type === 'approval' || msg.message_type === 'approval_resolved') {
-    appendApprovalCard(msg);
+    appendApprovalCard(msg, beforeNode);
     return;
   }
   const div = document.createElement('div');
@@ -1446,9 +1528,12 @@ function appendMessage(msg, statusText) {
     status.textContent = statusText;
     div.appendChild(status);
   }
-  // Insert before the thinking bubble so it always stays at the bottom
+  // Prepend (older-message pagination) inserts before the given node; otherwise
+  // insert before the thinking bubble so live messages stay at the bottom.
   const thinkingBubble = $('#messages .thinking-bubble');
-  if (thinkingBubble) {
+  if (beforeNode) {
+    $('#messages').insertBefore(div, beforeNode);
+  } else if (thinkingBubble) {
     $('#messages').insertBefore(div, thinkingBubble);
   } else {
     $('#messages').appendChild(div);
@@ -1467,6 +1552,58 @@ function appendSystem(text) {
     $('#messages').appendChild(div);
   }
   return div;
+}
+
+// ── Scroll-back (older-message pagination) ──────────────────────────────────
+// Join loads only the most recent window; older history (it's all in SQLite)
+// is fetched on demand when the user scrolls to the top, via ?before_id=. State
+// is reset per room in the `history` handler above.
+let oldestMessageId = null;
+let loadingOlder = false;
+let noMoreOlder = false;
+
+async function loadOlderMessages() {
+  if (loadingOlder || noMoreOlder || !currentRoom || !oldestMessageId) return;
+  loadingOlder = true;
+  const el = $('#messages');
+  // Snapshot scroll geometry so the viewport stays pinned to the same message
+  // after prepending — on desktop #messages scrolls, on mobile the window does.
+  const prevElHeight = el.scrollHeight;
+  const prevElTop = el.scrollTop;
+  const prevDocHeight = document.documentElement.scrollHeight;
+  const prevWinY = window.scrollY;
+  try {
+    const r = await authFetch(
+      `/api/rooms/${encodeURIComponent(currentRoom)}/messages?before_id=${encodeURIComponent(oldestMessageId)}`,
+    );
+    if (!r.ok) return;
+    const older = await r.json();
+    if (!Array.isArray(older) || older.length === 0) {
+      noMoreOlder = true;
+      return;
+    }
+    // Dedupe against what's already rendered: guards page-boundary overlaps and
+    // stays correct if the request hit a backend that doesn't honor before_id
+    // (it would echo recent messages — all already on screen → nothing fresh).
+    const fresh = older.filter((m) => !m.id || !el.querySelector(`[data-message-id="${CSS.escape(m.id)}"]`));
+    if (fresh.length === 0) {
+      noMoreOlder = true;
+      return;
+    }
+    const anchor = el.firstChild; // current oldest rendered node
+    fresh.forEach((m) => appendMessage(m, undefined, anchor));
+    oldestMessageId = older[0].id; // advance from the oldest FETCHED id (paging anchor)
+    if (older.length < 50) noMoreOlder = true; // short page → reached the start
+    // Restore position: add the height the prepend introduced.
+    requestAnimationFrame(() => {
+      el.scrollTop = prevElTop + (el.scrollHeight - prevElHeight);
+      window.scrollTo(0, prevWinY + (document.documentElement.scrollHeight - prevDocHeight));
+    });
+  } catch {
+    /* leave noMoreOlder false so a later scroll-to-top retries */
+  } finally {
+    loadingOlder = false;
+  }
 }
 
 // ── Toasts + confirm modal ────────────────────────────────────────────────
@@ -1536,7 +1673,7 @@ function showConfirmModal({ title, body, confirmLabel = 'Confirm', cancelLabel =
     cancelBtn.textContent = cancelLabel;
     const confirmBtn = document.createElement('button');
     confirmBtn.type = 'button';
-    confirmBtn.className = destructive ? 'btn-delete' : 'btn-save';
+    confirmBtn.className = destructive ? 'btn btn-danger' : 'btn btn-primary';
     confirmBtn.textContent = confirmLabel;
     footer.append(cancelBtn, confirmBtn);
 
@@ -1620,8 +1757,8 @@ function stageFile(file) {
   input.focus();
   input.placeholder =
     pendingFiles.length === 1
-      ? `Add a message about ${file.name}...`
-      : `Add a message about ${pendingFiles.length} files...`;
+      ? `Add a message about ${file.name}…`
+      : `Add a message about ${pendingFiles.length} files…`;
 }
 
 function stageFiles(fileList) {
@@ -1641,8 +1778,8 @@ function removeStagedFile(id) {
     renderFilePreview();
     $('#message-input').placeholder =
       pendingFiles.length === 1
-        ? `Add a message about ${pendingFiles[0].file.name}...`
-        : `Add a message about ${pendingFiles.length} files...`;
+        ? `Add a message about ${pendingFiles[0].file.name}…`
+        : `Add a message about ${pendingFiles.length} files…`;
   }
 }
 
@@ -1655,7 +1792,7 @@ function clearStagedFiles() {
     preview.hidden = true;
     preview.innerHTML = '';
   }
-  $('#message-input').placeholder = 'Message...';
+  $('#message-input').placeholder = 'Message…';
 }
 
 function renderFilePreview() {
@@ -1747,7 +1884,7 @@ function uuidv4() {
 async function uploadFileChunked(file, caption) {
   const uploadId = uuidv4();
   const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-  const statusMsg = appendSystem(`Uploading ${file.name} (0/${totalChunks})...`);
+  const statusMsg = appendSystem(`Uploading ${file.name} (0/${totalChunks})…`);
 
   for (let i = 0; i < totalChunks; i++) {
     const start = i * CHUNK_SIZE;
@@ -1782,7 +1919,7 @@ async function uploadFileChunked(file, caption) {
       if (statusMsg) statusMsg.textContent = `Upload failed: ${err.message}`;
       return;
     }
-    if (statusMsg) statusMsg.textContent = `Uploading ${file.name} (${i + 1}/${totalChunks})...`;
+    if (statusMsg) statusMsg.textContent = `Uploading ${file.name} (${i + 1}/${totalChunks})…`;
   }
   if (statusMsg) statusMsg.remove();
 }
@@ -1927,6 +2064,13 @@ window.addEventListener('keydown', (e) => {
 
 function handleScroll() {
   updateScrollButton();
+  // Near the top → pull in older history. #messages scrolls on desktop, the
+  // window scrolls on mobile; check whichever actually overflows so we don't
+  // false-trigger on the axis that never moves.
+  const el = $('#messages');
+  const elScrolls = el.scrollHeight - el.clientHeight > 4;
+  const winScrolls = document.documentElement.scrollHeight - window.innerHeight > 4;
+  if ((elScrolls && el.scrollTop < 80) || (winScrolls && window.scrollY < 80)) loadOlderMessages();
   const now = Date.now();
   const userDriven = now - lastUserScrollAt < 300 || now < momentumUntil;
   if (!isNearBottom()) {
@@ -2580,10 +2724,35 @@ $('#mobile-back').addEventListener('click', () => {
 
 let dashboardActive = false;
 
+// The full-width surfaces (dashboard/permissions/topology/matrix) are flex
+// siblings of #chat — only one may be visible at a time, or they'd split the
+// pane. Each opener hides its peers synchronously (the router stack still
+// unwinds normally on back).
+function hideOtherFullViews(keep) {
+  if (keep !== 'dashboard' && dashboardActive) {
+    dashboardActive = false;
+    $('#dashboard').hidden = true;
+    $('#dash-btn')?.classList.remove('active');
+  }
+  if (keep !== 'permissions' && permsActive) {
+    permsActive = false;
+    $('#permissions').hidden = true;
+  }
+  if (keep !== 'topology' && topologyActive) {
+    topologyActive = false;
+    $('#topology').hidden = true;
+  }
+  if (keep !== 'matrix' && matrixActive) {
+    matrixActive = false;
+    $('#matrix').hidden = true;
+  }
+}
+
 function openDashboard() {
   closeAgentDetail();
   closeRoomDetail();
   closeModelDetail();
+  hideOtherFullViews('dashboard');
   dashboardActive = true;
   $('#chat').hidden = true;
   $('#dashboard').hidden = false;
@@ -2609,6 +2778,306 @@ $('#dash-btn')?.addEventListener('click', toggleDashboard); // ▦ quick-toggle,
 $('#dash-back').addEventListener('click', toggleDashboard);
 $('#dash-refresh').addEventListener('click', refreshDashboard);
 
+// ── Topology (room → agent → model explore graph) ──────────────────────────
+// Full-width SVG view (no graph library): fixed three columns, barycenter
+// ordering to minimize edge crossings. Fan-in = load; a node with no lines is
+// unused. Data: GET /api/topology (access-scoped server-side).
+let topologyActive = false;
+function openTopology() {
+  closeAgentDetail();
+  closeRoomDetail();
+  closeModelDetail();
+  hideOtherFullViews('topology');
+  topologyActive = true;
+  $('#chat').hidden = true;
+  $('#topology').hidden = false;
+  $('#app').classList.add('in-dashboard'); // reuse the full-view mobile layout
+  $('#app').classList.remove('in-room');
+  refreshTopology();
+  openView('topology', teardownTopology);
+}
+function teardownTopology() {
+  topologyActive = false;
+  $('#chat').hidden = false;
+  $('#topology').hidden = true;
+  $('#app').classList.remove('in-dashboard');
+}
+function toggleTopology() {
+  if (topologyActive) closeView('topology');
+  else openTopology();
+}
+$('#topology-back')?.addEventListener('click', toggleTopology);
+$('#topology-refresh')?.addEventListener('click', refreshTopology);
+
+async function refreshTopology() {
+  const canvas = $('#topology-canvas');
+  if (!canvas) return;
+  canvas.textContent = 'Loading…';
+  try {
+    const r = await authFetch('/api/topology');
+    if (!r.ok) {
+      canvas.textContent = 'Could not load topology.';
+      return;
+    }
+    renderTopology(await r.json());
+  } catch {
+    canvas.textContent = 'Could not load topology.';
+  }
+}
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function svgEl(tag, attrs) {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const k in attrs) el.setAttribute(k, attrs[k]);
+  return el;
+}
+
+function renderTopology(data) {
+  const canvas = $('#topology-canvas');
+  if (!canvas) return;
+  canvas.textContent = '';
+  const rooms = data.rooms || [];
+  const agents = data.agents || [];
+  const models = data.models || [];
+  const edges = data.edges || [];
+  if (rooms.length === 0) {
+    canvas.textContent = 'No rooms yet.';
+    return;
+  }
+
+  // Adjacency.
+  const push = (m, k, v) => {
+    if (!m.has(k)) m.set(k, []);
+    m.get(k).push(v);
+  };
+  const agentRooms = new Map();
+  const roomAgents = new Map();
+  const modelAgents = new Map();
+  for (const e of edges) {
+    push(agentRooms, e.agent, e.room);
+    push(roomAgents, e.room, e.agent);
+  }
+  for (const a of agents) if (a.modelId) push(modelAgents, a.modelId, a.id);
+
+  // Barycenter ordering: average a node's y over its neighbors. Orphans (no
+  // neighbors) sink to the bottom. Forward (agents←rooms, models←agents), one
+  // reverse (rooms←agents), then re-settle — two-ish passes cut most crossings.
+  const indexMap = (arr) => new Map(arr.map((x, i) => [x.id, i]));
+  const bary = (neighbors, posMap) =>
+    !neighbors || neighbors.length === 0
+      ? Number.POSITIVE_INFINITY
+      : neighbors.reduce((s, n) => s + (posMap.get(n) ?? 0), 0) / neighbors.length;
+  const reorder = (items, neighborsOf, posMap) => {
+    const ranked = items.map((it, i) => ({ id: it.id, b: bary(neighborsOf(it.id), posMap), i }));
+    ranked.sort((x, y) => x.b - y.b || x.i - y.i); // stable on ties
+    return new Map(ranked.map((r, i) => [r.id, i]));
+  };
+  let roomY = indexMap(rooms);
+  let agentY = reorder(agents, (id) => agentRooms.get(id), roomY);
+  let modelY = reorder(models, (id) => modelAgents.get(id), agentY);
+  roomY = reorder(rooms, (id) => roomAgents.get(id), agentY);
+  agentY = reorder(agents, (id) => agentRooms.get(id), roomY);
+  modelY = reorder(models, (id) => modelAgents.get(id), agentY);
+
+  // Pixel layout.
+  const ROW = 46;
+  const PAD = 28;
+  const COLW = 240;
+  const cols = { room: PAD, agent: PAD + COLW, model: PAD + COLW * 2 };
+  const rowsCount = Math.max(rooms.length, agents.length, models.length, 1);
+  const W = cols.model + COLW;
+  const H = PAD * 2 + 20 + rowsCount * ROW;
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'topology-svg', preserveAspectRatio: 'xMidYMin meet' });
+  const NODE_X = 6; // circle radius; line attaches just past the label gap
+  const LABEL_W = 84; // px reserved before an edge leaves a node's right side
+  const yPx = (yMap, id) => PAD + 20 + (yMap.get(id) ?? 0) * ROW + ROW / 2;
+
+  // Column headers.
+  for (const [label, x] of [
+    ['Rooms', cols.room],
+    ['Agents', cols.agent],
+    ['Models', cols.model],
+  ]) {
+    const h = svgEl('text', { x, y: PAD, class: 'topo-col-head' });
+    h.textContent = label;
+    svg.appendChild(h);
+  }
+
+  // Edges (under nodes). Room→agent edges are tinted with the room's own color
+  // (the same palette as the sidebar dots) so you can trace each room's fan-out
+  // at a glance. Inline style beats the `.topo-edge` CSS stroke. Agent→model
+  // edges stay neutral — an agent can belong to several rooms, so there's no one
+  // room color to give them.
+  const edgeLine = (x1, y1, x2, y2, stroke) => {
+    const ln = svgEl('line', { x1, y1, x2, y2, class: 'topo-edge' });
+    if (stroke) ln.style.stroke = stroke;
+    return svg.appendChild(ln);
+  };
+  for (const e of edges)
+    edgeLine(cols.room + LABEL_W, yPx(roomY, e.room), cols.agent - NODE_X, yPx(agentY, e.agent), roomColor(e.room));
+  for (const a of agents)
+    if (a.modelId) edgeLine(cols.agent + LABEL_W, yPx(agentY, a.id), cols.model - NODE_X, yPx(modelY, a.modelId));
+
+  // Nodes.
+  const drawNode = (x, yMap, item, kind, degree, stroke) => {
+    const y = yPx(yMap, item.id);
+    const g = svgEl('g', { class: `topo-node topo-${kind}${degree === 0 ? ' topo-orphan' : ''}` });
+    const c = svgEl('circle', { cx: x, cy: y, r: NODE_X });
+    // Match the room node to its edge color (skip orphans — they keep the
+    // red-dashed "unused" treatment).
+    if (stroke && degree > 0) c.style.stroke = stroke;
+    g.appendChild(c);
+    const t = svgEl('text', { x: x + 11, y: y + 4, class: 'topo-label' });
+    t.textContent = degree > 0 ? `${item.name} · ${degree}` : item.name;
+    g.appendChild(t);
+    svg.appendChild(g);
+  };
+  for (const r of rooms) drawNode(cols.room, roomY, r, 'room', (roomAgents.get(r.id) || []).length, roomColor(r.id));
+  for (const a of agents) drawNode(cols.agent, agentY, a, 'agent', (agentRooms.get(a.id) || []).length);
+  for (const m of models) drawNode(cols.model, modelY, m, 'model', (modelAgents.get(m.id) || []).length);
+
+  canvas.appendChild(svg);
+}
+
+// ── Wiring matrix (rooms × agents management console) ──────────────────────
+// Same /api/topology data as the graph, rendered as a grid: tap a cell to
+// wire/unwire via the existing endpoints. Empty cells make gaps visible. Agents
+// shown are those in use (wired somewhere); brand-new unwired agents appear once
+// wired via a room's add-agent flow. Plain table — sticky headers, scrolls on
+// mobile.
+let matrixActive = false;
+let matrixWired = new Set(); // "roomId|agentId" for currently-wired pairs
+function openMatrix() {
+  closeAgentDetail();
+  closeRoomDetail();
+  closeModelDetail();
+  hideOtherFullViews('matrix');
+  matrixActive = true;
+  $('#chat').hidden = true;
+  $('#matrix').hidden = false;
+  $('#app').classList.add('in-dashboard');
+  $('#app').classList.remove('in-room');
+  refreshMatrix();
+  openView('matrix', teardownMatrix);
+}
+function teardownMatrix() {
+  matrixActive = false;
+  $('#chat').hidden = false;
+  $('#matrix').hidden = true;
+  $('#app').classList.remove('in-dashboard');
+}
+function toggleMatrix() {
+  if (matrixActive) closeView('matrix');
+  else openMatrix();
+}
+$('#matrix-back')?.addEventListener('click', toggleMatrix);
+$('#matrix-refresh')?.addEventListener('click', refreshMatrix);
+
+async function refreshMatrix() {
+  const canvas = $('#matrix-canvas');
+  if (!canvas) return;
+  canvas.textContent = 'Loading…';
+  try {
+    const r = await authFetch('/api/topology');
+    if (!r.ok) {
+      canvas.textContent = 'Could not load wiring.';
+      return;
+    }
+    renderMatrix(await r.json());
+  } catch {
+    canvas.textContent = 'Could not load wiring.';
+  }
+}
+
+function renderMatrix(data) {
+  const canvas = $('#matrix-canvas');
+  if (!canvas) return;
+  canvas.textContent = '';
+  const rooms = data.rooms || [];
+  const agents = data.agents || [];
+  if (rooms.length === 0 || agents.length === 0) {
+    canvas.textContent = 'Nothing to wire yet — create a room and an agent first.';
+    return;
+  }
+  matrixWired = new Set((data.edges || []).map((e) => `${e.room}|${e.agent}`));
+
+  const table = document.createElement('table');
+  table.className = 'matrix-table';
+
+  // Header row: corner + one column per agent (name + model chip).
+  const thead = document.createElement('thead');
+  const hr = document.createElement('tr');
+  const corner = document.createElement('th');
+  corner.className = 'matrix-corner';
+  corner.textContent = 'Room \\ Agent';
+  hr.appendChild(corner);
+  for (const a of agents) {
+    const th = document.createElement('th');
+    th.className = 'matrix-agent-head';
+    const name = document.createElement('div');
+    name.className = 'matrix-agent-name';
+    name.textContent = a.name;
+    th.appendChild(name);
+    const chip = document.createElement('div');
+    chip.className = 'matrix-model-chip' + (a.modelName ? '' : ' none');
+    chip.textContent = a.modelName || 'no model';
+    th.appendChild(chip);
+    hr.appendChild(th);
+  }
+  thead.appendChild(hr);
+  table.appendChild(thead);
+
+  // One row per room; cells toggle wiring.
+  const tbody = document.createElement('tbody');
+  for (const room of rooms) {
+    const tr = document.createElement('tr');
+    const rh = document.createElement('th');
+    rh.className = 'matrix-room-head';
+    rh.textContent = room.name;
+    tr.appendChild(rh);
+    for (const a of agents) {
+      const td = document.createElement('td');
+      const on = matrixWired.has(`${room.id}|${a.id}`);
+      td.className = 'matrix-cell' + (on ? ' on' : '');
+      td.dataset.room = room.id;
+      td.dataset.agent = a.id;
+      td.title = `${room.name} ↔ ${a.name}`;
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  canvas.appendChild(table);
+}
+
+$('#matrix-canvas')?.addEventListener('click', async (e) => {
+  const cell = e.target.closest('.matrix-cell');
+  if (!cell || cell.classList.contains('pending')) return;
+  const roomId = cell.dataset.room;
+  const agentId = cell.dataset.agent;
+  const wantWired = !cell.classList.contains('on');
+  cell.classList.add('pending');
+  cell.classList.toggle('on', wantWired); // optimistic
+  try {
+    const r = wantWired
+      ? await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/agents`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind: 'existing', id: agentId }),
+        })
+      : await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/agents/${encodeURIComponent(agentId)}`, {
+          method: 'DELETE',
+        });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    matrixWired[wantWired ? 'add' : 'delete'](`${roomId}|${agentId}`);
+  } catch (err) {
+    cell.classList.toggle('on', !wantWired); // revert
+    showToast('Could not update wiring: ' + (err.message || err), { kind: 'error' });
+  } finally {
+    cell.classList.remove('pending');
+  }
+});
+
 // ── Permissions section (owner-only) ──────────────────────────────────────
 // List + detail pattern (mirrors the Agents tab). Header button is hidden
 // by default and revealed by probeIsOwner() once /api/users succeeds. The
@@ -2625,6 +3094,7 @@ function openPermissions() {
   closeAgentDetail();
   closeRoomDetail();
   closeModelDetail();
+  hideOtherFullViews('permissions');
   permsActive = true;
   $('#chat').hidden = true;
   $('#permissions').hidden = false;
@@ -3478,16 +3948,26 @@ window.showAgentsDetail = showAgentsDetail;
 
 let allAgents = [];
 let selectedAgentId = null;
+// Archived agents are hidden by default (server-side). The Agents tab can opt
+// in to see them so they can be unarchived; pickers/topology never do.
+let showArchivedAgents = false;
 
 async function fetchAgents() {
   try {
-    const res = await authFetch('/api/agents');
+    const res = await authFetch('/api/agents' + (showArchivedAgents ? '?includeArchived=1' : ''));
     allAgents = await res.json();
     renderAgents();
   } catch (err) {
     console.error('Failed to fetch agents:', err);
   }
 }
+
+// Status labels + the one-line hint shown under the detail control.
+const AGENT_STATUS_HINTS = {
+  active: 'Responds normally and appears everywhere.',
+  paused: 'Wiring is kept, but the agent never responds. Still listed.',
+  archived: 'Retired: never responds and hidden from lists, pickers, and the map.',
+};
 
 function renderAgents() {
   const list = $('#agent-list');
@@ -3511,6 +3991,14 @@ function renderAgents() {
     nameSpan.className = 'agent-info-name';
     nameSpan.textContent = agent.name;
     info.appendChild(nameSpan);
+    // Badge for any non-active state so paused/archived agents read at a glance.
+    const status = agent.status || 'active';
+    if (status !== 'active') {
+      const badge = document.createElement('span');
+      badge.className = 'agent-status-badge status-' + status;
+      badge.textContent = status;
+      info.appendChild(badge);
+    }
     li.appendChild(info);
 
     li.setAttribute('role', 'button');
@@ -3530,6 +4018,24 @@ function renderAgents() {
     });
     list.appendChild(li);
   }
+
+  // "Show / hide archived" toggle. Always available from the Agents tab so
+  // archived agents can be brought back; pickers and the map never show them.
+  const toggle = $('#agent-show-archived');
+  if (toggle) {
+    toggle.hidden = false;
+    toggle.textContent = showArchivedAgents ? 'Hide archived agents' : 'Show archived agents';
+  }
+}
+
+// Reflect the agent's status on the 3-button segmented control + hint.
+function setAgentStatusControl(status) {
+  const s = status || 'active';
+  document.querySelectorAll('#agent-status-control .agent-status-btn').forEach((b) => {
+    b.classList.toggle('active', b.dataset.status === s);
+  });
+  const hint = $('#agent-status-hint');
+  if (hint) hint.textContent = AGENT_STATUS_HINTS[s] || '';
 }
 
 async function openAgentDetail(id) {
@@ -3551,6 +4057,8 @@ async function openAgentDetail(id) {
   // shows up without a tab-switch round trip.
   if (allModels.length === 0) await fetchModels();
   populateAgentModelSelect(agent.assigned_model_id);
+
+  setAgentStatusControl(agent.status);
 
   // Load instructions
   try {
@@ -3578,6 +4086,38 @@ function closeAgentDetail() {
 
 $('#agent-detail-close').addEventListener('click', closeAgentDetail);
 $('#agent-create-close').addEventListener('click', closeAgentDetail);
+
+// Status control: each button PUTs the new status, then refreshes the list so
+// the badge + (if archived) visibility update immediately.
+$('#agent-status-control').addEventListener('click', async (e) => {
+  const btn = e.target.closest('.agent-status-btn');
+  if (!btn || !selectedAgentId) return;
+  const status = btn.dataset.status;
+  const agent = allAgents.find((b) => b.id === selectedAgentId);
+  if (agent && (agent.status || 'active') === status) return;
+  setAgentStatusControl(status); // optimistic
+  try {
+    const res = await authFetch(`/api/agents/${encodeURIComponent(selectedAgentId)}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    });
+    if (!res.ok) throw new Error('status ' + res.status);
+    if (agent) agent.status = status;
+    showToast(`Agent ${status === 'active' ? 'activated' : status}`);
+    renderAgents();
+  } catch (err) {
+    console.error('Failed to set agent status:', err);
+    showToast('Could not change status');
+    if (agent) setAgentStatusControl(agent.status); // revert
+  }
+});
+
+// Show / hide archived agents in the list.
+$('#agent-show-archived').addEventListener('click', async () => {
+  showArchivedAgents = !showArchivedAgents;
+  await fetchAgents();
+});
 
 // ── Agent ↔ Room wiring (agent-centric; mirror of the room-detail panel) ──────
 // Read = GET /api/agents/:id/rooms (any admin of the agent). Writes go to
@@ -3685,7 +4225,7 @@ function updateAssignRoomSubmit() {
   const n = $('#agent-add-room-list').querySelectorAll('input[type=checkbox]:checked').length;
   const btn = $('#agent-add-room-submit');
   btn.disabled = n === 0;
-  btn.textContent = n === 0 ? 'Assign selected' : `Assign ${n} room${n === 1 ? '' : 's'}`;
+  btn.textContent = n === 0 ? 'Wire selected' : `Wire ${n} room${n === 1 ? '' : 's'}`;
 }
 
 async function assignSelectedRooms() {
@@ -3767,7 +4307,7 @@ $('#agent-add-room-submit').addEventListener('click', assignSelectedRooms);
 $('#agent-detail-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   if (!selectedAgentId) return;
-  const btn = $('#agent-detail-form button.btn-save');
+  const btn = $('#agent-detail-form button.btn-primary');
   const originalLabel = btn.textContent;
   btn.disabled = true;
   btn.textContent = 'Saving…';
@@ -4140,7 +4680,8 @@ async function populateAddAgentSelect() {
   // Make sure allAgents is fresh for the picker (avoid showing stale list).
   if (allAgents.length === 0) await fetchAgents();
   const wiredIds = new Set(roomDetailWiredAgents.map((a) => a.id));
-  const candidates = allAgents.filter((a) => !wiredIds.has(a.id));
+  // Never offer archived agents for wiring (even if the list toggle is on).
+  const candidates = allAgents.filter((a) => !wiredIds.has(a.id) && a.status !== 'archived');
   const list = $('#room-add-agent-list');
   list.innerHTML = '';
   if (candidates.length === 0) {
@@ -4182,7 +4723,7 @@ function updateAddAgentSubmitLabel() {
   const checked = $('#room-add-agent-list').querySelectorAll('input[type=checkbox]:checked');
   const btn = $('#room-add-agent-existing-submit');
   const n = checked.length;
-  btn.textContent = n > 0 ? `Add selected (${n})` : 'Add selected';
+  btn.textContent = n > 0 ? `Wire selected (${n})` : 'Wire selected';
   btn.disabled = n === 0;
 }
 
@@ -4366,7 +4907,9 @@ function renderRoomCreateAgentChecklist() {
     list.appendChild(li);
     return;
   }
-  const sorted = [...allAgents].sort((a, b) => a.name.localeCompare(b.name));
+  const sorted = [...allAgents]
+    .filter((a) => a.status !== 'archived')
+    .sort((a, b) => a.name.localeCompare(b.name));
   for (const agent of sorted) {
     const li = document.createElement('li');
     const cb = document.createElement('input');
@@ -4753,7 +5296,7 @@ function renderModels() {
     const li = document.createElement('li');
     li.style.cursor = 'default';
     li.style.opacity = '0.6';
-    li.textContent = 'No models registered. Click "+ New Model" to add one.';
+    li.textContent = 'No models registered. Click "+ New model" to add one.';
     list.appendChild(li);
     return;
   }
@@ -5139,7 +5682,7 @@ $('#model-create-form').addEventListener('submit', async (e) => {
 $('#model-detail-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   if (!selectedModelId) return;
-  const btn = $('#model-detail-form button.btn-save');
+  const btn = $('#model-detail-form button.btn-primary');
   const original = btn.textContent;
   btn.disabled = true;
   btn.textContent = 'Saving…';

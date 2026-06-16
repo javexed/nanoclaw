@@ -98,7 +98,7 @@ export interface FileHooks {
   onInbound: (roomId: string, message: InboundMessage) => void;
 }
 
-function uploadsDir(roomId: string): string {
+export function uploadsDir(roomId: string): string {
   return path.join(DATA_DIR, 'webchat', 'uploads', sanitizeId(roomId));
 }
 

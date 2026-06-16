@@ -295,6 +295,11 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     const agentGroup = getAgentGroup(agent.agent_group_id);
     if (!agentGroup) continue;
 
+    // Lifecycle gate: only `active` agents respond. `paused` (benched) and
+    // `archived` (retired) keep their wiring but never engage or wake — so a
+    // message addressed to them is silently not delivered to a container.
+    if (agentGroup.status && agentGroup.status !== 'active') continue;
+
     if (senderAgentGroupId && agent.agent_group_id === senderAgentGroupId) {
       // Self-exclusion: agent's own loop-back never re-engages itself.
       continue;

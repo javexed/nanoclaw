@@ -697,6 +697,69 @@ export function getWebchatMessagesAfterId(roomId: string, afterId: string, limit
   return rows.map(rowToMessage);
 }
 
+/**
+ * Older-message pagination (scroll-back). Returns up to `limit` messages
+ * immediately BEFORE `beforeId`, oldest-to-newest so the client can prepend
+ * them as one ascending block. An empty/short result means the start of
+ * history has been reached. Mirrors getWebchatMessagesAfterId's created_at
+ * anchoring.
+ */
+export interface WebchatSearchResult {
+  id: string;
+  room_id: string;
+  sender: string;
+  sender_type: string;
+  message_type: string;
+  snippet: string;
+  created_at: number;
+}
+
+/**
+ * Full-text search (FTS5) over message content, scoped to `roomIds` (the
+ * caller's accessible rooms — never search rooms the user can't see). Returns
+ * relevance-ranked hits with a highlighted snippet.
+ *
+ * The MATCH string is built ONLY from extracted word tokens, each prefix-matched
+ * and AND-ed — so no user-supplied FTS5 operators/quotes reach the parser (which
+ * would otherwise throw a syntax error on input like `"` or `AND`).
+ */
+export function searchWebchatMessages(roomIds: string[], rawQuery: string, limit = 50): WebchatSearchResult[] {
+  if (roomIds.length === 0) return [];
+  const tokens = (rawQuery.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).slice(0, 12);
+  if (tokens.length === 0) return [];
+  const match = tokens.map((t) => `${t}*`).join(' ');
+  const placeholders = roomIds.map(() => '?').join(',');
+  return getDb()
+    .prepare(
+      `SELECT m.id, m.room_id, m.sender, m.sender_type, m.message_type,
+              snippet(webchat_messages_fts, 0, '«', '»', '…', 12) AS snippet,
+              m.created_at
+       FROM webchat_messages_fts f
+       JOIN webchat_messages m ON m.rowid = f.rowid
+       WHERE webchat_messages_fts MATCH ?
+         AND m.room_id IN (${placeholders})
+         AND m.message_type NOT IN ('approval', 'approval_resolved')
+       ORDER BY rank
+       LIMIT ?`,
+    )
+    .all(match, ...roomIds, limit) as WebchatSearchResult[];
+}
+
+export function getWebchatMessagesBeforeId(roomId: string, beforeId: string, limit = 50): WebchatMessage[] {
+  const anchor = getDb().prepare(`SELECT created_at FROM webchat_messages WHERE id = ?`).get(beforeId) as
+    | { created_at: number }
+    | undefined;
+  if (!anchor) return [];
+  const rows = getDb()
+    .prepare(
+      `SELECT * FROM webchat_messages
+       WHERE room_id = ? AND created_at < ?
+       ORDER BY created_at DESC LIMIT ?`,
+    )
+    .all(roomId, anchor.created_at, limit) as WebchatMessageRow[];
+  return rows.reverse().map(rowToMessage);
+}
+
 // ── Push subscriptions ──
 
 export function upsertWebchatPushSubscription(sub: Omit<WebchatPushSubscription, 'created_at'>): void {
@@ -800,6 +863,47 @@ export function getAgentsAssignedToModel(modelId: string): string[] {
       agent_group_id: string;
     }[]
   ).map((r) => r.agent_group_id);
+}
+
+export interface WebchatTopology {
+  rooms: { id: string; name: string }[];
+  agents: { id: string; name: string; modelId: string | null; modelName: string | null }[];
+  models: { id: string; name: string }[];
+  edges: { room: string; agent: string }[]; // room↔agent wirings
+}
+
+/**
+ * Assemble the room → agent → model topology from the given (already
+ * access-filtered) rooms AND agents. ALL accessible agents appear as nodes —
+ * including ones wired to no in-scope room (they surface as orphans in the graph
+ * and as empty columns in the wiring matrix, so a brand-new agent can be wired
+ * straight from the matrix). Edges are the room↔agent wirings among these rooms
+ * and agents only — so nothing outside the caller's visible set leaks. Each
+ * agent carries its assigned model; models are deduped. Powers GET /api/topology.
+ */
+export function getWebchatTopology(
+  rooms: { id: string; name: string }[],
+  agents: { id: string; name: string }[],
+): WebchatTopology {
+  const agentNodes = agents.map((a) => {
+    const m = getAssignedModelForAgent(a.id);
+    return { id: a.id, name: a.name, modelId: m?.id ?? null, modelName: m?.name ?? null };
+  });
+  const ids = new Set(agentNodes.map((a) => a.id));
+  const edges: { room: string; agent: string }[] = [];
+  for (const room of rooms) {
+    for (const a of getAgentsForWebchatRoom(room.id)) {
+      if (ids.has(a.id)) edges.push({ room: room.id, agent: a.id });
+    }
+  }
+  const modelMap = new Map<string, { id: string; name: string }>();
+  for (const a of agentNodes) if (a.modelId) modelMap.set(a.modelId, { id: a.modelId, name: a.modelName ?? a.modelId });
+  return {
+    rooms: rooms.map((r) => ({ id: r.id, name: r.name })),
+    agents: agentNodes,
+    models: [...modelMap.values()],
+    edges,
+  };
 }
 
 export function getAssignedModelForAgent(agentGroupId: string): WebchatModel | null {

@@ -1,4 +1,4 @@
-import type { AgentGroup } from '../types.js';
+import type { AgentGroup, AgentStatus } from '../types.js';
 import { getDb } from './connection.js';
 
 export function createAgentGroup(group: AgentGroup): void {
@@ -37,6 +37,18 @@ export function updateAgentGroup(id: string, updates: Partial<Pick<AgentGroup, '
   getDb()
     .prepare(`UPDATE agent_groups SET ${fields.join(', ')} WHERE id = @id`)
     .run(values);
+}
+
+/**
+ * Set an agent group's lifecycle status. Only `active` agents engage/wake
+ * (the router gates on this), so we validate here to keep the column to the
+ * three known values rather than relying on callers.
+ */
+export function setAgentStatus(id: string, status: AgentStatus): void {
+  if (status !== 'active' && status !== 'paused' && status !== 'archived') {
+    throw new Error(`Invalid agent status: ${status}`);
+  }
+  getDb().prepare('UPDATE agent_groups SET status = ? WHERE id = ?').run(status, id);
 }
 
 export function deleteAgentGroup(id: string): void {

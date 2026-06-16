@@ -120,16 +120,22 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
-  // App files: network-first, fall back to cache (always fresh after server restart)
+  // App files: network-first, fall back to cache (always fresh after server
+  // restart). Only KNOWN shell paths are cached, keyed by pathname — so
+  // query-string deep-links (e.g. /?room=X from a notification) reuse the
+  // single '/' entry instead of each accumulating a redundant shell copy.
+  // Anything else (dynamic/unknown non-/api/ responses) is served but never
+  // written to the cache, so the app cache can't grow unboundedly.
+  const cacheKey = ASSETS.includes(url.pathname) ? url.pathname : null;
   e.respondWith(
     fetch(e.request)
       .then((res) => {
-        if (res.ok && res.type !== 'opaque') {
+        if (cacheKey && res.ok && res.type !== 'opaque') {
           const clone = res.clone();
-          caches.open(CACHE).then((c) => c.put(e.request, clone));
+          caches.open(CACHE).then((c) => c.put(cacheKey, clone));
         }
         return res;
       })
-      .catch(() => caches.match(e.request)),
+      .catch(() => caches.match(cacheKey || e.request)),
   );
 });

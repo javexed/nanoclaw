@@ -32,6 +32,15 @@
   --agent-strong: #ffe082;
   --delete-strong: #ff8a80;
   --danger: var(--delete-color);
+  /* Semantic status — was hardcoded (#2ea043 / #ffd54f) at call sites. The
+     -strong variants are the readable-on-tint foreground (cf. accent-strong). */
+  --success: #3fb950;
+  --success-strong: #56d364;
+  --warning: #e3b341;
+  --warning-strong: #f0c674;
+  /* Foreground text on a filled accent / danger surface (e.g. primary button). */
+  --on-accent: #000;
+  --on-danger: #fff;
   --shadow: rgba(0, 0, 0, 0.3);
 }
 
@@ -59,6 +68,13 @@
   --agent-strong: #b87900;
   --delete-strong: var(--delete-color);
   --danger: var(--delete-color);
+  /* Darker on white for AA (cf. the GH-light status palette). */
+  --success: #1a7f37;
+  --success-strong: var(--success);
+  --warning: #9a6700;
+  --warning-strong: var(--warning);
+  --on-accent: #fff;
+  --on-danger: #fff;
   --shadow: rgba(0, 0, 0, 0.1);
 }
 
@@ -85,19 +101,54 @@
     --agent-strong: #b87900;
     --delete-strong: var(--delete-color);
     --danger: var(--delete-color);
+    --success: #1a7f37;
+    --success-strong: var(--success);
+    --warning: #9a6700;
+    --warning-strong: var(--warning);
+    --on-accent: #fff;
+    --on-danger: #fff;
     --shadow: rgba(0, 0, 0, 0.1);
   }
 }
 
-/* Font size presets */
-[data-font='small'] #app {
+/* Font size presets — set on the root (html carries the data-font attribute)
+   so the scale becomes the rem base and reaches every rem-sized element, not
+   just em/inherited text. The mobile block narrows the inherited base (#app)
+   for density without changing the rem base. */
+[data-font='small'] {
   font-size: 13px;
 }
-[data-font='medium'] #app {
+[data-font='medium'] {
   font-size: 15px;
 }
-[data-font='large'] #app {
+[data-font='large'] {
   font-size: 17px;
+}
+
+/* ── Design tokens (theme-agnostic) ──────────────────────────────────────────
+   Radius, type, and motion scales. Colors live in the theme blocks above.
+   These are ADDITIVE — existing literal values still work; migrate to these
+   per the mapping in DESIGN.md. See DESIGN.md for the full contract. */
+:root {
+  /* Corner radius — collapses the historical 2/3/4/6/7/8/9/12/14/16px spread.
+     (50% stays inline for circular avatars/dots — it's geometry, not a token.) */
+  --radius-sm: 4px; /* chips, badges, small inline controls */
+  --radius-md: 8px; /* buttons, inputs, cards, list rows */
+  --radius-lg: 12px; /* modals, drawers, large panels */
+  --radius-pill: 999px; /* pills / fully-rounded toggles */
+
+  /* Type scale — rem, rooted at the [data-font] base now set on the root
+     element (the Small/Medium/Large setting drives the root font-size, so the
+     whole scale tracks it). rem is nesting-independent — no em compounding.
+     ~px shown at the 15px medium base. */
+  --fs-xs: 0.733rem; /* ~11px — meta, hints, badges, timestamps */
+  --fs-sm: 0.867rem; /* ~13px — secondary text, form labels, buttons */
+  --fs-base: 1rem; /* ~15px — body text, messages */
+  --fs-lg: 1.2rem; /* ~18px — section / panel titles */
+  --fs-xl: 1.4rem; /* ~21px — view headings */
+
+  /* Motion — one standard duration/easing; 0.15s already dominates. */
+  --transition: 0.15s ease;
 }
 
 html,
@@ -135,692 +186,14 @@ body {
 }
 .login-subtitle {
   color: var(--text-dim);
-  font-size: 13px;
+  font-size: 0.867rem;
   margin-bottom: 16px;
-}
-.login-form {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.login-form input {
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  color: var(--text);
-  padding: 10px 14px;
-  border-radius: 8px;
-  font-size: 14px;
-  text-align: center;
-}
-.login-form input:focus {
-  border-color: var(--accent);
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-.login-error {
-  color: var(--delete-color);
-  font-size: 12px;
-  margin-top: 8px;
-}
-.login-error[hidden] {
-  display: none;
-}
-
-#app {
-  display: flex;
-  height: 100vh;
-  height: 100dvh;
-} /* dvh for mobile address bar, vh fallback */
-
-/* Sidebar */
-#sidebar {
-  width: 220px;
-  background: var(--surface);
-  border-right: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-}
-.sidebar-header {
-  padding: 16px 12px;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 8%, transparent) 0%, transparent 100%);
-}
-.logo {
-  height: 24px;
-  width: auto;
-  display: block;
-}
-.logo-light {
-  display: none;
-}
-[data-theme='light'] .logo-dark {
-  display: none;
-}
-[data-theme='light'] .logo-light {
-  display: block;
-}
-@media (prefers-color-scheme: light) {
-  [data-theme='system'] .logo-dark {
-    display: none;
-  }
-  [data-theme='system'] .logo-light {
-    display: block;
-  }
-}
-.identity {
-  display: block;
-  font-size: 11px;
-  color: var(--text-dim);
-  margin-top: 4px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-/* Sidebar tabs */
-.sidebar-tabs {
-  display: flex;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-.sidebar-tab {
-  flex: 1;
-  padding: 8px 0;
-  background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
-  color: var(--text-dim);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  transition:
-    color 0.15s,
-    border-color 0.15s;
-}
-.sidebar-tab:hover {
-  color: var(--text);
-}
-.sidebar-tab.active {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
-}
-.tab-content {
-  display: none;
-  flex: 1;
-  flex-direction: column;
-  overflow: hidden; /* the list scrolls; the create button stays pinned below */
-  min-height: 0;
-}
-.tab-content.active {
-  display: flex;
-}
-
-/* Room list */
-#room-list {
-  list-style: none;
-  padding: 8px 0;
-  flex: 1;
-  overflow-y: auto;
-  border-bottom: 1px solid var(--border); /* divider above the pinned create button */
-}
-#room-list li {
-  display: flex;
-  align-items: center;
-  position: relative;
-  padding: 10px 16px;
-  cursor: pointer;
-  border-radius: 4px;
-  margin: 2px 6px;
-  transition: background 0.15s;
-  border-left: 3px solid transparent;
-}
-/* [hidden] must beat display:flex so search filtering works without !important. */
-#room-list li[hidden] {
-  display: none;
-}
-#room-list li:hover {
-  background: var(--surface2);
-}
-#room-list li.active {
-  background: var(--surface2);
-  box-shadow: inset 0 0 8px color-mix(in srgb, var(--accent) 15%, transparent);
-}
-#room-list li:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-#room-list li .unread-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-  display: inline-block;
-  margin-left: 6px;
-  flex-shrink: 0;
-  vertical-align: middle;
-}
-#room-list li.dragging {
-  opacity: 0.4;
-}
-#room-list li.archived {
-  opacity: 0.55;
-}
-#room-list li .room-kebab {
-  background: transparent;
-  border: none;
-  color: var(--text-muted);
-  cursor: pointer;
-  padding: 0 4px;
-  font-size: 18px;
-  line-height: 1;
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-#room-list li:hover .room-kebab,
-#room-list li:focus-within .room-kebab {
-  opacity: 1;
-}
-#room-list li .room-menu {
-  position: absolute;
-  right: 8px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 4px 0;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-  z-index: 10;
-}
-#room-list li .room-menu button {
-  background: transparent;
-  border: none;
-  color: var(--text);
-  cursor: pointer;
-  padding: 6px 14px;
-  text-align: left;
-  width: 100%;
-  font-size: 13px;
-}
-#room-list li .room-menu button:hover {
-  background: var(--surface2);
-}
-.archived-toggle {
-  flex-shrink: 0;
-  background: transparent;
-  border: none;
-  color: var(--text-muted);
-  cursor: pointer;
-  font-size: 12px;
-  padding: 8px 16px;
-  text-align: left;
-  width: 100%;
-}
-.archived-toggle:hover {
-  color: var(--text);
-}
-#room-list li.drag-over {
-  border-top: 2px solid var(--accent);
-}
-
-/* Agent list */
-#agent-list {
-  list-style: none;
-  padding: 8px 0;
-  flex: 1;
-  overflow-y: auto;
-}
-#agent-list li {
-  padding: 8px 12px;
-  cursor: pointer;
-  border-radius: 4px;
-  margin: 2px 6px;
-  font-size: 13px;
-  transition: background 0.15s;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  border-left: 3px solid transparent;
-}
-/* [hidden] must beat display:flex so search filtering works. */
-#agent-list li[hidden] {
-  display: none;
-}
-#agent-list li:hover {
-  background: var(--surface2);
-}
-#agent-list li.active {
-  background: var(--surface2);
-  box-shadow: inset 0 0 8px color-mix(in srgb, var(--accent) 15%, transparent);
-}
-#agent-list li:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-#agent-list li .agent-icon {
-  flex-shrink: 0;
-  font-size: 14px;
-  transition: transform 0.15s;
-}
-#agent-list li:hover .agent-icon {
-  transform: scale(1.15);
-}
-#agent-list li .agent-info {
-  flex: 1;
-  min-width: 0;
-}
-#agent-list li .agent-info-name {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-#agent-list li .agent-info-channel {
-  display: block;
-  font-size: 10px;
-  color: var(--text-dim);
-}
-#agent-list li .agent-main-tag {
-  font-size: 9px;
-  background: var(--agent);
-  color: #000;
-  padding: 1px 5px;
-  border-radius: 3px;
-  font-weight: 600;
-  flex-shrink: 0;
-}
-/* "+ New X" actions in the sidebar lists. Quietly accent-flavored so they
-   read as actionable without shouting — no longer the dashed grey "draft"
-   look that blended into the background. */
-.create-agent-btn {
-  flex-shrink: 0; /* stays pinned at the bottom; the list above scrolls */
-  margin: 8px 12px;
-  padding: 9px 12px;
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
-  color: var(--accent-strong);
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 600;
-  transition:
-    background 0.15s,
-    border-color 0.15s,
-    color 0.15s;
-}
-.create-agent-btn:hover {
-  background: color-mix(in srgb, var(--accent) 22%, transparent);
-  border-color: var(--accent);
-  color: var(--accent-strong);
-}
-.create-agent-btn:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-/* Chat area */
-#chat {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-#chat-header {
-  padding: 14px 20px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-  font-weight: 600;
-  font-size: 1em;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-shrink: 0;
-  position: sticky;
-  top: 0;
-  z-index: 20;
-}
-/* The room name doubles as the room-settings affordance when a room is open. */
-#room-name.has-settings {
-  cursor: pointer;
-}
-#room-name.has-settings::after {
-  content: '⌄';
-  margin-left: 5px;
-  font-size: 0.8em;
-  opacity: 0.55;
-}
-#room-name.has-settings:hover::after {
-  opacity: 0.9;
-}
-.mobile-back {
-  display: none;
-}
-/* Back buttons for full-screen surfaces stay visible on desktop too — these
-   surfaces (Manage especially) can cover the sidebar, so they need their own
-   way back to chat. */
-#manage-back,
-#dash-back,
-#perms-exit {
-  display: inline-flex;
-  align-items: center;
-  background: none;
-  border: none;
-  color: var(--accent);
-  font-size: 20px;
-  line-height: 1;
-  cursor: pointer;
-  padding: 0 10px 0 0;
-}
-#chat-body {
-  flex: 1;
-  display: flex;
-  min-height: 0;
-  position: relative;
-}
-#chat-content {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-/* Messages */
-#messages {
-  flex: 1;
-  overflow-y: auto;
-  padding: 16px 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.msg {
-  max-width: 80%;
-  display: flex;
-  flex-direction: column;
-}
-.msg.mine {
-  align-self: flex-end;
-  align-items: flex-end;
-}
-.msg.other {
-  align-self: flex-start;
-}
-.msg .sender {
-  font-size: 0.73em;
-  color: var(--text-dim);
-  margin-bottom: 3px;
-}
-.msg.agent .sender {
-  color: var(--agent);
-}
-.msg .bubble {
-  padding: 8px 13px;
-  border-radius: 14px;
-  line-height: 1.4;
-  word-break: break-word;
-}
-.msg.mine .bubble,
-.msg.other .bubble {
-  white-space: pre-wrap;
-}
-.msg.mine .bubble {
-  background: var(--mine-bubble);
-  color: var(--mine-text);
-  border-bottom-right-radius: 4px;
-}
-.msg.mine .sender {
-  text-align: right;
-}
-.msg.mine .msg-body {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 6px;
-}
-.msg-delete {
-  background: none;
-  border: none;
-  color: var(--delete-color);
-  cursor: pointer;
-  font-size: 1.3em;
-  padding: 6px 8px;
-  border-radius: 6px;
-  transition:
-    opacity 0.15s,
-    color 0.15s,
-    background 0.15s,
-    transform 0.1s;
-  flex-shrink: 0;
-  opacity: 0;
-  pointer-events: none;
-}
-.msg-delete:hover {
-  background: var(--surface2);
-  transform: scale(1.1);
-}
-.msg-delete.confirm {
-  opacity: 1;
-  pointer-events: auto;
-  color: var(--mine-text);
-  background: var(--delete-color);
-  font-size: 0.8em;
-  padding: 5px 10px;
-  transform: none;
-}
-.msg.mine:hover .msg-delete {
-  opacity: 1;
-  pointer-events: auto;
-}
-@media (pointer: coarse) {
-  .msg.mine .msg-delete {
-    opacity: 0.5;
-    pointer-events: auto;
-  }
-  .msg.mine .msg-delete.confirm {
-    opacity: 1;
-  }
-}
-.msg.mine.deleting {
-  transition: opacity 0.3s ease;
-  opacity: 0;
-}
-.msg.other .bubble {
-  background: var(--surface2);
-  border-bottom-left-radius: 4px;
-}
-.msg.agent .bubble {
-  background: var(--agent-bubble-bg);
-  border: 1.5px solid var(--agent);
-  border-left: 3px solid var(--agent);
-}
-/* a2a side-channel: a read-only copy of an agent↔agent exchange surfaced into a
-   shared room. Rendered as a compact card with a left accent bar tinted in the
-   sending agent's colour (--a2a-accent, set per-message in app.js), so it reads
-   as "overheard" and you can track who's speaking at a glance. */
-.msg.a2a {
-  align-self: center;
-  max-width: 92%;
-  width: 100%;
-  background: var(--surface2);
-  border-left: 3px solid var(--a2a-accent, var(--text-dim));
-  border-radius: 7px;
-  padding: 6px 12px 5px;
-}
-.msg.a2a .sender.a2a-label {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  margin-bottom: 2px;
-  font-size: 0.72em;
-  letter-spacing: 0.01em;
-}
-.msg.a2a .a2a-agent {
-  font-weight: 600;
-}
-.msg.a2a .a2a-arrow {
-  color: var(--text-dim);
-  font-weight: 400;
-}
-.msg.a2a .bubble {
-  background: transparent;
-  border: none;
-  border-radius: 0;
-  padding: 0;
-  font-size: 0.92em;
-}
-.msg.system {
-  align-self: center;
-  color: var(--text-dim);
-  font-size: 0.8em;
-  font-style: italic;
-}
-.msg .timestamp {
-  font-size: 0.67em;
-  color: var(--text-dim);
-  margin-top: 2px;
-}
-
-/* Delivery status */
-.msg .status {
-  font-size: 0.73em;
-  color: var(--text-dim);
-  margin-top: 2px;
-  text-align: right;
-}
-.msg .status.delivered {
-  color: var(--accent);
-}
-
-/* Scroll to bottom button */
-.scroll-bottom {
-  position: fixed;
-  bottom: 70px;
-  right: 20px;
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  color: var(--text-dim);
-  font-size: 16px;
-  cursor: pointer;
-  z-index: 200;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  box-shadow: 0 2px 8px var(--shadow);
-  transition:
-    opacity 0.15s,
-    color 0.15s;
-}
-.scroll-bottom:hover {
-  color: var(--accent);
-  border-color: var(--accent);
-}
-.scroll-bottom[hidden] {
-  display: none;
-}
-.scroll-bottom .unread-count {
-  position: absolute;
-  top: -6px;
-  right: -6px;
-  background: var(--accent);
-  color: #fff;
-  font-size: 10px;
-  font-weight: 700;
-  min-width: 18px;
-  height: 18px;
-  border-radius: 9px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 4px;
-}
-.scroll-bottom .unread-count:empty {
-  display: none;
-}
-
-/* Empty state */
-.empty-state {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-dim);
-  font-size: 14px;
-  text-align: center;
-  padding: 20px;
-}
-
-/* Input area */
-#message-form {
-  display: flex;
-  gap: 8px;
-  padding: 12px 20px;
-  background: var(--surface);
-  border-top: 1px solid var(--border);
-}
-#message-input {
-  flex: 1;
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  color: var(--text);
-  padding: 10px 14px;
-  border-radius: 8px;
-  resize: none;
-  max-height: 120px;
-  overflow-y: auto;
-  font-family: inherit;
-  font-size: inherit;
-  line-height: 1.4;
-}
-#message-input:focus {
-  outline: none;
-  box-shadow: 0 0 0 1px var(--accent);
-}
-button[type='submit'] {
-  background: var(--accent);
-  color: #000;
-  border: none;
-  padding: 10px 18px;
-  border-radius: 8px;
-  font-weight: 600;
-  cursor: pointer;
-}
-button[type='submit']:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-#send-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 10px 14px;
-}
-#send-btn svg {
-  display: block;
-}
-button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-/* Connection banner */
-.connection-banner {
-  padding: 6px 20px;
-  background: var(--delete-color);
-  color: #fff;
-  font-size: 12px;
-  text-align: center;
-  display: none;
-}
-.connection-banner.visible {
-  display: block;
 }
 
 /* Mobile */
 @media (max-width: 600px) {
+  /* Mobile narrows the inherited base (em/inherited text) for density. The rem
+     base stays the root value above, so rem-sized chrome is unchanged here. */
   [data-font='small'] #app {
     font-size: 12px;
   }
@@ -884,7 +257,7 @@ button:focus-visible {
     background: none;
     border: none;
     color: var(--accent);
-    font-size: 18px;
+    font-size: 1.2rem;
     cursor: pointer;
     padding: 0 8px 0 0;
     line-height: 1;
@@ -904,7 +277,7 @@ button:focus-visible {
     font-size: 0.85em;
   }
   .sidebar-tabs {
-    font-size: 11px;
+    font-size: 0.733rem;
   }
   #message-form {
     padding: 8px 12px;
@@ -912,7 +285,7 @@ button:focus-visible {
   }
   #message-input {
     padding: 8px 10px;
-    font-size: 16px;
+    font-size: 1.067rem;
   } /* 16px prevents iOS auto-zoom */
   button[type='submit'] {
     min-width: 44px;
@@ -1001,7 +374,7 @@ button:focus-visible {
   background: none;
   border: none;
   color: var(--text-dim);
-  font-size: 16px;
+  font-size: 1.067rem;
   cursor: pointer;
   padding: 2px 6px;
   flex-shrink: 0;
@@ -1105,7 +478,7 @@ button:focus-visible {
   border: none;
   background: rgba(0, 0, 0, 0.55);
   color: #fff;
-  font-size: 24px;
+  font-size: 1.6rem;
   line-height: 1;
   cursor: pointer;
   display: flex;
@@ -1115,11 +488,11 @@ button:focus-visible {
   touch-action: manipulation;
 }
 a.lightbox-btn {
-  font-size: 20px;
+  font-size: 1.333rem;
   font-weight: 600;
 }
 #lightbox-close {
-  font-size: 28px;
+  font-size: 1.867rem;
 }
 .lightbox-btn:hover,
 .lightbox-btn:focus-visible {
@@ -1135,7 +508,7 @@ a.lightbox-btn {
   border: none;
   background: rgba(0, 0, 0, 0.45);
   color: #fff;
-  font-size: 32px;
+  font-size: 2.133rem;
   line-height: 1;
   cursor: pointer;
   display: flex;
@@ -1350,14 +723,14 @@ a.lightbox-btn {
   border-color: var(--accent);
 }
 .msg .bubble pre .code-btn.copied {
-  background: #2ea043;
+  background: var(--success);
   color: #fff;
-  border-color: #2ea043;
+  border-color: var(--success);
 }
 .msg .bubble pre .code-btn.error {
-  background: #da3633;
+  background: var(--danger);
   color: #fff;
-  border-color: #da3633;
+  border-color: var(--danger);
 }
 .msg .bubble ul,
 .msg .bubble ol {
@@ -1428,7 +801,7 @@ a.lightbox-btn {
   min-height: 32px;
   padding: 6px 12px;
   border-radius: 12px;
-  font-size: 12px;
+  font-size: 0.8rem;
   cursor: pointer;
   transition:
     background 0.15s,
@@ -1465,14 +838,14 @@ a.lightbox-btn {
   align-items: center;
   justify-content: space-between;
   font-weight: 600;
-  font-size: 13px;
+  font-size: 0.867rem;
   color: var(--text-dim);
 }
 .members-close {
   background: none;
   border: none;
   color: var(--text-dim);
-  font-size: 18px;
+  font-size: 1.2rem;
   cursor: pointer;
   padding: 0 4px;
   line-height: 1;
@@ -1486,7 +859,7 @@ a.lightbox-btn {
 }
 #members-list li {
   padding: 6px 14px;
-  font-size: 13px;
+  font-size: 0.867rem;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1509,7 +882,7 @@ a.lightbox-btn {
   white-space: nowrap;
 }
 #members-list li .member-tag {
-  font-size: 10px;
+  font-size: 0.667rem;
   color: var(--text-dim);
   margin-left: auto;
   flex-shrink: 0;
@@ -1532,6 +905,31 @@ a.lightbox-btn {
 .agent-detail[hidden] {
   display: none;
 }
+/* Desktop only: the agent + model editors are opened FROM the Manage drawer,
+   so they slide in as a right-side drawer aligned over the list (z above
+   .manage's 60), giving a tidy master→detail in the right column with the chat
+   still visible to the left. #room-detail keeps the base left-over-chat
+   behavior (it opens from a room, not from Manage). On phones (max-width 600)
+   the shared `.agent-detail` rule below already makes all three full-screen at
+   z-110, so this override is scoped to desktop to avoid fighting it. */
+@media (min-width: 601px) {
+  #agent-detail,
+  #model-detail {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: auto;
+    width: min(420px, 100vw);
+    height: auto;
+    z-index: 110;
+    border-right: none;
+    border-left: 1px solid var(--border);
+    box-shadow: -6px 0 24px rgba(0, 0, 0, 0.3);
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
 .agent-detail-header {
   padding: 12px 14px;
   border-bottom: 1px solid var(--border);
@@ -1539,7 +937,7 @@ a.lightbox-btn {
   align-items: center;
   justify-content: space-between;
   font-weight: 600;
-  font-size: 13px;
+  font-size: 0.867rem;
   color: var(--text-dim);
 }
 .agent-detail-form {
@@ -1554,7 +952,7 @@ a.lightbox-btn {
   gap: 4px;
 }
 .agent-detail-form .form-label {
-  font-size: 11px;
+  font-size: 0.733rem;
   color: var(--text-dim);
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -1565,7 +963,7 @@ a.lightbox-btn {
   color: var(--text);
   padding: 8px 10px;
   border-radius: 6px;
-  font-size: 13px;
+  font-size: 0.867rem;
 }
 .agent-detail-form input[type='text']:focus {
   border-color: var(--accent);
@@ -1580,7 +978,7 @@ a.lightbox-btn {
   flex-direction: row !important;
   align-items: center;
   gap: 8px !important;
-  font-size: 13px;
+  font-size: 0.867rem;
   cursor: pointer;
 }
 .checkbox-label input[type='checkbox'] {
@@ -1593,56 +991,104 @@ a.lightbox-btn {
   gap: 8px;
   margin-top: 4px;
 }
-.btn-save {
-  flex: 1;
-  background: var(--accent);
-  color: #000;
-  border: none;
-  padding: 8px;
-  border-radius: 6px;
+/* ── Buttons — role-based set: .btn base + four role modifiers. See DESIGN.md §2.
+   Icon buttons (.lightbox-btn, .settings-btn, .file-picker-btn) and the
+   .agent-status-btn segmented control are deliberately NOT part of this set. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
   font-weight: 600;
-  font-size: 13px;
+  line-height: 1.2;
   cursor: pointer;
   transition:
-    background 0.15s,
-    opacity 0.15s;
+    background var(--transition),
+    border-color var(--transition),
+    color var(--transition),
+    opacity var(--transition);
 }
-.btn-save:hover:not(:disabled) {
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Primary — the main commit action of a form/dialog. Stretches to fill its
+   action row (its uniform usage across every form today). */
+.btn-primary {
+  flex: 1;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+.btn-primary:hover:not(:disabled) {
   opacity: 0.9;
 }
-.btn-save:disabled {
+.btn-primary:disabled {
   cursor: progress;
   opacity: 0.7;
 }
-.btn-save.success {
-  background: var(--accent2);
+.btn-primary.success {
+  background: var(--success);
+  border-color: var(--success);
   cursor: default;
   opacity: 1;
 }
-.btn-delete {
+
+/* Secondary — accent-tinted secondary actions (Probe, Browse, + New …). */
+.btn-secondary {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent-strong);
+}
+.btn-secondary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: var(--accent);
+}
+
+/* Ghost — low-emphasis (surface-tinted): refresh, suggest-from-prompt. */
+.btn-ghost {
+  background: var(--surface2);
+  border-color: var(--border);
+  color: var(--text-dim);
+}
+.btn-ghost:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
+/* Danger — destructive; outline that fills on hover. */
+.btn-danger {
   background: none;
-  border: 1px solid var(--delete-color);
+  border-color: var(--delete-color);
   color: var(--delete-color);
-  padding: 8px 12px;
-  border-radius: 6px;
-  font-size: 13px;
-  cursor: pointer;
 }
-.btn-delete:hover {
+.btn-danger:hover:not(:disabled) {
   background: var(--delete-color);
-  color: #fff;
+  color: var(--on-danger);
 }
-.btn-delete:disabled {
+.btn-danger:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
-.btn-delete:disabled:hover {
-  background: none;
-  color: var(--delete-color);
+
+/* Layout-only modifier: a "+ New" button pinned at the bottom of a scrolling
+   list (the role color comes from .btn-secondary). */
+.btn-list-footer {
+  flex-shrink: 0;
+  margin: 8px 12px;
 }
 
 /* "Danger zone" — destructive actions sit below a divider, right-aligned, and
-   all use the single loud .btn-delete pattern so destructive == visible. */
+   all use the single loud .btn-danger role so destructive == visible. */
 .agent-detail-danger {
   margin-top: 16px;
   padding-top: 12px;
@@ -1658,7 +1104,7 @@ a.lightbox-btn {
   color: var(--text);
   padding: 8px 10px;
   border-radius: 6px;
-  font-size: 12px;
+  font-size: 0.8rem;
   font-family: 'SF Mono', 'Fira Code', monospace;
   resize: vertical;
   min-height: 120px;
@@ -1713,13 +1159,13 @@ a.lightbox-btn {
   background: var(--surface2);
   border: 1px solid var(--border);
   border-radius: 6px;
-  font-size: 13px;
+  font-size: 0.867rem;
 }
 .room-wired-agents .room-wired-remove {
   background: none;
   border: none;
   color: var(--text-secondary, var(--text));
-  font-size: 16px;
+  font-size: 1.067rem;
   cursor: pointer;
   padding: 0 4px;
   line-height: 1;
@@ -1735,7 +1181,7 @@ a.lightbox-btn {
   background: none;
   border: none;
   color: var(--text-secondary, var(--text));
-  font-size: 14px;
+  font-size: 0.933rem;
   cursor: pointer;
   padding: 0 4px;
   line-height: 1;
@@ -1754,7 +1200,7 @@ a.lightbox-btn {
   gap: 6px;
 }
 .room-wired-prime-badge {
-  font-size: 10px;
+  font-size: 0.667rem;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   padding: 1px 6px;
@@ -1765,7 +1211,7 @@ a.lightbox-btn {
 }
 .room-prime-note {
   margin: 4px 0 10px;
-  font-size: 11px;
+  font-size: 0.733rem;
   color: var(--text-secondary, var(--text));
   opacity: 0.75;
   line-height: 1.4;
@@ -1773,7 +1219,7 @@ a.lightbox-btn {
 .room-mode-badge {
   margin: 8px 0 4px;
   padding: 4px 8px;
-  font-size: 11px;
+  font-size: 0.733rem;
   font-weight: 600;
   letter-spacing: 0.3px;
   border-radius: 4px;
@@ -1815,7 +1261,7 @@ a.lightbox-btn {
   background: none;
   border: none;
   padding: 6px 12px;
-  font-size: 12px;
+  font-size: 0.8rem;
   font-weight: 600;
   color: var(--text-dim);
   cursor: pointer;
@@ -1847,7 +1293,7 @@ a.lightbox-btn {
   color: var(--text);
   padding: 6px 8px;
   border-radius: 4px;
-  font-size: 13px;
+  font-size: 0.867rem;
   font-family: inherit;
 }
 
@@ -1869,7 +1315,7 @@ a.lightbox-btn {
   background: var(--surface2);
   border: 1px solid var(--border);
   border-radius: 4px;
-  font-size: 13px;
+  font-size: 0.867rem;
 }
 .room-create-agent-checklist li[hidden] {
   display: none;
@@ -1902,7 +1348,7 @@ a.lightbox-btn {
   color: var(--text);
   padding: 6px 8px;
   border-radius: 4px;
-  font-size: 13px;
+  font-size: 0.867rem;
   font-family: inherit;
 }
 
@@ -1916,7 +1362,7 @@ a.lightbox-btn {
   background: none;
   border: none;
   color: var(--text-dim);
-  font-size: 16px;
+  font-size: 1.067rem;
   cursor: pointer;
   padding: 2px 4px;
   border-radius: 4px;
@@ -1987,7 +1433,7 @@ a.lightbox-btn {
   text-align: left;
   padding: 10px 12px;
   border-radius: 6px;
-  font-size: 14px;
+  font-size: 0.933rem;
   cursor: pointer;
   white-space: nowrap;
 }
@@ -2001,15 +1447,31 @@ a.lightbox-btn {
 /* Manage section — full-screen surface for Agents/Models, reached from the ⋯
    menu. z-index sits BELOW the detail panes (110) so an agent/model detail
    still overlays it, and below members (99/100). */
+/* Right-side drawer (not a full-screen takeover) so the chat + sidebar stay
+   visible and focused — matches the members panel / detail panes that already
+   overlay the chat. Full-width on phones. */
 .manage {
   position: fixed;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: auto;
+  width: min(420px, 100vw);
   z-index: 60;
   background: var(--bg);
+  border-left: 1px solid var(--border);
+  box-shadow: -6px 0 24px rgba(0, 0, 0, 0.3);
   display: flex;
   flex-direction: column;
   padding-top: env(safe-area-inset-top);
   padding-bottom: env(safe-area-inset-bottom);
+}
+@media (max-width: 600px) {
+  .manage {
+    width: 100vw;
+    border-left: none;
+    box-shadow: none;
+  }
 }
 .manage[hidden] {
   display: none;
@@ -2024,7 +1486,7 @@ a.lightbox-btn {
   color: var(--text-dim);
   padding: 8px 14px;
   border-radius: 8px;
-  font-size: 14px;
+  font-size: 0.933rem;
   font-weight: 600;
   cursor: pointer;
 }
@@ -2086,7 +1548,7 @@ a.lightbox-btn {
   align-items: center;
   justify-content: space-between;
   font-weight: 600;
-  font-size: 15px;
+  font-size: 1rem;
 }
 .modal-body {
   padding: 18px;
@@ -2102,7 +1564,7 @@ a.lightbox-btn {
   gap: 8px;
 }
 .setting-label {
-  font-size: 12px;
+  font-size: 0.8rem;
   color: var(--text-dim);
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -2119,7 +1581,7 @@ a.lightbox-btn {
   border: 1px solid var(--border);
   color: var(--text-dim);
   border-radius: 6px;
-  font-size: 12px;
+  font-size: 0.8rem;
   cursor: pointer;
   transition: all 0.15s;
   text-align: center;
@@ -2138,7 +1600,7 @@ a.lightbox-btn {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 13px;
+  font-size: 0.867rem;
   cursor: pointer;
 }
 .setting-toggle input[type='checkbox'] {
@@ -2189,7 +1651,7 @@ a.lightbox-btn {
      roughly 44×44px (Apple/Material minimum). */
   .members-close {
     padding: 10px 14px;
-    font-size: 24px;
+    font-size: 1.6rem;
     min-width: 44px;
     min-height: 44px;
   }
@@ -2219,17 +1681,58 @@ a.lightbox-btn {
 /* ── Dashboard ─────────────────────────────────────────────────────────── */
 #dashboard { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 #dashboard[hidden] { display: none; }
+
+/* Topology — fixed three-column SVG (no graph lib). Scrolls horizontally on
+   narrow screens so it degrades gracefully on mobile. */
+#topology { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+#topology[hidden] { display: none; }
+.topology-body { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; padding: 14px 18px; }
+.topology-legend { display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; font-size: 0.867rem; color: var(--text); }
+.topology-hint { font-size: 0.8rem; color: var(--text-dim); }
+.topology-canvas { flex: 1; min-height: 0; overflow: auto; color: var(--text-dim); font-size: 0.867rem; }
+.topology-svg { width: 100%; height: auto; display: block; min-width: 680px; }
+.topo-col-head { fill: var(--text-dim); font-size: 0.8rem; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; }
+.topo-edge { stroke: color-mix(in srgb, var(--accent) 35%, var(--border)); stroke-width: 1.5; }
+.topo-node circle { fill: var(--surface2); stroke-width: 2; }
+.topo-room circle { stroke: var(--accent); }
+.topo-agent circle { stroke: var(--agent, var(--accent)); }
+.topo-model circle { stroke: var(--accent2, var(--accent)); }
+.topo-label { fill: var(--text); font-size: 0.8rem; }
+.topo-orphan circle { stroke: var(--delete-color, #e5484d); stroke-dasharray: 3 2; fill: transparent; }
+.topo-orphan .topo-label { fill: var(--text-dim); font-style: italic; }
+
+/* Wiring matrix — rooms × agents grid; sticky headers, tap-to-toggle cells.
+   Plain table so it scrolls/taps on mobile. */
+#matrix { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+#matrix[hidden] { display: none; }
+.matrix-body { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; padding: 14px 18px; }
+.matrix-hint { margin: 0; font-size: 0.8rem; line-height: 1.4; color: var(--text-dim); }
+.matrix-canvas { flex: 1; min-height: 0; overflow: auto; }
+.matrix-table { border-collapse: separate; border-spacing: 0; font-size: 0.8rem; }
+.matrix-table th,
+.matrix-table td { border: 1px solid var(--border); }
+.matrix-table thead th { position: sticky; top: 0; z-index: 2; background: var(--surface); }
+.matrix-room-head,
+.matrix-corner { position: sticky; left: 0; z-index: 1; background: var(--surface); text-align: left; padding: 6px 10px; white-space: nowrap; font-weight: 600; color: var(--text); }
+.matrix-corner { z-index: 3; color: var(--text-dim); font-weight: 500; }
+.matrix-agent-head { padding: 6px 10px; min-width: 88px; max-width: 150px; text-align: center; vertical-align: bottom; }
+.matrix-agent-name { font-weight: 600; color: var(--text); word-break: break-word; }
+.matrix-model-chip { display: inline-block; margin-top: 3px; padding: 1px 6px; border-radius: 8px; font-size: 0.667rem; color: var(--accent2, var(--accent)); background: color-mix(in srgb, var(--accent2, var(--accent)) 14%, var(--surface2)); }
+.matrix-model-chip.none { color: var(--text-dim); background: var(--surface2); font-style: italic; }
+.matrix-cell { width: 42px; height: 36px; text-align: center; cursor: pointer; background: var(--bg); transition: background 0.1s; }
+.matrix-cell:hover { background: var(--surface2); }
+.matrix-cell.on { background: color-mix(in srgb, var(--accent) 28%, var(--surface)); }
+.matrix-cell.on::after { content: '✓'; color: var(--accent); font-weight: 700; }
+.matrix-cell.pending { opacity: 0.5; }
 .dash-header { padding: 14px 20px; background: var(--surface); border-bottom: 1px solid var(--border); font-weight: 600; display: flex; align-items: center; justify-content: space-between; }
-.dash-refresh-btn { background: var(--surface2); border: 1px solid var(--border); color: var(--text-dim); padding: 4px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; }
-.dash-refresh-btn:hover { color: var(--text); border-color: var(--text-dim); }
 .dash-body { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 24px; }
 .dash-section { display: flex; flex-direction: column; gap: 10px; }
-.dash-section-title { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+.dash-section-title { font-size: 0.733rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
 .settings-btn.active { color: var(--accent); }
 
 /* Health strip */
 .dash-health { display: flex; gap: 10px; flex-wrap: wrap; }
-.dash-pill { display: flex; align-items: center; gap: 6px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px; font-size: 12px; }
+.dash-pill { display: flex; align-items: center; gap: 6px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px; font-size: 0.8rem; }
 .dash-pill .pill-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .dash-pill .pill-dot.ok { background: var(--accent2); }
 .dash-pill .pill-dot.warn { background: var(--agent); }
@@ -2241,35 +1744,35 @@ a.lightbox-btn {
 .metrics-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
 .metric-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px; text-align: center; }
 .metric-card.wide { text-align: left; grid-column: span 2; }
-.metric-value { font-size: 28px; font-weight: 700; color: var(--accent); line-height: 1.2; }
-.metric-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
-.metric-sub { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
-.channel-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.metric-value { font-size: 1.867rem; font-weight: 700; color: var(--accent); line-height: 1.2; }
+.metric-label { font-size: 0.733rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
+.metric-sub { font-size: 0.8rem; color: var(--text-dim); margin-top: 4px; }
+.channel-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 0.867rem; }
 .channel-row:last-child { border-bottom: none; }
 .channel-name { text-transform: capitalize; }
 .channel-count { color: var(--accent); font-weight: 600; }
 .metrics-grid.two-col { grid-template-columns: 1fr 1fr; }
-.sys-row { display: flex; justify-content: space-between; font-size: 12px; padding: 4px 0; color: var(--text-dim); }
+.sys-row { display: flex; justify-content: space-between; font-size: 0.8rem; padding: 4px 0; color: var(--text-dim); }
 .sys-row span:last-child { color: var(--text); }
 .progress-bar { height: 6px; background: var(--surface2); border-radius: 3px; margin: 4px 0 6px; overflow: hidden; }
 .progress-fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
-.model-tag { display: inline-block; background: var(--surface2); border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; font-size: 11px; margin: 2px; }
+.model-tag { display: inline-block; background: var(--surface2); border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; font-size: 0.733rem; margin: 2px; }
 .metric-card.clickable { cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s; }
 .metric-card.clickable:hover { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .dash-detail { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-top: 12px; }
 .dash-detail[hidden] { display: none; }
-.dash-detail-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 13px; }
-.dash-detail-header button { background: none; border: none; color: var(--text-dim); font-size: 20px; cursor: pointer; }
+.dash-detail-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 0.867rem; }
+.dash-detail-header button { background: none; border: none; color: var(--text-dim); font-size: 1.333rem; cursor: pointer; }
 #dash-detail-body { padding: 12px 14px; max-height: 400px; overflow-y: auto; }
-.detail-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.detail-table th { text-align: left; color: var(--text-dim); font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.detail-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+.detail-table th { text-align: left; color: var(--text-dim); font-size: 0.667rem; text-transform: uppercase; letter-spacing: 0.5px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
 .detail-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
 .detail-table tr:last-child td { border-bottom: none; }
 .detail-table .msg-content { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.detail-table .status-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 600; }
-.status-active { background: #69f0ae22; color: #69f0ae; }
-.status-paused { background: #ffd54f22; color: #ffd54f; }
-.dash-empty { color: var(--text-dim); font-size: 13px; font-style: italic; padding: 12px 0; }
+.detail-table .status-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.667rem; font-weight: 600; }
+.status-active { background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success-strong); }
+.status-paused { background: color-mix(in srgb, var(--warning) 14%, transparent); color: var(--warning-strong); }
+.dash-empty { color: var(--text-dim); font-size: 0.867rem; font-style: italic; padding: 12px 0; }
 
 @media (max-width: 600px) {
   .metrics-grid { grid-template-columns: repeat(2, 1fr); }
@@ -2302,7 +1805,7 @@ a.lightbox-btn {
   max-height: 240px;
   overflow-y: auto;
   padding: 4px 0;
-  font-size: 13px;
+  font-size: 0.867rem;
 }
 .mention-popover[hidden] {
   display: none;
@@ -2334,7 +1837,7 @@ a.lightbox-btn {
 }
 .mention-popover-prime {
   margin-left: auto;
-  font-size: 9px;
+  font-size: 0.6rem;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   padding: 1px 5px;
@@ -2356,7 +1859,7 @@ a.lightbox-btn {
   cursor: pointer;
   border-radius: 4px;
   margin: 2px 6px;
-  font-size: 13px;
+  font-size: 0.867rem;
   display: flex;
   align-items: baseline;
   gap: 6px;
@@ -2370,7 +1873,7 @@ a.lightbox-btn {
   box-shadow: inset 0 0 8px color-mix(in srgb, var(--accent) 15%, transparent);
 }
 #model-list .model-kind-badge {
-  font-size: 9px;
+  font-size: 0.6rem;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   padding: 1px 5px;
@@ -2389,7 +1892,7 @@ a.lightbox-btn {
   white-space: nowrap;
 }
 #model-list .model-row-uses {
-  font-size: 10px;
+  font-size: 0.667rem;
   color: var(--text-dim, var(--text));
   opacity: 0.7;
 }
@@ -2412,7 +1915,7 @@ a.lightbox-btn {
   color: var(--text);
   padding: 6px 8px;
   border-radius: 4px;
-  font-size: 13px;
+  font-size: 0.867rem;
 }
 
 /* ✨ Suggest from prompt — appears in three create flows. */
@@ -2432,27 +1935,18 @@ a.lightbox-btn {
   color: var(--text);
   padding: 6px 8px;
   border-radius: 4px;
-  font-size: 13px;
+  font-size: 0.867rem;
   font-family: inherit;
   resize: vertical;
   min-height: 36px;
 }
+/* Drafter "Suggest from prompt" buttons take the .btn .btn-ghost role; this
+   class is retained only as the JS hook (querySelectorAll('.drafter-btn')) plus
+   the layout it needs. */
 .drafter-btn {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  color: var(--text);
-  padding: 6px 10px;
-  border-radius: 4px;
-  font-size: 12px;
-  cursor: pointer;
   align-self: flex-start;
 }
-.drafter-btn:hover:not(:disabled) {
-  border-color: var(--accent);
-  color: var(--accent);
-}
 .drafter-btn:disabled {
-  opacity: 0.5;
   cursor: progress;
 }
 
@@ -2469,7 +1963,7 @@ a.lightbox-btn {
 }
 .model-probe-status {
   margin: 4px 0;
-  font-size: 12px;
+  font-size: 0.8rem;
   color: var(--text-dim, var(--text));
   font-style: italic;
 }
@@ -2485,7 +1979,7 @@ a.lightbox-btn {
   flex-wrap: wrap;
 }
 .model-probe-kind {
-  font-size: 10px;
+  font-size: 0.667rem;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   padding: 2px 6px;
@@ -2502,7 +1996,7 @@ a.lightbox-btn {
   color: var(--bg);
 }
 .model-probe-notes {
-  font-size: 11px;
+  font-size: 0.733rem;
   color: var(--text-dim, var(--text));
   flex: 1;
 }
@@ -2524,7 +2018,7 @@ a.lightbox-btn {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 4px;
-  font-size: 12px;
+  font-size: 0.8rem;
 }
 .model-probe-list .empty-note {
   background: none;
@@ -2548,7 +2042,7 @@ a.lightbox-btn {
   color: var(--text);
   padding: 3px 6px;
   border-radius: 3px;
-  font-size: 11px;
+  font-size: 0.733rem;
 }
 .model-probe-actions {
   display: flex;
@@ -2560,7 +2054,7 @@ a.lightbox-btn {
 }
 .model-advanced summary {
   cursor: pointer;
-  font-size: 12px;
+  font-size: 0.8rem;
   color: var(--text-dim, var(--text));
   padding: 4px 0;
 }
@@ -2606,14 +2100,14 @@ a.lightbox-btn {
   flex: 1;
 }
 .model-picker-trigger-name {
-  font-size: 14px;
+  font-size: 0.933rem;
   color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .model-picker-trigger-meta {
-  font-size: 11px;
+  font-size: 0.733rem;
   color: var(--text-dim, var(--text));
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2621,7 +2115,7 @@ a.lightbox-btn {
 }
 .model-picker-trigger-caret {
   color: var(--text-dim, var(--text));
-  font-size: 12px;
+  font-size: 0.8rem;
   flex: 0 0 auto;
 }
 
@@ -2680,7 +2174,7 @@ a.lightbox-btn {
   align-items: center;
   justify-content: space-between;
   padding: 10px 16px 8px;
-  font-size: 13px;
+  font-size: 0.867rem;
   color: var(--text-dim, var(--text));
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -2699,7 +2193,7 @@ a.lightbox-btn {
   border: 1px solid var(--border);
   border-radius: 4px;
   color: var(--text);
-  font-size: 14px;
+  font-size: 0.933rem;
 }
 .model-picker-search:focus {
   outline: 2px solid var(--accent);
@@ -2742,14 +2236,14 @@ a.lightbox-btn {
 }
 .model-picker-row-name {
   flex: 1;
-  font-size: 14px;
+  font-size: 0.933rem;
   color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .model-picker-row-sub {
-  font-size: 11px;
+  font-size: 0.733rem;
   color: var(--text-dim, var(--text));
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2757,7 +2251,7 @@ a.lightbox-btn {
 }
 /* Reuse existing .model-kind-badge.kind-* coloring; just match selectors. */
 .model-picker-row .model-kind-badge {
-  font-size: 9px;
+  font-size: 0.6rem;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   padding: 1px 5px;
@@ -2783,14 +2277,14 @@ a.lightbox-btn {
   padding: 12px;
   text-align: center;
   color: var(--text-dim, var(--text));
-  font-size: 12px;
+  font-size: 0.8rem;
   font-style: italic;
 }
 .model-picker-footer {
   padding: 10px 16px 14px;
   border-top: 1px solid var(--border);
 }
-.model-picker-footer .create-agent-btn {
+.model-picker-footer .btn {
   width: 100%;
 }
 
@@ -2839,7 +2333,7 @@ a.lightbox-btn {
   background: none;
   border: none;
   color: var(--text);
-  font-size: 12px;
+  font-size: 0.8rem;
   font-weight: 600;
   cursor: pointer;
   text-align: left;
@@ -2878,7 +2372,7 @@ a.lightbox-btn {
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--surface, var(--bg));
-  font-size: 13px;
+  font-size: 0.867rem;
 }
 /* In-room approval card wrapper + read-only/resolved note */
 .msg.approval-msg {
@@ -2914,7 +2408,7 @@ a.lightbox-btn {
 }
 .approval-card .approval-payload {
   font-family: ui-monospace, Menlo, monospace;
-  font-size: 11px;
+  font-size: 0.733rem;
   color: var(--text-dim);
   background: var(--bg);
   border: 1px solid var(--border);
@@ -2937,7 +2431,7 @@ a.lightbox-btn {
   background: var(--bg);
   color: var(--text);
   cursor: pointer;
-  font-size: 12px;
+  font-size: 0.8rem;
   font-weight: 600;
 }
 .approval-card button.approve {
@@ -2974,7 +2468,7 @@ a.lightbox-btn {
   border-radius: 6px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
   padding: 10px 12px;
-  font-size: 12px;
+  font-size: 0.8rem;
   animation: approval-toast-in 0.18s ease-out;
 }
 @keyframes approval-toast-in {
@@ -3013,7 +2507,7 @@ a.lightbox-btn {
   border-radius: 6px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
   padding: 10px 12px;
-  font-size: 13px;
+  font-size: 0.867rem;
   color: var(--text);
   white-space: pre-line;
   animation: toast-in 0.18s ease-out;
@@ -3042,7 +2536,7 @@ a.lightbox-btn {
   width: 420px;
 }
 .confirm-message {
-  font-size: 14px;
+  font-size: 0.933rem;
   line-height: 1.5;
   color: var(--text);
 }
@@ -3058,7 +2552,7 @@ a.lightbox-btn {
   color: var(--text);
   padding: 8px 14px;
   border-radius: 6px;
-  font-size: 13px;
+  font-size: 0.867rem;
   cursor: pointer;
 }
 .btn-cancel:hover {
@@ -3069,7 +2563,7 @@ a.lightbox-btn {
 .form-hint {
   margin: -4px 0 8px 0;
   padding: 6px 10px;
-  font-size: 11px;
+  font-size: 0.733rem;
   color: var(--text-dim);
   background: rgba(127, 127, 127, 0.06);
   border-left: 2px solid var(--accent);
@@ -3132,7 +2626,7 @@ a.lightbox-btn {
   outline-offset: -2px;
 }
 .perms-user-name {
-  font-size: 14px;
+  font-size: 0.933rem;
   font-weight: 600;
   color: var(--text);
   display: flex;
@@ -3147,7 +2641,7 @@ a.lightbox-btn {
   flex: 1;
 }
 .perms-user-name .perms-you-tag {
-  font-size: 9px;
+  font-size: 0.6rem;
   background: var(--accent);
   color: #000;
   padding: 1px 5px;
@@ -3157,14 +2651,14 @@ a.lightbox-btn {
 }
 .perms-user-id-sub {
   font-family: ui-monospace, Menlo, monospace;
-  font-size: 10px;
+  font-size: 0.667rem;
   color: var(--text-dim);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .perms-user-summary {
-  font-size: 11px;
+  font-size: 0.733rem;
   color: var(--text-dim);
   margin-top: 2px;
 }
@@ -3186,7 +2680,7 @@ a.lightbox-btn {
   align-items: center;
   padding: 32px 24px;
   color: var(--text-dim);
-  font-size: 13px;
+  font-size: 0.867rem;
   text-align: center;
   gap: 8px;
 }
@@ -3194,7 +2688,7 @@ a.lightbox-btn {
   display: none;
 }
 .perms-empty-state code {
-  font-size: 11px;
+  font-size: 0.733rem;
   background: var(--surface2);
   padding: 1px 4px;
   border-radius: 3px;
@@ -3219,7 +2713,7 @@ a.lightbox-btn {
 }
 .perms-detail-id {
   font-family: ui-monospace, Menlo, monospace;
-  font-size: 12px;
+  font-size: 0.8rem;
   color: var(--text-dim);
   word-break: break-all;
   background: var(--surface);
@@ -3250,7 +2744,7 @@ a.lightbox-btn {
   color: var(--text);
   padding: 10px 12px;
   border-radius: 4px;
-  font-size: 14px;
+  font-size: 0.933rem;
   width: 100%;
 }
 
@@ -3266,7 +2760,7 @@ a.lightbox-btn {
   gap: 6px;
   padding: 6px 12px;
   border-radius: 14px;
-  font-size: 12px;
+  font-size: 0.8rem;
   font-weight: 600;
   background: rgba(127, 127, 127, 0.12);
   color: var(--text);
@@ -3288,7 +2782,7 @@ a.lightbox-btn {
   border: none;
   color: inherit;
   cursor: pointer;
-  font-size: 16px;
+  font-size: 1.067rem;
   font-weight: 700;
   line-height: 1;
   padding: 0 0 0 2px;
@@ -3301,7 +2795,7 @@ a.lightbox-btn {
 }
 .perms-empty {
   color: var(--text-dim);
-  font-size: 12px;
+  font-size: 0.8rem;
   font-style: italic;
 }
 
@@ -3332,7 +2826,7 @@ a.lightbox-btn {
 
 /* ── Permissions toggle matrix ────────────────────────────────────────── */
 .perms-section-title {
-  font-size: 11px;
+  font-size: 0.733rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -3360,7 +2854,7 @@ a.lightbox-btn {
   border-bottom: none;
 }
 .perms-toggle-label {
-  font-size: 14px;
+  font-size: 0.933rem;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -3368,7 +2862,7 @@ a.lightbox-btn {
   min-width: 0;
 }
 .perms-toggle-label .perms-toggle-meta {
-  font-size: 10px;
+  font-size: 0.667rem;
   color: var(--text-dim);
   font-weight: normal;
   margin-left: 4px;
@@ -3419,7 +2913,7 @@ a.lightbox-btn {
   grid-template-columns: 1fr 64px 64px;
   gap: 8px;
   padding: 6px 12px;
-  font-size: 10px;
+  font-size: 0.667rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -3452,7 +2946,7 @@ a.lightbox-btn {
   border-bottom: none;
 }
 .perms-matrix-row .perms-group-name {
-  font-size: 13px;
+  font-size: 0.867rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3468,7 +2962,7 @@ a.lightbox-btn {
   background: transparent;
   cursor: pointer;
   color: var(--text-dim);
-  font-size: 14px;
+  font-size: 0.933rem;
   transition:
     background 0.15s,
     color 0.15s,
@@ -3501,7 +2995,7 @@ a.lightbox-btn {
 .perms-matrix-empty {
   padding: 16px 12px;
   color: var(--text-dim);
-  font-size: 12px;
+  font-size: 0.8rem;
   font-style: italic;
   text-align: center;
 }
@@ -3548,7 +3042,7 @@ a.lightbox-btn {
   cursor: pointer;
 }
 .room-add-agent-name {
-  font-size: 13px;
+  font-size: 0.867rem;
   font-weight: 600;
   color: var(--text);
   overflow: hidden;
@@ -3557,9 +3051,79 @@ a.lightbox-btn {
 }
 .room-add-agent-sub {
   font-family: ui-monospace, Menlo, monospace;
-  font-size: 10px;
+  font-size: 0.667rem;
   color: var(--text-dim);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ── Agent lifecycle status ─────────────────────────────────────────────── */
+/* Segmented control in the agent detail form. */
+.agent-status-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0;
+}
+.agent-status-control {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  align-self: flex-start;
+}
+.agent-status-btn {
+  background: transparent;
+  color: var(--text-dim);
+  border: none;
+  border-right: 1px solid var(--border);
+  padding: 6px 14px;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.agent-status-btn:last-child { border-right: none; }
+.agent-status-btn:hover { color: var(--text); }
+.agent-status-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+#agent-status-hint {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+}
+
+/* Badge next to a non-active agent in the list. */
+.agent-status-badge {
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+}
+.agent-status-badge.status-paused {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent-strong);
+}
+.agent-status-badge.status-archived {
+  background: color-mix(in srgb, var(--text-dim) 25%, transparent);
+  color: var(--text-dim);
+}
+
+/* "Show / hide archived" toggle under the agent list. */
+.agent-show-archived {
+  display: block;
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  padding: 6px 0;
+  cursor: pointer;
+  text-align: left;
+}
+.agent-show-archived:hover { color: var(--text); }

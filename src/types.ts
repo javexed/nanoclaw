@@ -1,5 +1,13 @@
 // ── Central DB entities ──
 
+/**
+ * Lifecycle state of an agent group.
+ * - `active`   — normal: engages, wakes, shows everywhere.
+ * - `paused`   — wiring kept but the agent never responds (benched). Still visible.
+ * - `archived` — retired: never responds AND hidden from lists/pickers by default.
+ */
+export type AgentStatus = 'active' | 'paused' | 'archived';
+
 export interface AgentGroup {
   id: string;
   name: string;
@@ -7,6 +15,12 @@ export interface AgentGroup {
   /** @deprecated Use container_configs.provider instead. */
   agent_provider: string | null;
   created_at: string;
+  /**
+   * Lifecycle state. DB rows always carry it (NOT NULL DEFAULT 'active',
+   * migration 019); optional here only so hand-built fixtures/objects don't
+   * have to set it — consumers treat a missing value as 'active'.
+   */
+  status?: AgentStatus;
 }
 
 /** Per-agent-group container runtime config. Source of truth in the DB;

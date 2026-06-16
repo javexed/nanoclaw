@@ -416,3 +416,52 @@ export const moduleWebchatApprovalsIndexFanout: Migration = {
     `);
   },
 };
+
+/**
+ * Full-text search over message content (FTS5). An external-content virtual
+ * table mirrors webchat_messages.content (no duplicate storage), kept in sync
+ * by INSERT/DELETE/UPDATE triggers. Existing rows are backfilled on first run.
+ * Powers GET /api/search. FTS5 is compiled into the bundled SQLite.
+ */
+export const moduleWebchatMessageFts: Migration = {
+  version: 110,
+  name: 'webchat-message-fts',
+  up(db: Database.Database) {
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS webchat_messages_fts
+        USING fts5(content, content='webchat_messages', content_rowid='rowid');
+
+      CREATE TRIGGER IF NOT EXISTS webchat_messages_fts_ai AFTER INSERT ON webchat_messages BEGIN
+        INSERT INTO webchat_messages_fts(rowid, content) VALUES (new.rowid, new.content);
+      END;
+      CREATE TRIGGER IF NOT EXISTS webchat_messages_fts_ad AFTER DELETE ON webchat_messages BEGIN
+        INSERT INTO webchat_messages_fts(webchat_messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+      END;
+      CREATE TRIGGER IF NOT EXISTS webchat_messages_fts_au AFTER UPDATE ON webchat_messages BEGIN
+        INSERT INTO webchat_messages_fts(webchat_messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+        INSERT INTO webchat_messages_fts(rowid, content) VALUES (new.rowid, new.content);
+      END;
+
+      INSERT INTO webchat_messages_fts(rowid, content)
+        SELECT rowid, content FROM webchat_messages;
+    `);
+  },
+};
+
+/**
+ * Agent lifecycle status: active | paused | archived. Delivered as a webchat
+ * module migration (webchat is the consumer — the Agents UI surfaces/sets it;
+ * the router gates engagement on it). Adds a NOT NULL column defaulting to
+ * 'active', so every existing agent keeps responding. Writes are validated in
+ * setAgentStatus (src/db/agent-groups.ts) — plain TEXT, no CHECK, matching the
+ * rest of the schema.
+ */
+export const moduleWebchatAgentStatus: Migration = {
+  version: 111,
+  name: 'agent-status',
+  up(db: Database.Database) {
+    db.exec(`
+      ALTER TABLE agent_groups ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
+    `);
+  },
+};

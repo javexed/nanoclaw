@@ -55,6 +55,7 @@ NEW_PATHS=(
   src/session-teardown.ts
   src/session-teardown.test.ts
   src/router.agent-loopback.test.ts
+  src/router.agent-status.test.ts
   src/router.backtick-escape.test.ts
   container/agent-runner/src/graceful-degradation.test.ts
 )
@@ -72,6 +73,7 @@ git checkout "$BR" -- "${NEW_PATHS[@]}"
 #                            conflict markers that would break the build
 # uninstall-webchat.sh reverses exactly these same deltas.
 HOOK_FILES=(
+  CLAUDE.md
   src/modules/agent-to-agent/create-agent.ts
   src/modules/agent-to-agent/agent-route.ts
   src/modules/approvals/primitive.ts
@@ -87,6 +89,9 @@ HOOK_FILES=(
   src/delivery.ts
   src/index.ts
   src/router.ts
+  src/types.ts
+  src/db/agent-groups.ts
+  pnpm-workspace.yaml
   src/session-manager.ts
 )
 CONFLICTS=()

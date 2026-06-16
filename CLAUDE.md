@@ -120,6 +120,10 @@ Trunk does not ship any specific channel adapter or non-default agent provider. 
 
 Each `/add-<name>` skill is idempotent: `git fetch origin <branch>` → copy module(s) into the standard paths → append a self-registration import to the relevant barrel → `pnpm install <pkg>@<pinned-version>` → build.
 
+## Webchat UI design language
+
+When editing the webchat PWA (`public/webchat/` — `index.html`, `app.js`, `style.css`), follow **[public/webchat/DESIGN.md](public/webchat/DESIGN.md)**. It is the design-language contract: the CSS token layer (color, `--radius-*`, `--fs-*` rem type scale, `--transition`), the four button roles with the old-class → role mapping, the dismissal contract, the three feedback channels (`appendSystem` transcript / `showToast` / inline) and when each fires, and microcopy rules (sentence case, the `…` character, "wire" as the verb). Use the tokens for new styles; don't reintroduce literal radii/font-sizes or hardcoded status colors.
+
 ## Self-Modification
 
 One tier of agent self-modification today:

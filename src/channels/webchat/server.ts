@@ -16,7 +16,7 @@
  *   DELETE /api/rooms/:id/prime                  clear the room's prime designation  [owner]
  *   GET  /api/rooms/:id/engage-mode              read room's engage default ('mention-only' | 'broadcast')
  *   PUT  /api/rooms/:id/engage-mode              set { mode } for the room  [owner]
- *   GET  /api/rooms/:id/messages                 history (?after_id= for incremental)
+ *   GET  /api/rooms/:id/messages                 history (?after_id= catch-up, ?before_id= scroll-back)
  *   POST /api/rooms/:id/archive                  mark room archived (owner + admin) — global
  *   POST /api/rooms/:id/unarchive                clear global archive (owner + admin)
  *   POST /api/rooms/:id/hide                     hide room from this user's sidebar — per-user
@@ -82,6 +82,7 @@ import {
   deleteAgentGroup,
   getAgentGroup,
   getAllAgentGroups,
+  setAgentStatus,
   updateAgentGroup,
 } from '../../db/agent-groups.js';
 import { createMessagingGroupAgent, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
@@ -146,6 +147,9 @@ import {
   isWebchatApprovalIndexedFor,
   getWebchatMessages,
   getWebchatMessagesAfterId,
+  getWebchatMessagesBeforeId,
+  searchWebchatMessages,
+  getWebchatTopology,
   getWebchatModel,
   getWebchatPendingApprovalsForUser,
   getWebchatRoom,
@@ -340,6 +344,26 @@ async function handleHttp(
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  // Security headers on every response (set via setHeader so later writeHead
+  // calls merge rather than clobber them). CSP is the key one: this is a chat
+  // app rendering LLM/markdown output, so even if the DOMPurify sanitizer is
+  // ever bypassed, script-src 'self' stops injected <script>/handlers/eval from
+  // executing — defense-in-depth behind the sanitizer. Everything is
+  // same-origin and vendored (script-src/connect-src/font-src 'self'); the WS
+  // is same-origin so 'self' covers it; img allows data:/blob: (thumbnails,
+  // icon masks). style-src keeps 'unsafe-inline' for the handful of inline
+  // style= attrs + JS el.style assignments — style injection is low-risk and
+  // the script protection stays strict.
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+      "img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; " +
+      "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+  );
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'same-origin');
 
   const url = new URL(req.url ?? '/', 'http://localhost');
   const method = req.method ?? 'GET';
@@ -553,13 +577,53 @@ async function handleHttp(
     return json(res, 200, { ok: true, mode: body.mode });
   }
 
+  // Room → agent → model topology for the explore view, scoped to the caller's
+  // accessible rooms (and only the agents/models reachable from them).
+  if (url.pathname === '/api/topology' && method === 'GET') {
+    const rooms = filterRoomsForUser(userId, getAllWebchatRooms());
+    // ALL agents the caller manages become columns/nodes (not just wired ones),
+    // so unused agents show as orphans and can be wired from the matrix.
+    const agents = listAgentsForUser(userId).map((a) => ({ id: a.id, name: a.name }));
+    return json(res, 200, getWebchatTopology(rooms, agents));
+  }
+
+  // Full-text search across the caller's accessible rooms (FTS5). Scoped to
+  // rooms the user can see — never leaks messages from other rooms.
+  if (url.pathname === '/api/search' && method === 'GET') {
+    const q = url.searchParams.get('q') ?? '';
+    if (!q.trim()) return json(res, 200, { results: [] });
+    const rooms = filterRoomsForUser(userId, getAllWebchatRooms());
+    const nameById = new Map(rooms.map((r) => [r.id, r.name]));
+    const hits = searchWebchatMessages(
+      rooms.map((r) => r.id),
+      q,
+      50,
+    );
+    return json(res, 200, {
+      results: hits.map((h) => ({
+        id: h.id,
+        roomId: h.room_id,
+        roomName: nameById.get(h.room_id) ?? h.room_id,
+        sender: h.sender,
+        senderType: h.sender_type,
+        snippet: redactSensitiveData(h.snippet),
+        createdAt: h.created_at,
+      })),
+    });
+  }
+
   const histMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/messages$/);
   if (histMatch && method === 'GET') {
     const room = getWebchatRoom(histMatch[1]);
     if (!room) return json(res, 404, { error: 'Room not found' });
     if (!canAccessRoom(userId, room.id)) return json(res, 403, { error: 'Access denied' });
     const afterId = url.searchParams.get('after_id');
-    const msgs = afterId ? getWebchatMessagesAfterId(room.id, afterId, 200) : getWebchatMessages(room.id, 100);
+    const beforeId = url.searchParams.get('before_id');
+    const msgs = afterId
+      ? getWebchatMessagesAfterId(room.id, afterId, 200)
+      : beforeId
+        ? getWebchatMessagesBeforeId(room.id, beforeId, 50)
+        : getWebchatMessages(room.id, 100);
     return json(
       res,
       200,
@@ -615,7 +679,8 @@ async function handleHttp(
 
   // ── Agents (= agent groups) ─────────────────────────────────────────────
   if (url.pathname === '/api/agents' && method === 'GET') {
-    return json(res, 200, listAgentsForUser(userId));
+    const includeArchived = url.searchParams.get('includeArchived') === '1';
+    return json(res, 200, listAgentsForUser(userId, includeArchived));
   }
 
   // POST /api/agents/draft must come BEFORE the /api/agents/:id pattern
@@ -683,6 +748,18 @@ async function handleHttp(
     if (!group) return json(res, 404, { error: 'Agent not found' });
     if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
     return assignAgentModelHandler(req, res, group.id);
+  }
+
+  // ── Lifecycle status (active | paused | archived) ──────────────────────
+  const agentStatusMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/status$/);
+  if (agentStatusMatch && method === 'PUT') {
+    if (req.headers['x-webchat-csrf'] !== '1') {
+      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    }
+    const group = resolveAgent(decodeURIComponent(agentStatusMatch[1]));
+    if (!group) return json(res, 404, { error: 'Agent not found' });
+    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+    return setAgentStatusHandler(req, res, group.id);
   }
 
   // ── Models ────────────────────────────────────────────────────────────
@@ -1406,6 +1483,7 @@ function provisionWebchatAgentWithRoom(
     folder,
     agent_provider: null,
     created_at: new Date().toISOString(),
+    status: 'active',
   };
 
   // The three steps (DB row, on-disk folder, wiring) need to land together
@@ -1476,9 +1554,13 @@ function resolveAgent(idOrJid: string): AgentGroup | null {
   return getAgentGroup(idOrJid) ?? null;
 }
 
-function listAgentsForUser(userId: string): AgentForUI[] {
+function listAgentsForUser(userId: string, includeArchived = false): AgentForUI[] {
   const all = getAllAgentGroups();
-  const visible = isOwner(userId) ? all : all.filter((g) => hasAdminPrivilege(userId, g.id));
+  const role = isOwner(userId) ? all : all.filter((g) => hasAdminPrivilege(userId, g.id));
+  // Archived agents are hidden by default — this declutters every consumer
+  // (agent list, pickers, topology/matrix) at once. The agent list opts in via
+  // ?includeArchived=1 so they can still be managed (unarchived).
+  const visible = includeArchived ? role : role.filter((g) => g.status !== 'archived');
   return visible.map(toAgentForUI);
 }
 
@@ -1973,6 +2055,7 @@ function createBareAgentGroup(
     folder,
     agent_provider: null,
     created_at: new Date().toISOString(),
+    status: 'active',
   };
   try {
     createAgentGroup(group);
@@ -2474,6 +2557,24 @@ async function discoverModelsHandler(req: IncomingMessage, res: ServerResponse):
     }
   }
   return json(res, 400, { error: 'kind must be "anthropic" or "ollama"' });
+}
+
+async function setAgentStatusHandler(req: IncomingMessage, res: ServerResponse, agentGroupId: string): Promise<void> {
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { status?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  const status = body.status;
+  if (status !== 'active' && status !== 'paused' && status !== 'archived') {
+    return json(res, 400, { error: "status must be 'active', 'paused', or 'archived'" });
+  }
+  setAgentStatus(agentGroupId, status);
+  const group = getAgentGroup(agentGroupId);
+  return json(res, 200, group ? toAgentForUI(group) : { status });
 }
 
 async function assignAgentModelHandler(req: IncomingMessage, res: ServerResponse, agentGroupId: string): Promise<void> {

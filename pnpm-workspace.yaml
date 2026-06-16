@@ -3,6 +3,9 @@ onlyBuiltDependencies:
   - esbuild
   - protobufjs
   - sharp
+  # @playwright/test: dev-only E2E runner; its install hook fetches the browser.
+  # Human-approved 2026-06-15 (webchat happy-path E2E).
+  - '@playwright/test'
 
 pnpm:
   minimumReleaseAge: 4320

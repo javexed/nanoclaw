@@ -90,4 +90,30 @@ describe('startWebchatServer — boot gate', () => {
       await server.stopWebchatServer(wc);
     }
   });
+
+  it('sets CSP + nosniff + frame headers on every response', async () => {
+    const http = await import('http');
+    const server = await loadServerWithEnv({ WEBCHAT_HOST: '127.0.0.1', WEBCHAT_PORT: '0', WEBCHAT_TOKEN: '' });
+    const wc = await server.startWebchatServer(noopHooks);
+    try {
+      const addr = wc.http.address();
+      const port = typeof addr === 'object' && addr ? addr.port : 0;
+      const headers = await new Promise<Record<string, string | string[] | undefined>>((resolve, reject) => {
+        const r = http.request({ host: '127.0.0.1', port, path: '/', method: 'GET' }, (res) => {
+          res.resume();
+          resolve(res.headers);
+        });
+        r.on('error', reject);
+        r.end();
+      });
+      const csp = String(headers['content-security-policy'] ?? '');
+      expect(csp).toContain("default-src 'self'");
+      expect(csp).toContain("script-src 'self'"); // the load-bearing XSS guard
+      expect(csp).toContain("object-src 'none'");
+      expect(headers['x-content-type-options']).toBe('nosniff');
+      expect(headers['x-frame-options']).toBe('DENY');
+    } finally {
+      await server.stopWebchatServer(wc);
+    }
+  });
 });
