@@ -189,6 +189,763 @@ body {
   font-size: 0.867rem;
   margin-bottom: 16px;
 }
+/* Lucide inline icons (sprite in index.html). Inherit text color via currentColor. */
+.icon {
+  width: 1.15em;
+  height: 1.15em;
+  display: inline-block;
+  vertical-align: -0.18em;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.icon--fill {
+  fill: currentColor;
+}
+
+.login-help {
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  margin: 12px 0 0;
+}
+.login-help-dim {
+  display: block;
+  margin-top: 2px;
+  opacity: 0.7;
+}
+.login-help code {
+  background: var(--surface2);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 0.733rem;
+}
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.login-form input {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 0.933rem;
+  text-align: center;
+}
+.login-form input:focus {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.login-error {
+  color: var(--delete-color);
+  font-size: 0.8rem;
+  margin-top: 8px;
+}
+.login-error[hidden] {
+  display: none;
+}
+
+#app {
+  display: flex;
+  height: 100vh;
+  height: 100dvh;
+} /* dvh for mobile address bar, vh fallback */
+
+/* Sidebar */
+#sidebar {
+  width: 220px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+.sidebar-header {
+  padding: 16px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 8%, transparent) 0%, transparent 100%);
+}
+.logo {
+  height: 24px;
+  width: auto;
+  display: block;
+}
+.logo-light {
+  display: none;
+}
+[data-theme='light'] .logo-dark {
+  display: none;
+}
+[data-theme='light'] .logo-light {
+  display: block;
+}
+@media (prefers-color-scheme: light) {
+  [data-theme='system'] .logo-dark {
+    display: none;
+  }
+  [data-theme='system'] .logo-light {
+    display: block;
+  }
+}
+.identity {
+  display: block;
+  font-size: 0.733rem;
+  color: var(--text-dim);
+  margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Sidebar tabs */
+.sidebar-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.sidebar-tab {
+  flex: 1;
+  padding: 8px 0;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  transition:
+    color 0.15s,
+    border-color 0.15s;
+}
+.sidebar-tab:hover {
+  color: var(--text);
+}
+.sidebar-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.tab-content {
+  display: none;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden; /* the list scrolls; the create button stays pinned below */
+  min-height: 0;
+}
+.tab-content.active {
+  display: flex;
+}
+
+/* Room list */
+/* Message search — input pinned at the top of the Rooms tab; results replace
+   the room list while a query is active. */
+.room-search {
+  flex-shrink: 0;
+  width: calc(100% - 16px);
+  margin: 8px 8px 4px;
+  padding: 7px 10px;
+  box-sizing: border-box;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 0.867rem;
+}
+.room-search::placeholder {
+  color: var(--text-dim);
+}
+.search-results {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  flex: 1;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--border);
+}
+.search-results[hidden] {
+  display: none;
+}
+.search-result {
+  padding: 8px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+}
+.search-result:hover {
+  background: var(--surface2);
+}
+.search-result-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.733rem;
+  color: var(--text-dim);
+  margin-bottom: 2px;
+}
+.search-result-room {
+  font-weight: 600;
+  color: var(--text);
+}
+.search-result-snip {
+  font-size: 0.8rem;
+  line-height: 1.4;
+  color: var(--text);
+  word-break: break-word;
+}
+.search-result-sender {
+  color: var(--text-dim);
+}
+.search-result mark {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--text);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.search-empty {
+  padding: 12px;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+}
+
+#room-list {
+  list-style: none;
+  padding: 8px 0;
+  flex: 1;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--border); /* divider above the pinned create button */
+}
+#room-list li {
+  display: flex;
+  align-items: center;
+  position: relative;
+  padding: 10px 16px;
+  cursor: pointer;
+  border-radius: 4px;
+  margin: 2px 6px;
+  transition: background 0.15s;
+  border-left: 3px solid transparent;
+}
+/* [hidden] must beat display:flex so search filtering works without !important. */
+#room-list li[hidden] {
+  display: none;
+}
+#room-list li:hover {
+  background: var(--surface2);
+}
+#room-list li.active {
+  background: var(--surface2);
+  box-shadow: inset 0 0 8px color-mix(in srgb, var(--accent) 15%, transparent);
+}
+#room-list li:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+#room-list li .unread-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  display: inline-block;
+  margin-left: 6px;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+#room-list li.dragging {
+  opacity: 0.4;
+}
+#room-list li.archived {
+  opacity: 0.55;
+}
+#room-list li .room-kebab {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0 4px;
+  font-size: 1.2rem;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+#room-list li:hover .room-kebab,
+#room-list li:focus-within .room-kebab {
+  opacity: 1;
+}
+#room-list li .room-menu {
+  position: absolute;
+  right: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  z-index: 10;
+}
+#room-list li .room-menu button {
+  background: transparent;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  padding: 6px 14px;
+  text-align: left;
+  width: 100%;
+  font-size: 0.867rem;
+}
+#room-list li .room-menu button:hover {
+  background: var(--surface2);
+}
+.archived-toggle {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 8px 16px;
+  text-align: left;
+  width: 100%;
+}
+.archived-toggle:hover {
+  color: var(--text);
+}
+#room-list li.drag-over {
+  border-top: 2px solid var(--accent);
+}
+
+/* Agent list */
+#agent-list {
+  list-style: none;
+  padding: 8px 0;
+  flex: 1;
+  overflow-y: auto;
+}
+#agent-list li {
+  padding: 8px 12px;
+  cursor: pointer;
+  border-radius: 4px;
+  margin: 2px 6px;
+  font-size: 0.867rem;
+  transition: background 0.15s;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-left: 3px solid transparent;
+}
+/* [hidden] must beat display:flex so search filtering works. */
+#agent-list li[hidden] {
+  display: none;
+}
+#agent-list li:hover {
+  background: var(--surface2);
+}
+#agent-list li.active {
+  background: var(--surface2);
+  box-shadow: inset 0 0 8px color-mix(in srgb, var(--accent) 15%, transparent);
+}
+#agent-list li:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+#agent-list li .agent-icon {
+  flex-shrink: 0;
+  font-size: 0.933rem;
+  transition: transform 0.15s;
+}
+#agent-list li:hover .agent-icon {
+  transform: scale(1.15);
+}
+#agent-list li .agent-info {
+  flex: 1;
+  min-width: 0;
+}
+#agent-list li .agent-info-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#agent-list li .agent-info-channel {
+  display: block;
+  font-size: 0.667rem;
+  color: var(--text-dim);
+}
+#agent-list li .agent-main-tag {
+  font-size: 0.6rem;
+  background: var(--agent);
+  color: #000;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+/* Chat area */
+#chat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+#chat-header {
+  padding: 14px 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  font-size: 1em;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+/* The room name doubles as the room-settings affordance when a room is open. */
+#room-name.has-settings {
+  cursor: pointer;
+}
+#room-name.has-settings::after {
+  content: '⌄';
+  margin-left: 5px;
+  font-size: 0.8em;
+  opacity: 0.55;
+}
+#room-name.has-settings:hover::after {
+  opacity: 0.9;
+}
+.mobile-back {
+  display: none;
+}
+/* Back buttons for full-screen surfaces stay visible on desktop too — these
+   surfaces (Manage especially) can cover the sidebar, so they need their own
+   way back to chat. */
+#manage-back,
+#dash-back,
+#perms-exit,
+#topology-back,
+#matrix-back {
+  display: inline-flex;
+  align-items: center;
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 1.333rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 10px 0 0;
+}
+#chat-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  position: relative;
+}
+#chat-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* Messages */
+#messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.msg {
+  max-width: 80%;
+  display: flex;
+  flex-direction: column;
+}
+.msg.mine {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+.msg.other {
+  align-self: flex-start;
+}
+.msg .sender {
+  font-size: 0.73em;
+  color: var(--text-dim);
+  margin-bottom: 3px;
+}
+.msg.agent .sender {
+  color: var(--agent);
+}
+.msg .bubble {
+  padding: 8px 13px;
+  border-radius: 14px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.msg.mine .bubble,
+.msg.other .bubble {
+  white-space: pre-wrap;
+}
+.msg.mine .bubble {
+  background: var(--mine-bubble);
+  color: var(--mine-text);
+  border-bottom-right-radius: 4px;
+}
+.msg.mine .sender {
+  text-align: right;
+}
+.msg.mine .msg-body {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+.msg-delete {
+  background: none;
+  border: none;
+  color: var(--delete-color);
+  cursor: pointer;
+  font-size: 1.3em;
+  padding: 6px 8px;
+  border-radius: 6px;
+  transition:
+    opacity 0.15s,
+    color 0.15s,
+    background 0.15s,
+    transform 0.1s;
+  flex-shrink: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.msg-delete:hover {
+  background: var(--surface2);
+  transform: scale(1.1);
+}
+.msg-delete.confirm {
+  opacity: 1;
+  pointer-events: auto;
+  color: var(--mine-text);
+  background: var(--delete-color);
+  font-size: 0.8em;
+  padding: 5px 10px;
+  transform: none;
+}
+.msg.mine:hover .msg-delete {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (pointer: coarse) {
+  .msg.mine .msg-delete {
+    opacity: 0.5;
+    pointer-events: auto;
+  }
+  .msg.mine .msg-delete.confirm {
+    opacity: 1;
+  }
+}
+.msg.mine.deleting {
+  transition: opacity 0.3s ease;
+  opacity: 0;
+}
+.msg.other .bubble {
+  background: var(--surface2);
+  border-bottom-left-radius: 4px;
+}
+.msg.agent .bubble {
+  background: var(--agent-bubble-bg);
+  border: 1.5px solid var(--agent);
+  border-left: 3px solid var(--agent);
+}
+/* a2a side-channel: a read-only copy of an agent↔agent exchange surfaced into a
+   shared room. Rendered as a compact card with a left accent bar tinted in the
+   sending agent's colour (--a2a-accent, set per-message in app.js), so it reads
+   as "overheard" and you can track who's speaking at a glance. */
+.msg.a2a {
+  align-self: center;
+  max-width: 92%;
+  width: 100%;
+  background: var(--surface2);
+  border-left: 3px solid var(--a2a-accent, var(--text-dim));
+  border-radius: 7px;
+  padding: 6px 12px 5px;
+}
+.msg.a2a .sender.a2a-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 2px;
+  font-size: 0.72em;
+  letter-spacing: 0.01em;
+}
+.msg.a2a .a2a-agent {
+  font-weight: 600;
+}
+.msg.a2a .a2a-arrow {
+  color: var(--text-dim);
+  font-weight: 400;
+}
+.msg.a2a .bubble {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  font-size: 0.92em;
+}
+.msg.system {
+  align-self: center;
+  color: var(--text-dim);
+  font-size: 0.8em;
+  font-style: italic;
+}
+.msg .timestamp {
+  font-size: 0.67em;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+/* Delivery status */
+.msg .status {
+  font-size: 0.73em;
+  color: var(--text-dim);
+  margin-top: 2px;
+  text-align: right;
+}
+.msg .status.delivered {
+  color: var(--accent);
+}
+
+/* Scroll to bottom button */
+.scroll-bottom {
+  position: fixed;
+  bottom: 70px;
+  right: 20px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 1.067rem;
+  cursor: pointer;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px var(--shadow);
+  transition:
+    opacity 0.15s,
+    color 0.15s;
+}
+.scroll-bottom:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.scroll-bottom[hidden] {
+  display: none;
+}
+.scroll-bottom .unread-count {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.667rem;
+  font-weight: 700;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+}
+.scroll-bottom .unread-count:empty {
+  display: none;
+}
+
+/* Empty state */
+.empty-state {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  font-size: 0.933rem;
+  text-align: center;
+  padding: 20px;
+}
+
+/* Input area */
+#message-form {
+  display: flex;
+  gap: 8px;
+  padding: 12px 20px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+#message-input {
+  flex: 1;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 10px 14px;
+  border-radius: 8px;
+  resize: none;
+  max-height: 120px;
+  overflow-y: auto;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 1.4;
+}
+#message-input:focus {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--accent);
+}
+button[type='submit'] {
+  background: var(--accent);
+  color: #000;
+  border: none;
+  padding: 10px 18px;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+}
+button[type='submit']:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+#send-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 14px;
+}
+#send-btn svg {
+  display: block;
+}
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Connection banner */
+.connection-banner {
+  padding: 6px 20px;
+  background: var(--delete-color);
+  color: #fff;
+  font-size: 0.8rem;
+  text-align: center;
+  display: none;
+}
+.connection-banner.visible {
+  display: block;
+}
 
 /* Mobile */
 @media (max-width: 600px) {
@@ -815,7 +1572,15 @@ a.lightbox-btn {
   display: none;
 }
 .members-toggle::before {
-  content: '👥 ';
+  content: '';
+  display: inline-block;
+  width: 1.05em;
+  height: 1.05em;
+  margin-right: 5px;
+  vertical-align: -0.18em;
+  background-color: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2'/%3E%3Ccircle cx='9' cy='7' r='4'/%3E%3Cpath d='M22 21v-2a4 4 0 0 0-3-3.87'/%3E%3Cpath d='M16 3.13a4 4 0 0 1 0 7.75'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2'/%3E%3Ccircle cx='9' cy='7' r='4'/%3E%3Cpath d='M22 21v-2a4 4 0 0 0-3-3.87'/%3E%3Cpath d='M16 3.13a4 4 0 0 1 0 7.75'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 
 /* Members panel — desktop: right sidebar */

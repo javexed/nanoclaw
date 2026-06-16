@@ -5,6 +5,19 @@ marked.setOptions({ breaks: true, gfm: true });
 
 const $ = (sel) => document.querySelector(sel);
 
+// Inline Lucide icon referencing the SVG sprite in index.html. Returns an HTML
+// string (safe — no user data); styling/color come from the .icon CSS class.
+function lucide(name, cls = '') {
+  return `<svg class="icon${cls ? ' ' + cls : ''}" aria-hidden="true"><use href="#i-${name}"></use></svg>`;
+}
+// Same icon as a detached DOM node, for inserting NEXT TO user-controlled text
+// without resorting to innerHTML (keeps the surrounding text XSS-safe).
+function lucideEl(name, cls = '') {
+  const t = document.createElement('template');
+  t.innerHTML = lucide(name, cls);
+  return t.content.firstChild;
+}
+
 // ── Code block copy / wrap controls ──────────────────────────────────────
 // Decorates any <pre> inside a container with a toolbar (language label,
 // wrap toggle, copy button). Called after marked+DOMPurify renders agent
@@ -1067,7 +1080,7 @@ function renderRooms(rooms) {
     const kebab = document.createElement('button');
     kebab.className = 'room-kebab';
     kebab.type = 'button';
-    kebab.textContent = '⋯';
+    kebab.innerHTML = lucide('ellipsis');
     kebab.setAttribute('aria-label', 'Room actions');
     kebab.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1470,7 +1483,13 @@ function appendMessage(msg, statusText, beforeNode) {
       sender.appendChild(toSpan);
     }
   } else {
-    sender.textContent = isAgent ? `🤖 ${msg.sender}` : isMine ? 'You' : msg.sender;
+    if (isAgent) {
+      sender.textContent = '';
+      sender.appendChild(lucideEl('bot'));
+      sender.append(' ' + msg.sender);
+    } else {
+      sender.textContent = isMine ? 'You' : msg.sender;
+    }
   }
   div.appendChild(sender);
 
@@ -1719,7 +1738,7 @@ function renderFileBubble(meta) {
   }
   const info = document.createElement('div');
   info.className = 'file-info';
-  const icon = isImage ? '🖼️' : meta.mime?.includes('pdf') ? '📄' : '📎';
+  const icon = isImage ? lucide('image') : meta.mime?.includes('pdf') ? lucide('file-text') : lucide('paperclip');
   const sizeStr =
     meta.size < 1024
       ? `${meta.size} B`
@@ -1731,7 +1750,7 @@ function renderFileBubble(meta) {
   dl.href = meta.url;
   dl.download = meta.filename;
   dl.className = 'file-download';
-  dl.textContent = '↓';
+  dl.innerHTML = lucide('download');
   dl.title = 'Download';
   info.appendChild(dl);
   wrap.appendChild(info);
@@ -1816,11 +1835,11 @@ function renderFilePreview() {
       }
       html += `<img src="${url}" class="file-preview-thumb" alt="">`;
     } else {
-      html += `<span class="file-preview-icon">📎</span>`;
+      html += `<span class="file-preview-icon">${lucide('paperclip')}</span>`;
     }
     html += `<span class="file-preview-name">${esc(file.name)}</span>`;
     html += `<span class="file-preview-size">${formatFileSize(file.size)}</span>`;
-    html += `<button class="file-preview-remove" data-remove-id="${id}">&times;</button>`;
+    html += `<button class="file-preview-remove" data-remove-id="${id}">${lucide('x')}</button>`;
     html += '</div>';
   }
   preview.innerHTML = html;
@@ -2515,7 +2534,11 @@ function teardownManage() {
   $('#overflow-btn')?.classList.remove('active');
 }
 function switchManageTab(tab) {
-  document.querySelectorAll('.manage-tab').forEach((t) => t.classList.toggle('active', t.dataset.mtab === tab));
+  document.querySelectorAll('.manage-tab').forEach((t) => {
+    const on = t.dataset.mtab === tab;
+    t.classList.toggle('active', on);
+    t.setAttribute('aria-selected', String(on));
+  });
   $('#mtab-agents').hidden = tab !== 'agents';
   $('#mtab-models').hidden = tab !== 'models';
   if (tab === 'agents') fetchAgents();
@@ -3885,7 +3908,7 @@ async function showMessagesDetail() {
   const rows = all
     .map((m) => {
       const time = new Date(m.created_at).toLocaleTimeString();
-      const icon = m.sender_type === 'agent' ? '🤖' : '👤';
+      const icon = m.sender_type === 'agent' ? lucide('bot') : lucide('user');
       return `<tr>
       <td>${esc(time)}</td>
       <td style="color:${roomColor(m.roomId)}">#${esc(m.roomId)}</td>
@@ -3982,7 +4005,7 @@ function renderAgents() {
 
     const icon = document.createElement('span');
     icon.className = 'agent-icon';
-    icon.textContent = '🤖';
+    icon.innerHTML = lucide('bot');
     li.appendChild(icon);
 
     const info = document.createElement('span');
@@ -4168,7 +4191,7 @@ function renderAgentWiredRooms() {
       const removeBtn = document.createElement('button');
       removeBtn.type = 'button';
       removeBtn.className = 'room-wired-remove';
-      removeBtn.textContent = '×';
+      removeBtn.innerHTML = lucide('x');
       removeBtn.title = onlyAgent
         ? "Cannot unassign — this agent is the room's only agent (delete the room instead)"
         : `Remove this agent from ${room.name}`;
@@ -4471,9 +4494,9 @@ async function draftFor(btn) {
     showToast('Type a description first, e.g. "An agent that helps me draft replies to emails".', { kind: 'error' });
     return;
   }
-  const original = btn.textContent;
+  const original = btn.innerHTML;
   btn.disabled = true;
-  btn.textContent = '✨ Drafting…';
+  btn.innerHTML = lucide('sparkles') + ' Drafting…';
   try {
     const res = await authFetch('/api/agents/draft', {
       method: 'POST',
@@ -4493,7 +4516,7 @@ async function draftFor(btn) {
     showToast('Drafter failed: ' + err.message, { kind: 'error' });
   } finally {
     btn.disabled = false;
-    btn.textContent = original;
+    btn.innerHTML = original;
   }
 }
 
@@ -4588,7 +4611,7 @@ function renderRoomWiredAgents() {
     const primeBtn = document.createElement('button');
     primeBtn.type = 'button';
     primeBtn.className = 'room-wired-prime' + (agent.is_prime ? ' active' : '');
-    primeBtn.textContent = agent.is_prime ? '★' : '☆';
+    primeBtn.innerHTML = agent.is_prime ? lucide('star', 'icon--fill') : lucide('star');
     primeBtn.title = agent.is_prime
       ? `Clear prime — room reverts to mention-only (no fallback)`
       : `Make ${agent.name} the prime fallback — answers messages that don't @-mention any wired agent`;
@@ -4610,7 +4633,7 @@ function renderRoomWiredAgents() {
     const removeBtn = document.createElement('button');
     removeBtn.type = 'button';
     removeBtn.className = 'room-wired-remove';
-    removeBtn.textContent = '×';
+    removeBtn.innerHTML = lucide('x');
     removeBtn.title = onlyOne ? 'Cannot remove the last agent (delete the room instead)' : `Remove ${agent.name}`;
     removeBtn.disabled = onlyOne;
     removeBtn.addEventListener('click', () => removeAgentFromRoom(agent.id, agent.name));
@@ -4631,7 +4654,7 @@ function renderRoomWiredAgents() {
   badge.className = `room-mode-badge mode-${effectiveMode}`;
   badge.textContent =
     effectiveMode === 'prime'
-      ? `Mode: prime (★ ${roomDetailWiredAgents.find((a) => a.is_prime)?.name ?? 'unknown'})`
+      ? `Mode: prime (${roomDetailWiredAgents.find((a) => a.is_prime)?.name ?? 'unknown'})`
       : effectiveMode === 'broadcast'
         ? 'Mode: broadcast (all agents respond — legacy)'
         : 'Mode: mention-only (no fallback agent)';
@@ -5028,7 +5051,9 @@ function renderTypingIndicator() {
       bubble.className = 'msg agent thinking-bubble';
       const sender = document.createElement('div');
       sender.className = 'sender';
-      sender.textContent = `🤖 ${agentName || 'Agent'} — Thinking`;
+      sender.textContent = '';
+      sender.appendChild(lucideEl('bot'));
+      sender.append(` ${agentName || 'Agent'} — Thinking`);
       bubble.appendChild(sender);
       const content = document.createElement('div');
       content.className = 'bubble';
@@ -5101,7 +5126,11 @@ function updateThinkingBubble(label) {
     if (shouldScroll) scrollToBottom();
   }
   const sender = bubble.querySelector('.sender');
-  if (sender) sender.textContent = `🤖 ${agentName || 'Agent'} — ${label}`;
+  if (sender) {
+    sender.textContent = '';
+    sender.appendChild(lucideEl('bot'));
+    sender.append(` ${agentName || 'Agent'} — ${label}`);
+  }
 }
 
 // ── Typing send (debounced) ───────────────────────────────────────────────
