@@ -1,7 +1,7 @@
 # Design: OAuth (subscription) BYOK via per-member containers
 
-**Status:** approved — building on `feat/byok-per-member`
-**Extends:** `feat/byok-per-member` (per-member API-key BYOK, already shipping)
+**Status:** approved — building on the per-member API-key BYOK core.
+**Extends:** [byok.md](byok.md) — the per-member-session architecture (session keying, identity derivation, fan-out, approval routing) is defined there; this doc covers only the OAuth/subscription delta.
 
 **Resolved decisions (owner sign-off):**
 - §8.3 host-can-decrypt at-rest store — **accepted.**
