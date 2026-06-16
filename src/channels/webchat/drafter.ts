@@ -160,7 +160,7 @@ async function buildDrafterTransport(): Promise<{
   if (cachedTransport && cachedTransport.expiresAt > Date.now()) {
     return { dispatcher: cachedTransport.dispatcher, authHeaders: cachedTransport.authHeaders };
   }
-  const cfg = await onecli.getContainerConfig(DRAFTER_AGENT_ID);
+  const cfg = await onecli.getContainerConfig({ agent: DRAFTER_AGENT_ID });
   const rawProxy = cfg.env.HTTPS_PROXY ?? cfg.env.HTTP_PROXY;
   if (!rawProxy) throw new DraftError('OneCLI gateway returned no proxy URL', 503);
   // The OneCLI gateway returns `host.docker.internal:<port>` as the proxy
