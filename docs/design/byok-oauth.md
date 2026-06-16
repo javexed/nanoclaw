@@ -1,6 +1,6 @@
 # Design: OAuth (subscription) BYOK via per-member containers
 
-**Status:** approved — building on the per-member API-key BYOK core.
+**Status:** shipped — the OAuth/subscription variant of per-member BYOK.
 **Extends:** [byok.md](byok.md) — the per-member-session architecture (session keying, identity derivation, fan-out, approval routing) is defined there; this doc covers only the OAuth/subscription delta.
 
 **Resolved decisions (owner sign-off):**
@@ -76,8 +76,8 @@ custody** — we store one long-lived value, re-prompt when it eventually expire
 
 ## 5. Data model
 
-Extend `byok_credentials` (migration `016` adds the table; a new migration adds
-columns — never edit a shipped migration):
+`byok_credentials` (migration `020` adds the table) carries these OAuth columns,
+added by a separate migration — never edit a shipped migration:
 
 ```
 ALTER TABLE byok_credentials ADD COLUMN cred_type TEXT NOT NULL DEFAULT 'api_key';
@@ -133,9 +133,9 @@ For the resolved per-member session, look up the credential:
 Delete the encrypted blob + mark revoked; remove the user key from the
 per-member agent (tools left), same as API-key revoke.
 
-## 7. Touch points (all on `feat/byok-per-member`, additive)
+## 7. Touch points (additive)
 
-- `src/db/migrations/0NN-byok-oauth.ts` — new columns.
+- `src/db/migrations/021-byok-oauth.ts` — new columns.
 - `src/modules/byok/db.ts` — `cred_type` + encrypted-blob get/set; a
   `getMemberCredential()` that returns a tagged union `{type, …}`.
 - `src/modules/byok/crypto.ts` (**new**) — AES-256-GCM encrypt/decrypt + key
@@ -196,7 +196,7 @@ Node built-in).
 
 ## 10. Recommendation
 
-Build it as an **additive credential type** on `feat/byok-per-member`, behind the
-own-use acknowledgment, with the host-side encrypted store as the explicit cost
-of subscription support. Ship API-key and OAuth side by side; rooms/members
-choose per connection.
+Built as an **additive credential type** on the per-member BYOK core
+([byok.md](byok.md)), behind the own-use acknowledgment, with the host-side
+encrypted store as the explicit cost of subscription support. API-key and OAuth
+ship side by side; rooms/members choose per connection.
