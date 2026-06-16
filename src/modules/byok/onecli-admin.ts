@@ -21,8 +21,18 @@ const pexec = promisify(execFile);
 const TIMEOUT_MS = 20_000;
 
 async function onecli(args: string[]): Promise<unknown> {
-  const { stdout } = await pexec('onecli', args, { timeout: TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 });
-  return stdout.trim() ? (JSON.parse(stdout) as unknown) : {};
+  try {
+    const { stdout } = await pexec('onecli', args, { timeout: TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 });
+    return stdout.trim() ? (JSON.parse(stdout) as unknown) : {};
+  } catch (err) {
+    // execFile rejections carry the full argv (incl. any `--value <secret>`) on
+    // `.message`/`.cmd`; those propagate to callers that log err.message and would
+    // leak a member's plaintext key into the persistent host log. Rethrow a scrubbed
+    // error that names only the resource+verb (args[0]/args[1] are never secrets) and
+    // the exit code — never the argv. See byok-adversarial-review (cred-storage).
+    const code = (err as { code?: unknown } | null)?.code;
+    throw new Error(`onecli ${args[0] ?? '?'} ${args[1] ?? ''}`.trim() + ` failed (exit ${code ?? '?'})`);
+  }
 }
 
 function dataArray(r: unknown): Record<string, unknown>[] {
