@@ -30,9 +30,10 @@ export interface TeardownTarget {
 }
 
 function findSessionsBy(column: 'messaging_group_id' | 'agent_group_id', value: string): TeardownTarget[] {
-  const rows = getDb()
-    .prepare(`SELECT id, agent_group_id FROM sessions WHERE ${column} = ?`)
-    .all(value) as { id: string; agent_group_id: string }[];
+  const rows = getDb().prepare(`SELECT id, agent_group_id FROM sessions WHERE ${column} = ?`).all(value) as {
+    id: string;
+    agent_group_id: string;
+  }[];
   return rows.map((r) => ({ sessionId: r.id, agentGroupId: r.agent_group_id }));
 }
 

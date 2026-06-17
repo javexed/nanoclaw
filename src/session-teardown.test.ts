@@ -12,16 +12,9 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { closeDb, getDb, initTestDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
 import { createAgentGroup, deleteAgentGroup } from './db/agent-groups.js';
-import {
-  createMessagingGroup,
-  deleteMessagingGroup,
-} from './db/messaging-groups.js';
+import { createMessagingGroup, deleteMessagingGroup } from './db/messaging-groups.js';
 import { createPendingApproval, createPendingQuestion, createSession, getSession } from './db/sessions.js';
-import {
-  deleteSessionDbState,
-  findSessionsByAgentGroup,
-  findSessionsByMessagingGroup,
-} from './session-teardown.js';
+import { deleteSessionDbState, findSessionsByAgentGroup, findSessionsByMessagingGroup } from './session-teardown.js';
 
 const now = () => new Date().toISOString();
 
@@ -141,8 +134,12 @@ describe('deleteSessionDbState', () => {
     });
     deleteSessionDbState('sess-1');
     const db = getDb();
-    expect(db.prepare('SELECT COUNT(*) as n FROM pending_questions WHERE session_id = ?').get('sess-1')).toEqual({ n: 0 });
-    expect(db.prepare('SELECT COUNT(*) as n FROM pending_approvals WHERE session_id = ?').get('sess-1')).toEqual({ n: 0 });
+    expect(db.prepare('SELECT COUNT(*) as n FROM pending_questions WHERE session_id = ?').get('sess-1')).toEqual({
+      n: 0,
+    });
+    expect(db.prepare('SELECT COUNT(*) as n FROM pending_approvals WHERE session_id = ?').get('sess-1')).toEqual({
+      n: 0,
+    });
   });
 });
 
@@ -171,8 +168,12 @@ describe('FK behavior — the bug this primitive prevents', () => {
     })();
 
     const db = getDb();
-    expect(db.prepare('SELECT COUNT(*) as n FROM messaging_groups WHERE id = ?').get(messagingGroupId)).toEqual({ n: 0 });
-    expect(db.prepare('SELECT COUNT(*) as n FROM sessions WHERE messaging_group_id = ?').get(messagingGroupId)).toEqual({ n: 0 });
+    expect(db.prepare('SELECT COUNT(*) as n FROM messaging_groups WHERE id = ?').get(messagingGroupId)).toEqual({
+      n: 0,
+    });
+    expect(db.prepare('SELECT COUNT(*) as n FROM sessions WHERE messaging_group_id = ?').get(messagingGroupId)).toEqual(
+      { n: 0 },
+    );
   });
 
   it('a failing parent-delete inside a transaction rolls back the session teardown', () => {

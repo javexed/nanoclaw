@@ -152,9 +152,7 @@ describe('agent-authored loop-back', () => {
   it('agent loop-back: mentioning self + another agent engages only the other', async () => {
     const { routeInbound } = await import('./router.js');
     // FOMC writes "@fomc to @advisor". Self skipped; Advisor engages.
-    await routeInbound(
-      baseEvent({ text: '@fomc to @advisor — your read on this?', senderAgentGroupId: 'ag-fomc' }),
-    );
+    await routeInbound(baseEvent({ text: '@fomc to @advisor — your read on this?', senderAgentGroupId: 'ag-fomc' }));
     const { getActiveSessions } = await import('./db/sessions.js');
     const active = getActiveSessions();
     expect(active).toHaveLength(1);
