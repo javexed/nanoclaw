@@ -28,6 +28,7 @@ import {
   moduleWebchatApprovalsIndexFanout,
   moduleWebchatMessageFts,
   moduleWebchatAgentStatus,
+  moduleWebchatRoomReads,
 } from '../../channels/webchat/migration.js';
 
 export interface Migration {
@@ -71,6 +72,7 @@ export const migrations: Migration[] = [
   moduleWebchatApprovalsIndexFanout,
   moduleWebchatMessageFts,
   moduleWebchatAgentStatus,
+  moduleWebchatRoomReads,
 ];
 
 /** Row shape of PRAGMA foreign_key_check. Child rowids are stable across a

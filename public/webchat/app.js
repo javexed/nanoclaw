@@ -787,6 +787,13 @@ function connect() {
         return;
       case 'rooms':
         lastRoomsList = msg.rooms;
+        // Seed persistent unread badges from the server's per-user read markers
+        // so messages that arrived while away surface on reconnect — not just
+        // live ones. Never dot the open room (the join that follows reads it).
+        msg.rooms.forEach((r) => {
+          if (r.unread && r.id !== currentRoom) unreadRooms.add(r.id);
+          else unreadRooms.delete(r.id);
+        });
         if (allAgents.length === 0) {
           authFetch('/api/agents')
             .then((r) => r.json())
@@ -894,7 +901,15 @@ function connect() {
         } else {
           appendedEl = appendMessage(msg);
         }
-        if (msg.id && msg.room_id === currentRoom) setLastSeenMessageId(msg.id);
+        if (msg.id && msg.room_id === currentRoom) {
+          setLastSeenMessageId(msg.id);
+          // Reading in the open, focused room: advance the server marker so the
+          // badge stays cleared across this user's other devices too. Skip when
+          // backgrounded — a hidden tab hasn't actually been seen.
+          if (!document.hidden && ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'read', room_id: currentRoom }));
+          }
+        }
         const shouldScroll = wasNearBottom || (forceScrollCount > 0 && !userScrolledAway);
         if (shouldScroll) {
           scrollToBottom();
@@ -933,6 +948,12 @@ function connect() {
       case 'unread':
         if (msg.room_id && msg.room_id !== currentRoom) {
           unreadRooms.add(msg.room_id);
+          updateUnreadDots();
+        }
+        break;
+      case 'read_cleared':
+        // Another of this user's devices read the room — drop the stale badge.
+        if (msg.room_id && unreadRooms.delete(msg.room_id)) {
           updateUnreadDots();
         }
         break;
@@ -989,6 +1010,10 @@ document.addEventListener('visibilitychange', () => {
     connect();
   } else {
     fetchApprovals();
+    // Returning to a focused tab with a room open means its messages are now
+    // seen — advance the server marker (and sync other devices). The reconnect
+    // path already re-joins (which reads) when the socket was actually down.
+    if (currentRoom) ws.send(JSON.stringify({ type: 'read', room_id: currentRoom }));
   }
 });
 

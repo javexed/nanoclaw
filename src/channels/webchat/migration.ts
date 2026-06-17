@@ -105,9 +105,9 @@ export const moduleWebchatDropRooms: Migration = {
     // this one in production order. Stay robust if it isn't present yet (e.g. a
     // test that builds a baseline excluding 016): include the column only when
     // it exists — a later 016 backfills it to channel_type ('webchat').
-    const hasInstance = (
-      db.prepare("PRAGMA table_info('messaging_groups')").all() as Array<{ name: string }>
-    ).some((c) => c.name === 'instance');
+    const hasInstance = (db.prepare("PRAGMA table_info('messaging_groups')").all() as Array<{ name: string }>).some(
+      (c) => c.name === 'instance',
+    );
     const insertMg = db.prepare(
       hasInstance
         ? `INSERT INTO messaging_groups (id, channel_type, instance, platform_id, name, is_group, unknown_sender_policy, created_at)
@@ -462,6 +462,42 @@ export const moduleWebchatAgentStatus: Migration = {
   up(db: Database.Database) {
     db.exec(`
       ALTER TABLE agent_groups ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
+    `);
+  },
+};
+
+/**
+ * Per-user "last read" marker so unread state survives an away-and-return.
+ *
+ * Before this table unread was a purely client-side, in-memory Set: it was
+ * populated only by live `{type:'unread'}` WS pushes while a tab was open, so
+ * messages that arrived while the user was away left no trace the UI could
+ * reconstruct on reconnect (the rooms payload carried no unread metadata).
+ *
+ * `last_read_at` is the high-water mark of message `created_at` the user has
+ * seen in a room. A room is unread for the user when the newest message in it
+ * is newer than this marker (or there's no row yet and the room has messages).
+ * Advanced on join, on receiving a message in the open room, and on the user's
+ * own sends. Keyed on the trusted webchat `user_id` (same identifier as
+ * webchat_user_room_hides / push subscriptions), so the marker — and therefore
+ * the unread badge — is shared across all of that user's devices.
+ *
+ * `room_id` is `messaging_groups.platform_id` (no FK, matching the rest of the
+ * webchat tables; deleteWebchatRoom clears rows in app code).
+ */
+export const moduleWebchatRoomReads: Migration = {
+  version: 112,
+  name: 'webchat-room-reads',
+  up(db: Database.Database) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS webchat_room_reads (
+        user_id      TEXT NOT NULL,
+        room_id      TEXT NOT NULL,
+        last_read_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, room_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_webchat_room_reads_user
+        ON webchat_room_reads(user_id);
     `);
   },
 };

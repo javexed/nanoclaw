@@ -268,6 +268,7 @@ export function deleteWebchatRoom(id: string): void {
   db.prepare(`DELETE FROM webchat_room_primes WHERE room_id = ?`).run(id);
   db.prepare(`DELETE FROM webchat_user_room_hides WHERE room_id = ?`).run(id);
   db.prepare(`DELETE FROM webchat_room_archives WHERE room_id = ?`).run(id);
+  db.prepare(`DELETE FROM webchat_room_reads WHERE room_id = ?`).run(id);
   // Drop any agent_destinations rows pointing at this room. target_id has no
   // FK so they wouldn't block, just rot. Guarded — a2a module may not be installed.
   if (hasTable(db, 'agent_destinations')) {
@@ -998,4 +999,56 @@ export function getHiddenRoomIdsForUser(userId: string): Set<string> {
 
 export function clearHidesForRoom(roomId: string): void {
   getDb().prepare(`DELETE FROM webchat_user_room_hides WHERE room_id = ?`).run(roomId);
+}
+
+// ── Per-user read markers (unread badge persistence) ──
+//
+// `last_read_at` is a per-(user, room) high-water mark of the newest message
+// `created_at` the user has seen. A room is unread for the user when its newest
+// message is newer than the marker (or there's no marker and the room has any
+// messages). The marker is server-side and keyed on the trusted webchat
+// user_id, so the unread badge is shared across all of that user's devices:
+// reading on one device clears it on the others (live via a `read_cleared`
+// push; on reconnect via the `unread` flag in the rooms payload).
+
+/**
+ * Advance a user's read marker for a room to `ts` (defaults to now). Idempotent
+ * and monotonic — never moves the marker backwards, so a late-arriving stale
+ * read (e.g. a backgrounded tab catching up) can't un-read newer messages.
+ */
+export function markRoomRead(userId: string, roomId: string, ts: number = Date.now()): void {
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_room_reads (user_id, room_id, last_read_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(user_id, room_id) DO UPDATE SET last_read_at = MAX(last_read_at, excluded.last_read_at)`,
+    )
+    .run(userId, roomId, ts);
+}
+
+/**
+ * The set of room ids that have unread messages for this user: rooms whose
+ * newest message is newer than the user's read marker (rooms with no marker
+ * yet count as unread if they contain any message). The `idx_webchat_messages_room`
+ * index makes the per-room MAX(created_at) cheap. Approval/a2a side-channel
+ * rows count the same as in the live `unread` path — any new activity lights
+ * the dot.
+ */
+export function getUnreadRoomIdsForUser(userId: string): Set<string> {
+  const rows = getDb()
+    .prepare(
+      `SELECT m.room_id AS room_id
+         FROM webchat_messages m
+         LEFT JOIN webchat_room_reads r
+           ON r.room_id = m.room_id AND r.user_id = ?
+        GROUP BY m.room_id
+       HAVING MAX(m.created_at) > COALESCE(MAX(r.last_read_at), 0)`,
+    )
+    .all(userId) as { room_id: string }[];
+  return new Set(rows.map((r) => r.room_id));
+}
+
+/** Drop a room's read markers — called from deleteWebchatRoom's cascade. */
+export function clearReadsForRoom(roomId: string): void {
+  getDb().prepare(`DELETE FROM webchat_room_reads WHERE room_id = ?`).run(roomId);
 }

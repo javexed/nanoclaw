@@ -22,8 +22,11 @@ import {
   getArchivedRoomIds,
   getHiddenRoomIdsForUser,
   getSharedWebchatRooms,
+  getUnreadRoomIdsForUser,
   getWebchatRoom,
+  markRoomRead,
   storeWebchatA2aMessage,
+  type WebchatRoom,
 } from './db.js';
 import { sendPushForMessage } from './push.js';
 import { redactSensitiveData } from './redact.js';
@@ -228,19 +231,58 @@ export function pushApprovalResolvedToUser(userId: string, approvalId: string, r
  * so every broadcastRooms() call stays per-user-correct without each caller
  * threading userId.
  */
+/**
+ * Annotate the room list for one user with the per-viewer flags the PWA
+ * sidebar needs: `archived` (global), `hidden` (per-user), `canArchive`
+ * (capability), and `unread` (per-user read marker). Shared by the auth-time
+ * send (ws.ts) and broadcastRooms so both paths carry identical metadata —
+ * crucially `unread`, so the badge reconstructs on reconnect instead of only
+ * appearing for live messages. `allRooms`/`archivedSet` are accepted so a
+ * fan-out (broadcastRooms) computes them once across all clients.
+ */
+export function annotateRoomsForUser(
+  userId: string,
+  allRooms: WebchatRoom[] = getAllWebchatRooms(),
+  archivedSet: Set<string> = getArchivedRoomIds(),
+): Array<WebchatRoom & { archived: boolean; hidden: boolean; canArchive: boolean; unread: boolean }> {
+  const visible = filterRoomsForUser(userId, allRooms);
+  const hiddenSet = getHiddenRoomIdsForUser(userId); // per-user
+  const unreadSet = getUnreadRoomIdsForUser(userId); // per-user
+  return visible.map((r) => ({
+    ...r,
+    archived: archivedSet.has(r.id),
+    hidden: hiddenSet.has(r.id),
+    canArchive: canArchiveRoom(userId, r.id),
+    unread: unreadSet.has(r.id),
+  }));
+}
+
 export function broadcastRooms(): void {
   const allRooms = getAllWebchatRooms();
   const archivedSet = getArchivedRoomIds(); // global, computed once per broadcast
   for (const c of clients.values()) {
     if (c.ws.readyState !== WebSocket.OPEN) continue;
-    const visible = filterRoomsForUser(c.userId, allRooms);
-    const hiddenSet = getHiddenRoomIdsForUser(c.userId); // per-user
-    const annotated = visible.map((r) => ({
-      ...r,
-      archived: archivedSet.has(r.id),
-      hidden: hiddenSet.has(r.id),
-      canArchive: canArchiveRoom(c.userId, r.id),
-    }));
-    c.ws.send(JSON.stringify({ type: 'rooms', rooms: annotated }));
+    c.ws.send(JSON.stringify({ type: 'rooms', rooms: annotateRoomsForUser(c.userId, allRooms, archivedSet) }));
+  }
+}
+
+/**
+ * Advance a user's read marker for a room and clear the unread badge live on
+ * that user's OTHER connected clients. The `read_cleared` push is what makes
+ * read state feel synced across devices: open a room on your phone and the
+ * stale dot disappears on your laptop without waiting for a reconnect. The
+ * originating client (which already cleared its own dot locally) is skipped.
+ */
+export function markRoomReadForUser(userId: string, roomId: string, ts: number, originClientId?: string): void {
+  markRoomRead(userId, roomId, ts);
+  const payload = JSON.stringify({ type: 'read_cleared', room_id: roomId });
+  for (const c of clients.values()) {
+    if (c.userId !== userId || c.id === originClientId) continue;
+    if (c.ws.readyState !== WebSocket.OPEN) continue;
+    try {
+      c.ws.send(payload);
+    } catch {
+      // Socket may have closed between readyState check and send — ignore.
+    }
   }
 }

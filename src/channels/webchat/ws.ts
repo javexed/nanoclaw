@@ -20,15 +20,18 @@ import { randomUUID } from 'crypto';
 
 import { log } from '../../log.js';
 import type { InboundMessage } from '../adapter.js';
-import { WSClient, clients, addClient, removeClient, broadcast, getMemberList } from './state.js';
 import {
-  deleteWebchatMessage,
-  getAllWebchatRooms,
-  getWebchatMessages,
-  getWebchatRoom,
-  storeWebchatMessage,
-} from './db.js';
-import { canAccessRoom, filterRoomsForUser } from './access.js';
+  WSClient,
+  clients,
+  addClient,
+  removeClient,
+  broadcast,
+  getMemberList,
+  annotateRoomsForUser,
+  markRoomReadForUser,
+} from './state.js';
+import { deleteWebchatMessage, getWebchatMessages, getWebchatRoom, storeWebchatMessage } from './db.js';
+import { canAccessRoom } from './access.js';
 import { redactSensitiveData } from './redact.js';
 
 // Cap inbound WS messages — chat payloads are small (text, controls);
@@ -150,7 +153,9 @@ export function setupWebSocket(
         // identity. The auth message just confirms the session is established.
         authenticated = true;
         send({ type: 'system', message: `Connected as ${client.identity}` });
-        send({ type: 'rooms', rooms: filterRoomsForUser(client.userId, getAllWebchatRooms()) });
+        // Annotated payload (incl. per-user `unread`) so the sidebar reconstructs
+        // unread badges on reconnect — not just for messages seen live.
+        send({ type: 'rooms', rooms: annotateRoomsForUser(client.userId) });
         return;
       }
 
@@ -172,6 +177,9 @@ export function setupWebSocket(
           return;
         }
         client.room_id = room.id;
+        // Opening a room reads it: advance the marker and clear any stale dot
+        // on this user's other devices.
+        markRoomReadForUser(client.userId, room.id, Date.now(), clientId);
         send({
           type: 'history',
           room_id: room.id,
@@ -206,6 +214,19 @@ export function setupWebSocket(
         return;
       }
 
+      // ── READ ─────────────────────────────────────────────────────────────
+      // Client signals it has caught up on a room (e.g. a message arrived while
+      // the room was open and focused). Advances the server marker and clears
+      // the badge on the user's other devices. Scoped to rooms the user can see.
+      if (msg.type === 'read') {
+        const roomId = typeof msg.room_id === 'string' ? msg.room_id : '';
+        if (!roomId) return;
+        const room = getWebchatRoom(roomId);
+        if (!room || !canAccessRoom(client.userId, room.id)) return;
+        markRoomReadForUser(client.userId, room.id, Date.now(), clientId);
+        return;
+      }
+
       // ── MESSAGE ──────────────────────────────────────────────────────────
       if (msg.type === 'message') {
         if (!client.room_id) {
@@ -216,6 +237,9 @@ export function setupWebSocket(
         if (!text.trim()) return;
 
         const stored = storeWebchatMessage(client.room_id, client.identity, client.identity_type, text);
+        // The sender has by definition read their own message — advance their
+        // marker (and sync their other devices) so it never self-unreads.
+        markRoomReadForUser(client.userId, client.room_id, stored.created_at, clientId);
         const outgoing: Record<string, unknown> = { type: 'message', ...stored };
         if (typeof msg.client_id === 'string') outgoing.client_id = msg.client_id;
         broadcast(client.room_id, outgoing, clientId);
