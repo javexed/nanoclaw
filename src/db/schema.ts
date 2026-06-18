@@ -268,4 +268,11 @@ CREATE TABLE IF NOT EXISTS container_state (
   tool_started_at          TEXT,
   updated_at               TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS status_events (
+  seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind       TEXT NOT NULL,
+  text       TEXT,
+  detail     TEXT,
+  created_at TEXT NOT NULL
+);
 `;

@@ -127,6 +127,21 @@ export interface OutboundMessage {
   senderAgentGroupId?: string;
 }
 
+/**
+ * Fine-grained agent activity status for the current turn, surfaced to rich
+ * clients (webchat) for the "thinking" bubble. Cosmetic; carries no routing
+ * data.
+ *   - tool:      `text` = tool name, `detail` = target (file/command/query)
+ *   - progress:  `text` = milestone message
+ *   - reasoning: `text` = a reasoning summary line
+ *   - done:      the turn finished; clear the activity display
+ */
+export interface AgentActivityStatus {
+  kind: 'tool' | 'progress' | 'reasoning' | 'done';
+  text: string | null;
+  detail: string | null;
+}
+
 /** Discovered conversation info (from syncConversations). */
 export interface ConversationInfo {
   platformId: string;
@@ -170,6 +185,16 @@ export interface ChannelAdapter {
 
   // Optional
   setTyping?(platformId: string, threadId: string | null): Promise<void>;
+
+  /**
+   * Push a fine-grained activity status for the agent's current turn (tool in
+   * use, progress milestone, reasoning summary) so a rich client can show what
+   * the agent is doing. Cosmetic and best-effort. Channels with no such surface
+   * omit it; webchat broadcasts it as a `status` WS frame. `status.kind` is
+   * 'tool' | 'progress' | 'reasoning' | 'done'.
+   */
+  sendStatus?(platformId: string, threadId: string | null, status: AgentActivityStatus): Promise<void>;
+
   syncConversations?(): Promise<ConversationInfo[]>;
   resolveChannelName?(platformId: string): Promise<string | null>;
 

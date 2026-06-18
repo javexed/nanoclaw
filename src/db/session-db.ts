@@ -241,6 +241,41 @@ export function getContainerState(outDb: Database.Database): ContainerState | nu
   }
 }
 
+export interface StatusEvent {
+  seq: number;
+  kind: string;
+  text: string | null;
+  detail: string | null;
+}
+
+/**
+ * Read status_events rows past `sinceSeq` (the host's per-session watermark)
+ * for the webchat "thinking" activity feed. Returns [] when the table is
+ * absent (older session DB) or nothing new has been written since. Read-only;
+ * purely cosmetic — never affects routing or lifecycle.
+ */
+export function getStatusEventsSince(outDb: Database.Database, sinceSeq: number): StatusEvent[] {
+  try {
+    return outDb
+      .prepare('SELECT seq, kind, text, detail FROM status_events WHERE seq > ? ORDER BY seq ASC')
+      .all(sinceSeq) as StatusEvent[];
+  } catch {
+    // Table not present on older session DBs — nothing to forward.
+    return [];
+  }
+}
+
+/** Current max status_events seq, or 0 when the table is empty/absent. Used to
+ *  initialize the host watermark so a restart doesn't replay a turn's backlog. */
+export function getMaxStatusEventSeq(outDb: Database.Database): number {
+  try {
+    const row = outDb.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM status_events').get() as { m: number };
+    return row.m;
+  } catch {
+    return 0;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // messages_out (read-only from host)
 // ---------------------------------------------------------------------------

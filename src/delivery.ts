@@ -24,7 +24,8 @@ import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
-import type { OutboundFile } from './channels/adapter.js';
+import { forwardSessionStatus, setStatusAdapter } from './modules/agent-status/index.js';
+import type { AgentActivityStatus, OutboundFile } from './channels/adapter.js';
 import type { Session } from './types.js';
 
 const ACTIVE_POLL_MS = 1000;
@@ -65,6 +66,13 @@ export interface ChannelDeliveryAdapter {
     source?: { sessionId: string; agentGroupId: string },
   ): Promise<string | undefined>;
   setTyping?(channelType: string, platformId: string, threadId: string | null, instance?: string): Promise<void>;
+  sendStatus?(
+    channelType: string,
+    platformId: string,
+    threadId: string | null,
+    status: AgentActivityStatus,
+    instance?: string,
+  ): Promise<void>;
 }
 
 let deliveryAdapter: ChannelDeliveryAdapter | null = null;
@@ -103,6 +111,8 @@ export function setDeliveryAdapter(adapter: ChannelDeliveryAdapter): void {
   // Forward to the typing module so it can fire setTyping on its own
   // interval. Direct call, not a registry — typing is a default module.
   setTypingAdapter(adapter);
+  // Same for the agent-status module (webchat thinking-bubble activity feed).
+  setStatusAdapter(adapter);
   for (const cb of adapterReadyCallbacks) {
     void Promise.resolve()
       .then(() => cb(adapter))
@@ -131,6 +141,9 @@ async function pollActive(): Promise<void> {
     const sessions = getRunningSessions();
     for (const session of sessions) {
       await deliverSessionMessages(session);
+      // Forward any new agent activity to rich clients (webchat). Cosmetic and
+      // isolated — never let it disrupt message delivery.
+      await forwardSessionStatus(session);
     }
   } catch (err) {
     log.error('Active delivery poll error', { err });

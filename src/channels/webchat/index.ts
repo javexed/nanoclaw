@@ -43,7 +43,8 @@ import { log } from '../../log.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { createMessagingGroup, getMessagingGroup, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import { registerChannelAdapter } from '../channel-registry.js';
-import type { ChannelAdapter, ChannelSetup, OutboundMessage } from '../adapter.js';
+import type { AgentActivityStatus, ChannelAdapter, ChannelSetup, OutboundMessage } from '../adapter.js';
+import { redactSensitiveData } from './redact.js';
 import { startWebchatServer, stopWebchatServer, type WebchatServer } from './server.js';
 import {
   APPROVAL_INBOX_PREFIX,
@@ -263,6 +264,19 @@ function createAdapter(): ChannelAdapter {
         identity: senderForRoom(platformId),
         identity_type: 'agent',
         is_typing: true,
+      });
+    },
+    async sendStatus(platformId, _threadId, status: AgentActivityStatus): Promise<void> {
+      if (!server) return;
+      // Redact before broadcast — tool targets (file paths, commands) and
+      // reasoning summaries can echo secrets. The whole room sees this frame.
+      const redact = (s: string | null): string | null => (s == null ? null : redactSensitiveData(s));
+      server.broadcast(platformId, {
+        type: 'status',
+        room_id: platformId,
+        event: status.kind,
+        text: redact(status.text),
+        detail: redact(status.detail),
       });
     },
   };

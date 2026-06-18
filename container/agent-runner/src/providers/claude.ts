@@ -4,7 +4,7 @@ import path from 'path';
 
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
-import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
+import { appendStatusEvent, clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
@@ -153,6 +153,56 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
 }
 
 /**
+ * Pull a short, human-meaningful target out of a tool's input for the webchat
+ * status feed — the file a Read/Edit touches, the command Bash runs, the query
+ * a search uses. Returns null when the tool has no salient target (the client
+ * then shows just the tool verb). Host-side redaction scrubs secrets before any
+ * of this reaches a client.
+ */
+function summarizeToolTarget(toolName: string, input: Record<string, unknown> | undefined): string | null {
+  const str = (v: unknown): string | null => (typeof v === 'string' && v.length > 0 ? v : null);
+  switch (toolName) {
+    case 'Bash':
+      return str(input?.command);
+    case 'Read':
+    case 'Write':
+    case 'Edit':
+    case 'NotebookEdit':
+      return str(input?.file_path) ?? str(input?.notebook_path);
+    case 'Glob':
+    case 'Grep':
+      return str(input?.pattern);
+    case 'WebFetch':
+      return str(input?.url);
+    case 'WebSearch':
+      return str(input?.query);
+    default:
+      return null;
+  }
+}
+
+/** Max reasoning lines surfaced per thinking block, and per-line char cap. The
+ *  webchat feed only keeps the last few anyway; this just bounds WS/DB volume
+ *  for a long thinking trace. */
+const REASONING_MAX_LINES = 8;
+const REASONING_LINE_MAX = 200;
+
+/**
+ * Turn a raw thinking block into a short list of feed lines: split on
+ * newlines, strip markdown header/bullet noise, drop empties, truncate each,
+ * and cap the count (keeping the LAST lines — the conclusion of the reasoning
+ * is the most informative).
+ */
+export function summarizeThinking(thinking: string): string[] {
+  const lines = thinking
+    .split(/\n+/)
+    .map((l) => l.replace(/^[#>\-*\s]+/, '').trim())
+    .filter((l) => l.length > 0)
+    .map((l) => (l.length > REASONING_LINE_MAX ? `${l.slice(0, REASONING_LINE_MAX - 1)}…` : l));
+  return lines.slice(-REASONING_MAX_LINES);
+}
+
+/**
  * PreToolUse hook: record the current tool + its declared timeout so the host
  * sweep can widen its stuck tolerance while Bash is running a long-declared
  * script. Defense-in-depth: if SDK_DISALLOWED_TOOLS slips through somehow,
@@ -176,6 +226,8 @@ const preToolUseHook: HookCallback = async (input) => {
   } catch (err) {
     log(`PreToolUse: failed to record container_state: ${err instanceof Error ? err.message : String(err)}`);
   }
+  // Cosmetic activity feed for the webchat thinking bubble (best-effort).
+  if (toolName) appendStatusEvent('tool', toolName, summarizeToolTarget(toolName, i.tool_input));
   return { continue: true };
 };
 
@@ -525,6 +577,23 @@ export class ClaudeProvider implements AgentProvider {
           } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
             const tn = message as { summary?: string };
             yield { type: 'progress', message: tn.summary || 'Task notification' };
+          } else if (message.type === 'assistant') {
+            // Surface the agent's reasoning (extended-thinking blocks) to rich
+            // clients as a fading feed. Cosmetic; absent when the model emits no
+            // thinking. Text blocks are handled separately as the final result.
+            const content = (message as { message?: { content?: unknown } }).message?.content;
+            if (Array.isArray(content)) {
+              for (const block of content) {
+                if (block && (block as { type?: string }).type === 'thinking') {
+                  const thinking = (block as { thinking?: string }).thinking;
+                  if (typeof thinking === 'string' && thinking.length > 0) {
+                    for (const line of summarizeThinking(thinking)) {
+                      yield { type: 'reasoning', message: line };
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       } catch (err) {

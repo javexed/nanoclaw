@@ -1,7 +1,13 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { writeMessageOut, getMaxOutboundSeq } from './db/messages-out.js';
-import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
+import {
+  getInboundDb,
+  touchHeartbeat,
+  clearStaleProcessingAcks,
+  appendStatusEvent,
+  clearStatusEvents,
+} from './db/connection.js';
 import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
 import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
 import {
@@ -144,6 +150,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     const ids = messages.map((m) => m.id);
     markProcessing(ids);
+
+    // Reset the webchat activity feed so the thinking bubble shows only this
+    // turn's tool/progress/reasoning events (cosmetic; see connection.ts).
+    clearStatusEvents();
 
     const routing = extractRouting(messages);
 
@@ -324,6 +334,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // (e.g. stream closed unexpectedly).
     markCompleted(processingIds);
     log(`Completed ${ids.length} message(s)`);
+
+    // Signal the webchat thinking bubble that the turn is done so the static
+    // activity line clears even when the turn produced no user-facing message.
+    appendStatusEvent('done', null);
   }
 }
 
@@ -675,6 +689,12 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
       break;
     case 'progress':
       log(`Progress: ${event.message}`);
+      // Surface milestones to the webchat thinking bubble (cosmetic).
+      appendStatusEvent('progress', event.message);
+      break;
+    case 'reasoning':
+      // Agent reasoning line → webchat thinking-bubble fading feed (cosmetic).
+      appendStatusEvent('reasoning', event.message);
       break;
   }
 }

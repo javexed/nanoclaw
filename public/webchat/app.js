@@ -5067,25 +5067,15 @@ function renderTypingIndicator() {
   let bubble = $('#messages .thinking-bubble');
   if (hasAgent) {
     if (!bubble) {
-      // Capture before appending — the bubble is taller than isNearBottom's 80px
-      // tolerance, so checking after append would always see us as scrolled-away.
-      // Also honor forceScrollCount so the bubble follows even when a smooth
-      // scroll from a just-sent message is still mid-animation.
-      const shouldScroll = isNearBottom() || (forceScrollCount > 0 && !userScrolledAway);
-      bubble = document.createElement('div');
-      bubble.className = 'msg agent thinking-bubble';
-      const sender = document.createElement('div');
-      sender.className = 'sender';
-      sender.textContent = '';
-      sender.appendChild(lucideEl('bot'));
-      sender.append(` ${agentName || 'Agent'} — Thinking`);
-      bubble.appendChild(sender);
-      const content = document.createElement('div');
-      content.className = 'bubble';
-      content.innerHTML = '<span class="dots"><span></span><span></span><span></span></span>';
-      bubble.appendChild(content);
-      $('#messages').appendChild(bubble);
-      if (shouldScroll) scrollToBottom();
+      // Build the shared bubble (with the activity/milestone slots) so a status
+      // event arriving after this heartbeat-driven creation finds them. Default
+      // the sender verb to "Thinking" until a tool/progress event refines it.
+      bubble = ensureThinkingBubble();
+      const sender = bubble.querySelector('.sender');
+      if (sender && !sender.textContent) {
+        sender.appendChild(lucideEl('bot'));
+        sender.append(` ${agentName || 'Agent'} — Thinking`);
+      }
     }
   } else if (bubble) {
     bubble.remove();
@@ -5119,43 +5109,132 @@ const TOOL_LABELS = {
   NotebookEdit: 'Editing notebook',
 };
 
+// Status frames carry fine-grained turn activity from the agent (see
+// src/channels/webchat/index.ts sendStatus). `event` is the kind:
+//   tool      → text = tool name, detail = target (file/command/query)
+//   progress  → text = milestone message
+//   reasoning → text = a reasoning summary line (rendered by the fading feed)
+//   done      → turn finished; clear the bubble
 function handleStatusEvent(msg) {
   if (msg.room_id !== currentRoom) return;
-  if (msg.event === 'tool_use' && msg.detail) {
-    updateThinkingBubble(TOOL_LABELS[msg.detail] || `Using ${msg.detail}`);
-  } else if (msg.event === 'thinking') {
-    updateThinkingBubble('Thinking');
-  } else if (msg.event === 'done') {
-    const bubble = $('#messages .thinking-bubble');
-    if (bubble) bubble.remove();
+  switch (msg.event) {
+    case 'tool': {
+      const verb = msg.text ? TOOL_LABELS[msg.text] || `Using ${msg.text}` : 'Working';
+      updateThinkingBubble(verb, msg.detail || null);
+      break;
+    }
+    case 'progress':
+      if (msg.text) setThinkingMilestone(msg.text);
+      break;
+    case 'reasoning':
+      if (msg.text) pushReasoning(msg.text);
+      break;
+    case 'done': {
+      const bubble = $('#messages .thinking-bubble');
+      if (bubble) bubble.remove();
+      break;
+    }
   }
 }
 
-function updateThinkingBubble(label) {
+const THINKING_DETAIL_MAX = 64;
+
+// Ensure the thinking bubble exists and is laid out with: a verb in the sender
+// line, a target line (the file/command/query), a milestone line (latest
+// progress), and the animated dots. Shared with the heartbeat typing path —
+// both create-or-reuse the single `.thinking-bubble`, so activity persists
+// through the turn and clears when the agent's message lands.
+function ensureThinkingBubble() {
   let bubble = $('#messages .thinking-bubble');
-  const created = !bubble;
-  if (created) {
-    // Same shouldScroll formula as the 'message' handler — honors forceScrollCount
-    // so the bubble follows even when a smooth scroll is still mid-animation.
-    const shouldScroll = isNearBottom() || (forceScrollCount > 0 && !userScrolledAway);
-    bubble = document.createElement('div');
-    bubble.className = 'msg agent thinking-bubble';
-    const sender = document.createElement('div');
-    sender.className = 'sender';
-    bubble.appendChild(sender);
-    const content = document.createElement('div');
-    content.className = 'bubble';
-    content.innerHTML = '<span class="dots"><span></span><span></span><span></span></span>';
-    bubble.appendChild(content);
-    $('#messages').appendChild(bubble);
-    if (shouldScroll) scrollToBottom();
-  }
+  if (bubble) return bubble;
+  // Same shouldScroll formula as the 'message' handler — honors forceScrollCount
+  // so the bubble follows even when a smooth scroll is still mid-animation.
+  const shouldScroll = isNearBottom() || (forceScrollCount > 0 && !userScrolledAway);
+  bubble = document.createElement('div');
+  bubble.className = 'msg agent thinking-bubble';
+  const sender = document.createElement('div');
+  sender.className = 'sender';
+  bubble.appendChild(sender);
+  const content = document.createElement('div');
+  content.className = 'bubble';
+  content.innerHTML =
+    '<div class="thinking-milestone" hidden></div>' +
+    '<div class="thinking-target" hidden></div>' +
+    '<div class="thinking-feed" hidden></div>' +
+    '<span class="dots"><span></span><span></span><span></span></span>';
+  bubble.appendChild(content);
+  $('#messages').appendChild(bubble);
+  if (shouldScroll) scrollToBottom();
+  return bubble;
+}
+
+function updateThinkingBubble(label, detail) {
+  const bubble = ensureThinkingBubble();
   const sender = bubble.querySelector('.sender');
   if (sender) {
     sender.textContent = '';
     sender.appendChild(lucideEl('bot'));
     sender.append(` ${agentName || 'Agent'} — ${label}`);
   }
+  const target = bubble.querySelector('.thinking-target');
+  if (target) {
+    if (detail) {
+      const trimmed =
+        detail.length > THINKING_DETAIL_MAX ? `${detail.slice(0, THINKING_DETAIL_MAX - 1)}…` : detail;
+      target.textContent = trimmed;
+      target.hidden = false;
+    } else {
+      target.hidden = true;
+    }
+  }
+}
+
+function setThinkingMilestone(text) {
+  const bubble = ensureThinkingBubble();
+  const el = bubble.querySelector('.thinking-milestone');
+  if (el) {
+    el.textContent = text;
+    el.hidden = false;
+  }
+}
+
+const REASONING_FEED_MAX = 5; // lines kept on screen at once
+const REASONING_FEED_TTL = 7000; // ms a line lingers before it fades out
+const REASONING_FADE_MS = 500; // fade-out transition duration (matches CSS)
+
+// Append one reasoning line to the bubble's fading feed: it slides in, lives
+// for REASONING_FEED_TTL, then fades and is removed. The feed shows at most
+// REASONING_FEED_MAX recent lines (oldest dropped first). Whole feed clears
+// with the bubble when the agent's message lands.
+function pushReasoning(text) {
+  const bubble = ensureThinkingBubble();
+  const feed = bubble.querySelector('.thinking-feed');
+  if (!feed) return;
+  feed.hidden = false;
+
+  const line = document.createElement('div');
+  line.className = 'thinking-feed-line';
+  line.textContent = text;
+  feed.appendChild(line);
+
+  // Cap on-screen lines — drop the oldest immediately when over budget,
+  // cancelling its pending fade timer so it can't fire after removal.
+  while (feed.children.length > REASONING_FEED_MAX) {
+    const oldest = feed.firstChild;
+    if (oldest._fadeTimer) clearTimeout(oldest._fadeTimer);
+    feed.removeChild(oldest);
+  }
+
+  line._fadeTimer = setTimeout(() => {
+    line.classList.add('fading');
+    setTimeout(() => {
+      line.remove();
+      if (feed.children.length === 0) feed.hidden = true;
+    }, REASONING_FADE_MS);
+  }, REASONING_FEED_TTL);
+
+  const shouldScroll = isNearBottom() || (forceScrollCount > 0 && !userScrolledAway);
+  if (shouldScroll) scrollToBottom();
 }
 
 // ── Typing send (debounced) ───────────────────────────────────────────────

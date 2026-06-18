@@ -108,6 +108,22 @@ export function getOutboundDb(): Database {
         updated_at               TEXT NOT NULL
       );
     `);
+    // status_events: append-only UI activity feed for the webchat "thinking"
+    // bubble — tool actions, progress milestones, and reasoning summaries. The
+    // host tails this read-only and forwards it to webchat clients; it has NO
+    // bearing on routing or lifecycle (that's container_state above). The feed
+    // is wiped per turn (clearStatusEvents) so it only ever shows the current
+    // turn; AUTOINCREMENT keeps `seq` monotonic across those clears so the
+    // host's per-session watermark never re-reads a recycled rowid.
+    _outbound.exec(`
+      CREATE TABLE IF NOT EXISTS status_events (
+        seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind       TEXT NOT NULL,
+        text       TEXT,
+        detail     TEXT,
+        created_at TEXT NOT NULL
+      );
+    `);
   }
   return _outbound;
 }
@@ -146,6 +162,53 @@ export function clearContainerToolInFlight(): void {
          updated_at = excluded.updated_at`,
     )
     .run(now);
+}
+
+/**
+ * Max status_events rows to keep mid-turn. The host only needs rows past its
+ * watermark and clearStatusEvents() wipes the table each turn, so this is just
+ * a safety cap against a pathological single turn emitting thousands of events.
+ */
+const STATUS_EVENTS_CAP = 200;
+
+/**
+ * Append one activity event to the webchat thinking-bubble feed. Best-effort
+ * and purely cosmetic — it must never throw into the caller (a missing table
+ * on an older outbound.db, a locked write, etc. are all swallowed).
+ *
+ * `kind` is 'tool' | 'progress' | 'reasoning' | 'done'. For 'tool', `text` is
+ * the tool name and `detail` is the target (file/command/query); for the
+ * others `text` carries the message and `detail` is null.
+ */
+export function appendStatusEvent(kind: string, text: string | null, detail: string | null = null): void {
+  try {
+    const db = getOutboundDb();
+    db.prepare(`INSERT INTO status_events (kind, text, detail, created_at) VALUES ($kind, $text, $detail, $now)`).run({
+      $kind: kind,
+      $text: text,
+      $detail: detail,
+      $now: new Date().toISOString(),
+    });
+    // Trim everything older than the most recent CAP rows.
+    db.prepare(`DELETE FROM status_events WHERE seq <= (SELECT MAX(seq) FROM status_events) - $cap`).run({
+      $cap: STATUS_EVENTS_CAP,
+    });
+  } catch {
+    // Cosmetic feed — never let it disrupt the turn.
+  }
+}
+
+/**
+ * Wipe the status feed at the start of a turn so it reflects only the current
+ * turn's activity. Safe across turns: AUTOINCREMENT means the next row's seq is
+ * still higher than the host's watermark, so nothing is missed or replayed.
+ */
+export function clearStatusEvents(): void {
+  try {
+    getOutboundDb().prepare(`DELETE FROM status_events`).run();
+  } catch {
+    // ignore — see appendStatusEvent
+  }
 }
 
 /**
@@ -247,6 +310,13 @@ export function initTestSessionDb(): { inbound: Database; outbound: Database } {
       tool_declared_timeout_ms INTEGER,
       tool_started_at          TEXT,
       updated_at               TEXT NOT NULL
+    );
+    CREATE TABLE status_events (
+      seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind       TEXT NOT NULL,
+      text       TEXT,
+      detail     TEXT,
+      created_at TEXT NOT NULL
     );
   `);
 

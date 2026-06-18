@@ -71,8 +71,10 @@ export async function teardownSessionResources(targets: TeardownTarget[], reason
   // Lazy-import container-runner so unit tests that only exercise the DB
   // primitives don't drag in the OneCLI SDK / container runtime modules.
   const { killContainer } = await import('./container-runner.js');
+  const { stopSessionStatus } = await import('./modules/agent-status/index.js');
   for (const t of targets) {
     killContainer(t.sessionId, reason);
+    stopSessionStatus(t.sessionId);
     const dir = sessionDir(t.agentGroupId, t.sessionId);
     try {
       fs.rmSync(dir, { recursive: true, force: true });

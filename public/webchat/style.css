@@ -1548,6 +1548,60 @@ a.lightbox-btn {
   height: 6px;
   background: var(--agent);
 }
+/* Static activity lines: latest progress milestone + current tool target. */
+.thinking-bubble .thinking-milestone {
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.thinking-bubble .thinking-target {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  margin-bottom: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.thinking-bubble .thinking-milestone[hidden],
+.thinking-bubble .thinking-target[hidden],
+.thinking-bubble .thinking-feed[hidden] {
+  display: none;
+}
+/* Reasoning fading feed: each line slides in, lingers, then fades out. */
+.thinking-bubble .thinking-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 6px;
+}
+.thinking-bubble .thinking-feed-line {
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  opacity: 0.85;
+  line-height: 1.35;
+  animation: thinking-feed-in 0.25s ease-out;
+  transition: opacity 0.45s ease; /* matches REASONING_FADE_MS in app.js */
+}
+.thinking-bubble .thinking-feed-line.fading {
+  opacity: 0;
+}
+@keyframes thinking-feed-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 0.85;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .thinking-bubble .thinking-feed-line {
+    animation: none;
+  }
+}
 
 /* Members toggle button */
 .members-toggle {
