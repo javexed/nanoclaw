@@ -1241,6 +1241,9 @@ function joinRoom(roomId, roomName) {
   closeAgentDetail();
   closeRoomDetail();
   closeModelDetail();
+  // Reset any in-progress turn state from the previous room so its bubble /
+  // elapsed timer can't leak into the new room.
+  endAgentTurn();
   currentRoom = roomId;
   unreadRooms.delete(roomId);
   updateUnreadDots();
@@ -1472,8 +1475,10 @@ function appendMessage(msg, statusText, beforeNode) {
       /* legacy/plain content — render as-is */
     }
   }
-  // Remove thinking bubble when an agent message arrives (covers reconnect catch-up too)
+  // An agent message means the turn produced output — end the turn (clears the
+  // bubble + elapsed timer). Covers reconnect catch-up too.
   if (isAgent) {
+    if (typeof endAgentTurn === 'function') endAgentTurn();
     const tb = $('#messages .thinking-bubble');
     if (tb) tb.remove();
   }
@@ -5053,30 +5058,17 @@ function handleTypingEvent(msg) {
 function renderTypingIndicator() {
   const el = $('#typing-indicator');
   const entries = [...typingUsers.entries()];
-  if (entries.length === 0) {
-    el.hidden = true;
-    el.className = 'typing-indicator';
-    const bubble = $('#messages .thinking-bubble');
-    if (bubble) bubble.remove();
-    return;
-  }
-
-  const hasAgent = entries.some(([, v]) => v.identity_type === 'agent');
   const userTypers = entries.filter(([, v]) => v.identity_type !== 'agent');
+  const hasAgent = entries.some(([, v]) => v.identity_type === 'agent');
 
+  // The thinking bubble shows while a turn is active (authoritative, from the
+  // status feed) OR while the heartbeat-driven typing signal says the agent is
+  // working (covers pre-status warm containers). It clears only when BOTH are
+  // false — so a quiet stretch in the typing signal can't drop a live turn's
+  // bubble out from under the user.
   let bubble = $('#messages .thinking-bubble');
-  if (hasAgent) {
-    if (!bubble) {
-      // Build the shared bubble (with the activity/milestone slots) so a status
-      // event arriving after this heartbeat-driven creation finds them. Default
-      // the sender verb to "Thinking" until a tool/progress event refines it.
-      bubble = ensureThinkingBubble();
-      const sender = bubble.querySelector('.sender');
-      if (sender && !sender.textContent) {
-        sender.appendChild(lucideEl('bot'));
-        sender.append(` ${agentName || 'Agent'} — Thinking`);
-      }
-    }
+  if (agentTurnActive || hasAgent) {
+    if (!bubble) bubble = ensureThinkingBubble();
   } else if (bubble) {
     bubble.remove();
   }
@@ -5111,30 +5103,88 @@ const TOOL_LABELS = {
 
 // Status frames carry fine-grained turn activity from the agent (see
 // src/channels/webchat/index.ts sendStatus). `event` is the kind:
+//   start     → a turn began; show the bubble and keep it up until done/stalled
 //   tool      → text = tool name, detail = target (file/command/query)
 //   progress  → text = milestone message
 //   reasoning → text = a reasoning summary line (rendered by the fading feed)
-//   done      → turn finished; clear the bubble
+//   done      → turn finished cleanly; clear the bubble
+//   stalled   → turn ended abnormally (agent died/killed); notice + clear
 function handleStatusEvent(msg) {
   if (msg.room_id !== currentRoom) return;
   switch (msg.event) {
+    case 'start':
+      beginAgentTurn();
+      break;
     case 'tool': {
+      markTurnActivity();
       const verb = msg.text ? TOOL_LABELS[msg.text] || `Using ${msg.text}` : 'Working';
       updateThinkingBubble(verb, msg.detail || null);
       break;
     }
     case 'progress':
+      markTurnActivity();
       if (msg.text) setThinkingMilestone(msg.text);
       break;
     case 'reasoning':
+      markTurnActivity();
       if (msg.text) pushReasoning(msg.text);
       break;
-    case 'done': {
-      const bubble = $('#messages .thinking-bubble');
-      if (bubble) bubble.remove();
+    case 'done':
+      endAgentTurn();
       break;
-    }
+    case 'stalled':
+      endAgentTurn();
+      appendSystem(msg.text || 'The agent stopped responding. You may want to resend your message.');
+      break;
   }
+}
+
+// ── Turn liveness ─────────────────────────────────────────────────────────
+// The thinking bubble is tied to the actual turn lifecycle (start → done/
+// stalled), NOT the heartbeat-driven typing signal — so it stays up through
+// long quiet operations and only clears on a real terminal signal. While a
+// turn is active an elapsed counter ticks so liveness is always explicit.
+let agentTurnActive = false;
+let turnStartedAt = 0;
+let lastTurnActivityAt = 0;
+let turnElapsedTimer = null;
+const TURN_QUIET_MS = 5000; // after this much silence, say "still working"
+
+function beginAgentTurn() {
+  agentTurnActive = true;
+  turnStartedAt = Date.now();
+  lastTurnActivityAt = Date.now();
+  ensureThinkingBubble();
+  if (!turnElapsedTimer) turnElapsedTimer = setInterval(updateTurnElapsed, 1000);
+  updateTurnElapsed();
+}
+
+function endAgentTurn() {
+  agentTurnActive = false;
+  if (turnElapsedTimer) {
+    clearInterval(turnElapsedTimer);
+    turnElapsedTimer = null;
+  }
+  const bubble = $('#messages .thinking-bubble');
+  if (bubble) bubble.remove();
+}
+
+function markTurnActivity() {
+  lastTurnActivityAt = Date.now();
+}
+
+function updateTurnElapsed() {
+  if (!agentTurnActive) return;
+  const bubble = $('#messages .thinking-bubble');
+  const el = bubble && bubble.querySelector('.thinking-elapsed');
+  if (!el) return;
+  const secs = Math.floor((Date.now() - turnStartedAt) / 1000);
+  if (secs < 2) {
+    el.textContent = '';
+    return;
+  }
+  const quiet = Date.now() - lastTurnActivityAt > TURN_QUIET_MS;
+  el.textContent = quiet ? ` · still working ${secs}s` : ` · ${secs}s`;
 }
 
 const THINKING_DETAIL_MAX = 64;
@@ -5152,8 +5202,20 @@ function ensureThinkingBubble() {
   const shouldScroll = isNearBottom() || (forceScrollCount > 0 && !userScrolledAway);
   bubble = document.createElement('div');
   bubble.className = 'msg agent thinking-bubble';
+  // Sender line: icon + "{agent} — " + a verb span (refined by tool events) +
+  // an elapsed span (ticked while the turn is active). Verb/elapsed live in
+  // their own spans so each updates without clobbering the other.
   const sender = document.createElement('div');
   sender.className = 'sender';
+  sender.appendChild(lucideEl('bot'));
+  sender.appendChild(document.createTextNode(` ${agentName || 'Agent'} — `));
+  const verb = document.createElement('span');
+  verb.className = 'thinking-verb';
+  verb.textContent = 'Thinking';
+  sender.appendChild(verb);
+  const elapsed = document.createElement('span');
+  elapsed.className = 'thinking-elapsed';
+  sender.appendChild(elapsed);
   bubble.appendChild(sender);
   const content = document.createElement('div');
   content.className = 'bubble';
@@ -5170,12 +5232,8 @@ function ensureThinkingBubble() {
 
 function updateThinkingBubble(label, detail) {
   const bubble = ensureThinkingBubble();
-  const sender = bubble.querySelector('.sender');
-  if (sender) {
-    sender.textContent = '';
-    sender.appendChild(lucideEl('bot'));
-    sender.append(` ${agentName || 'Agent'} — ${label}`);
-  }
+  const verbEl = bubble.querySelector('.thinking-verb');
+  if (verbEl) verbEl.textContent = label;
   const target = bubble.querySelector('.thinking-target');
   if (target) {
     if (detail) {

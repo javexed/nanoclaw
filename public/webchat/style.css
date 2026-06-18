@@ -1548,6 +1548,11 @@ a.lightbox-btn {
   height: 6px;
   background: var(--agent);
 }
+/* Elapsed-time counter in the sender line while a turn is active. */
+.thinking-bubble .thinking-elapsed {
+  color: var(--text-dim);
+  font-weight: 400;
+}
 /* Static activity lines: latest progress milestone + current tool target. */
 .thinking-bubble .thinking-milestone {
   font-size: var(--fs-sm);

@@ -44,12 +44,21 @@ let adapter: StatusAdapter | null = null;
  */
 const watermarks = new Map<string, number>();
 
+/**
+ * Sessions with a turn currently in progress (a 'start' was forwarded, no
+ * 'done' yet). Lets notifySessionStopped tell a mid-turn death (warn the room)
+ * from a clean idle exit after a completed turn (stay silent).
+ */
+const turnActive = new Set<string>();
+
 /** Bind to the delivery adapter. Called once by src/delivery.ts. */
 export function setStatusAdapter(a: StatusAdapter): void {
   adapter = a;
 }
 
-const VALID_KINDS = new Set<AgentActivityStatus['kind']>(['tool', 'progress', 'reasoning', 'done']);
+// 'start' rides the container's status feed; 'stalled' is host-generated (see
+// notifySessionStopped) and never appears in the feed.
+const VALID_KINDS = new Set<AgentActivityStatus['kind']>(['start', 'tool', 'progress', 'reasoning', 'done']);
 
 /**
  * Read and forward any new status events for a session. Best-effort: opens the
@@ -87,6 +96,10 @@ export async function forwardSessionStatus(session: Session): Promise<void> {
     for (const ev of events) {
       const kind = ev.kind as AgentActivityStatus['kind'];
       if (!VALID_KINDS.has(kind)) continue;
+      // Track turn boundaries so a mid-turn container death can be told from a
+      // clean idle exit (see notifySessionStopped).
+      if (kind === 'start') turnActive.add(session.id);
+      else if (kind === 'done') turnActive.delete(session.id);
       try {
         await adapter.sendStatus(
           mg.channel_type,
@@ -110,7 +123,36 @@ export async function forwardSessionStatus(session: Session): Promise<void> {
   }
 }
 
-/** Forget a session's watermark when it's torn down so the Map can't leak. */
+/**
+ * Called by the host when a session's container exits (normal, crash, or
+ * ceiling-kill). If a turn was in progress (we forwarded 'start' but never
+ * 'done'), the agent died mid-turn — tell the room with a 'stalled' notice so
+ * the bubble clears with an explanation instead of vanishing silently. A clean
+ * idle exit after a completed turn is a no-op. Best-effort and idempotent.
+ */
+export async function notifySessionStopped(session: Session): Promise<void> {
+  if (!turnActive.has(session.id)) return; // clean exit, or already handled
+  turnActive.delete(session.id);
+  if (!adapter?.sendStatus) return;
+
+  const mg = session.messaging_group_id ? getMessagingGroup(session.messaging_group_id) : undefined;
+  if (!mg || !mg.platform_id) return;
+
+  try {
+    await adapter.sendStatus(
+      mg.channel_type,
+      mg.platform_id,
+      null,
+      { kind: 'stalled', text: 'The agent stopped responding. You may want to resend your message.', detail: null },
+      mg.instance,
+    );
+  } catch {
+    // Best-effort.
+  }
+}
+
+/** Forget a session's tracking when it's torn down so the maps can't leak. */
 export function stopSessionStatus(sessionId: string): void {
   watermarks.delete(sessionId);
+  turnActive.delete(sessionId);
 }

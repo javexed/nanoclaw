@@ -235,6 +235,12 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
+    // Mark the turn as started so the webchat bubble appears immediately and
+    // persists for the whole turn, independent of the heartbeat-driven typing
+    // signal. A real query is guaranteed to run from here, so the matching
+    // 'done' (after markCompleted below) always pairs with this 'start'.
+    appendStatusEvent('start', null);
+
     // Process the query while concurrently polling for new messages
     const skippedSet = new Set(skipped);
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));

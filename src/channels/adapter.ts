@@ -131,13 +131,17 @@ export interface OutboundMessage {
  * Fine-grained agent activity status for the current turn, surfaced to rich
  * clients (webchat) for the "thinking" bubble. Cosmetic; carries no routing
  * data.
+ *   - start:     a turn began; show the bubble and keep it until done/stalled
  *   - tool:      `text` = tool name, `detail` = target (file/command/query)
  *   - progress:  `text` = milestone message
  *   - reasoning: `text` = a reasoning summary line
- *   - done:      the turn finished; clear the activity display
+ *   - done:      the turn finished cleanly; clear the activity display
+ *   - stalled:   the turn ended abnormally (container died/killed mid-turn);
+ *                `text` = a short human notice. Host-generated, not from the
+ *                container's status feed.
  */
 export interface AgentActivityStatus {
-  kind: 'tool' | 'progress' | 'reasoning' | 'done';
+  kind: 'start' | 'tool' | 'progress' | 'reasoning' | 'done' | 'stalled';
   text: string | null;
   detail: string | null;
 }

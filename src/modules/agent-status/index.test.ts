@@ -25,7 +25,7 @@ vi.mock('../../session-manager.js', () => ({
   openOutboundDb: () => new Database(OUT_PATH, { readonly: true }),
 }));
 
-import { forwardSessionStatus, setStatusAdapter, stopSessionStatus } from './index.js';
+import { forwardSessionStatus, notifySessionStopped, setStatusAdapter, stopSessionStatus } from './index.js';
 
 function seedDb(): void {
   if (fs.existsSync(OUT_DIR)) fs.rmSync(OUT_DIR, { recursive: true });
@@ -126,6 +126,50 @@ describe('forwardSessionStatus', () => {
     messagingGroup = undefined;
     append('progress', 'orphan');
     await forwardSessionStatus(session);
+    expect(captured).toHaveLength(0);
+  });
+});
+
+describe('notifySessionStopped (mid-turn death)', () => {
+  it('broadcasts a stalled notice when the container dies mid-turn', async () => {
+    await forwardSessionStatus(session); // seed
+    append('start', null);
+    append('tool', 'Bash', 'sleep 9999');
+    await forwardSessionStatus(session); // forwards start (turn active) + tool
+    captured.length = 0;
+
+    await notifySessionStopped(session);
+    expect(captured).toHaveLength(1);
+    expect(captured[0].status.kind).toBe('stalled');
+    expect(captured[0].status.text).toMatch(/stopped responding/i);
+  });
+
+  it('is silent after a clean done (idle exit is not a stall)', async () => {
+    await forwardSessionStatus(session); // seed
+    append('start', null);
+    append('done', null);
+    await forwardSessionStatus(session); // start then done → turn no longer active
+    captured.length = 0;
+
+    await notifySessionStopped(session);
+    expect(captured).toHaveLength(0);
+  });
+
+  it('is idempotent — only one stall per turn', async () => {
+    await forwardSessionStatus(session); // seed
+    append('start', null);
+    await forwardSessionStatus(session);
+    captured.length = 0;
+
+    await notifySessionStopped(session);
+    await notifySessionStopped(session);
+    expect(captured).toHaveLength(1);
+  });
+
+  it('is silent for a session that never started a turn', async () => {
+    await forwardSessionStatus(session); // seed, no start
+    captured.length = 0;
+    await notifySessionStopped(session);
     expect(captured).toHaveLength(0);
   });
 });
