@@ -1569,12 +1569,20 @@ a.lightbox-btn {
 .thinking-bubble .thinking-feed[hidden] {
   display: none;
 }
-/* Reasoning fading feed: each line slides in, lingers, then fades out. */
+/* Reasoning feed: a fixed-height window that auto-scrolls to the newest line.
+   Longer reasoning scrolls upward and fades out under the top gradient mask;
+   each line also self-fades when reasoning pauses (see app.js). */
 .thinking-bubble .thinking-feed {
   display: flex;
   flex-direction: column;
   gap: 2px;
   margin-bottom: 6px;
+  max-height: 6.5em; /* ~5 lines at the line-height below */
+  overflow: hidden;
+  scroll-behavior: smooth;
+  /* Fade the top edge so lines dissolve as they scroll out of the window. */
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 1.6em, #000 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 1.6em, #000 100%);
 }
 .thinking-bubble .thinking-feed-line {
   font-size: var(--fs-sm);
@@ -1598,6 +1606,9 @@ a.lightbox-btn {
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .thinking-bubble .thinking-feed {
+    scroll-behavior: auto;
+  }
   .thinking-bubble .thinking-feed-line {
     animation: none;
   }

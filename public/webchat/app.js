@@ -5198,14 +5198,16 @@ function setThinkingMilestone(text) {
   }
 }
 
-const REASONING_FEED_MAX = 5; // lines kept on screen at once
+const REASONING_FEED_BUFFER = 40; // max lines kept in the DOM (scroll history)
 const REASONING_FEED_TTL = 7000; // ms a line lingers before it fades out
 const REASONING_FADE_MS = 500; // fade-out transition duration (matches CSS)
 
-// Append one reasoning line to the bubble's fading feed: it slides in, lives
-// for REASONING_FEED_TTL, then fades and is removed. The feed shows at most
-// REASONING_FEED_MAX recent lines (oldest dropped first). Whole feed clears
-// with the bubble when the agent's message lands.
+// Append one reasoning line to the bubble's feed. The feed is a fixed-height
+// window (CSS max-height + overflow): new lines land at the bottom and the
+// window auto-scrolls to follow, so longer reasoning scrolls upward and fades
+// under the top gradient mask. Each line also self-fades after REASONING_FEED_TTL
+// so the feed drains when reasoning pauses; the whole thing clears with the
+// bubble when the agent's message lands. A bounded DOM buffer caps memory.
 function pushReasoning(text) {
   const bubble = ensureThinkingBubble();
   const feed = bubble.querySelector('.thinking-feed');
@@ -5217,13 +5219,16 @@ function pushReasoning(text) {
   line.textContent = text;
   feed.appendChild(line);
 
-  // Cap on-screen lines — drop the oldest immediately when over budget,
+  // Trim the DOM buffer — drop the oldest (already scrolled out of view),
   // cancelling its pending fade timer so it can't fire after removal.
-  while (feed.children.length > REASONING_FEED_MAX) {
+  while (feed.children.length > REASONING_FEED_BUFFER) {
     const oldest = feed.firstChild;
     if (oldest._fadeTimer) clearTimeout(oldest._fadeTimer);
     feed.removeChild(oldest);
   }
+
+  // Follow the newest line within the feed's own scroll viewport.
+  feed.scrollTop = feed.scrollHeight;
 
   line._fadeTimer = setTimeout(() => {
     line.classList.add('fading');
