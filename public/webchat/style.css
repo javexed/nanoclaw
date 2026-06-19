@@ -797,6 +797,63 @@ body {
   padding: 0;
   font-size: 0.92em;
 }
+/* a2a cards clamp to ~5 lines by default; .a2a-more toggles full view. */
+.msg.a2a .bubble.a2a-clamp.collapsed {
+  max-height: 7.5em;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent);
+  mask-image: linear-gradient(to bottom, #000 70%, transparent);
+}
+.msg.a2a .a2a-more {
+  margin-top: 4px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--a2a-accent, var(--text-dim));
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+.msg.a2a .a2a-more:hover {
+  text-decoration: underline;
+}
+/* "Thoughts" disclosure folded onto an agent reply — the full reasoning trace. */
+.msg .thoughts {
+  margin-top: 6px;
+  font-size: var(--fs-sm);
+}
+.msg .thoughts > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  color: var(--text-dim);
+  list-style: none;
+  user-select: none;
+}
+.msg .thoughts > summary::-webkit-details-marker {
+  display: none;
+}
+.msg .thoughts > summary .icon {
+  width: 13px;
+  height: 13px;
+}
+.msg .thoughts[open] > summary {
+  margin-bottom: 4px;
+}
+.msg .thoughts-body {
+  max-height: 16em;
+  overflow-y: auto;
+  border-left: 2px solid var(--border);
+  padding-left: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.msg .thoughts-line {
+  color: var(--text-dim);
+  line-height: 1.4;
+}
 .msg.system {
   align-self: center;
   color: var(--text-dim);
@@ -1552,6 +1609,43 @@ a.lightbox-btn {
 .thinking-bubble .thinking-elapsed {
   color: var(--text-dim);
   font-weight: 400;
+}
+/* The whole bubble is click-to-expand into the full reasoning trace. */
+.thinking-bubble {
+  cursor: pointer;
+}
+.thinking-bubble .thinking-chevron {
+  display: inline-flex;
+  margin-left: 4px;
+  color: var(--text-dim);
+  transition: transform 0.15s ease;
+}
+.thinking-bubble .thinking-chevron .icon {
+  width: 14px;
+  height: 14px;
+}
+.thinking-bubble.expanded .thinking-chevron {
+  transform: rotate(90deg);
+}
+/* Expanded view: swap the fading feed for the full scrollable trace. */
+.thinking-bubble .thinking-fulltrace {
+  display: none;
+}
+.thinking-bubble.expanded .thinking-feed {
+  display: none;
+}
+.thinking-bubble.expanded .thinking-fulltrace {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 14em;
+  overflow-y: auto;
+  margin-bottom: 6px;
+}
+.thinking-bubble .thinking-fulltrace-line {
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  line-height: 1.4;
 }
 /* Static activity lines: latest progress milestone + current tool target. */
 .thinking-bubble .thinking-milestone {

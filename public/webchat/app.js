@@ -1242,8 +1242,9 @@ function joinRoom(roomId, roomName) {
   closeRoomDetail();
   closeModelDetail();
   // Reset any in-progress turn state from the previous room so its bubble /
-  // elapsed timer can't leak into the new room.
+  // elapsed timer / reasoning trace can't leak into the new room.
   endAgentTurn();
+  reasoningLog = [];
   currentRoom = roomId;
   unreadRooms.delete(roomId);
   updateUnreadDots();
@@ -1476,8 +1477,15 @@ function appendMessage(msg, statusText, beforeNode) {
     }
   }
   // An agent message means the turn produced output — end the turn (clears the
-  // bubble + elapsed timer). Covers reconnect catch-up too.
+  // bubble + elapsed timer). Covers reconnect catch-up too. Snapshot the turn's
+  // reasoning so it can be folded onto THIS reply as a "Thoughts" disclosure,
+  // then clear it so only the first reply of the turn carries it.
+  let thoughtsForThisMsg = null;
   if (isAgent) {
+    if (reasoningLog.length > 0) {
+      thoughtsForThisMsg = reasoningLog.slice();
+      reasoningLog = [];
+    }
     if (typeof endAgentTurn === 'function') endAgentTurn();
     const tb = $('#messages .thinking-bubble');
     if (tb) tb.remove();
@@ -1563,6 +1571,11 @@ function appendMessage(msg, statusText, beforeNode) {
     div.appendChild(bubble);
   }
 
+  // Fold this turn's reasoning onto the reply as a collapsible disclosure.
+  if (thoughtsForThisMsg && thoughtsForThisMsg.length > 0) {
+    div.appendChild(buildThoughtsDisclosure(thoughtsForThisMsg));
+  }
+
   // Timestamp
   const timeStr = formatTime(msg.created_at);
   if (timeStr) {
@@ -1587,6 +1600,8 @@ function appendMessage(msg, statusText, beforeNode) {
   } else {
     $('#messages').appendChild(div);
   }
+  // a2a cards clamp to ~5 lines (measured now that the element is attached).
+  if (isA2a) applyA2aClamp(bubble, div);
   return div;
 }
 
@@ -1601,6 +1616,47 @@ function appendSystem(text) {
     $('#messages').appendChild(div);
   }
   return div;
+}
+
+// Collapsible "Thoughts" disclosure folded onto an agent reply — the full
+// reasoning trace captured during the turn. Collapsed by default.
+function buildThoughtsDisclosure(lines) {
+  const details = document.createElement('details');
+  details.className = 'thoughts';
+  const summary = document.createElement('summary');
+  summary.appendChild(lucideEl('sparkles'));
+  summary.append(` Thoughts (${lines.length})`);
+  details.appendChild(summary);
+  const body = document.createElement('div');
+  body.className = 'thoughts-body';
+  for (const line of lines) {
+    const row = document.createElement('div');
+    row.className = 'thoughts-line';
+    row.textContent = line;
+    body.appendChild(row);
+  }
+  details.appendChild(body);
+  return details;
+}
+
+// Clamp an a2a side-channel card to ~5 lines with a show more/less toggle.
+// Must run AFTER the element is attached to the DOM (needs layout to measure).
+function applyA2aClamp(bubble, container) {
+  bubble.classList.add('a2a-clamp', 'collapsed');
+  // Fits within the clamp → no toggle needed; drop the clamp classes.
+  if (bubble.scrollHeight <= bubble.clientHeight + 4) {
+    bubble.classList.remove('a2a-clamp', 'collapsed');
+    return;
+  }
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'a2a-more';
+  toggle.textContent = 'Show more';
+  toggle.addEventListener('click', () => {
+    const collapsed = bubble.classList.toggle('collapsed');
+    toggle.textContent = collapsed ? 'Show more' : 'Show less';
+  });
+  container.appendChild(toggle);
 }
 
 // ── Scroll-back (older-message pagination) ──────────────────────────────────
@@ -5150,10 +5206,18 @@ let lastTurnActivityAt = 0;
 let turnElapsedTimer = null;
 const TURN_QUIET_MS = 5000; // after this much silence, say "still working"
 
+// Full reasoning trace for the current turn (every line, uncapped by the feed's
+// fade) — powers the click-to-expand full view and the "Thoughts" disclosure
+// folded onto the agent's reply. Session-lived; cleared on turn start / room
+// switch. Bounded so a pathological turn can't grow it without limit.
+let reasoningLog = [];
+const REASONING_LOG_MAX = 500;
+
 function beginAgentTurn() {
   agentTurnActive = true;
   turnStartedAt = Date.now();
   lastTurnActivityAt = Date.now();
+  reasoningLog = [];
   ensureThinkingBubble();
   if (!turnElapsedTimer) turnElapsedTimer = setInterval(updateTurnElapsed, 1000);
   updateTurnElapsed();
@@ -5216,18 +5280,58 @@ function ensureThinkingBubble() {
   const elapsed = document.createElement('span');
   elapsed.className = 'thinking-elapsed';
   sender.appendChild(elapsed);
+  // Chevron affordance — the bubble is click-to-expand into the full trace.
+  const chevron = document.createElement('span');
+  chevron.className = 'thinking-chevron';
+  chevron.appendChild(lucideEl('chevron-right'));
+  sender.appendChild(chevron);
   bubble.appendChild(sender);
   const content = document.createElement('div');
   content.className = 'bubble';
+  // .thinking-feed = compact fading window (collapsed view); .thinking-fulltrace
+  // = the whole turn's reasoning, scrollable (expanded view). CSS swaps them on
+  // the bubble's .expanded class.
   content.innerHTML =
     '<div class="thinking-milestone" hidden></div>' +
     '<div class="thinking-target" hidden></div>' +
     '<div class="thinking-feed" hidden></div>' +
+    '<div class="thinking-fulltrace"></div>' +
     '<span class="dots"><span></span><span></span><span></span></span>';
   bubble.appendChild(content);
+  // Click toggles the full reasoning trace. Ignore clicks on links/buttons so
+  // selecting text or tapping a link inside doesn't toggle.
+  bubble.addEventListener('click', (e) => {
+    if (e.target.closest('a, button')) return;
+    toggleThinkingExpanded(bubble);
+  });
   $('#messages').appendChild(bubble);
   if (shouldScroll) scrollToBottom();
   return bubble;
+}
+
+// Toggle the bubble between the compact fading feed and the full scrollable
+// reasoning trace. Rebuilds the trace from reasoningLog on expand so it always
+// reflects everything captured this turn.
+function toggleThinkingExpanded(bubble) {
+  const expanded = bubble.classList.toggle('expanded');
+  if (expanded) renderFullTrace(bubble);
+}
+
+function renderFullTrace(bubble) {
+  const el = bubble.querySelector('.thinking-fulltrace');
+  if (!el) return;
+  if (reasoningLog.length === 0) {
+    el.textContent = 'No reasoning captured for this turn yet.';
+  } else {
+    el.textContent = '';
+    for (const line of reasoningLog) {
+      const row = document.createElement('div');
+      row.className = 'thinking-fulltrace-line';
+      row.textContent = line;
+      el.appendChild(row);
+    }
+  }
+  el.scrollTop = el.scrollHeight;
 }
 
 function updateThinkingBubble(label, detail) {
@@ -5268,6 +5372,13 @@ const REASONING_FADE_MS = 500; // fade-out transition duration (matches CSS)
 // bubble when the agent's message lands. A bounded DOM buffer caps memory.
 function pushReasoning(text) {
   const bubble = ensureThinkingBubble();
+
+  // Retain the full line for the click-to-expand view and the reply disclosure.
+  reasoningLog.push(text);
+  if (reasoningLog.length > REASONING_LOG_MAX) reasoningLog.shift();
+  // If the user is currently viewing the expanded trace, keep it live.
+  if (bubble.classList.contains('expanded')) renderFullTrace(bubble);
+
   const feed = bubble.querySelector('.thinking-feed');
   if (!feed) return;
   feed.hidden = false;
