@@ -218,6 +218,8 @@ export interface PendingApproval {
   status: 'pending' | 'approved' | 'rejected' | 'expired';
   title: string;
   options_json: string;
+  /** When set, only this exact user may resolve the approval. */
+  approver_user_id: string | null;
 }
 
 // ── Agent destinations (central DB) ──
@@ -227,5 +229,12 @@ export interface AgentDestination {
   local_name: string;
   target_type: 'channel' | 'agent';
   target_id: string;
+  created_at: string;
+}
+
+export interface AgentMessagePolicy {
+  from_agent_group_id: string;
+  to_agent_group_id: string;
+  approver: string;
   created_at: string;
 }

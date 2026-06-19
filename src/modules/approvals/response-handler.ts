@@ -125,6 +125,11 @@ function isAuthorizedApprovalClick(approval: PendingApproval, payload: ResponseP
   const userId = namespacedUserId(payload);
   if (!userId) return false;
 
+  // An approval may name a specific approver; only that exact user may resolve it.
+  if (approval.approver_user_id) {
+    return userId === approval.approver_user_id;
+  }
+
   const agentGroupId =
     approval.agent_group_id ?? (approval.session_id ? getSession(approval.session_id)?.agent_group_id : null);
 

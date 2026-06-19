@@ -155,11 +155,11 @@ export function createPendingApproval(
       `INSERT OR IGNORE INTO pending_approvals
          (approval_id, session_id, request_id, action, payload, created_at,
           agent_group_id, channel_type, platform_id, platform_message_id, expires_at, status,
-          title, options_json)
+          title, options_json, approver_user_id)
        VALUES
          (@approval_id, @session_id, @request_id, @action, @payload, @created_at,
           @agent_group_id, @channel_type, @platform_id, @platform_message_id, @expires_at, @status,
-          @title, @options_json)`,
+          @title, @options_json, @approver_user_id)`,
     )
     .run({
       session_id: null,
@@ -169,6 +169,7 @@ export function createPendingApproval(
       platform_message_id: null,
       expires_at: null,
       status: 'pending',
+      approver_user_id: null,
       ...pa,
     });
   return result.changes > 0;

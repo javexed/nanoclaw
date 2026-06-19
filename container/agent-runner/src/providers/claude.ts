@@ -6,7 +6,14 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 
 import { appendStatusEvent, clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
 import { registerProvider } from './provider-registry.js';
-import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
+import type {
+  AgentProvider,
+  AgentQuery,
+  McpServerConfig,
+  ProviderEvent,
+  ProviderOptions,
+  QueryInput,
+} from './types.js';
 
 function log(msg: string): void {
   console.error(`[claude-provider] ${msg}`);
@@ -126,10 +133,15 @@ function parseTranscript(content: string): ParsedMessage[] {
     try {
       const entry = JSON.parse(line);
       if (entry.type === 'user' && entry.message?.content) {
-        const text = typeof entry.message.content === 'string' ? entry.message.content : entry.message.content.map((c: { text?: string }) => c.text || '').join('');
+        const text =
+          typeof entry.message.content === 'string'
+            ? entry.message.content
+            : entry.message.content.map((c: { text?: string }) => c.text || '').join('');
         if (text) messages.push({ role: 'user', content: text });
       } else if (entry.type === 'assistant' && entry.message?.content) {
-        const textParts = entry.message.content.filter((c: { type: string }) => c.type === 'text').map((c: { text: string }) => c.text);
+        const textParts = entry.message.content
+          .filter((c: { type: string }) => c.type === 'text')
+          .map((c: { text: string }) => c.text);
         const text = textParts.join('');
         if (text) messages.push({ role: 'assistant', content: text });
       }
@@ -142,7 +154,13 @@ function parseTranscript(content: string): ParsedMessage[] {
 
 function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | null, assistantName?: string): string {
   const now = new Date();
-  const dateStr = now.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+  const dateStr = now.toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
   const lines = [`# ${title || 'Conversation'}`, '', `Archived: ${dateStr}`, '', '---', ''];
   for (const msg of messages) {
     const sender = msg.role === 'user' ? 'User' : assistantName || 'Assistant';
@@ -246,7 +264,11 @@ const postToolUseHook: HookCallback = async () => {
  * the agent's `conversations/` folder so context survives a compaction or a
  * session rotation. Best-effort: returns false (and logs) on any failure.
  */
-function archiveTranscriptFile(transcriptPath: string | undefined, sessionId: string | undefined, assistantName?: string): boolean {
+function archiveTranscriptFile(
+  transcriptPath: string | undefined,
+  sessionId: string | undefined,
+  assistantName?: string,
+): boolean {
   if (!transcriptPath || !fs.existsSync(transcriptPath)) {
     log('No transcript found for archiving');
     return false;
@@ -263,14 +285,20 @@ function archiveTranscriptFile(transcriptPath: string | undefined, sessionId: st
     if (fs.existsSync(indexPath)) {
       try {
         const index = JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
-        summary = index.entries?.find((e: { sessionId: string; summary?: string }) => e.sessionId === sessionId)?.summary;
+        summary = index.entries?.find(
+          (e: { sessionId: string; summary?: string }) => e.sessionId === sessionId,
+        )?.summary;
       } catch {
         /* ignore */
       }
     }
 
     const name = summary
-      ? summary.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 50)
+      ? summary
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '')
+          .slice(0, 50)
       : `conversation-${new Date().getHours().toString().padStart(2, '0')}${new Date().getMinutes().toString().padStart(2, '0')}`;
 
     const conversationsDir = process.env.NANOCLAW_CONVERSATIONS_DIR || '/workspace/agent/conversations';
@@ -411,7 +439,7 @@ export function classifyTerminalError(text: string): 'config' | 'network' | unde
 
   if (
     t.includes('model not found') ||
-    t.includes('not found') && t.includes('model') ||
+    (t.includes('not found') && t.includes('model')) ||
     t.includes('invalid model') ||
     t.includes('invalid_model') ||
     t.includes('unknown model') ||
@@ -501,11 +529,10 @@ export class ClaudeProvider implements AgentProvider {
         additionalDirectories: this.additionalDirectories,
         resume: input.continuation,
         pathToClaudeCodeExecutable: '/pnpm/claude',
-        systemPrompt: instructions ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions } : undefined,
-        allowedTools: [
-          ...TOOL_ALLOWLIST,
-          ...Object.keys(this.mcpServers).map(mcpAllowPattern),
-        ],
+        systemPrompt: instructions
+          ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions }
+          : undefined,
+        allowedTools: [...TOOL_ALLOWLIST, ...Object.keys(this.mcpServers).map(mcpAllowPattern)],
         disallowedTools: SDK_DISALLOWED_TOOLS,
         env: this.env,
         model: this.model,
@@ -539,33 +566,13 @@ export class ClaudeProvider implements AgentProvider {
           if (message.type === 'system' && message.subtype === 'init') {
             yield { type: 'init', continuation: message.session_id };
           } else if (message.type === 'result') {
-            // A result message can itself be an error — the SDK signals this via
-            // an `is_error` flag and/or an error-ish `subtype` (e.g.
-            // 'error_during_execution', 'error_max_turns'). The human-readable
-            // detail, when present, lives in the same `result` field as success
-            // text. Surface these as terminal errors instead of an empty result
-            // (which the poll-loop would otherwise treat as a silent completion).
-            const resultMsg = message as { result?: string; subtype?: string; is_error?: boolean };
-            const text = typeof resultMsg.result === 'string' ? resultMsg.result : null;
-            const subtype = resultMsg.subtype;
-            // `error_max_turns` is excepted: its `result` field still carries the
-            // agent's partial output (possibly <message> blocks), so dispatch it
-            // as a normal result like before rather than swallowing it as an
-            // error. Genuine faults (error_during_execution, is_error) surface.
-            const isErrorResult =
-              subtype !== 'error_max_turns' &&
-              (resultMsg.is_error === true || (typeof subtype === 'string' && subtype.startsWith('error')));
-            if (isErrorResult) {
-              const detail = text || subtype || 'unknown error';
-              yield {
-                type: 'error',
-                message: detail,
-                retryable: false,
-                classification: classifyTerminalError(detail),
-              };
-            } else {
-              yield { type: 'result', text };
-            }
+            // `result` text exists only on subtype:"success"; error subtypes
+            // (e.g. a non-retryable 403 billing_error) carry their message in
+            // `errors[]` instead. Surface either so the poll-loop can deliver a
+            // billing/quota notice to the user rather than dropping the turn.
+            const m = message as { result?: string; is_error?: boolean; errors?: string[] };
+            const text = m.result ?? (m.errors && m.errors.length > 0 ? m.errors.join('\n') : null);
+            yield { type: 'result', text, isError: m.is_error === true };
           } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
             yield { type: 'error', message: 'API retry', retryable: true };
           } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'rate_limit_event') {
