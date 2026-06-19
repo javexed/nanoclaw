@@ -3,20 +3,24 @@
 # verify-webchat-publish.sh — pre-publish gate for the webchat channel branch.
 #
 # Run this BEFORE publishing channels-webchat (forgejo → javexed). It catches
-# the three classes of mistake that have actually bitten this project:
+# the classes of mistake that have actually bitten this project:
 #   1. drift — a file changed on the channel branch that the installer never
 #      delivers (orphans), or a migration that's exported but not registered.
 #   2. identity — a commit carrying a private email that GitHub's push-block
 #      will reject.
 #   3. staleness — your local channel branch differing from the remote tip
 #      you're about to publish.
+#   4. exposure — a private email or secret token hardcoded in FILE CONTENT.
+#      The commit-author check (2) MISSES this — it's exactly how the
+#      maintainer's gmail once leaked, baked into this script's own default.
+#      ALWAYS scan file content, not just commit metadata.
 #
 #   ./verify-webchat-publish.sh            # fast structural checks
 #   ./verify-webchat-publish.sh --full     # also run install→uninstall round-trip
 #
 # Env overrides: UPSTREAM_REF (default origin/main), CHANNEL_REF
 # (default channels-webchat), WEBCHAT_REMOTE (default forgejo),
-# BLOCKED_EMAIL (default the maintainer's private gmail).
+# BLOCKED_EMAIL (optional; see below — never hardcode it here).
 #
 # Exit 0 = safe to publish. Exit 1 = a check failed. Exit 2 = setup error.
 
@@ -25,7 +29,13 @@ set -uo pipefail   # deliberately NOT -e: run every check, collect all failures
 UPSTREAM="${UPSTREAM_REF:-origin/main}"
 CHANNEL="${CHANNEL_REF:-channels-webchat}"
 REMOTE="${WEBCHAT_REMOTE:-forgejo}"
-BLOCKED_EMAIL="${BLOCKED_EMAIL:-$(git config user.email)}"
+# Private email to block in commit authorship. NEVER hardcode it here — that
+# would re-introduce the exact leak this script guards against. Supply it via
+# the BLOCKED_EMAIL env var, or a gitignored `.git/publish-blocked-email` file
+# (one-time: echo you@private.example > "$(git rev-parse --git-dir)/publish-blocked-email").
+# Unset → the author-email check is skipped (GitHub's own push-block + the
+# file-content Exposure scan below remain as backstops).
+BLOCKED_EMAIL="${BLOCKED_EMAIL:-$(cat "$(git rev-parse --git-dir 2>/dev/null)/publish-blocked-email" 2>/dev/null || true)}"
 FULL=false
 [ "${1:-}" = "--full" ] && FULL=true
 
@@ -57,10 +67,48 @@ fi
 
 # ── 2. Identity ───────────────────────────────────────────────────────────
 section "Identity — no private email in the publish range"
-hits=$(git log --format='%ae%n%ce' "$BASE..$CHANNEL" | grep -cxF "$BLOCKED_EMAIL" || true)
-if [ "$hits" -eq 0 ]; then pass "no commit exposes $BLOCKED_EMAIL"
-else fail "$hits commit(s) carry $BLOCKED_EMAIL — GitHub will reject the push (rewrite email or enable hide_email)"
-  git log --format='    %h %ae | %s' "$BASE..$CHANNEL" | grep -F "$BLOCKED_EMAIL" >&2
+if [ -z "$BLOCKED_EMAIL" ]; then
+  echo "  (BLOCKED_EMAIL not set — skipping the private-email author check. Set the env"
+  echo "   var or .git/publish-blocked-email to your private gmail to enable it.)"
+else
+  hits=$(git log --format='%ae%n%ce' "$BASE..$CHANNEL" | grep -cxF "$BLOCKED_EMAIL" || true)
+  if [ "$hits" -eq 0 ]; then pass "no commit exposes $BLOCKED_EMAIL"
+  else fail "$hits commit(s) carry $BLOCKED_EMAIL — GitHub will reject the push (rewrite email or enable hide_email)"
+    git log --format='    %h %ae | %s' "$BASE..$CHANNEL" | grep -F "$BLOCKED_EMAIL" >&2
+  fi
+fi
+
+# ── 2b. Exposure — no private email or secret token in FILE CONTENT ────────
+# The author-email check above is blind to anything embedded INSIDE a file —
+# exactly how the maintainer's gmail leaked. This scans content, generically.
+section "Exposure — no private email / secret material in published file content"
+# (a) Any PERSONAL-PROVIDER email newly added to file content — the real PII
+#     risk. Targeting known personal providers (not all domains) keeps it quiet
+#     on fixture addresses like foo@alice.com while hard-failing on a real
+#     gmail/outlook/etc. Doesn't need the address known up front.
+EMAIL_RE='[A-Za-z0-9._%+-]+@(gmail|googlemail|outlook|hotmail|live|yahoo|ymail|icloud|proton|protonmail|aol|gmx)\.[A-Za-z.]+'
+emc=$(git diff "$BASE" "$CHANNEL" -- . ':!*.test.ts' ':!*.md' 2>/dev/null \
+        | grep -E '^\+' | grep -vE '^\+\+\+' | grep -oiE "$EMAIL_RE" | sort -u || true)
+if [ -z "$emc" ]; then pass "no personal-provider email added to file content"
+else fail "personal email(s) in added file content — scrub before publishing:"
+  printf '%s\n' "$emc" | sed 's/^/      /' >&2
+fi
+# (a2) If a specific private email is configured, hard-check the WHOLE tree for it.
+if [ -n "$BLOCKED_EMAIL" ]; then
+  em=$(git grep -nI -F "$BLOCKED_EMAIL" "$CHANNEL" -- . 2>/dev/null || true)
+  if [ -z "$em" ]; then pass "configured private email absent from all file content"
+  else fail "configured private email found in file content:"; printf '%s\n' "$em" | sed 's/^/      /' >&2; fi
+fi
+# (b) Secret-shaped tokens newly added on the channel branch. Test fixtures,
+#     doc examples, and the redaction pattern table are legitimately full of
+#     fake tokens, so exclude them; anything left is a real-secret candidate.
+SECRET_RE='sk-ant-(api03|oat01)-[A-Za-z0-9_-]{50,}|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{40,}|xox[bpas]-[0-9]{8,}-[0-9]{8,}-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+sec=$(git diff "$BASE" "$CHANNEL" -- . ':!*.test.ts' ':!*redact.ts' ':!*.md' 2>/dev/null \
+        | grep -E '^\+' | grep -vE '^\+\+\+' \
+        | grep -EI "$SECRET_RE" | grep -vE 'repeat\(|A\{30,\}|a\{30,\}' || true)
+if [ -z "$sec" ]; then pass "no secret-shaped tokens added (outside tests/docs/redact patterns)"
+else fail "possible REAL secret(s) added on $CHANNEL — review before publishing:"
+  printf '%s\n' "$sec" | sed 's/^/      /' >&2
 fi
 
 # ── 3. Completeness ───────────────────────────────────────────────────────
