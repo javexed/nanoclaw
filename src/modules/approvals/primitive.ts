@@ -197,6 +197,8 @@ export interface RequestApprovalOptions {
   title: string;
   /** Card body shown to the admin. */
   question: string;
+  /** Deliver the card to this specific user instead of all of the session group's admins. */
+  approverUserId?: string;
 }
 
 /**
@@ -206,9 +208,9 @@ export interface RequestApprovalOptions {
  * approval handler for this action via the response dispatcher.
  */
 export async function requestApproval(opts: RequestApprovalOptions): Promise<void> {
-  const { session, action, payload, title, question, agentName } = opts;
+  const { session, action, payload, title, question, agentName, approverUserId } = opts;
 
-  const approvers = pickApprover(session.agent_group_id);
+  const approvers = approverUserId ? [approverUserId] : pickApprover(session.agent_group_id);
   if (approvers.length === 0) {
     notifyAgent(session, `${action} failed: no owner or admin configured to approve.`);
     return;
@@ -235,6 +237,7 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
     created_at: new Date().toISOString(),
     title,
     options_json: JSON.stringify(normalizedOptions),
+    approver_user_id: approverUserId ?? null,
   });
 
   const adapter = getDeliveryAdapter();

@@ -29,7 +29,9 @@ import { wakeContainer } from '../../container-runner.js';
 import { log } from '../../log.js';
 import { openInboundDb, resolveSession, sessionDir, writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
+import { requestApproval } from '../approvals/index.js';
 import { hasDestination } from './db/agent-destinations.js';
+import { getMessagePolicy } from './db/agent-message-policies.js';
 
 export { isSafeAttachmentName };
 
@@ -208,21 +210,87 @@ function resolveTargetSession(msg: RoutableAgentMessage, sourceSession: Session,
 }
 
 export async function routeAgentMessage(msg: RoutableAgentMessage, session: Session): Promise<void> {
+  const sourceAgentGroupId = session.agent_group_id;
   const targetAgentGroupId = msg.platform_id;
   if (!targetAgentGroupId) {
     throw new Error(`agent-to-agent message ${msg.id} is missing a target agent group id`);
   }
-  if (
-    targetAgentGroupId !== session.agent_group_id &&
-    !hasDestination(session.agent_group_id, 'agent', targetAgentGroupId)
-  ) {
-    throw new Error(
-      `unauthorized agent-to-agent: ${session.agent_group_id} has no destination for ${targetAgentGroupId}`,
-    );
+  const isSelf = targetAgentGroupId === sourceAgentGroupId;
+  if (!isSelf && !hasDestination(sourceAgentGroupId, 'agent', targetAgentGroupId)) {
+    throw new Error(`unauthorized agent-to-agent: ${sourceAgentGroupId} has no destination for ${targetAgentGroupId}`);
   }
   if (!getAgentGroup(targetAgentGroupId)) {
     throw new Error(`target agent group ${targetAgentGroupId} not found for message ${msg.id}`);
   }
+
+  // Gated edge: hold the message and return (not throw) so the delivery loop
+  // consumes the outbound row; `applyA2aMessageGate` re-routes it on approve.
+  if (!isSelf) {
+    const policy = getMessagePolicy(sourceAgentGroupId, targetAgentGroupId);
+    if (policy) {
+      const { approver } = policy;
+      const sourceName = getAgentGroup(sourceAgentGroupId)?.name ?? sourceAgentGroupId;
+      const targetName = getAgentGroup(targetAgentGroupId)?.name ?? targetAgentGroupId;
+      await requestApproval({
+        session,
+        agentName: sourceName,
+        action: A2A_MESSAGE_GATE_ACTION,
+        approverUserId: approver,
+        title: 'Message approval',
+        question: buildGateQuestion(sourceName, targetName, msg.content),
+        payload: {
+          id: msg.id,
+          platform_id: targetAgentGroupId,
+          content: msg.content,
+          in_reply_to: msg.in_reply_to,
+        },
+      });
+      log.info('Agent message held for approval', {
+        from: sourceAgentGroupId,
+        to: targetAgentGroupId,
+        msgId: msg.id,
+      });
+      return;
+    }
+  }
+
+  await performAgentRoute(msg, session, targetAgentGroupId);
+}
+
+export const A2A_MESSAGE_GATE_ACTION = 'a2a_message_gate';
+
+const GATE_CARD_BODY_MAX = 1500;
+
+function parseMessageContent(contentStr: string): { text: string; files: string[] } {
+  try {
+    const parsed = JSON.parse(contentStr) as { text?: unknown; files?: unknown };
+    return {
+      text: typeof parsed.text === 'string' ? parsed.text : '',
+      files: Array.isArray(parsed.files) ? parsed.files.filter((f): f is string => typeof f === 'string') : [],
+    };
+  } catch {
+    return { text: contentStr, files: [] };
+  }
+}
+
+function buildGateQuestion(sourceName: string, targetName: string, contentStr: string): string {
+  const { text, files } = parseMessageContent(contentStr);
+  const body = text.length > GATE_CARD_BODY_MAX ? `${text.slice(0, GATE_CARD_BODY_MAX)}… (truncated)` : text;
+  const lines = [`Agent "${sourceName}" wants to send a message to "${targetName}":`, '', body];
+  if (files.length > 0) lines.push('', `Attachments: ${files.join(', ')}`);
+  lines.push('', 'Approve delivery?');
+  return lines.join('\n');
+}
+
+/**
+ * Cross-session route: pick the target session, forward files, write to its
+ * inbound DB, wake it. Authorization is the caller's responsibility.
+ */
+export async function performAgentRoute(
+  msg: RoutableAgentMessage,
+  session: Session,
+  targetAgentGroupId: string,
+): Promise<void> {
   const targetSession = resolveTargetSession(msg, session, targetAgentGroupId);
   const a2aMsgId = `a2a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
