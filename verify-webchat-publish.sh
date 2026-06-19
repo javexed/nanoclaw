@@ -131,6 +131,7 @@ if [ -z "$INST" ]; then fail "no install-webchat.sh on $CHANNEL"; else
       package.json|pnpm-lock.yaml) covered=yes ;;                                  # deps (step 5)
       install-webchat.sh|uninstall-webchat.sh|configure-webchat.sh|verify-webchat-publish.sh) covered=yes ;;
       e2e/*|playwright.config.ts) covered=yes ;;                                   # dev-only e2e infra — intentionally not installed
+      webchat-hooks/*) covered=yes ;;                                              # provider overlays (step 2d) — applied/copied by name
     esac
     [ "$covered" = no ] && uncovered="${uncovered}${f}"$'\n'
   done < <(git diff --name-only "$BASE" "$CHANNEL")

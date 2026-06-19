@@ -21,6 +21,40 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)" \
   || { echo "install-webchat: must be run inside a nanoclaw git checkout" >&2; exit 1; }
 
+# ── 0a. Flags ─────────────────────────────────────────────────────────────
+ALLOW_NO_PROVIDER="${ALLOW_NO_PROVIDER:-0}"
+for arg in "$@"; do
+  case "$arg" in
+    --allow-no-provider) ALLOW_NO_PROVIDER=1 ;;
+  esac
+done
+
+# ── 0b. Preflight: require a connected LLM ────────────────────────────────
+# Webchat is a UI over agent output — useless with no usable model. Detect any
+# connected provider (claude / codex / …) via .env keys or the OneCLI vault.
+# claude is always *installed* (baked into trunk), so this gate is about
+# *credentials*, not code. Override with --allow-no-provider to install the UI
+# now and connect a model later.
+provider_connected() {
+  if grep -qE '^(ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|OPENAI_API_KEY)=.' .env 2>/dev/null; then return 0; fi
+  if command -v onecli >/dev/null 2>&1; then
+    if onecli secrets list 2>/dev/null | grep -qiE 'anthropic|openai|chatgpt'; then return 0; fi
+  fi
+  return 1
+}
+if ! provider_connected; then
+  if [ "$ALLOW_NO_PROVIDER" = "1" ]; then
+    echo "⚠  No connected LLM found — proceeding anyway (--allow-no-provider)." >&2
+  else
+    echo "install-webchat: no connected LLM found." >&2
+    echo "  Webchat needs at least one usable model. Connect one, then re-run:" >&2
+    echo "    • Claude  — run /setup (or set ANTHROPIC_API_KEY in .env)" >&2
+    echo "    • Codex   — run /add-codex" >&2
+    echo "  Installing the UI first? re-run with --allow-no-provider." >&2
+    exit 1
+  fi
+fi
+
 # ── 1. Detect which remote carries the webchat branches ─────────────────
 # The skill/webchat branch you merged to install this skill identifies the
 # remote that also hosts channels-webchat. Override with WEBCHAT_REMOTE=<name>.
@@ -133,6 +167,49 @@ done
 # Unstage the webchat paths so you review a plain working-tree diff and choose
 # what to commit — and so a later uninstall reverses to a clean tree.
 git reset -q -- "${NEW_PATHS[@]}" "${HOOK_FILES[@]}" 2>/dev/null || true
+
+# ── 2d. Provider activity overlays: per-provider webchat enrichment ───────
+# Some providers need a small webchat edit (live thinking-bubble activity) that
+# can't ride HOOK_FILES: the provider file is skill-installed and absent from
+# this branch, so there's no `git diff $BASE $BR` delta to compute. The delta is
+# stored as a committed patch on the channel branch and applied here only when
+# that provider is installed. Plain `git apply` (NOT --3way): the target is
+# untracked (no index entry, which --3way requires) and its base is pinned to
+# the provider's installed version. Idempotent via the reverse-check.
+# Future providers: add one row + one patch — no code change here.
+#   marker_file | patch | extra_src:extra_dest (optional new file to copy)
+PROVIDER_OVERLAYS=(
+  "container/agent-runner/src/providers/codex.ts|webchat-hooks/codex-activity.patch|webchat-hooks/codex-activity.test.ts:container/agent-runner/src/providers/codex-activity.test.ts"
+)
+echo "→ Applying provider activity overlays …"
+for entry in "${PROVIDER_OVERLAYS[@]}"; do
+  IFS='|' read -r marker patch extra <<< "$entry"
+  if [ ! -f "$marker" ]; then
+    echo "  = ${marker##*/}: provider not installed — skip (run its /add-* skill, then re-run)"
+    continue
+  fi
+  if ! PCONTENT=$(git show "$BR:$patch" 2>/dev/null); then
+    echo "  !! ${patch##*/}: not found on $BR — skip" >&2
+    continue
+  fi
+  if echo "$PCONTENT" | git apply --reverse --check 2>/dev/null; then
+    echo "  = ${patch##*/}: already applied (skip)"
+  elif echo "$PCONTENT" | git apply 2>/dev/null; then
+    echo "  → ${patch##*/}: applied"
+  else
+    CONFLICTS+=("$patch")
+    echo "  !! ${patch##*/}: does not apply ($marker drifted from its pinned base) — left unchanged" >&2
+  fi
+  if [ -n "${extra:-}" ]; then
+    IFS=':' read -r esrc edst <<< "$extra"
+    if git show "$BR:$esrc" > "$edst" 2>/dev/null; then
+      echo "  → ${edst##*/}: installed"
+    else
+      rm -f "$edst"
+      echo "  !! ${esrc##*/}: not found on $BR — skip" >&2
+    fi
+  fi
+done
 
 # ── 3. Channels barrel: idempotent append ───────────────────────────────
 if ! grep -qF "'./webchat/index.js'" src/channels/index.ts; then
