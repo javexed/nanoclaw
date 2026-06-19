@@ -130,6 +130,7 @@ if [ -z "$INST" ]; then fail "no install-webchat.sh on $CHANNEL"; else
       src/channels/index.ts|src/db/migrations/index.ts) covered=yes ;;             # barrels (steps 3 & 4)
       package.json|pnpm-lock.yaml) covered=yes ;;                                  # deps (step 5)
       install-webchat.sh|uninstall-webchat.sh|configure-webchat.sh|verify-webchat-publish.sh) covered=yes ;;
+      e2e/*|playwright.config.ts) covered=yes ;;                                   # dev-only e2e infra — intentionally not installed
     esac
     [ "$covered" = no ] && uncovered="${uncovered}${f}"$'\n'
   done < <(git diff --name-only "$BASE" "$CHANNEL")

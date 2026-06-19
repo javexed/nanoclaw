@@ -58,6 +58,15 @@ HOOK_FILES=(
   src/db/agent-groups.ts
   pnpm-workspace.yaml
   src/session-manager.ts
+  container/agent-runner/src/db/connection.ts
+  container/agent-runner/src/providers/types.ts
+  src/db/schema.ts
+  src/db/session-db.ts
+  src/db/session-db.test.ts
+  src/container-runner.ts
+  src/modules/agent-to-agent/agent-route.test.ts
+  src/modules/agent-to-agent/message-gate.test.ts
+  .gitignore
 )
 echo "→ Reversing webchat core-file hooks …"
 for f in "${HOOK_FILES[@]}"; do
@@ -79,13 +88,15 @@ echo "→ Removing webchat-owned files …"
 rm -rf \
   src/channels/webchat \
   public/webchat \
-  src/modules/agent-to-agent/create-agent.test.ts \
   src/session-teardown.ts \
   src/session-teardown.test.ts \
   src/router.agent-loopback.test.ts \
   src/router.agent-status.test.ts \
   src/router.backtick-escape.test.ts \
-  container/agent-runner/src/graceful-degradation.test.ts
+  container/agent-runner/src/graceful-degradation.test.ts \
+  src/modules/agent-status \
+  container/agent-runner/src/db/status-events.test.ts \
+  container/agent-runner/src/providers/summarize-thinking.test.ts
 
 # ── 4. Unwire the channels barrel ────────────────────────────────────────
 if grep -qF "'./webchat/index.js'" src/channels/index.ts; then
