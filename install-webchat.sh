@@ -60,6 +60,8 @@ NEW_PATHS=(
   src/modules/agent-status
   container/agent-runner/src/db/status-events.test.ts
   container/agent-runner/src/providers/summarize-thinking.test.ts
+  src/onecli-preflight.ts
+  src/onecli-preflight.test.ts
 )
 echo "→ Copying webchat-owned files …"
 git checkout "$BR" -- "${NEW_PATHS[@]}"

@@ -47,7 +47,9 @@ import {
   markContainerStopped,
   sessionDir,
   writeSessionRouting,
+  writeOutboundDirect,
 } from './session-manager.js';
+import { getMessagingGroup } from './db/messaging-groups.js';
 import type { AgentGroup, Session } from './types.js';
 
 const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
@@ -96,9 +98,13 @@ export function wakeContainer(session: Session): Promise<boolean> {
     return existing;
   }
   const promise = spawnContainer(session)
-    .then(() => true)
+    .then(() => {
+      spawnFailures.delete(session.id); // recovered — reset the streak + re-arm the notice
+      return true;
+    })
     .catch((err) => {
       log.warn('wakeContainer failed — host-sweep will retry', { sessionId: session.id, err });
+      noteSpawnFailure(session);
       return false;
     })
     .finally(() => {
@@ -106,6 +112,50 @@ export function wakeContainer(session: Session): Promise<boolean> {
     });
   wakePromises.set(session.id, promise);
   return promise;
+}
+
+/**
+ * Consecutive spawn-failure count per session. A spawn failing once is normal
+ * (transient gateway blip, host-sweep retries); failing repeatedly means the
+ * agent genuinely can't start — almost always the OneCLI credential gateway
+ * being unreachable/misconfigured. Without this, host-sweep retries forever and
+ * the room just looks dead, which is the single worst OneCLI failure mode.
+ */
+const spawnFailures = new Map<string, number>();
+const SPAWN_FAILURE_NOTICE_AT = 3;
+
+/**
+ * Record a failed spawn for a session; once it crosses the threshold, post ONE
+ * persistent notice into the room so the silence is explained and an admin
+ * knows to look. Reset on the next successful spawn (re-arms the notice for a
+ * future outage). Best-effort — never throws into the wake path.
+ */
+function noteSpawnFailure(session: Session): void {
+  const n = (spawnFailures.get(session.id) ?? 0) + 1;
+  spawnFailures.set(session.id, n);
+  if (n !== SPAWN_FAILURE_NOTICE_AT) return; // fire exactly once per outage
+  try {
+    const mg = session.messaging_group_id ? getMessagingGroup(session.messaging_group_id) : undefined;
+    if (!mg || !mg.platform_id) return; // nowhere to post (e.g. agent-only session)
+    writeOutboundDirect(session.agent_group_id, session.id, {
+      id: `spawn-fail-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind: 'chat',
+      platformId: mg.platform_id,
+      channelType: mg.channel_type,
+      threadId: session.thread_id ?? null,
+      content: JSON.stringify({
+        text:
+          "⚠️ I couldn't start to handle that — this usually means the credential gateway (OneCLI) is " +
+          'unreachable or misconfigured. An admin may need to check it; I’ll keep retrying and reply once it’s back.',
+      }),
+    });
+    log.warn('Posted spawn-failure notice to room after repeated failures', {
+      sessionId: session.id,
+      failures: n,
+    });
+  } catch (err) {
+    log.warn('Failed to post spawn-failure notice', { sessionId: session.id, err });
+  }
 }
 
 async function spawnContainer(session: Session): Promise<void> {

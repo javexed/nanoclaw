@@ -96,7 +96,9 @@ rm -rf \
   container/agent-runner/src/graceful-degradation.test.ts \
   src/modules/agent-status \
   container/agent-runner/src/db/status-events.test.ts \
-  container/agent-runner/src/providers/summarize-thinking.test.ts
+  container/agent-runner/src/providers/summarize-thinking.test.ts \
+  src/onecli-preflight.ts \
+  src/onecli-preflight.test.ts
 
 # ── 4. Unwire the channels barrel ────────────────────────────────────────
 if grep -qF "'./webchat/index.js'" src/channels/index.ts; then
