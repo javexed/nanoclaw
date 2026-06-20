@@ -380,6 +380,11 @@ body {
 .search-result:hover {
   background: var(--surface2);
 }
+/* The result you're currently viewing (the pane stays open across jumps). */
+.search-result.active {
+  background: var(--surface2);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
 .search-result-head {
   display: flex;
   justify-content: space-between;
@@ -687,6 +692,25 @@ body {
   border-radius: 14px;
   line-height: 1.4;
   word-break: break-word;
+}
+/* Search-result jump: ring + glow the targeted message's bubble, then fade. */
+.msg.jump-highlight .bubble {
+  animation: jump-flash 2.4s ease-out;
+}
+@keyframes jump-flash {
+  0%,
+  55% {
+    box-shadow:
+      inset 0 0 0 2px var(--accent),
+      0 0 0 3px var(--accent),
+      0 0 16px 3px var(--accent);
+  }
+  100% {
+    box-shadow:
+      inset 0 0 0 0 transparent,
+      0 0 0 0 transparent,
+      0 0 0 0 transparent;
+  }
 }
 .msg.mine .bubble,
 .msg.other .bubble {

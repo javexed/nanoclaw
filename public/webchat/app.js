@@ -841,7 +841,7 @@ function connect() {
           }
         }
         break;
-      case 'history':
+      case 'history': {
         $('#messages').innerHTML = '';
         msg.messages.forEach((m) => appendMessage(m));
         // Reset scroll-back pagination for the freshly loaded room. The oldest
@@ -856,12 +856,21 @@ function connect() {
         if (msg.messages.length > 0) {
           setLastSeenMessageId(msg.messages[msg.messages.length - 1].id);
         }
-        scrollToBottom(true);
-        requestAnimationFrame(() => scrollToBottom(true));
-        // Extra scrolls for mobile layout settle
-        setTimeout(() => scrollToBottom(true), 100);
-        setTimeout(() => scrollToBottom(true), 300);
+        const jumpTo = pendingJumpMessageId;
+        pendingJumpMessageId = null;
+        if (jumpTo) {
+          // Arrived from a search result — center + flash that message instead of
+          // scrolling to the bottom (paging older history in if it's not loaded).
+          void jumpToMessage(jumpTo);
+        } else {
+          scrollToBottom(true);
+          requestAnimationFrame(() => scrollToBottom(true));
+          // Extra scrolls for mobile layout settle
+          setTimeout(() => scrollToBottom(true), 100);
+          setTimeout(() => scrollToBottom(true), 300);
+        }
         break;
+      }
       case 'members':
         if (msg.room_id === currentRoom) renderMembers(msg.members);
         break;
@@ -1237,7 +1246,11 @@ async function toggleRoomHide(roomId, hide) {
   }
 }
 
-function joinRoom(roomId, roomName) {
+let pendingJumpMessageId = null;
+function joinRoom(roomId, roomName, jumpMessageId) {
+  // When set (e.g. from a search-result click), the `history` handler lands on
+  // this message instead of scrolling to the bottom.
+  pendingJumpMessageId = jumpMessageId || null;
   closeAgentDetail();
   closeRoomDetail();
   closeModelDetail();
@@ -1303,7 +1316,7 @@ function renderSearchResults(results) {
         const snip = esc(r.snippet || '')
           .replace(/«/g, '<mark>')
           .replace(/»/g, '</mark>');
-        return `<li class="search-result" data-room-id="${esc(r.roomId)}" data-room-name="${esc(r.roomName)}">
+        return `<li class="search-result" data-room-id="${esc(r.roomId)}" data-room-name="${esc(r.roomName)}" data-message-id="${esc(r.id)}">
             <div class="search-result-head">
               <span class="search-result-room">#${esc(r.roomName)}</span>
               <span class="search-result-time">${esc(relativeTime(r.createdAt))}</span>
@@ -1340,11 +1353,23 @@ $('#room-search')?.addEventListener('input', (e) => {
 $('#search-results')?.addEventListener('click', (e) => {
   const li = e.target.closest('.search-result');
   if (!li) return;
-  const { roomId, roomName } = li.dataset;
+  const { roomId, roomName, messageId } = li.dataset;
+  // Keep the search pane open so you can jump through several hits in a row.
+  // Mark the one you're viewing; close via Escape or by clearing the search box.
+  $('#search-results .search-result.active')?.classList.remove('active');
+  li.classList.add('active');
+  joinRoom(roomId, roomName, messageId);
+});
+
+// Escape closes the search pane (DESIGN §3 dismissal contract — same key that
+// closes settings / lightbox / modals). Clearing the box also closes it.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const list = $('#search-results');
+  if (!list || list.hidden) return;
   const input = $('#room-search');
   if (input) input.value = '';
   clearRoomSearch();
-  joinRoom(roomId, roomName);
 });
 
 // ── Messages ──────────────────────────────────────────────────────────────
@@ -1666,6 +1691,10 @@ function applyA2aClamp(bubble, container) {
 let oldestMessageId = null;
 let loadingOlder = false;
 let noMoreOlder = false;
+// During a search-jump we page older history in a tight loop; suppress
+// loadOlderMessages' per-page scroll re-pin so the viewport doesn't bounce —
+// jumpToMessage does one clean scroll at the end instead.
+let suppressScrollRestore = false;
 
 async function loadOlderMessages() {
   if (loadingOlder || noMoreOlder || !currentRoom || !oldestMessageId) return;
@@ -1699,16 +1728,56 @@ async function loadOlderMessages() {
     fresh.forEach((m) => appendMessage(m, undefined, anchor));
     oldestMessageId = older[0].id; // advance from the oldest FETCHED id (paging anchor)
     if (older.length < 50) noMoreOlder = true; // short page → reached the start
-    // Restore position: add the height the prepend introduced.
-    requestAnimationFrame(() => {
-      el.scrollTop = prevElTop + (el.scrollHeight - prevElHeight);
-      window.scrollTo(0, prevWinY + (document.documentElement.scrollHeight - prevDocHeight));
-    });
+    // Restore position: add the height the prepend introduced. Skipped during a
+    // search-jump — jumpToMessage scrolls to the target once at the end, so
+    // per-page re-pinning would just make the viewport bounce.
+    if (!suppressScrollRestore) {
+      requestAnimationFrame(() => {
+        el.scrollTop = prevElTop + (el.scrollHeight - prevElHeight);
+        window.scrollTo(0, prevWinY + (document.documentElement.scrollHeight - prevDocHeight));
+      });
+    }
   } catch {
     /* leave noMoreOlder false so a later scroll-to-top retries */
   } finally {
     loadingOlder = false;
   }
+}
+
+// Center + briefly flash a specific message (used by search-result clicks). If
+// the target isn't in the loaded window, page older history in until it appears
+// (or we run out / hit a safety cap), then scroll to it. Reuses the same
+// ?before_id= pagination as scroll-back, so no backend change is needed.
+async function jumpToMessage(messageId) {
+  if (!messageId) return;
+  const find = () => $('#messages').querySelector(`[data-message-id="${CSS.escape(messageId)}"]`);
+  let el = find();
+  if (!el) {
+    // Off-screen hit: page older history in (no per-page re-pin) until it appears.
+    suppressScrollRestore = true;
+    try {
+      let guard = 0;
+      while (!el && !noMoreOlder && guard < 40) {
+        const before = oldestMessageId;
+        await loadOlderMessages();
+        el = find();
+        if (oldestMessageId === before) break; // no progress (error / nothing fresh) — stop
+        guard++;
+      }
+    } finally {
+      suppressScrollRestore = false;
+    }
+  }
+  if (!el) {
+    showToast('Couldn’t find that message — it may be too old to load.', { kind: 'info' });
+    return;
+  }
+  // Let the prepends/layout settle, then do ONE definitive scroll + flash so the
+  // message is stably centered (and in view) for the whole highlight.
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  el.scrollIntoView({ block: 'center' });
+  el.classList.add('jump-highlight');
+  setTimeout(() => el.classList.remove('jump-highlight'), 2500);
 }
 
 // ── Toasts + confirm modal ────────────────────────────────────────────────
