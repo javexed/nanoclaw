@@ -1,0 +1,114 @@
+diff --git a/container/agent-runner/src/providers/codex.ts b/container/agent-runner/src/providers/codex.ts
+index f6dfe72..eb59faf 100644
+--- a/container/agent-runner/src/providers/codex.ts
++++ b/container/agent-runner/src/providers/codex.ts
+@@ -27,10 +27,84 @@ import {
+   steerCodexTurn,
+   writeCodexConfigToml,
+ } from './codex-app-server.js';
++import { appendStatusEvent } from '../db/connection.js';
+ 
+ const TURN_TIMEOUT_MS = 10 * 60 * 1000;
+ const SUPPORTED_EFFORTS = new Set<CodexReasoningEffort>(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+ 
++/**
++ * Subset of a codex v2 ThreadItem we surface to the webchat status feed.
++ * Confirmed against codex 0.138.0 `protocol/v2/item.rs` + a live authed capture.
++ */
++interface CodexThreadItem {
++  type?: string;
++  text?: string;
++  phase?: string;
++  command?: string;
++  commandActions?: Array<{ type?: string; command?: string }>;
++  server?: string;
++  tool?: string;
++  query?: string;
++  changes?: Array<{ path?: string }>;
++}
++
++/** A webchat status_events row: kind + display text + optional target detail. */
++export interface CodexStatus {
++  kind: 'reasoning' | 'tool';
++  text: string;
++  detail: string | null;
++}
++
++/** Collapse to a single capped line for the webchat "thinking" feed. */
++function summarizeStatusText(s: string, max = 200): string {
++  const line = s.replace(/\s+/g, ' ').trim();
++  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
++}
++
++/**
++ * Pure mapping from a codex v2 ThreadItem to a webchat status row (or null).
++ * Codex exposes no reasoning *text* — `reasoning` items come back empty under
++ * ChatGPT auth — so the live feed is driven by `agentMessage` items in the
++ * `commentary` phase; command/tool/search items drive the tool line. The
++ * `final_answer` phase is the reply and is left to result handling. Tool-name
++ * keys (`Bash`, `Edit`, `WebSearch`) match the webchat TOOL_LABELS map so a codex
++ * bubble reads identically to claude's. Tool items fire on `started` (so the line
++ * shows immediately); commentary on `completed` (text only complete by then).
++ * Exported for unit testing — kept pure (no DB / side effects).
++ */
++export function codexItemStatus(raw: unknown, phase: 'started' | 'completed'): CodexStatus | null {
++  const item = raw as CodexThreadItem | undefined;
++  if (!item?.type) return null;
++  switch (item.type) {
++    case 'agentMessage':
++      if (phase === 'completed' && item.phase === 'commentary' && item.text) {
++        return { kind: 'reasoning', text: summarizeStatusText(item.text), detail: null };
++      }
++      return null;
++    case 'commandExecution':
++      if (phase !== 'started') return null;
++      return { kind: 'tool', text: 'Bash', detail: item.commandActions?.[0]?.command ?? item.command ?? null };
++    case 'mcpToolCall':
++      return phase === 'started' ? { kind: 'tool', text: item.tool ?? 'mcp', detail: item.server ?? null } : null;
++    case 'fileChange':
++      return phase === 'started' ? { kind: 'tool', text: 'Edit', detail: item.changes?.[0]?.path ?? null } : null;
++    case 'webSearch':
++      return phase === 'started' ? { kind: 'tool', text: 'WebSearch', detail: item.query ?? null } : null;
++    default:
++      return null;
++  }
++}
++
++/** Mirror codex turn activity into the webchat "thinking" bubble. Best-effort + cosmetic. */
++function surfaceCodexActivity(raw: unknown, phase: 'started' | 'completed'): void {
++  try {
++    const s = codexItemStatus(raw, phase);
++    if (s) appendStatusEvent(s.kind, s.text, s.detail);
++  } catch {
++    // the status feed is best-effort; never disrupt the turn loop
++  }
++}
++
+ export interface CodexRuntimeDeps {
+   writeCodexConfigToml: typeof writeCodexConfigToml;
+   spawnCodexAppServer: typeof spawnCodexAppServer;
+@@ -282,14 +356,22 @@ async function* runOneTurn(
+         if (delta) resultText += delta;
+         break;
+       }
++      case 'item/started': {
++        // Surface tool/command/search activity to the webchat bubble the moment it begins.
++        surfaceCodexActivity(params.item, 'started');
++        break;
++      }
+       case 'item/completed': {
+         const item = params.item as { type?: string; text?: string } | undefined;
+         if (item?.type === 'agentMessage' && item.text) resultText = item.text;
++        // Surface commentary as the codex "thinking" feed; reply text stays in resultText.
++        surfaceCodexActivity(params.item, 'completed');
+         break;
+       }
+       case 'thread/status/changed': {
+-        const status = params.status as string | undefined;
+-        if (status) buffer.push({ type: 'progress', message: `status: ${status}` });
++        // codex sends status as an object { type, activeFlags }, not a bare string.
++        const status = params.status as { type?: string } | undefined;
++        if (status?.type) buffer.push({ type: 'progress', message: `status: ${status.type}` });
+         break;
+       }
+       case 'error': {

@@ -145,4 +145,12 @@ export type ProviderEvent =
    * event (tool call, thinking, partial message, anything) so the
    * poll-loop's idle timer stays honest during long tool runs.
    */
-  | { type: 'activity' };
+  | { type: 'activity' }
+  /**
+   * A file the provider produced this turn (e.g. a codex-generated image).
+   * Carried so provider code that emits it type-checks. NOTE: the poll-loop
+   * does not yet deliver these as attachments — neither does upstream — so a
+   * `file` event is currently ignored at runtime. Wiring delivery (write to the
+   * batch's reply destination) is a separate future enhancement.
+   */
+  | { type: 'file'; path: string };

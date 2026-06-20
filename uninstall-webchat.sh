@@ -83,6 +83,31 @@ for f in "${HOOK_FILES[@]}"; do
   rm -f "$PATCH"
 done
 
+# ── 2b. Reverse provider activity overlays ───────────────────────────────
+# Mirror install step 2d: reverse each provider's webchat patch (plain
+# --reverse, since the target is untracked) and remove any overlay-installed
+# files. reverse-check guards idempotency.
+#   marker_file | patch | overlay_file_to_remove
+PROVIDER_OVERLAYS=(
+  "container/agent-runner/src/providers/codex.ts|webchat-hooks/codex-activity.patch|container/agent-runner/src/providers/codex-activity.test.ts"
+)
+echo "→ Reversing provider activity overlays …"
+for entry in "${PROVIDER_OVERLAYS[@]}"; do
+  IFS='|' read -r marker patch extra <<< "$entry"
+  if [ -f "$marker" ] && PCONTENT=$(git show "$BR:$patch" 2>/dev/null); then
+    if echo "$PCONTENT" | git apply --reverse --check 2>/dev/null; then
+      echo "$PCONTENT" | git apply --reverse
+      echo "  ← ${patch##*/}: overlay reversed"
+    else
+      echo "  = ${patch##*/}: overlay not present (skip)"
+    fi
+  fi
+  if [ -n "${extra:-}" ] && [ -f "$extra" ]; then
+    rm -f "$extra"
+    echo "  ← ${extra##*/}: removed"
+  fi
+done
+
 # ── 3. Remove webchat-owned files ────────────────────────────────────────
 echo "→ Removing webchat-owned files …"
 rm -rf \
