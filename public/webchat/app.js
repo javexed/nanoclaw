@@ -1026,6 +1026,20 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
+// Safety-net poll for approvals. WS push + the reconnect/visibilitychange
+// refetches above cover the common cases, but a *foreground* socket can go
+// silently dead (zombie/throttled connection) and drop an `approval` push with
+// no onclose, no reconnect, and no visibility change to trigger a catch-up — so
+// the card would hang until the next unrelated push or a manual refocus. Poll
+// the canonical pending list on a short interval while the tab is visible so a
+// missed approval still surfaces within seconds. Cheap + idempotent
+// (fetchApprovals just re-renders the scoped list); skipped while hidden since
+// the visibilitychange handler already refetches on return to foreground.
+const APPROVAL_POLL_MS = 10000;
+setInterval(() => {
+  if (document.visibilityState === 'visible') fetchApprovals();
+}, APPROVAL_POLL_MS);
+
 // ── Rooms ─────────────────────────────────────────────────────────────────
 // ── Room ordering ─────────────────────────────────────────────────────────
 function getSavedRoomOrder() {
