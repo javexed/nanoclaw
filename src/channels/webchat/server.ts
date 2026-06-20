@@ -2121,18 +2121,20 @@ async function createRoomHandler(req: IncomingMessage, res: ServerResponse): Pro
     getDb().transaction(() => {
       createWebchatRoom(roomName, roomId);
       for (const id of wireIds) wireAgentToWebchatRoom(roomName, roomId, id);
-      // New rooms default to mention-only mode: agents fire on explicit
-      // @-mention; plain text wakes no one. The operator can ★ an agent to
-      // designate a prime fallback later, or PUT engage-mode to switch.
-      // No auto-prime — even a single-agent room starts mention-only so
-      // there's never an implicit "this agent answers everything" surprise.
-      // Done inside the transaction so a partial failure doesn't leave a
-      // dangling settings row referencing a half-created room.
+      // Default engage mode is mention-only: agents fire on explicit @-mention.
+      // EXCEPTION: a room created with exactly one agent auto-primes that agent
+      // (it then replies to everything) — consistent with the empty-room →
+      // first-agent path below, and avoiding the "you must @-mention the only
+      // agent to get a reply" surprise. Multi-agent rooms stay mention-only
+      // until the operator picks a default. Inside the transaction so a partial
+      // failure can't leave a settings/prime row referencing a half-created room.
       setRoomEngageDefault(roomId, 'mention-only');
+      if (wireIds.length === 1) setPrimeAgentForWebchatRoom(roomId, wireIds[0]);
     })();
     // recomputeEngagePatterns reads the current wirings + prime + engage_default,
-    // so it has to run AFTER the transaction commits. New room: no prime,
-    // engage_default='mention-only' → every wiring gets `\B@<folder>\b`.
+    // so it runs AFTER the transaction commits: a single-agent room now has a
+    // prime (→ that agent answers everything); a multi-agent room has none
+    // (→ every wiring gets `\B@<folder>\b`).
     recomputeEngagePatterns(roomId);
   } catch (err) {
     rollbackBareAgents(createdAgentIds);
