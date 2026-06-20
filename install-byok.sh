@@ -44,8 +44,8 @@ fi
 # ── 4. BYOK-owned NEW files: copy in wholesale ────────────────────────────
 NEW_PATHS=(
   src/modules/byok
-  src/db/migrations/016-byok-credentials.ts
-  src/db/migrations/017-byok-oauth.ts
+  src/db/migrations/020-byok-credentials.ts
+  src/db/migrations/021-byok-oauth.ts
 )
 echo "→ Copying BYOK-owned files …"
 git checkout "$BR" -- "${NEW_PATHS[@]}"

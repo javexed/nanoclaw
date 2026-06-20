@@ -56,7 +56,7 @@ for f in "${HOOK_FILES[@]}"; do
 done
 
 echo "→ Removing BYOK-owned files …"
-rm -rf src/modules/byok src/db/migrations/016-byok-credentials.ts src/db/migrations/017-byok-oauth.ts
+rm -rf src/modules/byok src/db/migrations/020-byok-credentials.ts src/db/migrations/021-byok-oauth.ts
 
 git reset -q -- "${HOOK_FILES[@]}" 2>/dev/null || true
 echo "→ Building host (tsc) …"
