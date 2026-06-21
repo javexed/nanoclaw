@@ -153,9 +153,11 @@ import {
   getWebchatModel,
   getWebchatPendingApprovalsForUser,
   getWebchatRoom,
+  getWebchatUserHandle,
   hideRoomForUser,
   listWebchatModels,
   setPrimeAgentForWebchatRoom,
+  setWebchatUserHandle,
   storeWebchatFileMessage,
   unarchiveRoom,
   unhideRoomForUser,
@@ -396,6 +398,29 @@ async function handleHttp(
   // ── Auth check ────────────────────────────────────────────────────────
   if (url.pathname === '/api/auth/check' && method === 'GET') {
     return json(res, 200, { ok: true, userId, identity: senderIdentity });
+  }
+
+  // ── Your @-mention handle (the slug others type to @-mention you) ──────
+  if (url.pathname === '/api/me/handle' && method === 'GET') {
+    return json(res, 200, { handle: getWebchatUserHandle(userId) ?? '' });
+  }
+  if (url.pathname === '/api/me/handle' && method === 'PUT') {
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { handle?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    const handle = typeof body.handle === 'string' ? body.handle.trim().toLowerCase() : '';
+    const result = setWebchatUserHandle(userId, handle);
+    if (!result.ok) {
+      return result.reason === 'taken'
+        ? json(res, 409, { error: 'That handle is already taken' })
+        : json(res, 400, { error: 'Handle must be 1–32 characters: lowercase letters, numbers, and hyphens' });
+    }
+    return json(res, 200, { ok: true, handle });
   }
 
   // ── Overview ──────────────────────────────────────────────────────────

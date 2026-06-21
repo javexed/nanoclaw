@@ -657,6 +657,24 @@
                 <input id="notif-toggle" type="checkbox" />
               </label>
             </div>
+            <div class="setting-group">
+              <span class="setting-label">Your @handle</span>
+              <div class="handle-row">
+                <span class="handle-at">@</span>
+                <input
+                  id="handle-input"
+                  type="text"
+                  class="handle-input"
+                  placeholder="handle"
+                  autocomplete="off"
+                  autocapitalize="off"
+                  spellcheck="false"
+                  maxlength="32"
+                />
+                <button id="handle-save" type="button" class="btn btn-secondary">Save</button>
+              </div>
+              <p id="handle-status" class="handle-status" hidden></p>
+            </div>
           </div>
         </div>
       </div>
