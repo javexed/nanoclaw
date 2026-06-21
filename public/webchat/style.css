@@ -461,6 +461,25 @@ body {
   flex-shrink: 0;
   vertical-align: middle;
 }
+/* Mention badge — higher signal than the plain unread dot. A small "@" pill in
+   the warning colour so a room you were named in reads at a glance. */
+#room-list li .mention-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  margin-left: 6px;
+  border-radius: 8px;
+  background: var(--warning);
+  color: var(--surface);
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
 #room-list li.dragging {
   opacity: 0.4;
 }
@@ -2746,6 +2765,17 @@ a.lightbox-btn {
   font-weight: 500;
   font-size: 0.95em;
 }
+/* The @-mention of the current user: warmer chip so it stands out from the
+   ordinary accent-coloured mention of others. */
+.mention.mention-me {
+  background: var(--warning);
+  color: var(--surface);
+}
+/* Whole message that @-mentions me: subtle left accent + tinted bubble. */
+.msg.mentions-me .bubble {
+  box-shadow: inset 3px 0 0 var(--warning);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+}
 
 /* Mention autocomplete popover — anchored above the message input */
 .mention-popover {
@@ -2798,6 +2828,56 @@ a.lightbox-btn {
   color: var(--surface);
   border-radius: 3px;
   font-weight: 700;
+}
+/* Distinguishes a human @-mention candidate from a wired agent in the popover.
+   Muted (notify-only) vs the accent "prime" badge (triggers the agent). */
+.mention-popover-person {
+  margin-left: auto;
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 1px 5px;
+  background: var(--surface2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-weight: 600;
+}
+
+/* Settings → Your @handle field */
+.handle-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.handle-at {
+  color: var(--text);
+  opacity: 0.6;
+  font-weight: 600;
+}
+.handle-input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  color: var(--text);
+  font-size: var(--fs-sm, 0.867rem);
+}
+.handle-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+.handle-status {
+  margin: 6px 0 0;
+  font-size: var(--fs-sm, 0.867rem);
+}
+.handle-status.ok {
+  color: var(--success);
+}
+.handle-status.err {
+  color: var(--danger);
 }
 
 /* Models tab — list rows mirror agent list */
