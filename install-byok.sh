@@ -34,11 +34,14 @@ git fetch "$BYOK_REMOTE" skill/byok channels-webchat
 BR="$BYOK_REMOTE/skill/byok"
 BASE=$(git merge-base "$BR" "$BYOK_REMOTE/channels-webchat")
 [ -n "$BASE" ] || { echo "install-byok: could not find byok⇄channels-webchat fork point" >&2; exit 1; }
-# Refuse if the remote's channels-webchat lags the fork point (would absorb
-# non-BYOK webchat work into the delta).
+# The byok delta is computed FROM the fork point ($BASE, used in the HOOK_FILES
+# loop below), so it stays pure-byok even when channels-webchat has advanced past
+# it. A newer channels-webchat therefore does NOT require re-rebasing skill/byok
+# to install: the hooks 3-way-apply against your current webchat, and any
+# overlapping hunks are reported as conflicts (never silently dropped). So we no
+# longer refuse on a fork-point mismatch — just note it.
 if [ "$BASE" != "$(git rev-parse "$BYOK_REMOTE/channels-webchat")" ]; then
-  echo "install-byok: $BYOK_REMOTE/channels-webchat is behind the byok fork point — fetch/advance it first." >&2
-  exit 1
+  echo "→ note: $BYOK_REMOTE/channels-webchat is ahead of byok's fork point ($(git rev-parse --short "$BASE")); applying the byok delta against your current webchat."
 fi
 
 # ── 4. BYOK-owned NEW files: copy in wholesale ────────────────────────────
