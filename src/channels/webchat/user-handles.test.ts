@@ -26,6 +26,7 @@ import {
   setWebchatUserHandle,
   ensureWebchatUserHandle,
   resolveHandlesToUserIds,
+  getWebchatHandleUsers,
   getMentionedRoomIdsForUser,
   markRoomRead,
 } from './db.js';
@@ -179,6 +180,26 @@ describe('userIdForHandle / resolveHandlesToUserIds', () => {
 
   it('returns nothing for an empty list', () => {
     expect(resolveHandlesToUserIds([])).toEqual([]);
+  });
+});
+
+describe('getWebchatHandleUsers', () => {
+  it('returns every handle with its display name (null when unknown)', () => {
+    getDb()
+      .prepare(`INSERT INTO users (id, kind, display_name, created_at) VALUES (?, 'webchat', ?, ?)`)
+      .run('webchat:u1', 'Jane Doe', new Date().toISOString());
+    setWebchatUserHandle('webchat:u1', 'jane');
+    setWebchatUserHandle('webchat:u2', 'bob'); // no users row → null display name
+
+    const rows = getWebchatHandleUsers().sort((a, b) => a.handle.localeCompare(b.handle));
+    expect(rows).toEqual([
+      { userId: 'webchat:u2', handle: 'bob', displayName: null },
+      { userId: 'webchat:u1', handle: 'jane', displayName: 'Jane Doe' },
+    ]);
+  });
+
+  it('is empty when no one has a handle', () => {
+    expect(getWebchatHandleUsers()).toEqual([]);
   });
 });
 

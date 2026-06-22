@@ -152,6 +152,7 @@ import {
   getWebchatTopology,
   getWebchatModel,
   getWebchatPendingApprovalsForUser,
+  getWebchatHandleUsers,
   getWebchatRoom,
   getWebchatUserHandle,
   hideRoomForUser,
@@ -476,6 +477,20 @@ async function handleHttp(
       agents.map((a) => ({ ...a, is_prime: a.id === primeAgentId })),
     );
   }
+  // People you can @-mention in this room: anyone with a handle who can access
+  // it (NOT limited to who's currently connected — a mention notifies on
+  // return). Excludes the requester. Used by the composer's @ autocomplete.
+  const roomMentionableMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/mentionable$/);
+  if (roomMentionableMatch && method === 'GET') {
+    const roomId = decodeURIComponent(roomMentionableMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    const people = getWebchatHandleUsers()
+      .filter((u) => u.userId !== userId && canAccessRoom(u.userId, roomId))
+      .map((u) => ({ handle: u.handle, name: u.displayName || u.handle }));
+    return json(res, 200, people);
+  }
+
   if (roomAgentsMatch && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') {
       return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
