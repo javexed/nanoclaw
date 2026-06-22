@@ -15,8 +15,15 @@ import { writeMemberTranscript } from './fanout.js';
 import { getDb, hasTable } from '../../db/connection.js';
 import { registerApprovalAgentGroupFallback } from '../approvals/onecli-approvals.js';
 import { getRoomCredentialMode, getRoomOauthAllowed } from '../../channels/webchat/db.js';
-import { userHasActiveKey, agentGroupForByokAgent, getOauthToken } from './db.js';
+import { userHasActiveKey, userHasActiveOauth, agentGroupForByokAgent } from './db.js';
 import { byokAgentIdentifier } from './identity.js';
+
+// Sentinel bearer for a per-member OAuth container. Its value is irrelevant
+// beyond being non-empty: it flips Claude Code into OAuth mode (so it sends
+// `Authorization: Bearer <sentinel>` + the oauth beta header), and OneCLI
+// overwrites it on the wire with the member's real vault token. Mirrors the
+// host-side drafter (src/channels/webchat/drafter.ts).
+const OAUTH_SENTINEL = 'placeholder';
 
 registerSessionKeyResolver((mg, agentGroupId, userId) => {
   // BYOK is webchat-only and opt-in per room. Fail safe to no override.
@@ -49,15 +56,14 @@ registerAgentIdentityResolver((agentGroupId, threadId) => {
   return null;
 });
 
-// OAuth members: inject the member's Claude subscription token into their
-// per-member container and carve the Anthropic leg out of the OneCLI proxy so
-// the SDK authenticates directly on their subscription (OneCLI can't carry an
-// OAuth token). API-key members get {} here — their key flows via OneCLI.
+// OAuth members: put their per-member container in subscription/OAuth mode with
+// a SENTINEL token and route Anthropic THROUGH OneCLI (no NO_PROXY) — OneCLI
+// swaps the sentinel for the member's real token, stored in their vault. The
+// real token never enters the container. API-key members get {} here (their key
+// is injected as x-api-key by OneCLI, no OAuth mode needed).
 registerContainerEnvResolver((agentGroupId, threadId): Record<string, string> => {
-  if (!threadId) return {};
-  const token = getOauthToken(threadId, agentGroupId);
-  if (!token) return {};
-  return { CLAUDE_CODE_OAUTH_TOKEN: token, NO_PROXY: 'api.anthropic.com' };
+  if (!threadId || !userHasActiveOauth(threadId, agentGroupId)) return {};
+  return { CLAUDE_CODE_OAUTH_TOKEN: OAUTH_SENTINEL };
 });
 
 // Approval routing: reverse a BYOK per-member identity back to its agent group

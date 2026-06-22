@@ -54,12 +54,11 @@ own** turns in **their own** per-member container — this is `setup-token`'s
 sanctioned headless use, not seat-sharing (the schema forbids one token across
 members).
 
-**The tradeoff:** OneCLI can't carry an OAuth token (no refresh, can't put the
-SDK in OAuth mode), so the **host stores the token encrypted** at rest
-(`data/byok-oauth.key`, AES-256-GCM) and injects `CLAUDE_CODE_OAUTH_TOKEN` into
-the member's container at spawn, with the Anthropic leg bypassing OneCLI
-(`NO_PROXY=api.anthropic.com`); OneCLI still proxies all other tools. Unlike the
-API-key path, the host *can* decrypt these tokens. See
+**How it works:** the member's `sk-ant-oat…` token is stored in the **OneCLI
+vault** (same as an API key) on their per-member agent. The container is spawned
+in OAuth mode via a sentinel `CLAUDE_CODE_OAUTH_TOKEN`; Anthropic still routes
+through OneCLI, which swaps the sentinel bearer for the member's real token on the
+wire. The host never holds the token — same posture as the API-key path. See
 [docs/design/byok-oauth.md](../../../docs/design/byok-oauth.md).
 
 ## Security review & residual risks
@@ -77,16 +76,14 @@ them when deciding how far to harden:
   takes the secret as a `--value` argument, so the key is momentarily visible in
   `ps` / `/proc` on the host while it's stored. Fine on a single-operator host;
   on a shared host, restrict who can read other users' processes.
-- **OAuth tokens are host-decryptable.** Unlike API keys (OneCLI-vault only), a
-  connected Claude **subscription** token is stored encrypted at
-  `data/byok-oauth.key` (AES-256-GCM, mode 0600). That key file is the crown
-  jewel — keep its filesystem perms tight, include it in your (encrypted)
-  backups, and treat host compromise as token compromise. Rotation = the member
-  reconnects; *Disconnect* wipes the stored token.
-- **The OAuth leg bypasses the OneCLI gateway.** For subscription members,
-  `NO_PROXY=api.anthropic.com` sends that one host straight to Anthropic with the
-  member's token, so egress-lockdown / gateway policy doesn't cover it. The
-  bypass is scoped to `api.anthropic.com` only — keep it that way.
+- **OAuth tokens are vault-only, like API keys.** A connected Claude
+  **subscription** token lives in the OneCLI vault on the member's per-member
+  agent — the host never stores it. The container holds only a sentinel
+  `CLAUDE_CODE_OAUTH_TOKEN`; OneCLI swaps the real token on the wire. Rotation =
+  the member reconnects; *Disconnect* removes the secret from their agent.
+- **No gateway bypass.** Subscription members' Anthropic traffic routes through
+  OneCLI like every other tool host (the proxy swaps the bearer), so
+  egress-lockdown / gateway policy covers it.
 - **Revoke stops resolution; it doesn't delete the identity.** Disconnecting
   wipes the member's secret/token; the per-member OneCLI agent lingers but is
   inert (the session simply stops resolving to it). Revoke is the offboarding
@@ -114,5 +111,5 @@ unit-tested with a fake admin).
 
 ## Files
 
-- **BYOK-owned (copied):** `src/modules/byok/` (identity, db, onecli-admin, onboard, fanout, crypto, index), `src/db/migrations/020-byok-credentials.ts`, `src/db/migrations/021-byok-oauth.ts`.
+- **BYOK-owned (copied):** `src/modules/byok/` (identity, db, onecli-admin, onboard, fanout, index), `src/db/migrations/020-byok-credentials.ts`, `src/db/migrations/021-byok-oauth.ts`.
 - **Hooks (reversible 3-way patch):** `src/session-manager.ts`, `src/router.ts`, `src/container-runtime.ts`, `src/container-runner.ts`, `src/modules/index.ts`, `src/modules/approvals/onecli-approvals.ts`, `src/db/migrations/index.ts`, and the webchat files `migration.ts`, `migration.test.ts`, `db.ts`, `server.ts`, `public/webchat/{app.js,index.html,style.css}`. (No agent-runner files.)

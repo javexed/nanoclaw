@@ -206,8 +206,9 @@ async function spawnContainer(session: Session): Promise<void> {
   // member's own OneCLI agent (their key); approval routing then reverses it
   // via the byok_credentials map.
   const agentIdentifier = resolveAgentIdentity(agentGroup.id, session.thread_id) ?? agentGroup.id;
-  // Module-contributed env for this session (BYOK OAuth injects the member's
-  // CLAUDE_CODE_OAUTH_TOKEN + NO_PROXY). Empty for normal sessions.
+  // Module-contributed env for this session (BYOK OAuth injects a sentinel
+  // CLAUDE_CODE_OAUTH_TOKEN to flip Claude Code into OAuth mode; OneCLI swaps the
+  // real token on the wire). Empty for normal sessions.
   const extraEnv = resolveContainerEnv(agentGroup.id, session.thread_id);
   const args = await buildContainerArgs(
     mounts,
@@ -559,10 +560,10 @@ async function buildContainerArgs(
   }
   log.info('OneCLI gateway applied', { containerName });
 
-  // Module-contributed env (BYOK OAuth: CLAUDE_CODE_OAUTH_TOKEN + NO_PROXY).
+  // Module-contributed env (BYOK OAuth: a sentinel CLAUDE_CODE_OAUTH_TOKEN).
   // Applied AFTER the OneCLI gateway so it wins on key collisions (last `-e`
-  // wins) — e.g. NO_PROXY=api.anthropic.com carves the Anthropic leg out of the
-  // proxy while OneCLI keeps proxying every other tool host.
+  // wins). Anthropic still routes through OneCLI, which swaps the sentinel bearer
+  // for the member's real vault token on the wire.
   if (extraEnv) {
     for (const [key, value] of Object.entries(extraEnv)) {
       args.push('-e', `${key}=${value}`);

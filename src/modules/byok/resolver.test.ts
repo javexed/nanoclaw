@@ -10,7 +10,7 @@ import { runMigrations } from '../../db/migrations/index.js';
 import { resolveSessionKeyOverride } from '../../session-manager.js';
 import { resolveAgentIdentity } from '../../container-runtime.js';
 import { setRoomCredentialMode, setRoomOauthAllowed } from '../../channels/webchat/db.js';
-import { upsertByokCredential, upsertByokOauthCredential, setByokStatus } from './db.js';
+import { upsertByokCredential, setByokStatus } from './db.js';
 import { byokAgentIdentifier } from './identity.js';
 import './index.js'; // registers the resolvers
 
@@ -57,7 +57,7 @@ describe('byok session-key resolver', () => {
   it('OAuth-only room (mode disabled, oauth_allowed) + member with OAuth key → per-member session', () => {
     // The load-bearing case: oauth_allowed must route even though credential_mode is 'disabled'.
     setRoomOauthAllowed('room-1', true); // credential_mode stays 'disabled'
-    upsertByokOauthCredential('webchat:alice', 'ag-1', 'byok-alice', 'sk-ant-oat-X');
+    upsertByokCredential('webchat:alice', 'ag-1', 'byok-alice', 'sec-oat', 'oauth_token');
     expect(resolveSessionKeyOverride(webchatMg('room-1'), 'ag-1', 'webchat:alice')).toEqual({
       sessionMode: 'per-thread',
       threadId: 'webchat:alice',

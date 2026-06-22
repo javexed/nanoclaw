@@ -1,12 +1,23 @@
 # Design: OAuth (subscription) BYOK via per-member containers
 
-**Status:** shipped — the OAuth/subscription variant of per-member BYOK.
+**Status:** prototype (`proto/byok-oauth-onecli`) — reworked from the original
+host-encrypted design to **vault-only** (OneCLI carries the token). See §8 for the
+re-validation this rework requires.
 **Extends:** [byok.md](byok.md) — the per-member-session architecture (session keying, identity derivation, fan-out, approval routing) is defined there; this doc covers only the OAuth/subscription delta.
 
 **Resolved decisions (owner sign-off):**
-- §8.3 host-can-decrypt at-rest store — **accepted.**
 - §2 gating — **both**: a per-room owner/admin toggle (`oauth_allowed`, default
   off) *and* a per-member own-use acknowledgment. OAuth onboarding requires both.
+
+> **Design revision (this branch).** The original design stored each member's
+> OAuth token **host-side, encrypted** (`crypto.ts` + `data/byok-oauth.key`) and
+> injected the real token into the container env with `NO_PROXY=api.anthropic.com`
+> (Anthropic leg bypassing OneCLI). That worked and was validated end-to-end, but
+> it was built on the belief that *"OneCLI cannot carry an OAuth token."* That
+> belief is **false**: `src/channels/webchat/drafter.ts` and `setup/auto.ts`
+> already route Anthropic OAuth through OneCLI with a placeholder bearer that the
+> proxy swaps for the real vault token. This revision makes OAuth BYOK **vault-only,
+> same posture as API-key BYOK** — deleting the host-side at-rest token and crypto.
 
 ## 1. Goal
 
@@ -26,87 +37,77 @@ turns, in its owner's own container**. That is *N* individuals each using their
 own subscription headlessly — which is exactly what `claude setup-token` is
 sanctioned for.
 
-The agent SDK (the Claude Code engine) authenticates in genuine OAuth mode and
-presents as Claude Code legitimately — no identity spoofing. The compliant path
-is the honest one; the only way to keep the token *out* of the container would
-be a proxy faking the Claude Code identity, which is the path we explicitly
-reject.
-
-**Guardrails (both required for OAuth onboard):**
-1. **Per-room toggle** — owner/admin sets `oauth_allowed` on the room
-   (default **off**). A room never accepts OAuth tokens unless explicitly opted
-   in, independent of its API-key `credential_mode`.
-2. **Per-member acknowledgment** — "I am connecting *my own* Claude subscription
-   for *my own* use."
+The agent SDK authenticates in **genuine OAuth mode** — it sends the
+`anthropic-beta: oauth-2025-04-20` header and presents the real Claude Code
+identity/system prompt. OneCLI swaps only the bearer *value* on the wire; it does
+**not** fake the Claude Code identity or downgrade the request to API-key mode.
+The honest OAuth request shape is preserved end to end.
 
 The schema keys credentials per `(user_id, agent_group_id)`, so one token can
 never be attached to multiple members.
 
 ## 3. What changes vs. API-key BYOK
 
-| | API-key BYOK (shipping) | OAuth BYOK (this doc) |
+| | API-key BYOK | OAuth BYOK (this doc) |
 |---|---|---|
 | Credential | `sk-ant-…` API key | `sk-ant-oat…` from `claude setup-token` |
 | Billing | metered API account | member's Pro/Max subscription |
-| At-rest custody | **OneCLI vault** (host never holds it) | **host-side, encrypted** (OneCLI can't carry it) |
-| Injection | OneCLI proxy injects `x-api-key` per request | `CLAUDE_CODE_OAUTH_TOKEN` env at spawn; Anthropic leg bypasses OneCLI |
-| In-container exposure | never (proxy-injected) | token in container env (same as Claude Code on your own laptop) |
+| At-rest custody | **OneCLI vault** (host never holds it) | **OneCLI vault** (same — host never holds it) |
+| Injection | OneCLI proxy swaps in `x-api-key` per request | OneCLI proxy swaps the `Authorization: Bearer` value per request |
+| Container env | nothing | sentinel `CLAUDE_CODE_OAUTH_TOKEN=placeholder` (flips OAuth mode only) |
+| In-container exposure | never (proxy-injected) | never — container holds only the sentinel |
 | Cross-member isolation | ✅ per-member container | ✅ per-member container (unchanged) |
 
-The **one genuine new cost**: OneCLI cannot inject an OAuth token (no refresh,
-can't put the SDK in OAuth mode), so the host stores each member's token
-encrypted at rest and injects it at spawn. Bounded to opt-in OAuth members.
+The two kinds now differ only in (a) the token prefix and (b) one sentinel env
+var that puts the container's Claude Code in OAuth mode. Both store the real
+credential in the OneCLI vault, assigned to the member's per-member agent.
 
-## 4. Why OneCLI is out of the Anthropic path (and only that path)
+## 4. How the OneCLI OAuth path works
 
-- OneCLI is a static MITM injector: secret types `anthropic`(→`x-api-key`) or
-  `generic`(→one custom header). Verified: its whole CLI surface has **no
-  oauth/refresh** concept.
-- Subscription OAuth requires the SDK to be *in OAuth mode* — it adds
-  `anthropic-beta: oauth-2025-04-20` and the Claude Code system-prompt identity.
-  Proxy-injecting a bearer while the SDK believes it's in API-key mode produces
-  the wrong system prompt → rejected and/or ToS-adjacent. So the SDK must hold
-  the token.
-- Therefore for OAuth members: `NO_PROXY=api.anthropic.com` (SDK talks directly
-  with its bearer); OneCLI **still proxies every other tool** (Gmail, GitHub,
-  etc.) exactly as today. Only the Anthropic leg is direct.
+Subscription OAuth requires the SDK to be **in OAuth mode** — it adds
+`anthropic-beta: oauth-2025-04-20` and the Claude Code system-prompt identity.
+The sentinel `CLAUDE_CODE_OAUTH_TOKEN` (any non-empty value) is what flips the
+SDK into that mode; the value itself is irrelevant because:
+
+- The container routes Anthropic **through OneCLI** (no `NO_PROXY`).
+- OneCLI holds the member's real `sk-ant-oat…` as the Anthropic secret on the
+  member's per-member agent, and **rewrites the `Authorization` header on the
+  wire** (`--header-name Authorization --value-format 'Bearer {value}'`, or the
+  equivalent behavior of `--type anthropic`).
+- The SDK still sends the `anthropic-beta` header and the real Claude Code system
+  prompt — so the request that reaches Anthropic is a genuine OAuth request, just
+  with its bearer value supplied by the proxy instead of the container.
+
+This is exactly the pattern already in production host-side
+(`src/channels/webchat/drafter.ts`) and for the operator's own subscription
+(`setup/register-claude-token.sh`, `setup/auto.ts`). OneCLI **still proxies every
+other tool** (Gmail, GitHub, …) for the per-member agent, unchanged.
 
 `setup-token` produces a long-lived token, so there is **no refresh-token
-custody** — we store one long-lived value, re-prompt when it eventually expires.
+custody** — OneCLI holds one long-lived value; re-prompt when it eventually expires.
 
 ## 5. Data model
 
-`byok_credentials` (migration `020` adds the table) carries these OAuth columns,
-added by a separate migration — never edit a shipped migration:
+`byok_credentials` (migration `020` adds the table). Migration `021` adds only the
+discriminator — **no encrypted-token columns** (the token lives in the vault):
 
 ```
 ALTER TABLE byok_credentials ADD COLUMN cred_type TEXT NOT NULL DEFAULT 'api_key';
                                                    -- 'api_key' | 'oauth_token'
-ALTER TABLE byok_credentials ADD COLUMN oauth_token_enc BLOB;  -- AES-256-GCM, null for api_key rows
-ALTER TABLE byok_credentials ADD COLUMN oauth_token_nonce BLOB;
 ```
 
-- `api_key` rows are unchanged: `secret_id` / `onecli_agent_id` populated, no
-  encrypted blob. OneCLI remains the vault.
-- `oauth_token` rows: `oauth_token_enc`/`_nonce` populated; `secret_id` may be
-  null (no Anthropic secret in OneCLI). `onecli_agent_id` still set — the
-  per-member agent still exists for the group's **tool** secrets.
+- Both `api_key` and `oauth_token` rows carry `secret_id` (the OneCLI vault
+  secret) and `onecli_agent_id` (the per-member agent). The host stores no token.
+- `cred_type` drives only (a) presentation and (b) whether the per-member
+  container is spawned in OAuth mode (the sentinel env var).
 
-**Encryption key:** a host-local key (e.g. `data/byok-oauth.key`, `0600`,
-generated on first OAuth onboard). Decryptable only by the host process. This is
-the deliberate cost of OAuth: the host can decrypt these tokens. Documented, not
-hidden.
-
-**Per-room toggle** — add to `webchat_room_settings` (the table that already
-holds `credential_mode`):
+**Per-room toggle** — on `webchat_room_settings` (alongside `credential_mode`):
 
 ```
 ALTER TABLE webchat_room_settings ADD COLUMN oauth_allowed INTEGER NOT NULL DEFAULT 0;
 ```
 
-Orthogonal to `credential_mode`: a room may be `optional` API-key BYOK *and*
-allow OAuth, or `required` and forbid OAuth, etc. OAuth onboard rejects unless
-`oauth_allowed = 1`.
+Orthogonal to `credential_mode`. OAuth onboard rejects unless `oauth_allowed = 1`.
 
 ## 6. Flow
 
@@ -118,85 +119,78 @@ allow OAuth, or `required` and forbid OAuth, etc. OAuth onboard rejects unless
    - reject unless the room's `oauth_allowed = 1` (gate 1);
    - reject unless `acknowledged === true` (gate 2);
    - validate format (`^sk-ant-oat`), reject otherwise;
-   - ensure the per-member OneCLI agent (for tool secrets — same as today);
-   - encrypt token → `oauth_token_enc`; `upsertByokCredential(cred_type:'oauth_token')`;
-   - **never log the token.**
+   - `onboardByokOauth` → store the token as the member's Anthropic vault secret,
+     assign it (+ the group's tool secrets) to the per-member agent, mark
+     `cred_type='oauth_token'`. **Never log the token.**
 
 ### Spawn (`container-runner.ts`, BYOK session)
-For the resolved per-member session, look up the credential:
-- `api_key` → today's path (OneCLI injects `x-api-key`).
-- `oauth_token` → decrypt; `args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=' + token)`
-  and `args.push('-e', 'NO_PROXY=api.anthropic.com')` (merge with any existing
-  `NO_PROXY`). OneCLI still applied for tools.
+The per-member session spawns under the member's OneCLI agent (identity resolver,
+unchanged). The module's container-env resolver adds, for OAuth members only, a
+sentinel `CLAUDE_CODE_OAUTH_TOKEN=placeholder` (no `NO_PROXY`). OneCLI swaps the
+real token on the wire for both kinds; api-key members need no env at all.
 
 ### Revoke
-Delete the encrypted blob + mark revoked; remove the user key from the
-per-member agent (tools left), same as API-key revoke.
+Remove the member's secret from the per-member agent (tools left) and mark
+revoked — identical for both credential kinds.
 
-## 7. Touch points (additive)
+## 7. Touch points
 
-- `src/db/migrations/021-byok-oauth.ts` — new columns.
-- `src/modules/byok/db.ts` — `cred_type` + encrypted-blob get/set; a
-  `getMemberCredential()` that returns a tagged union `{type, …}`.
-- `src/modules/byok/crypto.ts` (**new**) — AES-256-GCM encrypt/decrypt + key
-  bootstrap. ~40 lines, unit-tested with a fixed key.
-- `src/modules/byok/onboard.ts` — branch on `type`; OAuth path skips
-  `createAnthropicSecret`, stores the blob.
-- `src/container-runner.ts` — BYOK spawn branch: env injection + `NO_PROXY` for
-  oauth members (the agent-identity resolver already exists).
+- `src/db/migrations/021-byok-oauth.ts` — `cred_type` column only.
+- `src/modules/byok/db.ts` — `cred_type` + `userHasActiveOauth()`; one unified
+  `upsertByokCredential(…, credType)`. **No crypto, no token columns.**
+- `src/modules/byok/onboard.ts` — `onboardByokOauth` shares the API-key path
+  (`onboardSecret`), differing only in `cred_type`.
+- `src/modules/byok/index.ts` — container-env resolver injects the sentinel for
+  OAuth members; **no `NO_PROXY`, no real token**.
+- `~~src/modules/byok/crypto.ts~~` — **deleted** (no host-side at-rest token).
 - `src/channels/webchat/migration.ts` + `db.ts` — `oauth_allowed` column +
-  get/set; the credential endpoint accepts `{type, acknowledged}`; new
-  `GET/PUT /api/rooms/:id/oauth-allowed` (owner/admin) for the room toggle.
-- `public/webchat/{app.js,index.html}` — room-settings OAuth toggle (admin);
-  second connect mode + `setup-token` instructions + acknowledgment checkbox,
-  shown only when the room has `oauth_allowed`.
+  get/set; credential endpoint; room toggle.
+- `public/webchat/{app.js,index.html}` — room OAuth toggle + connect mode.
 
-No agent-runner change → **no container rebuild**. No new npm deps (crypto is
-Node built-in).
+No agent-runner change → **no container rebuild**. No new npm deps.
 
-## 8. Risks / open questions (validate during build)
+## 8. Risks / open questions
 
-1. **`CLAUDE_CODE_OAUTH_TOKEN` + `NO_PROXY` interplay** — ✅ **VALIDATED**
-   (2026-06-12, against the live agent image). Ran the real SDK in the container
-   with a logging HTTPS_PROXY + an invalid `sk-ant-oat` token. Control (no
-   NO_PROXY): the proxy logged `CONNECT api.anthropic.com:443` (proxy in-path).
-   Test (`NO_PROXY=api.anthropic.com`): the proxy saw **zero** anthropic CONNECTs
-   (only datadog telemetry — OneCLI still proxies everything else), and the
-   request reached **real** Anthropic, returning `401 Invalid bearer token` /
-   `authentication_failed` — i.e. OAuth Bearer mode engaged and the carve-out
-   works. **Confirmed with a real subscription token** the same day: same env
-   shape → clean completion (`result: "pong"`, `is_error=false`, no retries).
-   The subscription path is validated end-to-end.
-2. **Token longevity / expiry UX** — when a `setup-token` expires the member
-   gets 401s; surface a clear "reconnect your subscription" banner rather than a
-   silent failure.
-3. **Host-can-decrypt** — accepted and documented. Mitigations: `0600` keyfile,
-   token never logged, encrypted at rest. A motivated host operator can read
-   them — but the host already runs every container, so this is not a new trust
-   boundary, only a new at-rest artifact.
-4. **In-container exposure** — the member's own agent can read its own
-   `CLAUDE_CODE_OAUTH_TOKEN`. Identical to Claude Code on a personal machine;
-   isolated per member. Prompt-injection in that member's content could exfil
-   *that member's own* token — same baseline risk as any personal Claude Code
-   use; never reaches another member.
-5. **ToS drift** — if Anthropic later restricts headless subscription use, this
-   feature is the first thing to disable. Keep it a distinct, opt-in credential
-   type so it can be turned off without touching API-key BYOK.
+> The **original** host-encrypted + `NO_PROXY` design was validated end-to-end on
+> 2026-06-12 (including a real subscription token → clean completion). This
+> revision changes the transport, so two things need **re-validation** before it
+> replaces the shipped path:
+
+1. **Sentinel acceptance** — does the container's Claude Code accept a
+   `CLAUDE_CODE_OAUTH_TOKEN=placeholder` (non-real) value to enter OAuth mode
+   *without locally validating/decoding it* before the first request? The drafter
+   proves OneCLI swaps the bearer, but it hand-builds the HTTP request, so it does
+   **not** exercise Claude Code's token-loading path. **NEEDS A LIVE TEST.** If
+   Claude Code pre-validates, use a validly-shaped but inert token, or fall back
+   to the original env-injection.
+2. **OneCLI container swap for `--type anthropic` oat** — confirm OneCLI rewrites
+   the `Authorization: Bearer` for a *container* request (not just the host-side
+   `getContainerConfig` path the drafter uses) when the member's secret is an
+   `sk-ant-oat…` value. Fallback: store it as `--type generic --header-name
+   Authorization --value-format 'Bearer {value}'` (the `setup/auto.ts` mechanism).
+3. **Token longevity / expiry UX** — expired `setup-token` → 401; surface a
+   "reconnect your subscription" banner, not a silent failure.
+4. **In-container exposure — now eliminated.** The container holds only the
+   sentinel; the real token never enters it (strictly better than the original,
+   which put the real token in env).
+5. **ToS drift** — if Anthropic later restricts headless subscription use, disable
+   this opt-in credential type without touching API-key BYOK.
 
 ## 9. Test plan
 
-- Unit: crypto round-trip; `db.ts` tagged-union get/set; onboard OAuth branch
-  (fake admin) stores blob + no Anthropic secret; revoke clears blob.
-- Spawn: BYOK oauth session → container args contain `CLAUDE_CODE_OAUTH_TOKEN`
-  and `NO_PROXY=api.anthropic.com`; api_key session unchanged.
-- Live: real `setup-token` → one message round-trips on the subscription;
-  `onecli` shows no Anthropic secret for that member's agent but tools still
-  resolve; revoke → 401/declined.
+- Unit (✅ this branch): `db.ts` cred_type + `userHasActiveOauth`; onboard OAuth
+  branch stores the vault secret (no host token); revoke removes the secret.
+- Spawn: BYOK oauth session → container args contain a sentinel
+  `CLAUDE_CODE_OAUTH_TOKEN` and **no** `NO_PROXY`; api_key session unchanged.
+- Live (§8.1/8.2): real `setup-token` → one message round-trips on the
+  subscription through OneCLI; `onecli` shows the member's oat secret on their
+  agent; revoke → 401/declined.
 - Regression: API-key BYOK and non-BYOK rooms untouched.
 
 ## 10. Recommendation
 
-Built as an **additive credential type** on the per-member BYOK core
-([byok.md](byok.md)), behind the own-use acknowledgment, with the host-side
-encrypted store as the explicit cost of subscription support. API-key and OAuth
-ship side by side; rooms/members choose per connection.
+Make OAuth BYOK **vault-only**, identical in posture to API-key BYOK, by reusing
+the OneCLI bearer-swap already proven in the drafter and operator-subscription
+paths. This deletes the host-side encrypted store and removes the in-container
+token exposure. Gate the cutover on the §8.1/8.2 live re-validation; keep the
+original env-injection path available as a fallback until then.

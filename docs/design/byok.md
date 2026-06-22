@@ -94,8 +94,8 @@ transcript the next time they speak.
   never the key**, which lives in the OneCLI vault.
 - **`webchat_room_settings.credential_mode`**: `disabled` (default) | `optional`
   | `required` (§10).
-- The OAuth variant adds its own columns + a host-encrypted at-rest store — see
-  [byok-oauth.md](byok-oauth.md).
+- The OAuth variant adds a `cred_type` discriminator only; the token lives in the
+  OneCLI vault like an API key — see [byok-oauth.md](byok-oauth.md).
 
 ## 8. Flow
 
@@ -153,9 +153,8 @@ Per the room's `credential_mode`:
   approval routing, and onboarding authz all held up. One credential-in-logs
   hygiene finding (an `onecli` exec error embedding the key in its argv) was
   fixed at the `onecli()` chokepoint. Residual operational risks (onboarding
-  argv exposure, the OAuth at-rest store, the OAuth gateway-bypass, OneCLI as
-  trust anchor) are catalogued in the `/add-byok` SKILL.md "Security review &
-  residual risks" section.
+  argv exposure, OneCLI as trust anchor) are catalogued in the `/add-byok`
+  SKILL.md "Security review & residual risks" section.
 
 ## 12. Touch points
 

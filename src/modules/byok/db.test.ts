@@ -5,16 +5,13 @@ import { runMigrations } from '../../db/migrations/index.js';
 import {
   getByokCredential,
   userHasActiveKey,
+  userHasActiveOauth,
   getUserSecretId,
   agentGroupForByokAgent,
   activeMembersForGroup,
   upsertByokCredential,
-  upsertByokOauthCredential,
-  getOauthToken,
-  clearOauthToken,
   setByokStatus,
 } from './db.js';
-import { _resetKeyCacheForTests } from './crypto.js';
 import {
   getRoomCredentialMode,
   setRoomCredentialMode,
@@ -71,51 +68,34 @@ describe('byok_credentials', () => {
   });
 });
 
-describe('byok oauth credentials', () => {
-  beforeEach(() => _resetKeyCacheForTests());
-
-  it('stores an encrypted oauth token and decrypts it back (no secret_id)', () => {
-    upsertByokOauthCredential('webchat:alice', 'ag-1', 'byok-alice-aaa', 'sk-ant-oat-SECRET');
+describe('byok oauth credentials (vault-only)', () => {
+  it('stores an oauth credential with a vault secret_id + oauth cred_type', () => {
+    upsertByokCredential('webchat:alice', 'ag-1', 'byok-alice-aaa', 'sec-oat', 'oauth_token');
     const row = getByokCredential('webchat:alice', 'ag-1')!;
     expect(row.cred_type).toBe('oauth_token');
-    expect(row.secret_id).toBeNull();
-    expect(row.oauth_token_enc).toBeInstanceOf(Buffer);
-    // Ciphertext must not contain the plaintext.
-    expect(row.oauth_token_enc!.toString('utf8')).not.toContain('SECRET');
-    expect(getOauthToken('webchat:alice', 'ag-1')).toBe('sk-ant-oat-SECRET');
+    expect(row.secret_id).toBe('sec-oat'); // lives in the OneCLI vault, like api keys
     expect(userHasActiveKey('webchat:alice', 'ag-1')).toBe(true);
+    expect(userHasActiveOauth('webchat:alice', 'ag-1')).toBe(true);
   });
 
-  it('getOauthToken is null for api_key rows and after revoke', () => {
-    upsertByokCredential('webchat:bob', 'ag-1', 'byok-bob', 'sec-1');
-    expect(getOauthToken('webchat:bob', 'ag-1')).toBeNull(); // api_key row
+  it('userHasActiveOauth is false for api_key rows and after revoke', () => {
+    upsertByokCredential('webchat:bob', 'ag-1', 'byok-bob', 'sec-1'); // default api_key
+    expect(userHasActiveOauth('webchat:bob', 'ag-1')).toBe(false);
 
-    upsertByokOauthCredential('webchat:alice', 'ag-1', 'byok-alice', 'sk-ant-oat-X');
+    upsertByokCredential('webchat:alice', 'ag-1', 'byok-alice', 'sec-oat', 'oauth_token');
     setByokStatus('webchat:alice', 'ag-1', 'revoked');
-    expect(getOauthToken('webchat:alice', 'ag-1')).toBeNull(); // revoked
+    expect(userHasActiveOauth('webchat:alice', 'ag-1')).toBe(false); // revoked
   });
 
-  it('clearOauthToken wipes the blob', () => {
-    upsertByokOauthCredential('webchat:alice', 'ag-1', 'byok-alice', 'sk-ant-oat-X');
-    clearOauthToken('webchat:alice', 'ag-1');
+  it('switching oauth→api_key flips cred_type and updates secret_id', () => {
+    upsertByokCredential('webchat:alice', 'ag-1', 'byok-alice', 'sec-oat', 'oauth_token');
+    expect(userHasActiveOauth('webchat:alice', 'ag-1')).toBe(true);
+
+    upsertByokCredential('webchat:alice', 'ag-1', 'byok-alice', 'sec-key', 'api_key');
     const row = getByokCredential('webchat:alice', 'ag-1')!;
-    expect(row.oauth_token_enc).toBeNull();
-    expect(row.oauth_token_nonce).toBeNull();
-  });
-
-  it('switching api_key→oauth and back clears the stale side', () => {
-    upsertByokCredential('webchat:alice', 'ag-1', 'byok-alice', 'sec-1');
-    upsertByokOauthCredential('webchat:alice', 'ag-1', 'byok-alice', 'sk-ant-oat-X');
-    let row = getByokCredential('webchat:alice', 'ag-1')!;
-    expect(row.secret_id).toBeNull();
-    expect(row.cred_type).toBe('oauth_token');
-
-    upsertByokCredential('webchat:alice', 'ag-1', 'byok-alice', 'sec-2');
-    row = getByokCredential('webchat:alice', 'ag-1')!;
     expect(row.cred_type).toBe('api_key');
-    expect(row.secret_id).toBe('sec-2');
-    expect(row.oauth_token_enc).toBeNull();
-    expect(getOauthToken('webchat:alice', 'ag-1')).toBeNull();
+    expect(row.secret_id).toBe('sec-key');
+    expect(userHasActiveOauth('webchat:alice', 'ag-1')).toBe(false);
   });
 });
 
@@ -135,7 +115,9 @@ describe('room credential_mode', () => {
   it('defaults to disabled, round-trips, preserves engage_default', () => {
     expect(getRoomCredentialMode('room-x')).toBe('disabled');
     getDb()
-      .prepare(`INSERT INTO webchat_room_settings (room_id, engage_default, updated_at) VALUES ('room-y','mention-only',1)`)
+      .prepare(
+        `INSERT INTO webchat_room_settings (room_id, engage_default, updated_at) VALUES ('room-y','mention-only',1)`,
+      )
       .run();
     setRoomCredentialMode('room-y', 'required');
     expect(getRoomCredentialMode('room-y')).toBe('required');

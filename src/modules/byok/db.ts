@@ -1,10 +1,10 @@
 /**
  * BYOK credential mapping (central DB). Stores only OneCLI ids + status — the
- * Anthropic key itself lives in the OneCLI vault. One row per (user, agent
- * group); the user's vault secret is reused across their agent-group rows.
+ * Anthropic credential itself (API key OR subscription/OAuth token) lives in the
+ * OneCLI vault. One row per (user, agent group); the user's vault secret is
+ * reused across their agent-group rows.
  */
 import { getDb } from '../../db/connection.js';
-import { openToken, sealToken } from './crypto.js';
 
 export type ByokStatus = 'active' | 'revoked';
 export type ByokCredType = 'api_key' | 'oauth_token';
@@ -16,8 +16,6 @@ export interface ByokCredentialRow {
   secret_id: string | null;
   status: ByokStatus;
   cred_type: ByokCredType;
-  oauth_token_enc: Buffer | null;
-  oauth_token_nonce: Buffer | null;
   created_at: string;
   updated_at: string;
 }
@@ -30,9 +28,19 @@ export function getByokCredential(userId: string, agentGroupId: string): ByokCre
   );
 }
 
-/** True when the user has an active per-member key for this agent group. */
+/** True when the user has an active per-member credential for this agent group. */
 export function userHasActiveKey(userId: string, agentGroupId: string): boolean {
   return getByokCredential(userId, agentGroupId)?.status === 'active';
+}
+
+/**
+ * True when the user's active credential is a subscription/OAuth token, so the
+ * per-member container must be spawned in OAuth mode (sentinel
+ * CLAUDE_CODE_OAUTH_TOKEN; the real token is swapped in by OneCLI on the wire).
+ */
+export function userHasActiveOauth(userId: string, agentGroupId: string): boolean {
+  const row = getByokCredential(userId, agentGroupId);
+  return row?.status === 'active' && row.cred_type === 'oauth_token';
 }
 
 /** The user's existing vault secret id (reused across their agent-group rows), if any. */
@@ -60,82 +68,32 @@ export function activeMembersForGroup(agentGroupId: string): string[] {
   ).map((r) => r.user_id);
 }
 
+/**
+ * Upsert a member's credential row. Both API-key and OAuth credentials live in
+ * the OneCLI vault, so both carry a `secret_id`; `credType` only records which
+ * connect flow the member used (and gates OAuth-mode spawn).
+ */
 export function upsertByokCredential(
   userId: string,
   agentGroupId: string,
   onecliAgentId: string,
   secretId: string | null,
+  credType: ByokCredType = 'api_key',
 ): void {
   const now = new Date().toISOString();
-  // API-key row: the key lives in the OneCLI vault; clear any OAuth blob so a
-  // member switching oauth→api_key doesn't leave a stale encrypted token.
   getDb()
     .prepare(
       `INSERT INTO byok_credentials
          (user_id, agent_group_id, onecli_agent_id, secret_id, status, cred_type, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'active', 'api_key', ?, ?)
+       VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
        ON CONFLICT (user_id, agent_group_id) DO UPDATE SET
-         onecli_agent_id   = excluded.onecli_agent_id,
-         secret_id         = excluded.secret_id,
-         status            = 'active',
-         cred_type         = 'api_key',
-         oauth_token_enc   = NULL,
-         oauth_token_nonce = NULL,
-         updated_at        = excluded.updated_at`,
+         onecli_agent_id = excluded.onecli_agent_id,
+         secret_id       = excluded.secret_id,
+         status          = 'active',
+         cred_type       = excluded.cred_type,
+         updated_at      = excluded.updated_at`,
     )
-    .run(userId, agentGroupId, onecliAgentId, secretId, now, now);
-}
-
-/**
- * OAuth row: the host stores the encrypted subscription token (OneCLI can't
- * carry it). `secret_id` is null — there is no Anthropic vault secret; the
- * per-member agent still exists (onecli_agent_id) for the group's tool secrets.
- */
-export function upsertByokOauthCredential(
-  userId: string,
-  agentGroupId: string,
-  onecliAgentId: string,
-  token: string,
-): void {
-  const now = new Date().toISOString();
-  const { enc, nonce } = sealToken(token);
-  getDb()
-    .prepare(
-      `INSERT INTO byok_credentials
-         (user_id, agent_group_id, onecli_agent_id, secret_id, status, cred_type,
-          oauth_token_enc, oauth_token_nonce, created_at, updated_at)
-       VALUES (?, ?, ?, NULL, 'active', 'oauth_token', ?, ?, ?, ?)
-       ON CONFLICT (user_id, agent_group_id) DO UPDATE SET
-         onecli_agent_id   = excluded.onecli_agent_id,
-         secret_id         = NULL,
-         status            = 'active',
-         cred_type         = 'oauth_token',
-         oauth_token_enc   = excluded.oauth_token_enc,
-         oauth_token_nonce = excluded.oauth_token_nonce,
-         updated_at        = excluded.updated_at`,
-    )
-    .run(userId, agentGroupId, onecliAgentId, enc, nonce, now, now);
-}
-
-/**
- * Decrypt the member's OAuth token for spawn-time env injection, or null if the
- * member has no active oauth_token row for this group. Never logged.
- */
-export function getOauthToken(userId: string, agentGroupId: string): string | null {
-  const row = getByokCredential(userId, agentGroupId);
-  if (!row || row.status !== 'active' || row.cred_type !== 'oauth_token') return null;
-  if (!row.oauth_token_enc || !row.oauth_token_nonce) return null;
-  return openToken(row.oauth_token_enc, row.oauth_token_nonce);
-}
-
-/** Wipe the encrypted OAuth token (on revoke) so a stale blob never lingers. */
-export function clearOauthToken(userId: string, agentGroupId: string): void {
-  getDb()
-    .prepare(
-      `UPDATE byok_credentials SET oauth_token_enc = NULL, oauth_token_nonce = NULL, updated_at = ?
-       WHERE user_id = ? AND agent_group_id = ?`,
-    )
-    .run(new Date().toISOString(), userId, agentGroupId);
+    .run(userId, agentGroupId, onecliAgentId, secretId, credType, now, now);
 }
 
 export function setByokStatus(userId: string, agentGroupId: string, status: ByokStatus): void {
