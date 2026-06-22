@@ -2528,6 +2528,24 @@ a.lightbox-btn {
   flex-direction: column;
   gap: 18px;
 }
+/* Settings IA: identity ("Profile") first, then app prefs ("Preferences").
+   Sentence case + full-strength text so it reads above the uppercase muted
+   per-group .setting-label. A divider separates sections, but not the first. */
+.settings-section-title {
+  margin: 0;
+  font-size: var(--fs-base);
+  font-weight: 600;
+  color: var(--text);
+}
+.settings-section-title:not(:first-child) {
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+.setting-help {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
 
 /* Setting groups */
 .setting-group {
