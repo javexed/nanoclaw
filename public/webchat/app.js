@@ -2743,6 +2743,12 @@ function renderMembers(members) {
       tag.className = 'member-tag';
       tag.textContent = 'AGENT';
       li.appendChild(tag);
+    } else if (m.handle) {
+      // Show how to @-mention this person, right-aligned like the AGENT tag.
+      const handle = document.createElement('span');
+      handle.className = 'member-handle';
+      handle.textContent = `@${m.handle}`;
+      li.appendChild(handle);
     }
     list.appendChild(li);
   }
