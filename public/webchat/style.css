@@ -1859,6 +1859,12 @@ a.lightbox-btn {
   margin-left: auto;
   flex-shrink: 0;
 }
+#members-list li .member-handle {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  margin-left: auto;
+  flex-shrink: 0;
+}
 
 /* Agent detail panel */
 .agent-detail {
