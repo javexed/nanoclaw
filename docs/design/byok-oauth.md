@@ -1,8 +1,8 @@
 # Design: OAuth (subscription) BYOK via per-member containers
 
 **Status:** prototype (`proto/byok-oauth-onecli`) — reworked from the original
-host-encrypted design to **vault-only** (OneCLI carries the token). See §8 for the
-re-validation this rework requires.
+host-encrypted design to **vault-only** (OneCLI carries the token). Core transport
+**validated end-to-end** (2026-06-22, see §8.1).
 **Extends:** [byok.md](byok.md) — the per-member-session architecture (session keying, identity derivation, fan-out, approval routing) is defined there; this doc covers only the OAuth/subscription delta.
 
 **Resolved decisions (owner sign-off):**
@@ -152,22 +152,25 @@ No agent-runner change → **no container rebuild**. No new npm deps.
 ## 8. Risks / open questions
 
 > The **original** host-encrypted + `NO_PROXY` design was validated end-to-end on
-> 2026-06-12 (including a real subscription token → clean completion). This
-> revision changes the transport, so two things need **re-validation** before it
-> replaces the shipped path:
+> 2026-06-12. This revision changes the transport; the two transport questions
+> below were **re-validated on 2026-06-22** against the live OneCLI gateway
+> (onecli 2.2.5) + claude 2.1.174 with the operator's real `--type anthropic`
+> credential.
 
-1. **Sentinel acceptance** — does the container's Claude Code accept a
-   `CLAUDE_CODE_OAUTH_TOKEN=placeholder` (non-real) value to enter OAuth mode
-   *without locally validating/decoding it* before the first request? The drafter
-   proves OneCLI swaps the bearer, but it hand-builds the HTTP request, so it does
-   **not** exercise Claude Code's token-loading path. **NEEDS A LIVE TEST.** If
-   Claude Code pre-validates, use a validly-shaped but inert token, or fall back
-   to the original env-injection.
-2. **OneCLI container swap for `--type anthropic` oat** — confirm OneCLI rewrites
-   the `Authorization: Bearer` for a *container* request (not just the host-side
-   `getContainerConfig` path the drafter uses) when the member's secret is an
-   `sk-ant-oat…` value. Fallback: store it as `--type generic --header-name
-   Authorization --value-format 'Bearer {value}'` (the `setup/auto.ts` mechanism).
+1. **Sentinel acceptance — ✅ VALIDATED (2026-06-22).** `onecli run claude` itself
+   injects `CLAUDE_CODE_OAUTH_TOKEN=placeholder` (the literal string) and routes
+   `api.anthropic.com` *through* the gateway (no `NO_PROXY`). Running `claude -p`
+   with that exact env (placeholder token, gateway proxy, CA) returned a clean
+   completion — so Claude Code accepts the sentinel and enters OAuth mode without
+   locally validating it. **This is OneCLI's own standard mechanism**, so the
+   sentinel the byok env-resolver injects is in fact redundant (OneCLI sets the
+   same value); the resolver is harmless belt-and-suspenders and could be dropped.
+2. **OneCLI container swap for `--type anthropic` — ✅ VALIDATED (2026-06-22).**
+   The same run completed in **OAuth mode** (placeholder oauth token, no API key
+   in env), which means the credential OneCLI swapped on the wire authenticated as
+   an OAuth/subscription credential — the exact `--type anthropic` oat path the
+   rework relies on. (Per-member containers use the same gateway swap that
+   already powers shipped API-key BYOK.)
 3. **Token longevity / expiry UX** — expired `setup-token` → 401; surface a
    "reconnect your subscription" banner, not a silent failure.
 4. **In-container exposure — now eliminated.** The container holds only the
@@ -192,5 +195,7 @@ No agent-runner change → **no container rebuild**. No new npm deps.
 Make OAuth BYOK **vault-only**, identical in posture to API-key BYOK, by reusing
 the OneCLI bearer-swap already proven in the drafter and operator-subscription
 paths. This deletes the host-side encrypted store and removes the in-container
-token exposure. Gate the cutover on the §8.1/8.2 live re-validation; keep the
-original env-injection path available as a fallback until then.
+token exposure. The §8.1/8.2 transport re-validation is **done** (2026-06-22) — the
+sentinel + gateway-swap path is exactly OneCLI's own `run claude` mechanism. Ready
+to fold into `skill/byok`; a follow-up could drop the now-redundant env-resolver
+sentinel (OneCLI injects it) and add a spawn-args unit test.
