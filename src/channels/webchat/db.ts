@@ -1118,6 +1118,22 @@ export function ensureWebchatUserHandle(userId: string, displayName: string): st
   return getWebchatUserHandle(userId) ?? candidate;
 }
 
+/**
+ * Everyone who has a handle, with their display name — the candidate pool for
+ * @-mention autocomplete. The caller filters by room access; mention candidates
+ * are NOT limited to currently-connected members (you can mention someone who's
+ * offline — they get the badge/notification when they return).
+ */
+export function getWebchatHandleUsers(): { userId: string; handle: string; displayName: string | null }[] {
+  return getDb()
+    .prepare(
+      `SELECT h.user_id AS userId, h.handle AS handle, u.display_name AS displayName
+         FROM webchat_user_handles h
+         LEFT JOIN users u ON u.id = h.user_id`,
+    )
+    .all() as { userId: string; handle: string; displayName: string | null }[];
+}
+
 /** Resolve a set of @-handles to the user_ids that own them (for mention detection). */
 export function resolveHandlesToUserIds(handles: string[]): string[] {
   const uniq = [...new Set(handles.map((h) => h.toLowerCase()))].filter(Boolean);

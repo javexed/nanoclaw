@@ -898,8 +898,9 @@ function connect() {
         // toggles visible.
         probeIsOwner();
         // Wirings or prime designations may have changed — refresh the
-        // mention-autocomplete cache for the active room.
+        // mention-autocomplete caches for the active room.
         refreshWiredAgentsForCurrentRoom();
+        fetchMentionablePeople();
         if (currentRoom) {
           // Rejoin after reconnect — catch up on missed messages
           ws.send(JSON.stringify({ type: 'join', room_id: currentRoom }));
@@ -960,11 +961,10 @@ function connect() {
       case 'members':
         if (msg.room_id === currentRoom) {
           renderMembers(msg.members);
-          // Track human members with handles for @-mention autocomplete of
-          // people (separate from wired-agent mentions). Exclude self.
-          roomMentionPeople = (msg.members || [])
-            .filter((m) => m.handle && m.identity !== myIdentity)
-            .map((m) => ({ folder: m.handle, name: m.identity, isUser: true }));
+          // Membership may have changed (someone gained/lost access) — refresh
+          // the @-mention candidate pool. (The pool itself comes from the
+          // server, not this connected-members list — see fetchMentionablePeople.)
+          fetchMentionablePeople();
         }
         break;
       case 'message': {
@@ -1410,9 +1410,10 @@ function joinRoom(roomId, roomName, jumpMessageId) {
   document.querySelectorAll('#room-list li').forEach((li) => {
     li.classList.toggle('active', li.dataset.roomId === roomId);
   });
-  // Prime the mention-autocomplete cache so the first '@' the user types
+  // Prime the mention-autocomplete caches so the first '@' the user types
   // doesn't have to wait on a fetch.
   refreshWiredAgentsForCurrentRoom();
+  fetchMentionablePeople();
 }
 
 // ── Message search (FTS) ────────────────────────────────────────────────────
@@ -2489,6 +2490,28 @@ async function refreshWiredAgentsForCurrentRoom() {
     if (currentRoom === roomId) wiredAgentsForCurrentRoom = next;
   } catch {
     // network blip — leave stale cache rather than blanking
+  }
+}
+
+// People you can @-mention here: anyone with a handle who can access the room,
+// online or not (mentions notify on return). Sourced from the server, NOT the
+// connected-members list — so you can mention offline teammates and the list
+// isn't empty just because you're the only one currently in the room.
+async function fetchMentionablePeople() {
+  const roomId = currentRoom;
+  if (!roomId) {
+    roomMentionPeople = [];
+    return;
+  }
+  try {
+    const res = await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/mentionable`);
+    if (!res.ok) return; // leave stale on error rather than blanking
+    const people = await res.json();
+    if (currentRoom === roomId) {
+      roomMentionPeople = people.map((p) => ({ folder: p.handle, name: p.name, isUser: true }));
+    }
+  } catch {
+    // network blip — leave stale cache
   }
 }
 
