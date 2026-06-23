@@ -315,6 +315,57 @@ function renderSettingsModal() {
   });
   // Notifications
   $('#notif-toggle').checked = settings.notifications;
+  // @handle — reflect the current handle; clear any stale status line.
+  const handleInput = $('#handle-input');
+  if (handleInput) handleInput.value = myHandle || '';
+  const handleStatus = $('#handle-status');
+  if (handleStatus) {
+    handleStatus.hidden = true;
+    handleStatus.textContent = '';
+  }
+}
+
+// Persist the @handle from the Settings field. Inline feedback (per DESIGN.md):
+// success/taken/invalid all surface on the #handle-status line, not a toast.
+async function saveHandle() {
+  const input = $('#handle-input');
+  const status = $('#handle-status');
+  if (!input || !status) return;
+  const next = input.value.trim().toLowerCase().replace(/^@/, '');
+  const showStatus = (text, ok) => {
+    status.hidden = false;
+    status.textContent = text;
+    status.classList.toggle('ok', !!ok);
+    status.classList.toggle('err', !ok);
+  };
+  if (!/^[a-z0-9-]{1,32}$/.test(next)) {
+    showStatus('Use 1–32 letters, numbers, or hyphens.', false);
+    return;
+  }
+  if (next === myHandle) {
+    showStatus('That’s already your handle.', true);
+    return;
+  }
+  try {
+    const res = await authFetch('/api/me/handle', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+      body: JSON.stringify({ handle: next }),
+    });
+    if (res.ok) {
+      myHandle = (((await res.json()).handle || next) + '').toLowerCase();
+      input.value = myHandle;
+      showStatus('Saved.', true);
+    } else if (res.status === 409) {
+      showStatus('That handle is taken.', false);
+    } else if (res.status === 400) {
+      showStatus('Use 1–32 letters, numbers, or hyphens.', false);
+    } else {
+      showStatus('Couldn’t save — try again.', false);
+    }
+  } catch {
+    showStatus('Couldn’t save — try again.', false);
+  }
 }
 
 // Apply on load
@@ -657,6 +708,15 @@ $('#notif-toggle').addEventListener('change', async () => {
   saveSettings(settings);
 });
 
+// @handle save — button click and Enter-in-field both commit.
+$('#handle-save')?.addEventListener('click', saveHandle);
+$('#handle-input')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    saveHandle();
+  }
+});
+
 function urlBase64ToUint8Array(base64String) {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
   const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
@@ -740,10 +800,13 @@ async function disableWebPush() {
 
 let ws,
   currentRoom = null,
-  myIdentity = '';
+  myIdentity = '',
+  myHandle = '';
 const pendingMessages = new Map();
 const typingUsers = new Map();
 const unreadRooms = new Set();
+const mentionedRooms = new Set(); // rooms with an unread @-mention of me (distinct badge)
+let roomMentionPeople = []; // current room's human members as @ autocomplete candidates
 let showArchived = sessionStorage.getItem('webchat:showArchived') === '1';
 let showHidden = sessionStorage.getItem('webchat:showHidden') === '1';
 let agentName = '';
@@ -753,6 +816,25 @@ let reconnectDelay = 1000;
 function setLastSeenMessageId(id) {
   lastSeenMessageId = id;
   if (id) sessionStorage.setItem('lastSeenMessageId', id);
+}
+
+// Load my @-mention handle (server-stored, settable in Settings). Used to
+// highlight + notify when a message @-mentions me. Best-effort.
+async function fetchMyHandle() {
+  try {
+    const r = await authFetch('/api/me/handle');
+    if (r.ok) myHandle = ((await r.json()).handle || '').toLowerCase();
+  } catch {
+    /* non-fatal — mentions just won't self-highlight until next load */
+  }
+}
+
+// True when `text` contains an @-mention of the current user's handle. Mirrors
+// the token boundary used by decorateMentions so highlight + notify agree.
+function messageMentionsMe(text) {
+  if (!myHandle || typeof text !== 'string') return false;
+  const re = new RegExp('(?:^|[^a-z0-9_-])@' + myHandle + '(?![a-z0-9-])', 'i');
+  return re.test(text);
 }
 
 function connect() {
@@ -792,6 +874,8 @@ function connect() {
         // live ones. Never dot the open room (the join that follows reads it).
         msg.rooms.forEach((r) => {
           if (r.unread && r.id !== currentRoom) unreadRooms.add(r.id);
+          if (r.mention && r.id !== currentRoom) mentionedRooms.add(r.id);
+          else if (!r.mention) mentionedRooms.delete(r.id);
           else unreadRooms.delete(r.id);
         });
         if (allAgents.length === 0) {
@@ -807,13 +891,16 @@ function connect() {
         }
         // Catch up on approvals queued while offline / mid-reconnect. Idempotent.
         fetchApprovals();
+        // (Re)load my @-mention handle so self-highlight/notify work this session.
+        fetchMyHandle();
         // Reveal the Permissions header button if the caller is owner.
         // Idempotent: probe runs every reconnect, but the button only
         // toggles visible.
         probeIsOwner();
         // Wirings or prime designations may have changed — refresh the
-        // mention-autocomplete cache for the active room.
+        // mention-autocomplete caches for the active room.
         refreshWiredAgentsForCurrentRoom();
+        fetchMentionablePeople();
         if (currentRoom) {
           // Rejoin after reconnect — catch up on missed messages
           ws.send(JSON.stringify({ type: 'join', room_id: currentRoom }));
@@ -872,7 +959,13 @@ function connect() {
         break;
       }
       case 'members':
-        if (msg.room_id === currentRoom) renderMembers(msg.members);
+        if (msg.room_id === currentRoom) {
+          renderMembers(msg.members);
+          // Membership may have changed (someone gained/lost access) — refresh
+          // the @-mention candidate pool. (The pool itself comes from the
+          // server, not this connected-members list — see fetchMentionablePeople.)
+          fetchMentionablePeople();
+        }
         break;
       case 'message': {
         // Snapshot the scroll position BEFORE appending. If we check after,
@@ -889,9 +982,11 @@ function connect() {
           msg.sender_type !== 'a2a'
         ) {
           try {
-            new Notification(`${msg.sender}`, {
+            const mentioned = messageMentionsMe(msg.content);
+            new Notification(mentioned ? `${msg.sender} mentioned you` : `${msg.sender}`, {
               body: msg.content.slice(0, 100),
               tag: msg.id || 'nanoclaw-msg',
+              requireInteraction: mentioned,
             });
           } catch {}
         }
@@ -960,12 +1055,22 @@ function connect() {
           updateUnreadDots();
         }
         break;
-      case 'read_cleared':
-        // Another of this user's devices read the room — drop the stale badge.
-        if (msg.room_id && unreadRooms.delete(msg.room_id)) {
+      case 'mention':
+        // Server says an @-mention of me landed in a room I'm not viewing.
+        // Distinct, higher-signal badge than plain unread.
+        if (msg.room_id && msg.room_id !== currentRoom) {
+          mentionedRooms.add(msg.room_id);
+          unreadRooms.add(msg.room_id);
           updateUnreadDots();
         }
         break;
+      case 'read_cleared': {
+        // Another of this user's devices read the room — drop the stale badges.
+        const cleared = (msg.room_id && unreadRooms.delete(msg.room_id)) | 0;
+        const clearedMention = (msg.room_id && mentionedRooms.delete(msg.room_id)) | 0;
+        if (cleared || clearedMention) updateUnreadDots();
+        break;
+      }
       case 'delete_message':
         if (msg.message_id) {
           const el = document.querySelector(`[data-message-id="${CSS.escape(msg.message_id)}"]`);
@@ -1107,7 +1212,15 @@ function renderRooms(rooms) {
     text.style.flex = '1';
     li.appendChild(text);
 
-    if (unreadRooms.has(room.id)) {
+    // A room where you were @-mentioned gets a distinct "@" badge that takes
+    // precedence over the plain unread dot.
+    if (mentionedRooms.has(room.id)) {
+      const badge = document.createElement('span');
+      badge.className = 'mention-dot';
+      badge.textContent = '@';
+      badge.title = 'You were mentioned here';
+      li.appendChild(badge);
+    } else if (unreadRooms.has(room.id)) {
       const dot = document.createElement('span');
       dot.className = 'unread-dot';
       dot.style.background = color;
@@ -1274,6 +1387,7 @@ function joinRoom(roomId, roomName, jumpMessageId) {
   reasoningLog = [];
   currentRoom = roomId;
   unreadRooms.delete(roomId);
+  mentionedRooms.delete(roomId);
   updateUnreadDots();
   // Set agent name for thinking bubble from the agent wired to this room.
   const roomAgent = allAgents.find((b) => b.room_id === roomId);
@@ -1296,9 +1410,10 @@ function joinRoom(roomId, roomName, jumpMessageId) {
   document.querySelectorAll('#room-list li').forEach((li) => {
     li.classList.toggle('active', li.dataset.roomId === roomId);
   });
-  // Prime the mention-autocomplete cache so the first '@' the user types
+  // Prime the mention-autocomplete caches so the first '@' the user types
   // doesn't have to wait on a fetch.
   refreshWiredAgentsForCurrentRoom();
+  fetchMentionablePeople();
 }
 
 // ── Message search (FTS) ────────────────────────────────────────────────────
@@ -1530,6 +1645,9 @@ function appendMessage(msg, statusText, beforeNode) {
     if (tb) tb.remove();
   }
   div.className = isA2a ? 'msg a2a' : isMine ? 'msg mine' : isAgent ? 'msg agent' : 'msg other';
+  // Highlight messages that @-mention me (not my own). Bubble-level accent +
+  // the per-token .mention-me chip from decorateMentions.
+  if (!isMine && messageMentionsMe(isA2a ? a2aText : msg.content)) div.classList.add('mentions-me');
   if (msg.id) div.dataset.messageId = msg.id;
   if (isA2a) {
     // Tint the card's accent bar in the sending agent's colour (see .msg.a2a
@@ -2375,6 +2493,28 @@ async function refreshWiredAgentsForCurrentRoom() {
   }
 }
 
+// People you can @-mention here: anyone with a handle who can access the room,
+// online or not (mentions notify on return). Sourced from the server, NOT the
+// connected-members list — so you can mention offline teammates and the list
+// isn't empty just because you're the only one currently in the room.
+async function fetchMentionablePeople() {
+  const roomId = currentRoom;
+  if (!roomId) {
+    roomMentionPeople = [];
+    return;
+  }
+  try {
+    const res = await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/mentionable`);
+    if (!res.ok) return; // leave stale on error rather than blanking
+    const people = await res.json();
+    if (currentRoom === roomId) {
+      roomMentionPeople = people.map((p) => ({ folder: p.handle, name: p.name, isUser: true }));
+    }
+  } catch {
+    // network blip — leave stale cache
+  }
+}
+
 let mentionPopover = null;
 let mentionStart = -1;
 let mentionMatches = [];
@@ -2417,7 +2557,12 @@ function renderMentionPopover(input) {
       name.textContent = ` — ${agent.name}`;
       item.appendChild(name);
     }
-    if (agent.is_prime) {
+    if (agent.isUser) {
+      const badge = document.createElement('span');
+      badge.className = 'mention-popover-person';
+      badge.textContent = 'person';
+      item.appendChild(badge);
+    } else if (agent.is_prime) {
       const badge = document.createElement('span');
       badge.className = 'mention-popover-prime';
       badge.textContent = 'default';
@@ -2442,7 +2587,18 @@ function renderMentionPopover(input) {
 }
 
 function tryActivateMention(input) {
-  if (wiredAgentsForCurrentRoom.length === 0) {
+  // Candidates: wired agents (trigger the agent) + human members with handles
+  // (notify/surface only). De-dup by folder so a handle that collides with an
+  // agent folder doesn't double-list.
+  const seen = new Set();
+  const mentionPool = [];
+  for (const a of [...wiredAgentsForCurrentRoom, ...roomMentionPeople]) {
+    const key = (a.folder || '').toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    mentionPool.push(a);
+  }
+  if (mentionPool.length === 0) {
     dismissMentionPopover();
     return;
   }
@@ -2473,7 +2629,7 @@ function tryActivateMention(input) {
   }
   mentionStart = i;
   const token = value.slice(i + 1, cursor).toLowerCase();
-  mentionMatches = wiredAgentsForCurrentRoom
+  mentionMatches = mentionPool
     .filter((a) => a.folder.toLowerCase().startsWith(token))
     .slice(0, 8);
   mentionSelectedIndex = 0;
@@ -2569,6 +2725,7 @@ function decorateMentions(bubble) {
       if (fullStart > last) frag.appendChild(document.createTextNode(txt.slice(last, fullStart)));
       const span = document.createElement('span');
       span.className = 'mention';
+      if (myHandle && m[2].toLowerCase() === myHandle) span.classList.add('mention-me');
       span.textContent = `@${m[2]}`;
       frag.appendChild(span);
       last = fullStart + 1 + m[2].length;
@@ -2609,6 +2766,12 @@ function renderMembers(members) {
       tag.className = 'member-tag';
       tag.textContent = 'AGENT';
       li.appendChild(tag);
+    } else if (m.handle) {
+      // Show how to @-mention this person, right-aligned like the AGENT tag.
+      const handle = document.createElement('span');
+      handle.className = 'member-handle';
+      handle.textContent = `@${m.handle}`;
+      li.appendChild(handle);
     }
     list.appendChild(li);
   }

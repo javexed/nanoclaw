@@ -501,3 +501,25 @@ export const moduleWebchatRoomReads: Migration = {
     `);
   },
 };
+
+/**
+ * Per-user @-mention handle. `user_id` is the canonical webchat user id
+ * (e.g. `webchat:tailscale:foo@bar.com`); `handle` is the lowercase slug others
+ * type to @-mention them (`@alice`), UNIQUE so a handle resolves to one user.
+ * Defaults to a slug of the display name on first connect (see ensureWebchatUserHandle).
+ */
+export const moduleWebchatUserHandles: Migration = {
+  version: 113,
+  name: 'webchat-user-handles',
+  up(db: Database.Database) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS webchat_user_handles (
+        user_id    TEXT PRIMARY KEY,
+        handle     TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_webchat_user_handles_handle
+        ON webchat_user_handles(handle);
+    `);
+  },
+};

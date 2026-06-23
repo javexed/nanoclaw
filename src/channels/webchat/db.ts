@@ -1052,3 +1052,118 @@ export function getUnreadRoomIdsForUser(userId: string): Set<string> {
 export function clearReadsForRoom(roomId: string): void {
   getDb().prepare(`DELETE FROM webchat_room_reads WHERE room_id = ?`).run(roomId);
 }
+
+// ── User @-mention handles ──────────────────────────────────────────────────
+// Per-user slug others type to @-mention them. Lowercase [a-z0-9-]; UNIQUE so a
+// handle resolves to exactly one user. Defaults to a slug of the display name.
+
+/** Slugify a display name into a candidate handle: lowercase, [a-z0-9-] only. */
+export function slugifyHandle(name: string): string {
+  const slug = (name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32);
+  return slug || 'user';
+}
+
+export function getWebchatUserHandle(userId: string): string | null {
+  const row = getDb().prepare(`SELECT handle FROM webchat_user_handles WHERE user_id = ?`).get(userId) as
+    | { handle: string }
+    | undefined;
+  return row?.handle ?? null;
+}
+
+/** Which user_id (if any) currently owns a handle. */
+export function userIdForHandle(handle: string): string | null {
+  const row = getDb().prepare(`SELECT user_id FROM webchat_user_handles WHERE handle = ?`).get(handle.toLowerCase()) as
+    | { user_id: string }
+    | undefined;
+  return row?.user_id ?? null;
+}
+
+/**
+ * Set a user's handle. Returns { ok } or { ok:false, reason } when the handle is
+ * already taken by another user (caller surfaces a 409). Validates the shape too.
+ */
+export function setWebchatUserHandle(userId: string, handle: string): { ok: true } | { ok: false; reason: string } {
+  const h = handle.toLowerCase();
+  if (!/^[a-z0-9-]{1,32}$/.test(h)) return { ok: false, reason: 'invalid' };
+  const owner = userIdForHandle(h);
+  if (owner && owner !== userId) return { ok: false, reason: 'taken' };
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_user_handles (user_id, handle, created_at) VALUES (?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET handle = excluded.handle`,
+    )
+    .run(userId, h, Date.now());
+  return { ok: true };
+}
+
+/**
+ * Ensure a user has a handle, defaulting to a slug of their display name with a
+ * numeric suffix on collision. Idempotent; called on WS connect so every user is
+ * @-mentionable by default. Returns the effective handle.
+ */
+export function ensureWebchatUserHandle(userId: string, displayName: string): string {
+  const existing = getWebchatUserHandle(userId);
+  if (existing) return existing;
+  const base = slugifyHandle(displayName);
+  let candidate = base;
+  for (let n = 2; userIdForHandle(candidate) !== null; n++) candidate = `${base}-${n}`;
+  getDb()
+    .prepare(`INSERT OR IGNORE INTO webchat_user_handles (user_id, handle, created_at) VALUES (?, ?, ?)`)
+    .run(userId, candidate, Date.now());
+  // Re-read in case a concurrent connect won the INSERT for this user_id.
+  return getWebchatUserHandle(userId) ?? candidate;
+}
+
+/**
+ * Everyone who has a handle, with their display name — the candidate pool for
+ * @-mention autocomplete. The caller filters by room access; mention candidates
+ * are NOT limited to currently-connected members (you can mention someone who's
+ * offline — they get the badge/notification when they return).
+ */
+export function getWebchatHandleUsers(): { userId: string; handle: string; displayName: string | null }[] {
+  return getDb()
+    .prepare(
+      `SELECT h.user_id AS userId, h.handle AS handle, u.display_name AS displayName
+         FROM webchat_user_handles h
+         LEFT JOIN users u ON u.id = h.user_id`,
+    )
+    .all() as { userId: string; handle: string; displayName: string | null }[];
+}
+
+/** Resolve a set of @-handles to the user_ids that own them (for mention detection). */
+export function resolveHandlesToUserIds(handles: string[]): string[] {
+  const uniq = [...new Set(handles.map((h) => h.toLowerCase()))].filter(Boolean);
+  if (uniq.length === 0) return [];
+  const rows = getDb()
+    .prepare(`SELECT user_id FROM webchat_user_handles WHERE handle IN (${uniq.map(() => '?').join(',')})`)
+    .all(...uniq) as { user_id: string }[];
+  return rows.map((r) => r.user_id);
+}
+
+/**
+ * Rooms with an unread message that @-mentions this user's handle (latest such
+ * message is newer than their last read marker) — for the durable mention badge
+ * on load. The live `mention` WS signal is exact; this load-time query uses a
+ * substring LIKE on the handle, so it's approximate (may include `@handle-2`
+ * style near-matches) — acceptable for a badge. Empty when handle is blank.
+ */
+export function getMentionedRoomIdsForUser(userId: string, handle: string): Set<string> {
+  const h = (handle || '').toLowerCase();
+  if (!h) return new Set();
+  const rows = getDb()
+    .prepare(
+      `SELECT m.room_id AS room_id
+         FROM webchat_messages m
+         LEFT JOIN webchat_room_reads r
+           ON r.room_id = m.room_id AND r.user_id = ?
+        WHERE m.content LIKE '%@' || ? || '%'
+        GROUP BY m.room_id
+       HAVING MAX(m.created_at) > COALESCE(MAX(r.last_read_at), 0)`,
+    )
+    .all(userId, h) as { room_id: string }[];
+  return new Set(rows.map((r) => r.room_id));
+}

@@ -627,6 +627,27 @@
             <button id="settings-close" class="members-close"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
           </div>
           <div class="modal-body">
+            <h3 class="settings-section-title">Profile</h3>
+            <div class="setting-group">
+              <span class="setting-label">Your @handle</span>
+              <div class="handle-row">
+                <span class="handle-at">@</span>
+                <input
+                  id="handle-input"
+                  type="text"
+                  class="handle-input"
+                  placeholder="handle"
+                  autocomplete="off"
+                  autocapitalize="off"
+                  spellcheck="false"
+                  maxlength="32"
+                />
+                <button id="handle-save" type="button" class="btn btn-secondary">Save</button>
+              </div>
+              <p class="setting-help">How others @mention you in chat.</p>
+              <p id="handle-status" class="handle-status" hidden></p>
+            </div>
+            <h3 class="settings-section-title">Preferences</h3>
             <div class="setting-group">
               <span class="setting-label">Theme</span>
               <div class="setting-options" id="theme-options">
