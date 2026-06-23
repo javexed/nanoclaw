@@ -5499,6 +5499,18 @@ function updateTurnElapsed() {
 
 const THINKING_DETAIL_MAX = 64;
 
+// Interrupt the in-progress agent turn — sends a "stop" over the WS (the GUI
+// equivalent of the CLI's ESC). Optimistically ends the turn UI so it feels
+// instant; the host's stream-abort + 'done' status keeps it ended.
+function interruptAgent() {
+  if (!currentRoom || !ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: 'interrupt', room_id: currentRoom }));
+  if (typeof endAgentTurn === 'function') endAgentTurn();
+  const tb = $('#messages .thinking-bubble');
+  if (tb) tb.remove();
+  appendSystem('Stopped.');
+}
+
 // Ensure the thinking bubble exists and is laid out with: a verb in the sender
 // line, a target line (the file/command/query), a milestone line (latest
 // progress), and the animated dots. Shared with the heartbeat typing path —
@@ -5531,6 +5543,19 @@ function ensureThinkingBubble() {
   chevron.className = 'thinking-chevron';
   chevron.appendChild(lucideEl('chevron-right'));
   sender.appendChild(chevron);
+  // Stop button — interrupt the in-progress turn (the GUI equivalent of CLI ESC).
+  // stopPropagation so it doesn't also fire the bubble's expand-toggle handler.
+  const stop = document.createElement('button');
+  stop.type = 'button';
+  stop.className = 'thinking-stop';
+  stop.title = 'Stop the agent';
+  stop.setAttribute('aria-label', 'Stop the agent');
+  stop.innerHTML = '<span class="stop-square" aria-hidden="true"></span>Stop';
+  stop.addEventListener('click', (e) => {
+    e.stopPropagation();
+    interruptAgent();
+  });
+  sender.appendChild(stop);
   bubble.appendChild(sender);
   const content = document.createElement('div');
   content.className = 'bubble';
