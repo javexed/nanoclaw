@@ -1026,6 +1026,20 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
+// Safety-net poll for approvals. WS push + the reconnect/visibilitychange
+// refetches above cover the common cases, but a *foreground* socket can go
+// silently dead (zombie/throttled connection) and drop an `approval` push with
+// no onclose, no reconnect, and no visibility change to trigger a catch-up — so
+// the card would hang until the next unrelated push or a manual refocus. Poll
+// the canonical pending list on a short interval while the tab is visible so a
+// missed approval still surfaces within seconds. Cheap + idempotent
+// (fetchApprovals just re-renders the scoped list); skipped while hidden since
+// the visibilitychange handler already refetches on return to foreground.
+const APPROVAL_POLL_MS = 10000;
+setInterval(() => {
+  if (document.visibilityState === 'visible') fetchApprovals();
+}, APPROVAL_POLL_MS);
+
 // ── Rooms ─────────────────────────────────────────────────────────────────
 // ── Room ordering ─────────────────────────────────────────────────────────
 function getSavedRoomOrder() {
@@ -2406,7 +2420,7 @@ function renderMentionPopover(input) {
     if (agent.is_prime) {
       const badge = document.createElement('span');
       badge.className = 'mention-popover-prime';
-      badge.textContent = 'prime';
+      badge.textContent = 'default';
       item.appendChild(badge);
     }
     // mousedown (not click) so the input doesn't blur and dismiss the popover
@@ -4337,7 +4351,7 @@ function renderAgentWiredRooms() {
     if (room.is_prime) {
       const badge = document.createElement('span');
       badge.className = 'room-wired-prime-badge';
-      badge.textContent = ' prime';
+      badge.textContent = ' default';
       name.appendChild(badge);
     }
     li.appendChild(name);
@@ -4768,8 +4782,8 @@ function renderRoomWiredAgents() {
     primeBtn.className = 'room-wired-prime' + (agent.is_prime ? ' active' : '');
     primeBtn.innerHTML = agent.is_prime ? lucide('star', 'icon--fill') : lucide('star');
     primeBtn.title = agent.is_prime
-      ? `Clear prime — room reverts to mention-only (no fallback)`
-      : `Make ${agent.name} the prime fallback — answers messages that don't @-mention any wired agent`;
+      ? `Stop ${agent.name} replying to everything — back to only when @-mentioned`
+      : `Make ${agent.name} the default — replies to all messages (not just @-mentions)`;
     primeBtn.addEventListener('click', () => togglePrimeAgent(agent));
     li.appendChild(primeBtn);
 
@@ -4780,7 +4794,7 @@ function renderRoomWiredAgents() {
     if (agent.is_prime) {
       const badge = document.createElement('span');
       badge.className = 'room-wired-prime-badge';
-      badge.textContent = ' prime';
+      badge.textContent = ' default';
       name.appendChild(badge);
     }
     li.appendChild(name);
@@ -4809,10 +4823,10 @@ function renderRoomWiredAgents() {
   badge.className = `room-mode-badge mode-${effectiveMode}`;
   badge.textContent =
     effectiveMode === 'prime'
-      ? `Mode: prime (${roomDetailWiredAgents.find((a) => a.is_prime)?.name ?? 'unknown'})`
+      ? `Replies to everything: ${roomDetailWiredAgents.find((a) => a.is_prime)?.name ?? 'unknown'}`
       : effectiveMode === 'broadcast'
-        ? 'Mode: broadcast (all agents respond — legacy)'
-        : 'Mode: mention-only (no fallback agent)';
+        ? 'All agents reply to every message (legacy)'
+        : 'Only replies when @-mentioned';
 
   // Helper line below the badge explains what the mode does. Always shown so
   // the operator's mental model stays current as they ★ / unstar.
@@ -4826,10 +4840,10 @@ function renderRoomWiredAgents() {
   note.hidden = false;
   note.textContent =
     effectiveMode === 'prime'
-      ? 'Prime agent answers messages that do not @-mention another wired agent.'
+      ? 'The default agent replies to every message — except ones that @-mention a different agent.'
       : effectiveMode === 'broadcast'
         ? 'Every wired agent responds to every message. (Legacy mode — not produced by this UI.)'
-        : 'Only @-mentioned agents respond. Plain text wakes no one. Star an agent to designate a prime fallback.';
+        : 'Agents reply only when @-mentioned. Star an agent to make it the default (replies to everything).';
 }
 
 async function togglePrimeAgent(agent) {
@@ -4845,12 +4859,12 @@ async function togglePrimeAgent(agent) {
         });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      showToast('Failed to update prime: ' + (err.error || res.statusText), { kind: 'error' });
+      showToast('Could not update the default agent: ' + (err.error || res.statusText), { kind: 'error' });
       return;
     }
     await refreshRoomWiredAgents(selectedRoomId);
   } catch (err) {
-    showToast('Failed to update prime: ' + err.message, { kind: 'error' });
+    showToast('Could not update the default agent: ' + err.message, { kind: 'error' });
   }
 }
 

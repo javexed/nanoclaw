@@ -142,6 +142,70 @@ if [ -z "$INST" ]; then fail "no install-webchat.sh on $CHANNEL"; else
   fi
 fi
 
+# ── 3b. Hook surface ───────────────────────────────────────────────────────
+# Completeness (§3) proves every changed file is DECLARED in the installer — but
+# a maintainer can silence an orphan failure by simply adding ANY file to
+# HOOK_FILES, laundering a non-webchat file (a sibling skill, a provider module,
+# unrelated core work) into "delivered" status with no check that it belongs to
+# webchat. This pins the core-hook footprint: HOOK_FILES may only name files on
+# the blessed allowlist below. When webchat legitimately needs a NEW core hook,
+# add it here in the same change — that one-line edit is the conscious review gate.
+section "Hook surface — declared core hooks are on the blessed allowlist"
+WEBCHAT_HOOK_ALLOWLIST=(
+  CLAUDE.md
+  src/modules/agent-to-agent/create-agent.ts
+  src/modules/agent-to-agent/agent-route.ts
+  src/modules/approvals/primitive.ts
+  src/modules/approvals/response-handler.ts
+  container/agent-runner/src/destinations.ts
+  container/agent-runner/src/poll-loop.ts
+  container/agent-runner/src/db/messages-out.ts
+  container/agent-runner/src/providers/claude.ts
+  container/agent-runner/src/providers/mock.ts
+  src/channels/adapter.ts
+  src/channels/channel-registry.ts
+  src/cli/resources/destinations.ts
+  src/delivery.ts
+  src/index.ts
+  src/router.ts
+  src/types.ts
+  src/db/agent-groups.ts
+  pnpm-workspace.yaml
+  src/session-manager.ts
+  container/agent-runner/src/db/connection.ts
+  container/agent-runner/src/providers/types.ts
+  src/db/schema.ts
+  src/db/session-db.ts
+  src/db/session-db.test.ts
+  src/container-runner.ts
+  src/modules/agent-to-agent/agent-route.test.ts
+  src/modules/agent-to-agent/message-gate.test.ts
+  .gitignore
+)
+DECLARED=$(git show "$CHANNEL:install-webchat.sh" 2>/dev/null \
+  | awk '/^HOOK_FILES=\(/{f=1;next} f&&/^\)/{f=0} f{gsub(/^[ \t]+/,"");print}')
+if [ -z "$DECLARED" ]; then fail "no HOOK_FILES found in install-webchat.sh on $CHANNEL"; else
+  unblessed=""
+  while IFS= read -r h; do
+    [ -z "$h" ] && continue
+    ok=no
+    for a in "${WEBCHAT_HOOK_ALLOWLIST[@]}"; do [ "$h" = "$a" ] && ok=yes && break; done
+    [ "$ok" = no ] && unblessed="${unblessed}${h}"$'\n'
+  done <<< "$DECLARED"
+  hookn=$(printf '%s\n' "$DECLARED" | grep -c .)
+  if [ -z "${unblessed//[$'\n']/}" ]; then pass "all $hookn declared hooks are on the blessed allowlist"
+  else fail "HOOK_FILES names core file(s) NOT on the webchat hook allowlist — confirm each is a"
+    echo "    legitimate webchat hook into shared core (not a sibling skill/provider file slipping" >&2
+    echo "    in), then add it to WEBCHAT_HOOK_ALLOWLIST in verify-webchat-publish.sh:" >&2
+    printf '%s' "$unblessed" | sed '/^$/d; s/^/      /' >&2
+  fi
+  # Stale entries (allowlisted but no longer hooked) — informational, non-failing:
+  # keeps the list from rotting without blocking a publish that shrinks the surface.
+  for a in "${WEBCHAT_HOOK_ALLOWLIST[@]}"; do
+    printf '%s\n' "$DECLARED" | grep -qxF "$a" || echo "  · note: allowlisted but no longer a hook — $a (safe to prune)"
+  done
+fi
+
 # ── 4. Migration registration ─────────────────────────────────────────────
 section "Migrations — every exported moduleWebchat* is registered"
 EXP=$(git show "$CHANNEL:src/channels/webchat/migration.ts" 2>/dev/null | grep -oE 'export const moduleWebchat[A-Za-z0-9]*' | awk '{print $3}' | sort -u)
