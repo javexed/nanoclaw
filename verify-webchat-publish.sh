@@ -2,8 +2,8 @@
 #
 # verify-webchat-publish.sh — pre-publish gate for the webchat channel branch.
 #
-# Run this BEFORE publishing channels-webchat (forgejo → javexed). It catches
-# the classes of mistake that have actually bitten this project:
+# Run this BEFORE publishing the channels-webchat branch to your remote. It
+# catches the classes of mistake that have actually bitten this skill:
 #   1. drift — a file changed on the channel branch that the installer never
 #      delivers (orphans), or a migration that's exported but not registered.
 #   2. identity — a commit carrying a private email that GitHub's push-block
@@ -11,16 +11,16 @@
 #   3. staleness — your local channel branch differing from the remote tip
 #      you're about to publish.
 #   4. exposure — a private email or secret token hardcoded in FILE CONTENT.
-#      The commit-author check (2) MISSES this — it's exactly how the
-#      maintainer's gmail once leaked, baked into this script's own default.
+#      The commit-author check (2) MISSES this — scanning file content is how we
+#      ensure a maintainer's personal email isn't leaked via a file body.
 #      ALWAYS scan file content, not just commit metadata.
 #
 #   ./verify-webchat-publish.sh            # fast structural checks
 #   ./verify-webchat-publish.sh --full     # also run install→uninstall round-trip
 #
 # Env overrides: UPSTREAM_REF (default origin/main), CHANNEL_REF
-# (default channels-webchat), WEBCHAT_REMOTE (default forgejo),
-# BLOCKED_EMAIL (optional; see below — never hardcode it here).
+# (default channels-webchat), WEBCHAT_REMOTE (the remote you publish to,
+# default origin), BLOCKED_EMAIL (optional; see below — never hardcode it here).
 #
 # Exit 0 = safe to publish. Exit 1 = a check failed. Exit 2 = setup error.
 
@@ -28,7 +28,7 @@ set -uo pipefail   # deliberately NOT -e: run every check, collect all failures
 
 UPSTREAM="${UPSTREAM_REF:-origin/main}"
 CHANNEL="${CHANNEL_REF:-channels-webchat}"
-REMOTE="${WEBCHAT_REMOTE:-forgejo}"
+REMOTE="${WEBCHAT_REMOTE:-origin}"
 # Private email to block in commit authorship. NEVER hardcode it here — that
 # would re-introduce the exact leak this script guards against. Supply it via
 # the BLOCKED_EMAIL env var, or a gitignored `.git/publish-blocked-email` file
@@ -69,7 +69,7 @@ fi
 section "Identity — no private email in the publish range"
 if [ -z "$BLOCKED_EMAIL" ]; then
   echo "  (BLOCKED_EMAIL not set — skipping the private-email author check. Set the env"
-  echo "   var or .git/publish-blocked-email to your private gmail to enable it.)"
+  echo "   var or .git/publish-blocked-email to your private email to enable it.)"
 else
   hits=$(git log --format='%ae%n%ce' "$BASE..$CHANNEL" | grep -cxF "$BLOCKED_EMAIL" || true)
   if [ "$hits" -eq 0 ]; then pass "no commit exposes $BLOCKED_EMAIL"
@@ -79,8 +79,8 @@ else
 fi
 
 # ── 2b. Exposure — no private email or secret token in FILE CONTENT ────────
-# The author-email check above is blind to anything embedded INSIDE a file —
-# exactly how the maintainer's gmail leaked. This scans content, generically.
+# The author-email check above is blind to anything embedded INSIDE a file, so
+# this scans content to ensure a maintainer's personal email isn't leaked that way.
 section "Exposure — no private email / secret material in published file content"
 # (a) Any PERSONAL-PROVIDER email newly added to file content — the real PII
 #     risk. Targeting known personal providers (not all domains) keeps it quiet
