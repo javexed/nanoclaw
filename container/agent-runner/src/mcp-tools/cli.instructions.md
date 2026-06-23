@@ -71,9 +71,14 @@ ncl groups config add-package --npm some-package
 ncl members add --user telegram:jane
 ```
 
-### Important
+### Important — what needs a restart and what doesn't
 
-Config changes via `ncl groups config update` do not take effect until `ncl groups restart`. Run `ncl groups config help` for details.
+Two kinds of change behave differently. Don't conflate them:
+
+- **Container config** — `ncl groups config update` / `config add-*` (model, packages, MCP servers, provider, `cli_scope`) is baked into your container when it spawns, so it does **not** take effect until `ncl groups restart`. Run `ncl groups config help` for details.
+- **Wiring, membership, destinations** — wiring a messaging group/channel to an agent (`wirings`), `ncl members add`, and `ncl destinations add` are read **fresh by the host on every message**. They take effect on the **next message — no restart needed**.
+
+So when someone wires a new room/channel to an agent, do **not** tell them it needs a container restart: it doesn't — the agent starts handling that room on its next message. Only container-*config* changes need a restart. (The one subtlety: a change to where you can *proactively send* refreshes on your next wake, which the next inbound message triggers automatically — still no explicit restart.)
 
 ### Tips
 
