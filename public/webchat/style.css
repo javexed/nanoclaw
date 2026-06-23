@@ -1166,15 +1166,19 @@ button:focus-visible {
   font-size: 1.2em;
   cursor: pointer;
   padding: 4px 2px;
-  opacity: 0.6;
+  /* Resting state uses the theme-tuned secondary token, not opacity of the
+     inherited --text. opacity-dimming blended the icon toward the background,
+     which read as "very dark" on the dark composer surface (light --text@0.6
+     ≈ mid-gray on #1a1a2e). --text-dim is purpose-built per theme (dark #999,
+     light #666) and clears AA; hover lifts to full --text for affordance. */
+  color: var(--text-dim);
   transition:
-    opacity 0.15s,
-    background 0.15s,
-    color 0.15s;
+    color 0.15s,
+    background 0.15s;
   border-radius: 4px;
 }
 .file-picker-btn:hover {
-  opacity: 1;
+  color: var(--text);
 }
 .mobile-only {
   display: none;
