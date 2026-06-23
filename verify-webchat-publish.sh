@@ -2,8 +2,8 @@
 #
 # verify-webchat-publish.sh — pre-publish gate for the webchat channel branch.
 #
-# Run this BEFORE publishing channels-webchat (forgejo → javexed). It catches
-# the classes of mistake that have actually bitten this project:
+# Run this BEFORE publishing the channels-webchat branch to your remote. It
+# catches the classes of mistake that have actually bitten this skill:
 #   1. drift — a file changed on the channel branch that the installer never
 #      delivers (orphans), or a migration that's exported but not registered.
 #   2. identity — a commit carrying a private email that GitHub's push-block
@@ -11,16 +11,16 @@
 #   3. staleness — your local channel branch differing from the remote tip
 #      you're about to publish.
 #   4. exposure — a private email or secret token hardcoded in FILE CONTENT.
-#      The commit-author check (2) MISSES this — it's exactly how the
-#      maintainer's gmail once leaked, baked into this script's own default.
+#      The commit-author check (2) MISSES this — scanning file content is how we
+#      ensure a maintainer's personal email isn't leaked via a file body.
 #      ALWAYS scan file content, not just commit metadata.
 #
 #   ./verify-webchat-publish.sh            # fast structural checks
 #   ./verify-webchat-publish.sh --full     # also run install→uninstall round-trip
 #
 # Env overrides: UPSTREAM_REF (default origin/main), CHANNEL_REF
-# (default channels-webchat), WEBCHAT_REMOTE (default forgejo),
-# BLOCKED_EMAIL (optional; see below — never hardcode it here).
+# (default channels-webchat), WEBCHAT_REMOTE (the remote you publish to,
+# default origin), BLOCKED_EMAIL (optional; see below — never hardcode it here).
 #
 # Exit 0 = safe to publish. Exit 1 = a check failed. Exit 2 = setup error.
 
@@ -28,7 +28,7 @@ set -uo pipefail   # deliberately NOT -e: run every check, collect all failures
 
 UPSTREAM="${UPSTREAM_REF:-origin/main}"
 CHANNEL="${CHANNEL_REF:-channels-webchat}"
-REMOTE="${WEBCHAT_REMOTE:-forgejo}"
+REMOTE="${WEBCHAT_REMOTE:-origin}"
 # Private email to block in commit authorship. NEVER hardcode it here — that
 # would re-introduce the exact leak this script guards against. Supply it via
 # the BLOCKED_EMAIL env var, or a gitignored `.git/publish-blocked-email` file
@@ -69,7 +69,7 @@ fi
 section "Identity — no private email in the publish range"
 if [ -z "$BLOCKED_EMAIL" ]; then
   echo "  (BLOCKED_EMAIL not set — skipping the private-email author check. Set the env"
-  echo "   var or .git/publish-blocked-email to your private gmail to enable it.)"
+  echo "   var or .git/publish-blocked-email to your private email to enable it.)"
 else
   hits=$(git log --format='%ae%n%ce' "$BASE..$CHANNEL" | grep -cxF "$BLOCKED_EMAIL" || true)
   if [ "$hits" -eq 0 ]; then pass "no commit exposes $BLOCKED_EMAIL"
@@ -79,8 +79,8 @@ else
 fi
 
 # ── 2b. Exposure — no private email or secret token in FILE CONTENT ────────
-# The author-email check above is blind to anything embedded INSIDE a file —
-# exactly how the maintainer's gmail leaked. This scans content, generically.
+# The author-email check above is blind to anything embedded INSIDE a file, so
+# this scans content to ensure a maintainer's personal email isn't leaked that way.
 section "Exposure — no private email / secret material in published file content"
 # (a) Any PERSONAL-PROVIDER email newly added to file content — the real PII
 #     risk. Targeting known personal providers (not all domains) keeps it quiet
@@ -140,6 +140,70 @@ if [ -z "$INST" ]; then fail "no install-webchat.sh on $CHANNEL"; else
   else fail "files changed on $CHANNEL but NOT delivered by the installer (orphans):"
     printf '%s' "$uncovered" | sed '/^$/d; s/^/      /' >&2
   fi
+fi
+
+# ── 3b. Hook surface ───────────────────────────────────────────────────────
+# Completeness (§3) proves every changed file is DECLARED in the installer — but
+# a maintainer can silence an orphan failure by simply adding ANY file to
+# HOOK_FILES, laundering a non-webchat file (a sibling skill, a provider module,
+# unrelated core work) into "delivered" status with no check that it belongs to
+# webchat. This pins the core-hook footprint: HOOK_FILES may only name files on
+# the blessed allowlist below. When webchat legitimately needs a NEW core hook,
+# add it here in the same change — that one-line edit is the conscious review gate.
+section "Hook surface — declared core hooks are on the blessed allowlist"
+WEBCHAT_HOOK_ALLOWLIST=(
+  CLAUDE.md
+  src/modules/agent-to-agent/create-agent.ts
+  src/modules/agent-to-agent/agent-route.ts
+  src/modules/approvals/primitive.ts
+  src/modules/approvals/response-handler.ts
+  container/agent-runner/src/destinations.ts
+  container/agent-runner/src/poll-loop.ts
+  container/agent-runner/src/db/messages-out.ts
+  container/agent-runner/src/providers/claude.ts
+  container/agent-runner/src/providers/mock.ts
+  src/channels/adapter.ts
+  src/channels/channel-registry.ts
+  src/cli/resources/destinations.ts
+  src/delivery.ts
+  src/index.ts
+  src/router.ts
+  src/types.ts
+  src/db/agent-groups.ts
+  pnpm-workspace.yaml
+  src/session-manager.ts
+  container/agent-runner/src/db/connection.ts
+  container/agent-runner/src/providers/types.ts
+  src/db/schema.ts
+  src/db/session-db.ts
+  src/db/session-db.test.ts
+  src/container-runner.ts
+  src/modules/agent-to-agent/agent-route.test.ts
+  src/modules/agent-to-agent/message-gate.test.ts
+  .gitignore
+)
+DECLARED=$(git show "$CHANNEL:install-webchat.sh" 2>/dev/null \
+  | awk '/^HOOK_FILES=\(/{f=1;next} f&&/^\)/{f=0} f{gsub(/^[ \t]+/,"");print}')
+if [ -z "$DECLARED" ]; then fail "no HOOK_FILES found in install-webchat.sh on $CHANNEL"; else
+  unblessed=""
+  while IFS= read -r h; do
+    [ -z "$h" ] && continue
+    ok=no
+    for a in "${WEBCHAT_HOOK_ALLOWLIST[@]}"; do [ "$h" = "$a" ] && ok=yes && break; done
+    [ "$ok" = no ] && unblessed="${unblessed}${h}"$'\n'
+  done <<< "$DECLARED"
+  hookn=$(printf '%s\n' "$DECLARED" | grep -c .)
+  if [ -z "${unblessed//[$'\n']/}" ]; then pass "all $hookn declared hooks are on the blessed allowlist"
+  else fail "HOOK_FILES names core file(s) NOT on the webchat hook allowlist — confirm each is a"
+    echo "    legitimate webchat hook into shared core (not a sibling skill/provider file slipping" >&2
+    echo "    in), then add it to WEBCHAT_HOOK_ALLOWLIST in verify-webchat-publish.sh:" >&2
+    printf '%s' "$unblessed" | sed '/^$/d; s/^/      /' >&2
+  fi
+  # Stale entries (allowlisted but no longer hooked) — informational, non-failing:
+  # keeps the list from rotting without blocking a publish that shrinks the surface.
+  for a in "${WEBCHAT_HOOK_ALLOWLIST[@]}"; do
+    printf '%s\n' "$DECLARED" | grep -qxF "$a" || echo "  · note: allowlisted but no longer a hook — $a (safe to prune)"
+  done
 fi
 
 # ── 4. Migration registration ─────────────────────────────────────────────
