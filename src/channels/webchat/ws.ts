@@ -30,7 +30,13 @@ import {
   annotateRoomsForUser,
   markRoomReadForUser,
 } from './state.js';
-import { deleteWebchatMessage, getWebchatMessages, getWebchatRoom, storeWebchatMessage } from './db.js';
+import {
+  deleteWebchatMessage,
+  ensureWebchatUserHandle,
+  getWebchatMessages,
+  getWebchatRoom,
+  storeWebchatMessage,
+} from './db.js';
 import { canAccessRoom } from './access.js';
 import { redactSensitiveData } from './redact.js';
 
@@ -111,6 +117,13 @@ export function setupWebSocket(
     const clientId = randomUUID();
     const userId = augmented._authUserId ?? 'webchat:unknown';
     const displayName = augmented._authDisplayName ?? userId;
+    // Make this user @-mentionable right away: ensure a handle exists (defaults
+    // to a slug of the display name, suffixed on collision). Idempotent.
+    try {
+      ensureWebchatUserHandle(userId, displayName);
+    } catch (err) {
+      log.warn('ensureWebchatUserHandle failed', { userId, err: err instanceof Error ? err.message : err });
+    }
 
     const client: WSClient = {
       id: clientId,
