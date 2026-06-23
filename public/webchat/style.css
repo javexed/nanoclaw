@@ -346,11 +346,14 @@ body {
 /* Room list */
 /* Message search — input pinned at the top of the Rooms tab; results replace
    the room list while a query is active. */
-.room-search {
+.room-search-wrap {
+  position: relative;
   flex-shrink: 0;
-  width: calc(100% - 16px);
   margin: 8px 8px 4px;
-  padding: 7px 10px;
+}
+.room-search {
+  width: 100%;
+  padding: 7px 36px 7px 10px; /* right pad leaves room for the close button */
   box-sizing: border-box;
   background: var(--surface2);
   border: 1px solid var(--border);
@@ -360,6 +363,49 @@ body {
 }
 .room-search::placeholder {
   color: var(--text-dim);
+}
+/* Hide the native search clear — absent/inconsistent across mobile browsers — so
+   the custom close button below is the single reliable dismissal affordance. */
+.room-search::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+}
+/* Close/back affordance for the search pane — the one overlay that lacked it.
+   Shown only while a query is active; clears the box and restores the room list,
+   so mobile (no Escape key) has a visible tap target like every other overlay.
+   See DESIGN §3 dismissal contract. */
+.room-search-close {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition:
+    color 0.15s,
+    background 0.15s;
+}
+.room-search-close:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+.room-search-close[hidden] {
+  display: none;
+}
+@media (pointer: coarse) {
+  .room-search-close {
+    width: 36px;
+    height: 36px;
+  }
 }
 .search-results {
   list-style: none;
