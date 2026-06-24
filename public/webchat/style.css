@@ -346,11 +346,14 @@ body {
 /* Room list */
 /* Message search — input pinned at the top of the Rooms tab; results replace
    the room list while a query is active. */
-.room-search {
+.room-search-wrap {
+  position: relative;
   flex-shrink: 0;
-  width: calc(100% - 16px);
   margin: 8px 8px 4px;
-  padding: 7px 10px;
+}
+.room-search {
+  width: 100%;
+  padding: 7px 36px 7px 10px; /* right pad leaves room for the close button */
   box-sizing: border-box;
   background: var(--surface2);
   border: 1px solid var(--border);
@@ -360,6 +363,49 @@ body {
 }
 .room-search::placeholder {
   color: var(--text-dim);
+}
+/* Hide the native search clear — absent/inconsistent across mobile browsers — so
+   the custom close button below is the single reliable dismissal affordance. */
+.room-search::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+}
+/* Close/back affordance for the search pane — the one overlay that lacked it.
+   Shown only while a query is active; clears the box and restores the room list,
+   so mobile (no Escape key) has a visible tap target like every other overlay.
+   See DESIGN §3 dismissal contract. */
+.room-search-close {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition:
+    color 0.15s,
+    background 0.15s;
+}
+.room-search-close:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+.room-search-close[hidden] {
+  display: none;
+}
+@media (pointer: coarse) {
+  .room-search-close {
+    width: 36px;
+    height: 36px;
+  }
 }
 .search-results {
   list-style: none;
@@ -1158,6 +1204,21 @@ button:focus-visible {
     max-width: 90%;
   }
 }
+/* Under ~400px the chip crowds the members count — collapse the chip to "@"
+   (or "+@" when unset) so #members-toggle stays visible. */
+@media (max-width: 400px) {
+  .handle-chip {
+    font-size: 0;
+    padding: 6px 10px;
+  }
+  .handle-chip::after {
+    content: '@';
+    font-size: var(--fs-sm);
+  }
+  .handle-chip.is-unset::after {
+    content: '+@';
+  }
+}
 
 /* File picker button */
 .file-picker-btn {
@@ -1661,6 +1722,48 @@ a.lightbox-btn {
 .thinking-bubble {
   cursor: pointer;
 }
+/* Flex the sender line so the Stop button right-aligns; the leading text/verb/
+   elapsed keep their inline spacing (no gap), so the layout reads unchanged. */
+.thinking-bubble .sender {
+  display: flex;
+  align-items: center;
+}
+/* Stop button — interrupt the in-progress turn (GUI equivalent of CLI ESC). */
+.thinking-stop {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  color: var(--text-dim);
+  font-size: var(--fs-xs, 0.72rem);
+  line-height: 1.5;
+  cursor: pointer;
+  transition:
+    color 0.15s,
+    background 0.15s,
+    border-color 0.15s;
+}
+.thinking-stop:hover {
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--text-dim);
+}
+.thinking-stop .stop-square {
+  width: 7px;
+  height: 7px;
+  border-radius: 1px;
+  background: var(--delete-color);
+}
+@media (pointer: coarse) {
+  .thinking-stop {
+    padding: 5px 11px;
+    font-size: var(--fs-sm, 0.8rem);
+  }
+}
 .thinking-bubble .thinking-chevron {
   display: inline-flex;
   margin-left: 4px;
@@ -1761,6 +1864,38 @@ a.lightbox-btn {
 }
 
 /* Members toggle button */
+/* Right-side header cluster: handle chip + members toggle. Keeps the header's
+   space-between layout (room name left, controls right). */
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* The @handle chip — visual sibling of .members-toggle. */
+.handle-chip {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background var(--transition),
+    color var(--transition),
+    transform var(--transition);
+}
+.handle-chip:hover {
+  background: var(--border);
+  color: var(--text);
+  transform: translateY(-1px);
+}
+.handle-chip.is-unset {
+  color: var(--accent);
+}
 .members-toggle {
   background: var(--surface2);
   border: 1px solid var(--border);
@@ -2872,7 +3007,51 @@ a.lightbox-btn {
   font-weight: 600;
 }
 
-/* Settings → Your @handle field */
+/* @handle editor popover — anchored under the header chip (top-right). Lighter
+   than the modal: token surface + border + subtle shadow, no backdrop. */
+.handle-popover {
+  position: absolute;
+  top: 56px;
+  right: 16px;
+  z-index: 40;
+  width: min(300px, calc(100vw - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px var(--shadow);
+}
+.handle-popover[hidden] {
+  display: none;
+}
+.handle-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+}
+.handle-popover-close {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+  transition: color var(--transition);
+}
+.handle-popover-close:hover {
+  color: var(--text);
+}
+.handle-popover .setting-help {
+  margin: 0;
+}
+
+/* Your @handle field (shared by the popover) */
 .handle-row {
   display: flex;
   align-items: center;

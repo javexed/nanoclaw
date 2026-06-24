@@ -21,6 +21,7 @@
 import type { Session } from '../../types.js';
 import type { AgentActivityStatus } from '../../channels/adapter.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
+import { getAgentGroup } from '../../db/agent-groups.js';
 import { openOutboundDb } from '../../session-manager.js';
 import { getMaxStatusEventSeq, getStatusEventsSince } from '../../db/session-db.js';
 
@@ -71,6 +72,10 @@ export async function forwardSessionStatus(session: Session): Promise<void> {
   const mg = session.messaging_group_id ? getMessagingGroup(session.messaging_group_id) : undefined;
   if (!mg || !mg.platform_id) return;
 
+  // Attribute every frame to its agent so a multi-agent room renders one bubble
+  // per agent (the webchat keys bubbles by name).
+  const agentName = getAgentGroup(session.agent_group_id)?.name ?? null;
+
   let outDb;
   try {
     outDb = openOutboundDb(session.agent_group_id, session.id);
@@ -105,7 +110,7 @@ export async function forwardSessionStatus(session: Session): Promise<void> {
           mg.channel_type,
           mg.platform_id,
           null,
-          { kind, text: ev.text, detail: ev.detail },
+          { kind, text: ev.text, detail: ev.detail, agentName },
           mg.instance,
         );
       } catch {
@@ -143,7 +148,12 @@ export async function notifySessionStopped(session: Session): Promise<void> {
       mg.channel_type,
       mg.platform_id,
       null,
-      { kind: 'stalled', text: 'The agent stopped responding. You may want to resend your message.', detail: null },
+      {
+        kind: 'stalled',
+        text: 'The agent stopped responding. You may want to resend your message.',
+        detail: null,
+        agentName: getAgentGroup(session.agent_group_id)?.name ?? null,
+      },
       mg.instance,
     );
   } catch {
