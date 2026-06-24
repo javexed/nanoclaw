@@ -41,20 +41,26 @@ import { canAccessRoom } from './access.js';
 import { redactSensitiveData } from './redact.js';
 import { getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import { getRunningSessions } from '../../db/sessions.js';
+import { getAgentGroup } from '../../db/agent-groups.js';
 import { writeSessionMessage } from '../../session-manager.js';
 
 /**
- * Deliver a "stop" signal to every live session behind a webchat room (the GUI
- * Stop button — the in-browser equivalent of the CLI's ESC). Writes a trigger=0
- * `interrupt` control row into each running session's inbound.db; the container's
- * poll-loop aborts the active stream when it sees one mid-turn, and treats a
- * stale one (no live stream) as a no-op. Never wakes/spawns a container — there's
- * nothing to interrupt if none is running.
+ * Deliver a "stop" signal to live session(s) behind a webchat room (the GUI Stop
+ * button — the in-browser equivalent of the CLI's ESC). Writes a trigger=0
+ * `interrupt` control row into each targeted running session's inbound.db; the
+ * container's poll-loop aborts the active stream when it sees one mid-turn, and
+ * treats a stale one (no live stream) as a no-op. Never wakes/spawns a container.
+ *
+ * `agentName` (the thinking bubble's per-agent Stop) targets just that agent's
+ * session; omitted, it stops every running agent in the room.
  */
-function interruptRoomSessions(roomId: string): void {
+function interruptRoomSessions(roomId: string, agentName?: string | null): void {
   const mg = getMessagingGroupByPlatform('webchat', roomId);
   if (!mg) return;
-  const sessions = getRunningSessions().filter((s) => s.messaging_group_id === mg.id);
+  let sessions = getRunningSessions().filter((s) => s.messaging_group_id === mg.id);
+  if (agentName) {
+    sessions = sessions.filter((s) => getAgentGroup(s.agent_group_id)?.name === agentName);
+  }
   for (const s of sessions) {
     writeSessionMessage(s.agent_group_id, s.id, {
       id: `interrupt-${randomUUID()}`,
@@ -305,7 +311,8 @@ export function setupWebSocket(
       // ── INTERRUPT (GUI "stop", the ESC equivalent) ───────────────────────
       if (msg.type === 'interrupt') {
         if (!client.room_id) return;
-        interruptRoomSessions(client.room_id);
+        const agentName = typeof msg.agent_name === 'string' ? msg.agent_name : undefined;
+        interruptRoomSessions(client.room_id, agentName);
         return;
       }
 

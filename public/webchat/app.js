@@ -1381,10 +1381,9 @@ function joinRoom(roomId, roomName, jumpMessageId) {
   closeAgentDetail();
   closeRoomDetail();
   closeModelDetail();
-  // Reset any in-progress turn state from the previous room so its bubble /
-  // elapsed timer / reasoning trace can't leak into the new room.
-  endAgentTurn();
-  reasoningLog = [];
+  // Reset any in-progress turn state from the previous room so its bubbles /
+  // elapsed timer / reasoning traces can't leak into the new room.
+  endAllAgentTurns();
   currentRoom = roomId;
   unreadRooms.delete(roomId);
   mentionedRooms.delete(roomId);
@@ -1652,13 +1651,20 @@ function appendMessage(msg, statusText, beforeNode) {
   // then clear it so only the first reply of the turn carries it.
   let thoughtsForThisMsg = null;
   if (isAgent) {
-    if (reasoningLog.length > 0) {
-      thoughtsForThisMsg = reasoningLog.slice();
-      reasoningLog = [];
+    // Fold THIS agent's reasoning onto its reply and clear ITS bubble only — not
+    // another agent's that may still be thinking. Match the reply's sender to its
+    // bubble by name; if there's a lone bubble (single-agent room), use it even
+    // on a name mismatch.
+    let senderBubble = bubbleFor(msg.sender);
+    if (!senderBubble) {
+      const all = document.querySelectorAll('#messages .thinking-bubble');
+      if (all.length === 1) senderBubble = all[0];
     }
-    if (typeof endAgentTurn === 'function') endAgentTurn();
-    const tb = $('#messages .thinking-bubble');
-    if (tb) tb.remove();
+    if (senderBubble) {
+      const log = senderBubble._turn && senderBubble._turn.reasoningLog;
+      if (log && log.length > 0) thoughtsForThisMsg = log.slice();
+      endAgentTurn(senderBubble.dataset.agent);
+    }
   }
   div.className = isA2a ? 'msg a2a' : isMine ? 'msg mine' : isAgent ? 'msg agent' : 'msg other';
   // Highlight messages that @-mention me (not my own). Bubble-level accent +
@@ -5377,18 +5383,21 @@ function renderTypingIndicator() {
   const el = $('#typing-indicator');
   const entries = [...typingUsers.entries()];
   const userTypers = entries.filter(([, v]) => v.identity_type !== 'agent');
-  const hasAgent = entries.some(([, v]) => v.identity_type === 'agent');
+  const typingAgents = entries.filter(([, v]) => v.identity_type === 'agent').map(([n]) => n);
 
-  // The thinking bubble shows while a turn is active (authoritative, from the
-  // status feed) OR while the heartbeat-driven typing signal says the agent is
-  // working (covers pre-status warm containers). It clears only when BOTH are
-  // false — so a quiet stretch in the typing signal can't drop a live turn's
-  // bubble out from under the user.
-  let bubble = $('#messages .thinking-bubble');
-  if (agentTurnActive || hasAgent) {
-    if (!bubble) bubble = ensureThinkingBubble();
-  } else if (bubble) {
-    bubble.remove();
+  // Per-agent thinking bubbles persist while EITHER an authoritative status turn
+  // owns them (data-statusLive, cleared by removal on 'done') OR the heartbeat
+  // typing signal says that agent is working (covers pre-status warm containers).
+  // So a quiet typing stretch never drops a live turn's bubble. Ensure a bubble
+  // for each typing agent; remove only bubbles that are neither status-live nor
+  // currently typing.
+  for (const name of typingAgents) {
+    if (!bubbleFor(name)) ensureThinkingBubble(name);
+  }
+  for (const b of document.querySelectorAll('#messages .thinking-bubble')) {
+    if (b.dataset.statusLive === '1') continue;
+    if (typingAgents.includes(b.dataset.agent)) continue;
+    b.remove();
   }
 
   if (userTypers.length > 0) {
@@ -5429,29 +5438,32 @@ const TOOL_LABELS = {
 //   stalled   → turn ended abnormally (agent died/killed); notice + clear
 function handleStatusEvent(msg) {
   if (msg.room_id !== currentRoom) return;
+  // Each frame names its agent (host stamps agent_name); fall back to the room's
+  // single agent name so old/unattributed frames still land on one bubble.
+  const name = msg.agent_name || agentName || 'Agent';
   switch (msg.event) {
     case 'start':
-      beginAgentTurn();
+      beginAgentTurn(name);
       break;
     case 'tool': {
-      markTurnActivity();
+      markTurnActivity(name);
       const verb = msg.text ? TOOL_LABELS[msg.text] || `Using ${msg.text}` : 'Working';
-      updateThinkingBubble(verb, msg.detail || null);
+      updateThinkingBubble(name, verb, msg.detail || null);
       break;
     }
     case 'progress':
-      markTurnActivity();
-      if (msg.text) setThinkingMilestone(msg.text);
+      markTurnActivity(name);
+      if (msg.text) setThinkingMilestone(name, msg.text);
       break;
     case 'reasoning':
-      markTurnActivity();
-      if (msg.text) pushReasoning(msg.text);
+      markTurnActivity(name);
+      if (msg.text) pushReasoning(name, msg.text);
       break;
     case 'done':
-      endAgentTurn();
+      endAgentTurn(name);
       break;
     case 'stalled':
-      endAgentTurn();
+      endAgentTurn(name);
       appendSystem(msg.text || 'The agent stopped responding. You may want to resend your message.');
       break;
   }
@@ -5462,69 +5474,90 @@ function handleStatusEvent(msg) {
 // stalled), NOT the heartbeat-driven typing signal — so it stays up through
 // long quiet operations and only clears on a real terminal signal. While a
 // turn is active an elapsed counter ticks so liveness is always explicit.
-let agentTurnActive = false;
-let turnStartedAt = 0;
-let lastTurnActivityAt = 0;
-let turnElapsedTimer = null;
+// Per-agent turn state lives ON each bubble element (._turn = {startedAt,
+// lastActivityAt, reasoningLog}), keyed by agent name (data-agent). A
+// multi-agent room shows one bubble per agent instead of interleaving everyone's
+// activity into one; a single-agent room is unchanged. One shared ticker updates
+// every live bubble's elapsed counter.
 const TURN_QUIET_MS = 5000; // after this much silence, say "still working"
+const REASONING_LOG_MAX = 500; // cap a single agent's retained reasoning lines
+let turnElapsedTimer = null;
 
-// Full reasoning trace for the current turn (every line, uncapped by the feed's
-// fade) — powers the click-to-expand full view and the "Thoughts" disclosure
-// folded onto the agent's reply. Session-lived; cleared on turn start / room
-// switch. Bounded so a pathological turn can't grow it without limit.
-let reasoningLog = [];
-const REASONING_LOG_MAX = 500;
-
-function beginAgentTurn() {
-  agentTurnActive = true;
-  turnStartedAt = Date.now();
-  lastTurnActivityAt = Date.now();
-  reasoningLog = [];
-  ensureThinkingBubble();
+// Selector-safe lookup of a specific agent's bubble.
+function bubbleFor(name) {
+  const k = window.CSS && CSS.escape ? CSS.escape(name || 'Agent') : name || 'Agent';
+  return $(`#messages .thinking-bubble[data-agent="${k}"]`);
+}
+function ensureElapsedTimer() {
   if (!turnElapsedTimer) turnElapsedTimer = setInterval(updateTurnElapsed, 1000);
-  updateTurnElapsed();
 }
 
-function endAgentTurn() {
-  agentTurnActive = false;
+function beginAgentTurn(name) {
+  const bubble = ensureThinkingBubble(name);
+  bubble._turn = { startedAt: Date.now(), lastActivityAt: Date.now(), reasoningLog: [] };
+  // Mark the bubble as owned by an active status turn so the typing-heartbeat
+  // path won't remove it during a quiet stretch; cleared by removal on 'done'.
+  bubble.dataset.statusLive = '1';
+  ensureElapsedTimer();
+  updateTurnElapsed();
+  return bubble;
+}
+
+function endAgentTurn(name) {
+  const bubble = bubbleFor(name);
+  if (bubble) bubble.remove();
+  if (turnElapsedTimer && !$('#messages .thinking-bubble')) {
+    clearInterval(turnElapsedTimer);
+    turnElapsedTimer = null;
+  }
+}
+
+// Remove every agent's bubble (room switch / reset).
+function endAllAgentTurns() {
+  for (const b of document.querySelectorAll('#messages .thinking-bubble')) b.remove();
   if (turnElapsedTimer) {
     clearInterval(turnElapsedTimer);
     turnElapsedTimer = null;
   }
-  const bubble = $('#messages .thinking-bubble');
-  if (bubble) bubble.remove();
 }
 
-function markTurnActivity() {
-  lastTurnActivityAt = Date.now();
+function markTurnActivity(name) {
+  const bubble = bubbleFor(name);
+  if (bubble && bubble._turn) bubble._turn.lastActivityAt = Date.now();
 }
 
 function updateTurnElapsed() {
-  if (!agentTurnActive) return;
-  const bubble = $('#messages .thinking-bubble');
-  const el = bubble && bubble.querySelector('.thinking-elapsed');
-  if (!el) return;
-  const secs = Math.floor((Date.now() - turnStartedAt) / 1000);
-  if (secs < 2) {
-    el.textContent = '';
-    return;
+  let any = false;
+  for (const bubble of document.querySelectorAll('#messages .thinking-bubble')) {
+    any = true;
+    const t = bubble._turn;
+    const el = bubble.querySelector('.thinking-elapsed');
+    if (!t || !el) continue;
+    const secs = Math.floor((Date.now() - t.startedAt) / 1000);
+    if (secs < 2) {
+      el.textContent = '';
+      continue;
+    }
+    const quiet = Date.now() - t.lastActivityAt > TURN_QUIET_MS;
+    el.textContent = quiet ? ` · still working ${secs}s` : ` · ${secs}s`;
   }
-  const quiet = Date.now() - lastTurnActivityAt > TURN_QUIET_MS;
-  el.textContent = quiet ? ` · still working ${secs}s` : ` · ${secs}s`;
+  if (!any && turnElapsedTimer) {
+    clearInterval(turnElapsedTimer);
+    turnElapsedTimer = null;
+  }
 }
 
 const THINKING_DETAIL_MAX = 64;
 
-// Interrupt the in-progress agent turn — sends a "stop" over the WS (the GUI
-// equivalent of the CLI's ESC). Optimistically ends the turn UI so it feels
-// instant; the host's stream-abort + 'done' status keeps it ended.
-function interruptAgent() {
+// Interrupt ONE agent's in-progress turn (per-agent Stop) — sends a "stop" over
+// the WS targeting that agent (the host resolves the name to its session). The
+// GUI equivalent of the CLI's ESC. Removes that agent's bubble optimistically;
+// the host's stream-abort + 'done' keep it gone.
+function interruptAgent(name) {
   if (!currentRoom || !ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ type: 'interrupt', room_id: currentRoom }));
-  if (typeof endAgentTurn === 'function') endAgentTurn();
-  const tb = $('#messages .thinking-bubble');
-  if (tb) tb.remove();
-  appendSystem('Stopped.');
+  ws.send(JSON.stringify({ type: 'interrupt', room_id: currentRoom, agent_name: name || null }));
+  endAgentTurn(name);
+  appendSystem(name ? `Stopped ${name}.` : 'Stopped.');
 }
 
 // Ensure the thinking bubble exists and is laid out with: a verb in the sender
@@ -5532,21 +5565,24 @@ function interruptAgent() {
 // progress), and the animated dots. Shared with the heartbeat typing path —
 // both create-or-reuse the single `.thinking-bubble`, so activity persists
 // through the turn and clears when the agent's message lands.
-function ensureThinkingBubble() {
-  let bubble = $('#messages .thinking-bubble');
+function ensureThinkingBubble(name) {
+  const key = name || agentName || 'Agent';
+  let bubble = bubbleFor(key);
   if (bubble) return bubble;
   // Same shouldScroll formula as the 'message' handler — honors forceScrollCount
   // so the bubble follows even when a smooth scroll is still mid-animation.
   const shouldScroll = isNearBottom() || (forceScrollCount > 0 && !userScrolledAway);
   bubble = document.createElement('div');
   bubble.className = 'msg agent thinking-bubble';
+  bubble.dataset.agent = key; // one bubble per agent, keyed by name
+  bubble._turn = { startedAt: Date.now(), lastActivityAt: Date.now(), reasoningLog: [] };
   // Sender line: icon + "{agent} — " + a verb span (refined by tool events) +
   // an elapsed span (ticked while the turn is active). Verb/elapsed live in
   // their own spans so each updates without clobbering the other.
   const sender = document.createElement('div');
   sender.className = 'sender';
   sender.appendChild(lucideEl('bot'));
-  sender.appendChild(document.createTextNode(` ${agentName || 'Agent'} — `));
+  sender.appendChild(document.createTextNode(` ${key} — `));
   const verb = document.createElement('span');
   verb.className = 'thinking-verb';
   verb.textContent = 'Thinking';
@@ -5569,7 +5605,7 @@ function ensureThinkingBubble() {
   stop.innerHTML = '<span class="stop-square" aria-hidden="true"></span>Stop';
   stop.addEventListener('click', (e) => {
     e.stopPropagation();
-    interruptAgent();
+    interruptAgent(key);
   });
   sender.appendChild(stop);
   bubble.appendChild(sender);
@@ -5607,11 +5643,12 @@ function toggleThinkingExpanded(bubble) {
 function renderFullTrace(bubble) {
   const el = bubble.querySelector('.thinking-fulltrace');
   if (!el) return;
-  if (reasoningLog.length === 0) {
+  const log = (bubble._turn && bubble._turn.reasoningLog) || [];
+  if (log.length === 0) {
     el.textContent = 'No reasoning captured for this turn yet.';
   } else {
     el.textContent = '';
-    for (const line of reasoningLog) {
+    for (const line of log) {
       const row = document.createElement('div');
       row.className = 'thinking-fulltrace-line';
       row.textContent = line;
@@ -5621,8 +5658,8 @@ function renderFullTrace(bubble) {
   el.scrollTop = el.scrollHeight;
 }
 
-function updateThinkingBubble(label, detail) {
-  const bubble = ensureThinkingBubble();
+function updateThinkingBubble(name, label, detail) {
+  const bubble = ensureThinkingBubble(name);
   const verbEl = bubble.querySelector('.thinking-verb');
   if (verbEl) verbEl.textContent = label;
   const target = bubble.querySelector('.thinking-target');
@@ -5638,8 +5675,8 @@ function updateThinkingBubble(label, detail) {
   }
 }
 
-function setThinkingMilestone(text) {
-  const bubble = ensureThinkingBubble();
+function setThinkingMilestone(name, text) {
+  const bubble = ensureThinkingBubble(name);
   const el = bubble.querySelector('.thinking-milestone');
   if (el) {
     el.textContent = text;
@@ -5657,12 +5694,13 @@ const REASONING_FADE_MS = 500; // fade-out transition duration (matches CSS)
 // under the top gradient mask. Each line also self-fades after REASONING_FEED_TTL
 // so the feed drains when reasoning pauses; the whole thing clears with the
 // bubble when the agent's message lands. A bounded DOM buffer caps memory.
-function pushReasoning(text) {
-  const bubble = ensureThinkingBubble();
+function pushReasoning(name, text) {
+  const bubble = ensureThinkingBubble(name);
+  if (!bubble._turn) bubble._turn = { startedAt: Date.now(), lastActivityAt: Date.now(), reasoningLog: [] };
 
   // Retain the full line for the click-to-expand view and the reply disclosure.
-  reasoningLog.push(text);
-  if (reasoningLog.length > REASONING_LOG_MAX) reasoningLog.shift();
+  bubble._turn.reasoningLog.push(text);
+  if (bubble._turn.reasoningLog.length > REASONING_LOG_MAX) bubble._turn.reasoningLog.shift();
   // If the user is currently viewing the expanded trace, keep it live.
   if (bubble.classList.contains('expanded')) renderFullTrace(bubble);
 
