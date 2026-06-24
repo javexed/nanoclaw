@@ -115,7 +115,34 @@
         <div id="chat-header">
           <button id="mobile-back" class="mobile-back" aria-label="Back to rooms"><svg class="icon" aria-hidden="true"><use href="#i-chevron-left"></use></svg></button>
           <span id="room-name" role="button" tabindex="0" title="Room settings">Select a room</span>
-          <button id="members-toggle" class="members-toggle" hidden aria-label="Show room members">0</button>
+          <div class="header-controls">
+            <button id="members-toggle" class="members-toggle" hidden aria-label="Show room members">0</button>
+            <button id="handle-chip" class="handle-chip" type="button" aria-label="Edit your handle" aria-haspopup="dialog" aria-expanded="false">+ set @handle</button>
+          </div>
+        </div>
+        <!-- Handle editor popover — anchored under the header chip. Moved out of
+             Settings so the @handle lives where it's surfaced. -->
+        <div id="handle-popover" class="handle-popover" role="dialog" aria-label="Your handle" hidden>
+          <div class="handle-popover-header">
+            <span>Your @handle</span>
+            <button id="handle-popover-close" class="handle-popover-close" type="button" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
+          </div>
+          <div class="handle-row">
+            <span class="handle-at">@</span>
+            <input
+              id="handle-input"
+              type="text"
+              class="handle-input"
+              placeholder="handle"
+              autocomplete="off"
+              autocapitalize="off"
+              spellcheck="false"
+              maxlength="32"
+            />
+            <button id="handle-save" type="button" class="btn btn-secondary">Save</button>
+          </div>
+          <p id="handle-status" class="handle-status" hidden></p>
+          <p class="setting-help">Account-wide — how others @mention you in any room.</p>
         </div>
         <div id="connection-banner" class="connection-banner">Connection lost. Reconnecting…</div>
         <div id="chat-body">
@@ -632,26 +659,6 @@
             <button id="settings-close" class="members-close"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
           </div>
           <div class="modal-body">
-            <h3 class="settings-section-title">Profile</h3>
-            <div class="setting-group">
-              <span class="setting-label">Your @handle</span>
-              <div class="handle-row">
-                <span class="handle-at">@</span>
-                <input
-                  id="handle-input"
-                  type="text"
-                  class="handle-input"
-                  placeholder="handle"
-                  autocomplete="off"
-                  autocapitalize="off"
-                  spellcheck="false"
-                  maxlength="32"
-                />
-                <button id="handle-save" type="button" class="btn btn-secondary">Save</button>
-              </div>
-              <p class="setting-help">How others @mention you in chat.</p>
-              <p id="handle-status" class="handle-status" hidden></p>
-            </div>
             <h3 class="settings-section-title">Preferences</h3>
             <div class="setting-group">
               <span class="setting-label">Theme</span>

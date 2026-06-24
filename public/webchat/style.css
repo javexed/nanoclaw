@@ -1204,6 +1204,21 @@ button:focus-visible {
     max-width: 90%;
   }
 }
+/* Under ~400px the chip crowds the members count — collapse the chip to "@"
+   (or "+@" when unset) so #members-toggle stays visible. */
+@media (max-width: 400px) {
+  .handle-chip {
+    font-size: 0;
+    padding: 6px 10px;
+  }
+  .handle-chip::after {
+    content: '@';
+    font-size: var(--fs-sm);
+  }
+  .handle-chip.is-unset::after {
+    content: '+@';
+  }
+}
 
 /* File picker button */
 .file-picker-btn {
@@ -1849,6 +1864,38 @@ a.lightbox-btn {
 }
 
 /* Members toggle button */
+/* Right-side header cluster: handle chip + members toggle. Keeps the header's
+   space-between layout (room name left, controls right). */
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* The @handle chip — visual sibling of .members-toggle. */
+.handle-chip {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background var(--transition),
+    color var(--transition),
+    transform var(--transition);
+}
+.handle-chip:hover {
+  background: var(--border);
+  color: var(--text);
+  transform: translateY(-1px);
+}
+.handle-chip.is-unset {
+  color: var(--accent);
+}
 .members-toggle {
   background: var(--surface2);
   border: 1px solid var(--border);
@@ -2960,7 +3007,51 @@ a.lightbox-btn {
   font-weight: 600;
 }
 
-/* Settings → Your @handle field */
+/* @handle editor popover — anchored under the header chip (top-right). Lighter
+   than the modal: token surface + border + subtle shadow, no backdrop. */
+.handle-popover {
+  position: absolute;
+  top: 56px;
+  right: 16px;
+  z-index: 40;
+  width: min(300px, calc(100vw - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px var(--shadow);
+}
+.handle-popover[hidden] {
+  display: none;
+}
+.handle-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+}
+.handle-popover-close {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+  transition: color var(--transition);
+}
+.handle-popover-close:hover {
+  color: var(--text);
+}
+.handle-popover .setting-help {
+  margin: 0;
+}
+
+/* Your @handle field (shared by the popover) */
 .handle-row {
   display: flex;
   align-items: center;

@@ -315,14 +315,6 @@ function renderSettingsModal() {
   });
   // Notifications
   $('#notif-toggle').checked = settings.notifications;
-  // @handle — reflect the current handle; clear any stale status line.
-  const handleInput = $('#handle-input');
-  if (handleInput) handleInput.value = myHandle || '';
-  const handleStatus = $('#handle-status');
-  if (handleStatus) {
-    handleStatus.hidden = true;
-    handleStatus.textContent = '';
-  }
 }
 
 // Persist the @handle from the Settings field. Inline feedback (per DESIGN.md):
@@ -355,6 +347,9 @@ async function saveHandle() {
     if (res.ok) {
       myHandle = (((await res.json()).handle || next) + '').toLowerCase();
       input.value = myHandle;
+      renderHandleChip();
+      // Keep the popover open briefly showing the inline "Saved." status,
+      // consistent with the prior in-Settings behavior.
       showStatus('Saved.', true);
     } else if (res.status === 409) {
       showStatus('That handle is taken.', false);
@@ -367,6 +362,58 @@ async function saveHandle() {
     showStatus('Couldn’t save — try again.', false);
   }
 }
+
+// ── Header @handle chip + popover ────────────────────────────────────────────
+// The chip lives top-right in the header; clicking it opens a focused popover to
+// edit + save the handle. The editor (same #handle-input/#handle-save/
+// #handle-status ids) lives here, not in Settings. Inline status only.
+function renderHandleChip() {
+  const chip = $('#handle-chip');
+  if (!chip) return;
+  chip.textContent = myHandle ? `@${myHandle}` : '+ set @handle';
+  chip.classList.toggle('is-unset', !myHandle);
+}
+
+function openHandlePopover() {
+  const pop = $('#handle-popover');
+  const input = $('#handle-input');
+  const status = $('#handle-status');
+  if (!pop) return;
+  if (input) input.value = myHandle || '';
+  if (status) {
+    status.hidden = true;
+    status.textContent = '';
+    status.classList.remove('ok', 'err');
+  }
+  pop.hidden = false;
+  $('#handle-chip')?.setAttribute('aria-expanded', 'true');
+  if (input) input.focus();
+}
+
+function closeHandlePopover() {
+  const pop = $('#handle-popover');
+  if (!pop || pop.hidden) return;
+  pop.hidden = true;
+  $('#handle-chip')?.setAttribute('aria-expanded', 'false');
+}
+
+$('#handle-chip')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const pop = $('#handle-popover');
+  if (pop && pop.hidden) openHandlePopover();
+  else closeHandlePopover();
+});
+$('#handle-popover-close')?.addEventListener('click', closeHandlePopover);
+// Click outside the popover (and not on the chip) closes it.
+document.addEventListener('click', (e) => {
+  const pop = $('#handle-popover');
+  if (!pop || pop.hidden) return;
+  if (pop.contains(e.target) || e.target === $('#handle-chip')) return;
+  closeHandlePopover();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeHandlePopover();
+});
 
 // Apply on load
 applySettings();
@@ -827,6 +874,8 @@ async function fetchMyHandle() {
   } catch {
     /* non-fatal — mentions just won't self-highlight until next load */
   }
+  // Reflect the loaded handle in the header chip.
+  renderHandleChip();
 }
 
 // True when `text` contains an @-mention of the current user's handle. Mirrors
