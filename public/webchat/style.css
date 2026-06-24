@@ -1661,6 +1661,48 @@ a.lightbox-btn {
 .thinking-bubble {
   cursor: pointer;
 }
+/* Flex the sender line so the Stop button right-aligns; the leading text/verb/
+   elapsed keep their inline spacing (no gap), so the layout reads unchanged. */
+.thinking-bubble .sender {
+  display: flex;
+  align-items: center;
+}
+/* Stop button — interrupt the in-progress turn (GUI equivalent of CLI ESC). */
+.thinking-stop {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  color: var(--text-dim);
+  font-size: var(--fs-xs, 0.72rem);
+  line-height: 1.5;
+  cursor: pointer;
+  transition:
+    color 0.15s,
+    background 0.15s,
+    border-color 0.15s;
+}
+.thinking-stop:hover {
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--text-dim);
+}
+.thinking-stop .stop-square {
+  width: 7px;
+  height: 7px;
+  border-radius: 1px;
+  background: var(--delete-color);
+}
+@media (pointer: coarse) {
+  .thinking-stop {
+    padding: 5px 11px;
+    font-size: var(--fs-sm, 0.8rem);
+  }
+}
 .thinking-bubble .thinking-chevron {
   display: inline-flex;
   margin-left: 4px;

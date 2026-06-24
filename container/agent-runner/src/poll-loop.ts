@@ -121,7 +121,14 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   while (true) {
     if (config.signal?.aborted) return;
     // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
-    const messages = getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system');
+    const rawPending = getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system');
+    // Interrupt rows are control signals delivered by the host (GUI/CLI "stop").
+    // Mid-turn they're caught by the active-stream poll below and abort the
+    // query; one that lands here (between turns / no live stream) has nothing to
+    // stop — consume it so it never starts a turn of its own.
+    const staleInterrupts = rawPending.filter((m) => m.kind === 'interrupt');
+    if (staleInterrupts.length > 0) markCompleted(staleInterrupts.map((m) => m.id));
+    const messages = rawPending.filter((m) => m.kind !== 'interrupt');
     isFirstPoll = false;
     pollCount++;
 
@@ -476,6 +483,24 @@ export async function processQuery(
     void (async () => {
       try {
         const pending = getPendingMessages();
+
+        // Interrupt: a host-delivered "stop" signal (GUI Stop button / CLI ESC).
+        // Abort the active stream and mark this turn done — interrupt means
+        // "stop", never "respond", so unlike a slash command we DON'T leave rows
+        // pending for the outer loop: consume the interrupt row(s) and the
+        // triggering batch, then emit a clean 'done' so the host clears the
+        // thinking bubble (a stream that ends with no 'done' is read as a
+        // mid-turn death and warns the room — see src/modules/agent-status).
+        const interruptIds = pending.filter((m) => m.kind === 'interrupt').map((m) => m.id);
+        if (interruptIds.length > 0) {
+          log('Interrupt received — aborting active stream');
+          markCompleted(interruptIds);
+          markCompleted(initialBatchIds);
+          appendStatusEvent('done', null);
+          endedForCommand = true; // stop the poll from re-entering while we abort
+          query.abort();
+          return;
+        }
 
         // Slash commands need a fresh query: /clear resets the SDK's
         // resume id (fixed at sdkQuery() time); admin/passthrough commands
