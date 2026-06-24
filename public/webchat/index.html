@@ -90,14 +90,19 @@
           <ul id="approval-list" class="approvals-banner-list" hidden></ul>
         </div>
         <div id="tab-rooms" class="tab-content active">
-          <input
-            id="room-search"
-            class="room-search"
-            type="search"
-            placeholder="Search messages…"
-            autocomplete="off"
-            aria-label="Search messages across your rooms"
-          />
+          <div class="room-search-wrap">
+            <input
+              id="room-search"
+              class="room-search"
+              type="search"
+              placeholder="Search messages…"
+              autocomplete="off"
+              aria-label="Search messages across your rooms"
+            />
+            <button id="room-search-close" class="room-search-close" type="button" hidden aria-label="Close search">
+              <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+            </button>
+          </div>
           <ul id="search-results" class="search-results" hidden></ul>
           <ul id="room-list"></ul>
           <button id="archived-toggle" class="archived-toggle" type="button" hidden></button>

@@ -1430,6 +1430,8 @@ function clearRoomSearch() {
   }
   const roomList = $('#room-list');
   if (roomList) roomList.hidden = false;
+  const close = $('#room-search-close');
+  if (close) close.hidden = true;
 }
 
 function renderSearchResults(results) {
@@ -1462,6 +1464,10 @@ function renderSearchResults(results) {
 
 $('#room-search')?.addEventListener('input', (e) => {
   const q = e.target.value.trim();
+  // Show the close/back affordance whenever a query is active (immediate, not
+  // debounced) so the dismissal control is there the moment search begins.
+  const closeBtn = $('#room-search-close');
+  if (closeBtn) closeBtn.hidden = !q;
   clearTimeout(searchDebounce);
   if (!q) {
     clearRoomSearch();
@@ -1477,6 +1483,16 @@ $('#room-search')?.addEventListener('input', (e) => {
       renderSearchResults([]);
     }
   }, 250);
+});
+
+// Close/back button — the visible dismissal affordance the search pane lacked.
+// Mobile has no Escape key and the native search clear is unreliable, so this is
+// the tap target that returns you to the room list (same effect as Escape).
+$('#room-search-close')?.addEventListener('click', () => {
+  const input = $('#room-search');
+  if (input) input.value = '';
+  clearRoomSearch();
+  if (input) input.blur();
 });
 
 $('#search-results')?.addEventListener('click', (e) => {
