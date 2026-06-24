@@ -144,6 +144,13 @@ export interface AgentActivityStatus {
   kind: 'start' | 'tool' | 'progress' | 'reasoning' | 'done' | 'stalled';
   text: string | null;
   detail: string | null;
+  /**
+   * Which agent this activity is from — its display name (the agent group's
+   * name). Lets a multi-agent room render one thinking bubble per agent instead
+   * of interleaving everyone's activity into one. Null on the rare frame where
+   * the agent group can't be resolved (renders under a generic label).
+   */
+  agentName?: string | null;
 }
 
 /** Discovered conversation info (from syncConversations). */
