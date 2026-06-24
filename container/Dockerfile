@@ -106,6 +106,16 @@ COPY cli-tools.json install-cli-tools.sh /tmp/
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     sh /tmp/install-cli-tools.sh /tmp/cli-tools.json
 
+# ---- rtk (token-compression proxy, invoked via the PreToolUse hook) ----------
+# Static musl binary → runs on the glibc base. Baked into the image (NOT mounted)
+# because this install's mount-security rejects absolute container mount paths.
+ARG RTK_VERSION=v0.42.0
+RUN curl -fsSL "https://github.com/rtk-ai/rtk/releases/download/${RTK_VERSION}/rtk-x86_64-unknown-linux-musl.tar.gz" -o /tmp/rtk.tar.gz && \
+    tar -xzf /tmp/rtk.tar.gz -C /usr/local/bin rtk && \
+    chmod +x /usr/local/bin/rtk && \
+    rm -f /tmp/rtk.tar.gz && \
+    /usr/local/bin/rtk --version
+
 # ---- ncl CLI wrapper ----------------------------------------------------------
 # Actual script lives in the mounted source at /app/src/cli/ncl.ts.
 RUN printf '#!/bin/sh\nexec bun /app/src/cli/ncl.ts "$@"\n' > /usr/local/bin/ncl && \
