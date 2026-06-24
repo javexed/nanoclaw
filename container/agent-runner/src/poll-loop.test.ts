@@ -1,6 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
-import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
+import {
+  initTestSessionDb,
+  closeSessionDb,
+  getInboundDb,
+  getOutboundDb,
+  appendStatusEvent,
+  clearStatusEvents,
+} from './db/connection.js';
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
@@ -452,5 +459,26 @@ describe('isCorruptionError', () => {
     expect(isCorruptionError('database is locked')).toBe(false);
     expect(isCorruptionError('no such table: messages_in')).toBe(false);
     expect(isCorruptionError('')).toBe(false);
+  });
+});
+
+describe('webchat thinking feed cycling (follow-ups in an active query)', () => {
+  function statusKinds(): string[] {
+    return (getOutboundDb().prepare('SELECT kind FROM status_events ORDER BY seq ASC').all() as { kind: string }[]).map(
+      (r) => r.kind,
+    );
+  }
+
+  it('emits a status "done" when a result lands so the bubble settles', async () => {
+    // The outer poll loop seeds 'start' before calling processQuery.
+    clearStatusEvents();
+    appendStatusEvent('start', null);
+
+    const { query } = makeResultQuery({ type: 'result', text: 'bare text, no envelope' });
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    // Without the fix, processQuery never appends 'done' (the outer-loop 'done'
+    // is outside processQuery), so the bubble would never settle on a result.
+    expect(statusKinds()).toContain('done');
   });
 });
