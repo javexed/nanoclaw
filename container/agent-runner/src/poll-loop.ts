@@ -559,6 +559,14 @@ export async function processQuery(
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
+        // Webchat thinking feed: a follow-up pushed into the active query is a
+        // new sub-turn for the UI. Reset the feed and re-seed 'start' so the
+        // bubble reflects only this follow-up's activity — mirrors the per-turn
+        // reset at the top of the outer poll loop. Without this, a busy room
+        // that streams follow-ups into one long-lived query freezes the feed at
+        // the first sub-turn's snapshot. Cosmetic / best-effort.
+        clearStatusEvents();
+        appendStatusEvent('start', null);
         query.push(prompt);
         archivePrompts.push(prompt);
         markCompleted(keptIds);
@@ -641,6 +649,12 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        // Webchat thinking feed: settle the bubble for this sub-turn. Interim
+        // results inside a still-open query never reach the outer-loop 'done'
+        // (that fires only when the whole query ends), so without this the
+        // bubble would keep showing the last activity line. Cosmetic; the
+        // next follow-up re-seeds 'start'. Pairs with the reset at the push.
+        appendStatusEvent('done', null);
         if (event.text) {
           const { sent, hasUnwrapped } = dispatchResultText(event.text, routing);
           if (sent === 0 && event.isError === true) {
