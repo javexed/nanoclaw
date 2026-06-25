@@ -2811,18 +2811,32 @@ function decorateMentions(bubble) {
 // ── Members panel ─────────────────────────────────────────────────────────
 let currentMembers = [];
 
+let membersFilter = ''; // lowercased; filters the room members list
+
 function renderMembers(members) {
   currentMembers = members;
-  const list = $('#members-list');
   const toggle = $('#members-toggle');
-  toggle.textContent = members.length;
+  toggle.textContent = members.length; // full count — independent of the filter
   toggle.hidden = !currentRoom;
+  paintMembersList();
+}
 
+// Render #members-list from currentMembers, applying the search filter. Split
+// from renderMembers so the search box can re-paint without a re-fetch.
+function paintMembersList() {
+  const list = $('#members-list');
   list.innerHTML = '';
-  const sorted = [...members].sort((a, b) => {
+  let sorted = [...currentMembers].sort((a, b) => {
     if (a.identity_type !== b.identity_type) return a.identity_type === 'agent' ? -1 : 1;
     return a.identity.localeCompare(b.identity);
   });
+  if (membersFilter) {
+    sorted = sorted.filter((m) => `${m.identity} ${m.handle || ''}`.toLowerCase().includes(membersFilter));
+  }
+  if (sorted.length === 0) {
+    list.innerHTML = '<li class="member-empty">No members match.</li>';
+    return;
+  }
   for (const m of sorted) {
     const li = document.createElement('li');
     const dot = document.createElement('span');
@@ -2859,6 +2873,10 @@ function toggleMembersPanel() {
 
 $('#members-toggle').addEventListener('click', toggleMembersPanel);
 $('#members-close').addEventListener('click', toggleMembersPanel);
+$('#members-search')?.addEventListener('input', (e) => {
+  membersFilter = e.target.value.trim().toLowerCase();
+  paintMembersList();
+});
 $('#members-overlay').addEventListener('click', toggleMembersPanel);
 
 // ── Detail-panel backdrop (mobile-only via CSS) ─────────────────────────────
@@ -3641,6 +3659,8 @@ function userRoleSummary(u) {
   return parts.join(' · ') || 'no roles';
 }
 
+let permsUserFilter = ''; // lowercased; filters the user list by name + id
+
 function renderPermsUserList() {
   const list = $('#perms-user-list');
   list.innerHTML = '';
@@ -3657,7 +3677,16 @@ function renderPermsUserList() {
     if (ta !== tb) return ta - tb;
     return userDisplayName(a).localeCompare(userDisplayName(b));
   });
-  sorted.forEach((u) => {
+  // Filter by the search box — match on display name AND the namespaced id, so
+  // you can find someone by handle/email or by channel prefix (e.g. "slack:").
+  const rows = permsUserFilter
+    ? sorted.filter((u) => `${userDisplayName(u)} ${u.id}`.toLowerCase().includes(permsUserFilter))
+    : sorted;
+  if (rows.length === 0) {
+    list.innerHTML = '<li class="perms-empty" style="padding:16px;">No users match.</li>';
+    return;
+  }
+  rows.forEach((u) => {
     const li = document.createElement('li');
     li.tabIndex = 0;
     if (u.id === permsSelectedUserId) li.classList.add('active');
@@ -3696,6 +3725,11 @@ function renderPermsUserList() {
     list.appendChild(li);
   });
 }
+
+$('#perms-user-search')?.addEventListener('input', (e) => {
+  permsUserFilter = e.target.value.trim().toLowerCase();
+  renderPermsUserList();
+});
 
 function permsSelectUser(userId) {
   permsSelectedUserId = userId;
