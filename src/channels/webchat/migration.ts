@@ -523,3 +523,31 @@ export const moduleWebchatUserHandles: Migration = {
     `);
   },
 };
+
+/**
+ * Per-user room pins. The sidebar sorts rooms by recent activity (newest
+ * message first); pinned rooms are lifted into a sticky group at the top, above
+ * a divider, so the ones you care about don't drift down as other rooms get
+ * traffic. Each user controls their own pins — pinning only affects their view.
+ *
+ * Keyed on the trusted webchat `user_id` (same as webchat_room_reads /
+ * webchat_user_room_hides), so a pin follows the user across all their devices.
+ * `room_id` is `messaging_groups.platform_id` (no FK; deleteWebchatRoom clears
+ * rows in app code).
+ */
+export const moduleWebchatRoomPins: Migration = {
+  version: 114,
+  name: 'webchat-room-pins',
+  up(db: Database.Database) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS webchat_room_pins (
+        user_id   TEXT NOT NULL,
+        room_id   TEXT NOT NULL,
+        pinned_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, room_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_webchat_room_pins_user
+        ON webchat_room_pins(user_id);
+    `);
+  },
+};

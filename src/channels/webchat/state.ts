@@ -23,6 +23,8 @@ import {
   getHiddenRoomIdsForUser,
   getSharedWebchatRooms,
   getMentionedRoomIdsForUser,
+  getPinnedRoomIdsForUser,
+  getRoomLastActivity,
   getUnreadRoomIdsForUser,
   getWebchatRoom,
   getWebchatUserHandle,
@@ -274,11 +276,23 @@ export function annotateRoomsForUser(
   userId: string,
   allRooms: WebchatRoom[] = getAllWebchatRooms(),
   archivedSet: Set<string> = getArchivedRoomIds(),
-): Array<WebchatRoom & { archived: boolean; hidden: boolean; canArchive: boolean; unread: boolean; mention: boolean }> {
+  activityMap: Map<string, number> = getRoomLastActivity(),
+): Array<
+  WebchatRoom & {
+    archived: boolean;
+    hidden: boolean;
+    canArchive: boolean;
+    unread: boolean;
+    mention: boolean;
+    pinned: boolean;
+    last_activity: number;
+  }
+> {
   const visible = filterRoomsForUser(userId, allRooms);
   const hiddenSet = getHiddenRoomIdsForUser(userId); // per-user
   const unreadSet = getUnreadRoomIdsForUser(userId); // per-user
   const mentionSet = getMentionedRoomIdsForUser(userId, getWebchatUserHandle(userId) ?? ''); // per-user
+  const pinnedSet = getPinnedRoomIdsForUser(userId); // per-user
   return visible.map((r) => ({
     ...r,
     archived: archivedSet.has(r.id),
@@ -286,15 +300,21 @@ export function annotateRoomsForUser(
     canArchive: canArchiveRoom(userId, r.id),
     unread: unreadSet.has(r.id),
     mention: mentionSet.has(r.id),
+    pinned: pinnedSet.has(r.id),
+    // Newest-message time drives the "Recent" sort; fall back to created_at.
+    last_activity: activityMap.get(r.id) ?? r.created_at,
   }));
 }
 
 export function broadcastRooms(): void {
   const allRooms = getAllWebchatRooms();
   const archivedSet = getArchivedRoomIds(); // global, computed once per broadcast
+  const activityMap = getRoomLastActivity(); // global, computed once per broadcast
   for (const c of clients.values()) {
     if (c.ws.readyState !== WebSocket.OPEN) continue;
-    c.ws.send(JSON.stringify({ type: 'rooms', rooms: annotateRoomsForUser(c.userId, allRooms, archivedSet) }));
+    c.ws.send(
+      JSON.stringify({ type: 'rooms', rooms: annotateRoomsForUser(c.userId, allRooms, archivedSet, activityMap) }),
+    );
   }
 }
 
