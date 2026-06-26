@@ -4943,6 +4943,17 @@ async function openRoomDetail(roomId) {
   const room = lastRoomsList.find((r) => r.id === roomId);
   $('#room-detail-title').textContent = room ? `${room.name} — settings` : 'Room settings';
 
+  // Rename field — owner-only (the server also enforces). Prefilled with the
+  // current name; saving PUTs /name and the server's broadcastRooms refreshes
+  // the sidebar + this panel's title.
+  const renameField = $('#room-rename-field');
+  if (isOwnerView && room) {
+    renameField.hidden = false;
+    $('#room-rename-input').value = room.name || '';
+  } else {
+    renameField.hidden = true;
+  }
+
   // Hide the add-agent form when opening
   $('#room-add-agent-form').hidden = true;
 
@@ -4969,6 +4980,30 @@ function closeRoomDetail() {
   $('#room-edit-view').hidden = false;
   $('#room-create-view').hidden = true;
   selectedRoomId = null;
+}
+
+// Rename the selected room. Owner-only (the field is hidden otherwise, and the
+// server re-checks). The server's broadcastRooms() pushes the new name, so the
+// sidebar + panel title update via the 'rooms' handler — no manual refresh.
+async function saveRoomName() {
+  const id = selectedRoomId;
+  if (!id) return;
+  const name = $('#room-rename-input').value.trim();
+  if (!name) {
+    showToast('Enter a room name', { kind: 'error' });
+    return;
+  }
+  try {
+    const r = await authFetch(`/api/rooms/${encodeURIComponent(id)}/name`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    showToast('Room renamed', { kind: 'success' });
+  } catch (err) {
+    showToast('Rename failed: ' + (err.message || err), { kind: 'error' });
+  }
 }
 
 // Engage mode for the currently-loaded room. Populated alongside the agents
@@ -5281,6 +5316,13 @@ $('#room-name').addEventListener('keydown', (e) => {
 });
 $('#room-detail-close').addEventListener('click', closeRoomDetail);
 $('#room-delete').addEventListener('click', deleteCurrentRoom);
+$('#room-rename-save')?.addEventListener('click', saveRoomName);
+$('#room-rename-input')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    saveRoomName();
+  }
+});
 $('#room-archive-toggle').addEventListener('click', async () => {
   if (!selectedRoomId) return;
   const room = lastRoomsList.find((r) => r.id === selectedRoomId);

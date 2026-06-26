@@ -16,6 +16,7 @@
  *   DELETE /api/rooms/:id/prime                  clear the room's prime designation  [owner]
  *   GET  /api/rooms/:id/engage-mode              read room's engage default ('mention-only' | 'broadcast')
  *   PUT  /api/rooms/:id/engage-mode              set { mode } for the room  [owner]
+ *   PUT  /api/rooms/:id/name                     rename the room (set { name })  [owner]
  *   GET  /api/rooms/:id/messages                 history (?after_id= catch-up, ?before_id= scroll-back)
  *   POST /api/rooms/:id/archive                  mark room archived (owner + admin) — global
  *   POST /api/rooms/:id/unarchive                clear global archive (owner + admin)
@@ -155,6 +156,8 @@ import {
   getWebchatHandleUsers,
   getWebchatRoom,
   getWebchatUserHandle,
+  sanitizeRoomName,
+  updateWebchatRoomName,
   hideRoomForUser,
   listWebchatModels,
   setPrimeAgentForWebchatRoom,
@@ -615,6 +618,31 @@ async function handleHttp(
     recomputeEngagePatterns(roomId);
     broadcastRooms();
     return json(res, 200, { ok: true, mode: body.mode });
+  }
+
+  // Rename a room (its messaging_groups.name). Owner-only; broadcastRooms pushes
+  // the new title to every connected client live.
+  const roomNameMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/name$/);
+  if (roomNameMatch && method === 'PUT') {
+    if (req.headers['x-webchat-csrf'] !== '1') {
+      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    }
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const roomId = decodeURIComponent(roomNameMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { name?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    const name = sanitizeRoomName(body.name);
+    if (name === null) return json(res, 400, { error: 'name must be 1–80 characters' });
+    updateWebchatRoomName(roomId, name);
+    broadcastRooms();
+    return json(res, 200, { ok: true, name });
   }
 
   // Room → agent → model topology for the explore view, scoped to the caller's

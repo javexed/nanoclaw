@@ -4367,3 +4367,16 @@ a.lightbox-btn {
   text-align: left;
 }
 .agent-show-archived:hover { color: var(--text); }
+
+/* Room rename (room settings panel) */
+.room-rename-row {
+  display: flex;
+  gap: 0.5rem;
+}
+.room-rename-row input[type='text'] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.room-rename-row .btn {
+  flex: 0 0 auto;
+}

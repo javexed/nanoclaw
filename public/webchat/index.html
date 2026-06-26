@@ -279,6 +279,13 @@
                 <button id="room-detail-close" class="members-close"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
               </div>
               <div class="agent-detail-form">
+                <label id="room-rename-field" hidden>
+                  <span class="form-label">Room name</span>
+                  <span class="room-rename-row">
+                    <input id="room-rename-input" type="text" maxlength="80" autocomplete="off" placeholder="Room name" />
+                    <button type="button" id="room-rename-save" class="btn btn-secondary">Save</button>
+                  </span>
+                </label>
                 <div>
                   <span class="form-label">Wired agents</span>
                   <ul id="room-wired-agents" class="room-wired-agents"></ul>

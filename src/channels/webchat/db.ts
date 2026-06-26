@@ -247,6 +247,23 @@ export function getAllWebchatRooms(): WebchatRoom[] {
   return rows.map(rowToRoom);
 }
 
+/**
+ * Clean a user-supplied room name: strip control characters, collapse internal
+ * whitespace, trim, and bound the length. Returns null when the result is empty
+ * or longer than 80 chars — the caller rejects those. Keeps a room name from
+ * becoming an invisible or unwieldy string in the sidebar.
+ */
+export function sanitizeRoomName(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const name = raw
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!name || name.length > 80) return null;
+  return name;
+}
+
 export function updateWebchatRoomName(id: string, name: string): void {
   getDb()
     .prepare(`UPDATE messaging_groups SET name = ? WHERE channel_type='webchat' AND platform_id = ?`)
