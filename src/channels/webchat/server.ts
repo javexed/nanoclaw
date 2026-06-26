@@ -187,6 +187,7 @@ import {
   setRoomOauthAllowed,
 } from './db.js';
 import { onboardByokCredential, onboardByokOauth, revokeByokCredential } from '../../modules/byok/onboard.js';
+import { startClaudeMint, mintClaudeToken, cancelMint } from './oauth-mint.js';
 import { realOnecliAdmin } from '../../modules/byok/onecli-admin.js';
 import { userHasActiveKey, getByokCredential } from '../../modules/byok/db.js';
 import { broadcast, broadcastRooms } from './state.js';
@@ -590,6 +591,54 @@ async function handleHttp(
       return json(res, 502, { error: 'Credential setup failed — check OneCLI is running.' });
     }
     return json(res, 200, { ok: true });
+  }
+
+  // ── BYOK OAuth browser-mint: get a setup-token without a terminal ──────────
+  // A member signs in to their Claude subscription entirely in the browser; the
+  // server runs `claude setup-token` in a throwaway container, scrapes the URL,
+  // takes the pasted code, captures the token, and onboards it per-member via
+  // onboardByokOauth — the same storage the paste path uses, minus the terminal.
+  // Same gates as the OAuth paste path: room access + the room's OAuth opt-in
+  // (+ own-use acknowledgment on the final step).
+  const byokMintMatch = url.pathname.match(/^\/api\/byok\/oauth\/(start|code|cancel)$/);
+  if (byokMintMatch && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { roomId?: unknown; sessionId?: unknown; code?: unknown; acknowledged?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    const step = byokMintMatch[1];
+    if (step === 'cancel') {
+      if (typeof body.sessionId === 'string') cancelMint(userId, body.sessionId);
+      return json(res, 200, { ok: true });
+    }
+    const roomId = typeof body.roomId === 'string' ? body.roomId : '';
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    if (!getRoomOauthAllowed(roomId))
+      return json(res, 403, { error: 'This room does not allow subscription (OAuth) connections.' });
+    const groups = getAgentsForWebchatRoom(roomId);
+    if (groups.length === 0) return json(res, 400, { error: 'Room has no wired agent' });
+    try {
+      if (step === 'start') {
+        const { sessionId, url: signinUrl } = await startClaudeMint(userId);
+        return json(res, 200, { sessionId, url: signinUrl });
+      }
+      // step === 'code': require the own-use acknowledgment, mint, then onboard.
+      if (body.acknowledged !== true)
+        return json(res, 400, { error: 'You must acknowledge this connects your own subscription for your own use.' });
+      if (typeof body.sessionId !== 'string' || typeof body.code !== 'string')
+        return json(res, 400, { error: 'sessionId and code required' });
+      const token = await mintClaudeToken(userId, body.sessionId, body.code);
+      for (const g of groups) await onboardByokOauth(realOnecliAdmin, userId, g.id, userId, token);
+      return json(res, 200, { ok: true });
+    } catch (err) {
+      return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
+    }
   }
 
   const roomAgentMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/agents\/([^/]+)$/);
