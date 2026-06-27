@@ -2307,11 +2307,13 @@ a.lightbox-btn {
   font-size: var(--fs-sm);
   font-weight: 600;
 }
-/* Mode as a radio list (all options visible, no dropdown). */
+/* Mode as inline radios (all three on one row). */
 .room-cred-modes {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 18px;
   font-size: var(--fs-sm);
 }
 .room-cred-opt {
