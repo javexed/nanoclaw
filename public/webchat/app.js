@@ -1243,12 +1243,7 @@ function renderRooms(rooms) {
   // Divider sentinel between the pinned group and the rest — only when both
   // groups are non-empty.
   const showDivider = pinned.length > 0 && unpinned.length > 0;
-  const toRender = [
-    ...pinned,
-    ...(showDivider ? [ROOM_DIVIDER] : []),
-    ...unpinned,
-    ...(showArchived ? archived : []),
-  ];
+  const toRender = [...pinned, ...(showDivider ? [ROOM_DIVIDER] : []), ...unpinned, ...(showArchived ? archived : [])];
 
   for (let i = 0; i < toRender.length; i++) {
     const room = toRender[i];
@@ -2938,9 +2933,7 @@ function tryActivateMention(input) {
   }
   mentionStart = i;
   const token = value.slice(i + 1, cursor).toLowerCase();
-  mentionMatches = mentionPool
-    .filter((a) => a.folder.toLowerCase().startsWith(token))
-    .slice(0, 8);
+  mentionMatches = mentionPool.filter((a) => a.folder.toLowerCase().startsWith(token)).slice(0, 8);
   mentionSelectedIndex = 0;
   if (mentionMatches.length === 0) {
     dismissMentionPopover();
@@ -3124,9 +3117,7 @@ $('#members-overlay').addEventListener('click', toggleMembersPanel);
 (function () {
   const overlay = $('#detail-overlay');
   if (!overlay) return; // index.html older than this build — graceful no-op
-  const panels = ['#agent-detail', '#room-detail', '#model-detail']
-    .map((s) => $(s))
-    .filter(Boolean);
+  const panels = ['#agent-detail', '#room-detail', '#model-detail'].map((s) => $(s)).filter(Boolean);
   const app = $('#app');
   let detailViewSynced = false;
   const closeAllDetailPanels = () => {
@@ -3262,12 +3253,13 @@ function renderApprovalCard(a, options) {
 
   const actions = document.createElement('div');
   actions.className = 'approval-actions';
-  const optionList = Array.isArray(a.options) && a.options.length
-    ? a.options
-    : [
-        { label: 'Approve', value: 'approve' },
-        { label: 'Reject', value: 'reject' },
-      ];
+  const optionList =
+    Array.isArray(a.options) && a.options.length
+      ? a.options
+      : [
+          { label: 'Approve', value: 'approve' },
+          { label: 'Reject', value: 'reject' },
+        ];
   optionList.forEach((opt) => {
     const btn = document.createElement('button');
     btn.textContent = opt.label || opt.value;
@@ -3352,8 +3344,15 @@ function handleApprovalEvent(msg) {
   showApprovalToast(msg);
   fetchApprovals();
   // Desktop notification when settings allow + tab not focused.
-  if (settings.notifications && document.hidden && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-    try { new Notification(msg.title || 'Approval requested', { body: msg.question || '' }); } catch {}
+  if (
+    settings.notifications &&
+    document.hidden &&
+    typeof Notification !== 'undefined' &&
+    Notification.permission === 'granted'
+  ) {
+    try {
+      new Notification(msg.title || 'Approval requested', { body: msg.question || '' });
+    } catch {}
   }
 }
 
@@ -3903,13 +3902,15 @@ function renderPermsUserList() {
   const list = $('#perms-user-list');
   list.innerHTML = '';
   if (permsUsers.length === 0) {
-    list.innerHTML = '<li class="perms-empty" style="padding:16px;">No users yet — anyone who authenticates will appear here.</li>';
+    list.innerHTML =
+      '<li class="perms-empty" style="padding:16px;">No users yet — anyone who authenticates will appear here.</li>';
     return;
   }
   // Sort: you first, then owners, then admins, then everyone else, alphabetical
   // within each tier. Cheap stable enough for personal-scale.
   const sorted = [...permsUsers].sort((a, b) => {
-    const tier = (u) => (u.id === myUserId ? 0 : userIsOwner(u) ? 1 : userIsGlobalAdmin(u) || userScopedAdminCount(u) ? 2 : 3);
+    const tier = (u) =>
+      u.id === myUserId ? 0 : userIsOwner(u) ? 1 : userIsGlobalAdmin(u) || userScopedAdminCount(u) ? 2 : 3;
     const ta = tier(a);
     const tb = tier(b);
     if (ta !== tb) return ta - tb;
@@ -4008,8 +4009,16 @@ function renderPermsDetail(userId) {
   // ── GLOBAL section: Owner + Global admin toggles ──
   const globalEl = $('#perms-global-toggles');
   globalEl.innerHTML = '';
-  globalEl.appendChild(buildToggleRow(u, 'Owner', '👑 ', findRole(u, 'owner', null), () => togglePerm(u.id, 'owner', null, !findRole(u, 'owner', null))));
-  globalEl.appendChild(buildToggleRow(u, 'Global admin', '', findRole(u, 'admin', null), () => togglePerm(u.id, 'admin', null, !findRole(u, 'admin', null))));
+  globalEl.appendChild(
+    buildToggleRow(u, 'Owner', '👑 ', findRole(u, 'owner', null), () =>
+      togglePerm(u.id, 'owner', null, !findRole(u, 'owner', null)),
+    ),
+  );
+  globalEl.appendChild(
+    buildToggleRow(u, 'Global admin', '', findRole(u, 'admin', null), () =>
+      togglePerm(u.id, 'admin', null, !findRole(u, 'admin', null)),
+    ),
+  );
 
   // ── PER-AGENT-GROUP matrix ──
   const matrix = $('#perms-matrix');
@@ -4068,9 +4077,7 @@ function renderPermsDetail(userId) {
     deleteZone.hidden = isSelf;
     if (deleteBtn) {
       deleteBtn.disabled = hasRolesOrMemberships;
-      deleteBtn.title = hasRolesOrMemberships
-        ? 'Revoke all roles and memberships before deleting'
-        : '';
+      deleteBtn.title = hasRolesOrMemberships ? 'Revoke all roles and memberships before deleting' : '';
     }
   }
 }
@@ -4211,9 +4218,11 @@ function applyCreateAuthDefault() {
   if (m.tailscale) {
     hint.textContent = 'This install signs people in via Tailscale — they appear as webchat:tailscale:<email>.';
   } else if (m.proxy) {
-    hint.textContent = 'This install signs people in via SSO / reverse proxy (e.g. Entra ID) — they appear as webchat:<email>.';
+    hint.textContent =
+      'This install signs people in via SSO / reverse proxy (e.g. Entra ID) — they appear as webchat:<email>.';
   } else if (m.bearer) {
-    hint.textContent = 'This install uses a shared bearer token — per-user ids only differ when a proxy or Tailscale also fronts it.';
+    hint.textContent =
+      'This install uses a shared bearer token — per-user ids only differ when a proxy or Tailscale also fronts it.';
   } else {
     hint.textContent = '';
   }
@@ -4329,9 +4338,7 @@ function permsRefreshCreateUI() {
   $('#perms-create-handle-label').hidden = isRaw;
   $('#perms-create-raw-label').hidden = !isRaw;
   const composed = permsCreateComposedId();
-  $('#perms-create-preview').textContent = composed
-    ? `Resolved id: ${composed}`
-    : 'Resolved id will appear here.';
+  $('#perms-create-preview').textContent = composed ? `Resolved id: ${composed}` : 'Resolved id will appear here.';
   // Show/hide the agent-group selector based on initial-role choice.
   const kind = $('#perms-create-kind').value;
   const wantsGroup = kind === 'admin' || kind === 'member';
@@ -4575,7 +4582,10 @@ async function showMessagesDetail() {
         .catch(() => []),
     ),
   );
-  const all = perRoom.flat().sort((a, b) => b.created_at - a.created_at).slice(0, 50);
+  const all = perRoom
+    .flat()
+    .sort((a, b) => b.created_at - a.created_at)
+    .slice(0, 50);
   if (all.length === 0) {
     showDetail('Messages (24h)', '<div class="metric-sub">No messages in the last 24 hours</div>');
     return;
@@ -5028,8 +5038,7 @@ $('#agent-detail-form').addEventListener('submit', async (e) => {
     });
     // Update model assignment (empty string in the select = unassign).
     const selectedModel = $('#agent-model').value || null;
-    const currentModel =
-      allAgents.find((b) => b.id === selectedAgentId)?.assigned_model_id || null;
+    const currentModel = allAgents.find((b) => b.id === selectedAgentId)?.assigned_model_id || null;
     if (selectedModel !== currentModel) {
       await authFetch(`/api/agents/${encodeURIComponent(selectedAgentId)}/model`, {
         method: 'PUT',
@@ -5250,7 +5259,10 @@ async function openRoomDetail(roomId) {
       authFetch(`/api/rooms/${encodeURIComponent(roomId)}/credential-mode`)
         .then((r) => (r.ok ? r.json() : null))
         .then((d) => {
-          if (d) $('#room-credential-mode').value = d.mode;
+          if (d) {
+            const radio = document.querySelector(`input[name="room-credential-mode"][value="${d.mode}"]`);
+            if (radio) radio.checked = true;
+          }
         })
         .catch(() => {});
       authFetch(`/api/rooms/${encodeURIComponent(roomId)}/oauth-allowed`)
@@ -5260,6 +5272,10 @@ async function openRoomDetail(roomId) {
           if (d && cb) cb.checked = !!d.allowed;
         })
         .catch(() => {});
+      // Codex OAuth isn't wired on this instance yet — keep it off; the change
+      // handler explains what to do if someone tries to enable it.
+      const codexCb = $('#room-codex-oauth-allowed');
+      if (codexCb) codexCb.checked = false;
     } else {
       credSection.hidden = true;
     }
@@ -5611,8 +5627,8 @@ $('#room-name').addEventListener('keydown', (e) => {
 });
 $('#room-detail-close').addEventListener('click', closeRoomDetail);
 $('#room-delete').addEventListener('click', deleteCurrentRoom);
-$('#room-credential-mode')?.addEventListener('change', async (e) => {
-  if (!selectedRoomId) return;
+$('#room-credential-modes')?.addEventListener('change', async (e) => {
+  if (!selectedRoomId || e.target.name !== 'room-credential-mode') return;
   const mode = e.target.value;
   const r = await authFetch(`/api/rooms/${encodeURIComponent(selectedRoomId)}/credential-mode`, {
     method: 'PUT',
@@ -5620,12 +5636,27 @@ $('#room-credential-mode')?.addEventListener('change', async (e) => {
     body: JSON.stringify({ mode }),
   });
   if (r.ok) {
-    showToast(`Personal-key mode set to "${mode}".`, { kind: 'success' });
+    showToast(`Member credentials set to "${mode}".`, { kind: 'success' });
     if (selectedRoomId === currentRoom) updateByokBanner(currentRoom);
   } else {
     const err = await r.json().catch(() => ({}));
     showToast('Failed to set mode: ' + (err.error || r.statusText), { kind: 'error' });
   }
+});
+
+// Codex OAuth isn't supported on this instance yet (the Codex provider/backend
+// isn't installed). Rather than silently do nothing, explain what an admin must
+// do, then snap the toggle back off.
+$('#room-codex-oauth-allowed')?.addEventListener('change', (e) => {
+  if (!e.target.checked) return;
+  e.target.checked = false;
+  showToast(
+    'Codex support isn’t set up yet — ask an admin to add it (/add-codex) and wire a Codex agent to this room.',
+    {
+      kind: 'info',
+      timeout: 9000,
+    },
+  );
 });
 $('#room-oauth-allowed')?.addEventListener('change', async (e) => {
   if (!selectedRoomId) return;
@@ -5703,9 +5734,7 @@ function renderRoomCreateAgentChecklist() {
     list.appendChild(li);
     return;
   }
-  const sorted = [...allAgents]
-    .filter((a) => a.status !== 'archived')
-    .sort((a, b) => a.name.localeCompare(b.name));
+  const sorted = [...allAgents].filter((a) => a.status !== 'archived').sort((a, b) => a.name.localeCompare(b.name));
   for (const agent of sorted) {
     const li = document.createElement('li');
     const cb = document.createElement('input');
@@ -6084,8 +6113,7 @@ function updateThinkingBubble(name, label, detail) {
   const target = bubble.querySelector('.thinking-target');
   if (target) {
     if (detail) {
-      const trimmed =
-        detail.length > THINKING_DETAIL_MAX ? `${detail.slice(0, THINKING_DETAIL_MAX - 1)}…` : detail;
+      const trimmed = detail.length > THINKING_DETAIL_MAX ? `${detail.slice(0, THINKING_DETAIL_MAX - 1)}…` : detail;
       target.textContent = trimmed;
       target.hidden = false;
     } else {
@@ -6793,10 +6821,7 @@ $('#model-delete').addEventListener('click', async () => {
         destructive: true,
       });
       if (!confirmed) return;
-      const force = await authFetch(
-        `/api/models/${encodeURIComponent(selectedModelId)}?force=1`,
-        { method: 'DELETE' },
-      );
+      const force = await authFetch(`/api/models/${encodeURIComponent(selectedModelId)}?force=1`, { method: 'DELETE' });
       if (!force.ok) {
         const err = await force.json().catch(() => ({}));
         showToast(`Failed to delete: ${err.error || force.statusText}`, { kind: 'error' });
