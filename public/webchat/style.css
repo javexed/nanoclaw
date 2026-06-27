@@ -346,11 +346,14 @@ body {
 /* Room list */
 /* Message search — input pinned at the top of the Rooms tab; results replace
    the room list while a query is active. */
-.room-search {
+.room-search-wrap {
+  position: relative;
   flex-shrink: 0;
-  width: calc(100% - 16px);
   margin: 8px 8px 4px;
-  padding: 7px 10px;
+}
+.room-search {
+  width: 100%;
+  padding: 7px 36px 7px 10px; /* right pad leaves room for the close button */
   box-sizing: border-box;
   background: var(--surface2);
   border: 1px solid var(--border);
@@ -360,6 +363,49 @@ body {
 }
 .room-search::placeholder {
   color: var(--text-dim);
+}
+/* Hide the native search clear — absent/inconsistent across mobile browsers — so
+   the custom close button below is the single reliable dismissal affordance. */
+.room-search::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+}
+/* Close/back affordance for the search pane — the one overlay that lacked it.
+   Shown only while a query is active; clears the box and restores the room list,
+   so mobile (no Escape key) has a visible tap target like every other overlay.
+   See DESIGN §3 dismissal contract. */
+.room-search-close {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition:
+    color 0.15s,
+    background 0.15s;
+}
+.room-search-close:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+.room-search-close[hidden] {
+  display: none;
+}
+@media (pointer: coarse) {
+  .room-search-close {
+    width: 36px;
+    height: 36px;
+  }
 }
 .search-results {
   list-style: none;
@@ -461,8 +507,35 @@ body {
   flex-shrink: 0;
   vertical-align: middle;
 }
-#room-list li.dragging {
-  opacity: 0.4;
+/* Mention badge — higher signal than the plain unread dot. A small "@" pill in
+   the warning colour so a room you were named in reads at a glance. */
+#room-list li .mention-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  margin-left: 6px;
+  border-radius: 8px;
+  background: var(--warning);
+  color: var(--surface);
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+#room-list li .room-pin-indicator {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-dim);
+  margin-left: 4px;
+  flex-shrink: 0;
+}
+#room-list li .room-pin-indicator svg {
+  width: 13px;
+  height: 13px;
 }
 #room-list li.archived {
   opacity: 0.55;
@@ -519,8 +592,17 @@ body {
 .archived-toggle:hover {
   color: var(--text);
 }
-#room-list li.drag-over {
-  border-top: 2px solid var(--accent);
+/* Separates the pinned group from the rest of the (activity-sorted) rooms.
+   Non-interactive — purely a visual rule. */
+#room-list li.room-divider {
+  height: 0;
+  margin: 6px 10px;
+  padding: 0;
+  border-top: 1px solid var(--border);
+  border-left: none;
+  list-style: none;
+  cursor: default;
+  pointer-events: none;
 }
 
 /* Agent list */
@@ -1299,6 +1381,21 @@ button:focus-visible {
     max-width: 90%;
   }
 }
+/* Under ~400px the chip crowds the members count — collapse the chip to "@"
+   (or "+@" when unset) so #members-toggle stays visible. */
+@media (max-width: 400px) {
+  .handle-chip {
+    font-size: 0;
+    padding: 6px 10px;
+  }
+  .handle-chip::after {
+    content: '@';
+    font-size: var(--fs-sm);
+  }
+  .handle-chip.is-unset::after {
+    content: '+@';
+  }
+}
 
 /* File picker button */
 .file-picker-btn {
@@ -1307,15 +1404,19 @@ button:focus-visible {
   font-size: 1.2em;
   cursor: pointer;
   padding: 4px 2px;
-  opacity: 0.6;
+  /* Resting state uses the theme-tuned secondary token, not opacity of the
+     inherited --text. opacity-dimming blended the icon toward the background,
+     which read as "very dark" on the dark composer surface (light --text@0.6
+     ≈ mid-gray on #1a1a2e). --text-dim is purpose-built per theme (dark #999,
+     light #666) and clears AA; hover lifts to full --text for affordance. */
+  color: var(--text-dim);
   transition:
-    opacity 0.15s,
-    background 0.15s,
-    color 0.15s;
+    color 0.15s,
+    background 0.15s;
   border-radius: 4px;
 }
 .file-picker-btn:hover {
-  opacity: 1;
+  color: var(--text);
 }
 .mobile-only {
   display: none;
@@ -1798,6 +1899,48 @@ a.lightbox-btn {
 .thinking-bubble {
   cursor: pointer;
 }
+/* Flex the sender line so the Stop button right-aligns; the leading text/verb/
+   elapsed keep their inline spacing (no gap), so the layout reads unchanged. */
+.thinking-bubble .sender {
+  display: flex;
+  align-items: center;
+}
+/* Stop button — interrupt the in-progress turn (GUI equivalent of CLI ESC). */
+.thinking-stop {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  color: var(--text-dim);
+  font-size: var(--fs-xs, 0.72rem);
+  line-height: 1.5;
+  cursor: pointer;
+  transition:
+    color 0.15s,
+    background 0.15s,
+    border-color 0.15s;
+}
+.thinking-stop:hover {
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--text-dim);
+}
+.thinking-stop .stop-square {
+  width: 7px;
+  height: 7px;
+  border-radius: 1px;
+  background: var(--delete-color);
+}
+@media (pointer: coarse) {
+  .thinking-stop {
+    padding: 5px 11px;
+    font-size: var(--fs-sm, 0.8rem);
+  }
+}
 .thinking-bubble .thinking-chevron {
   display: inline-flex;
   margin-left: 4px;
@@ -1898,6 +2041,38 @@ a.lightbox-btn {
 }
 
 /* Members toggle button */
+/* Right-side header cluster: handle chip + members toggle. Keeps the header's
+   space-between layout (room name left, controls right). */
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* The @handle chip — visual sibling of .members-toggle. */
+.handle-chip {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background var(--transition),
+    color var(--transition),
+    transform var(--transition);
+}
+.handle-chip:hover {
+  background: var(--border);
+  color: var(--text);
+  transform: translateY(-1px);
+}
+.handle-chip.is-unset {
+  color: var(--accent);
+}
 .members-toggle {
   background: var(--surface2);
   border: 1px solid var(--border);
@@ -1970,6 +2145,11 @@ a.lightbox-btn {
   list-style: none;
   padding: 8px 0;
 }
+.member-empty {
+  padding: 10px 14px;
+  color: var(--text-dim);
+  font-size: var(--fs-sm, 0.85rem);
+}
 #members-list li {
   padding: 6px 14px;
   font-size: 0.867rem;
@@ -1996,6 +2176,12 @@ a.lightbox-btn {
 }
 #members-list li .member-tag {
   font-size: 0.667rem;
+  color: var(--text-dim);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+#members-list li .member-handle {
+  font-size: var(--fs-xs);
   color: var(--text-dim);
   margin-left: auto;
   flex-shrink: 0;
@@ -2669,6 +2855,24 @@ a.lightbox-btn {
   flex-direction: column;
   gap: 18px;
 }
+/* Settings IA: identity ("Profile") first, then app prefs ("Preferences").
+   Sentence case + full-strength text so it reads above the uppercase muted
+   per-group .setting-label. A divider separates sections, but not the first. */
+.settings-section-title {
+  margin: 0;
+  font-size: var(--fs-base);
+  font-weight: 600;
+  color: var(--text);
+}
+.settings-section-title:not(:first-child) {
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+.setting-help {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
 
 /* Setting groups */
 .setting-group {
@@ -2906,6 +3110,17 @@ a.lightbox-btn {
   font-weight: 500;
   font-size: 0.95em;
 }
+/* The @-mention of the current user: warmer chip so it stands out from the
+   ordinary accent-coloured mention of others. */
+.mention.mention-me {
+  background: var(--warning);
+  color: var(--surface);
+}
+/* Whole message that @-mentions me: subtle left accent + tinted bubble. */
+.msg.mentions-me .bubble {
+  box-shadow: inset 3px 0 0 var(--warning);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+}
 
 /* Mention autocomplete popover — anchored above the message input */
 .mention-popover {
@@ -2958,6 +3173,100 @@ a.lightbox-btn {
   color: var(--surface);
   border-radius: 3px;
   font-weight: 700;
+}
+/* Distinguishes a human @-mention candidate from a wired agent in the popover.
+   Muted (notify-only) vs the accent "prime" badge (triggers the agent). */
+.mention-popover-person {
+  margin-left: auto;
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 1px 5px;
+  background: var(--surface2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-weight: 600;
+}
+
+/* @handle editor popover — anchored under the header chip (top-right). Lighter
+   than the modal: token surface + border + subtle shadow, no backdrop. */
+.handle-popover {
+  position: absolute;
+  top: 56px;
+  right: 16px;
+  z-index: 40;
+  width: min(300px, calc(100vw - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px var(--shadow);
+}
+.handle-popover[hidden] {
+  display: none;
+}
+.handle-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+}
+.handle-popover-close {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+  transition: color var(--transition);
+}
+.handle-popover-close:hover {
+  color: var(--text);
+}
+.handle-popover .setting-help {
+  margin: 0;
+}
+
+/* Your @handle field (shared by the popover) */
+.handle-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.handle-at {
+  color: var(--text);
+  opacity: 0.6;
+  font-weight: 600;
+}
+.handle-input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  color: var(--text);
+  font-size: var(--fs-sm, 0.867rem);
+}
+.handle-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+.handle-status {
+  margin: 6px 0 0;
+  font-size: var(--fs-sm, 0.867rem);
+}
+.handle-status.ok {
+  color: var(--success);
+}
+.handle-status.err {
+  color: var(--danger);
 }
 
 /* Models tab — list rows mirror agent list */
@@ -3312,6 +3621,13 @@ a.lightbox-btn {
   outline: 2px solid var(--accent);
   outline-offset: 0;
   border-color: var(--accent);
+}
+/* Inset wrapper for a list-filter input (permissions users, room members) — the
+   input keeps its own bottom margin, so this just adds side/top breathing room
+   and stays fixed while the list below scrolls. */
+.list-search-wrap {
+  padding: 8px 8px 0;
+  flex-shrink: 0;
 }
 .model-picker-list {
   list-style: none;
@@ -4240,3 +4556,16 @@ a.lightbox-btn {
   text-align: left;
 }
 .agent-show-archived:hover { color: var(--text); }
+
+/* Room rename (room settings panel) */
+.room-rename-row {
+  display: flex;
+  gap: 0.5rem;
+}
+.room-rename-row input[type='text'] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.room-rename-row .btn {
+  flex: 0 0 auto;
+}

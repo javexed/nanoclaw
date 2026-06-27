@@ -1,8 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
-import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
+import {
+  initTestSessionDb,
+  closeSessionDb,
+  getInboundDb,
+  getOutboundDb,
+  appendStatusEvent,
+  clearStatusEvents,
+} from './db/connection.js';
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
+import { findByRouting } from './destinations.js';
 import { formatMessages, extractRouting } from './formatter.js';
 import { isCorruptionError, processQuery } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
@@ -452,5 +460,97 @@ describe('isCorruptionError', () => {
     expect(isCorruptionError('database is locked')).toBe(false);
     expect(isCorruptionError('no such table: messages_in')).toBe(false);
     expect(isCorruptionError('')).toBe(false);
+  });
+});
+
+describe('webchat thinking feed cycling (follow-ups in an active query)', () => {
+  function statusKinds(): string[] {
+    return (getOutboundDb().prepare('SELECT kind FROM status_events ORDER BY seq ASC').all() as { kind: string }[]).map(
+      (r) => r.kind,
+    );
+  }
+
+  it('emits a status "done" when a result lands so the bubble settles', async () => {
+    // The outer poll loop seeds 'start' before calling processQuery.
+    clearStatusEvents();
+    appendStatusEvent('start', null);
+
+    const { query } = makeResultQuery({ type: 'result', text: 'bare text, no envelope' });
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    // Without the fix, processQuery never appends 'done' (the outer-loop 'done'
+    // is outside processQuery), so the bubble would never settle on a result.
+    expect(statusKinds()).toContain('done');
+  });
+});
+
+describe('origin guard — reply pinned to the originating room', () => {
+  function seedChannel(name: string, channelType: string, platformId: string): void {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+         VALUES (?, ?, 'channel', ?, ?, NULL)`,
+      )
+      .run(name, name, channelType, platformId);
+  }
+
+  // Message arrived from room-a; the guard's job is to keep replies there.
+  const ORIGIN_ROUTING = { platformId: 'room-a', channelType: 'webchat', threadId: null, inReplyTo: 'm1' };
+
+  it('redirects a lone reply that resolves to a different room back to origin', async () => {
+    seedChannel('room-a', 'webchat', 'room-a');
+    seedChannel('room-b', 'webchat', 'room-b');
+    const originDests = [findByRouting('webchat', 'room-a')!];
+    const { query } = makeResultQuery({ type: 'result', text: '<message to="room-b">answer for the user</message>' });
+
+    await processQuery(query, ORIGIN_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, originDests);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].platform_id).toBe('room-a'); // pinned back to origin, not room-b
+    expect(JSON.parse(out[0].content).text).toBe('answer for the user');
+  });
+
+  it('leaves a reply already addressed to the origin room untouched', async () => {
+    seedChannel('room-a', 'webchat', 'room-a');
+    const originDests = [findByRouting('webchat', 'room-a')!];
+    const { query } = makeResultQuery({ type: 'result', text: '<message to="room-a">hello</message>' });
+
+    await processQuery(query, ORIGIN_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, originDests);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].platform_id).toBe('room-a');
+  });
+
+  it('honors a deliberate cross-room send (multiple blocks are not guarded)', async () => {
+    seedChannel('room-a', 'webchat', 'room-a');
+    seedChannel('room-b', 'webchat', 'room-b');
+    const originDests = [findByRouting('webchat', 'room-a')!];
+    const { query } = makeResultQuery({
+      type: 'result',
+      text: '<message to="room-a">ack</message><message to="room-b">heads up</message>',
+    });
+
+    await processQuery(query, ORIGIN_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, originDests);
+
+    const targets = getUndeliveredMessages()
+      .map((o) => o.platform_id)
+      .sort();
+    expect(targets).toEqual(['room-a', 'room-b']);
+  });
+
+  it('treats every room in the batch as a valid origin (agent-shared)', async () => {
+    seedChannel('room-a', 'webchat', 'room-a');
+    seedChannel('room-b', 'webchat', 'room-b');
+    // Batch spanned both rooms — a lone reply to either is legitimate, not a misfire.
+    const originDests = [findByRouting('webchat', 'room-a')!, findByRouting('webchat', 'room-b')!];
+    const { query } = makeResultQuery({ type: 'result', text: '<message to="room-b">reply to B</message>' });
+
+    await processQuery(query, ORIGIN_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, originDests);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].platform_id).toBe('room-b'); // not redirected — room-b was in the batch
   });
 });

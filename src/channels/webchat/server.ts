@@ -16,6 +16,7 @@
  *   DELETE /api/rooms/:id/prime                  clear the room's prime designation  [owner]
  *   GET  /api/rooms/:id/engage-mode              read room's engage default ('mention-only' | 'broadcast')
  *   PUT  /api/rooms/:id/engage-mode              set { mode } for the room  [owner]
+ *   PUT  /api/rooms/:id/name                     rename the room (set { name })  [owner]
  *   GET  /api/rooms/:id/messages                 history (?after_id= catch-up, ?before_id= scroll-back)
  *   POST /api/rooms/:id/archive                  mark room archived (owner + admin) — global
  *   POST /api/rooms/:id/unarchive                clear global archive (owner + admin)
@@ -152,13 +153,20 @@ import {
   getWebchatTopology,
   getWebchatModel,
   getWebchatPendingApprovalsForUser,
+  getWebchatHandleUsers,
   getWebchatRoom,
+  getWebchatUserHandle,
+  sanitizeRoomName,
+  updateWebchatRoomName,
   hideRoomForUser,
   listWebchatModels,
+  pinRoomForUser,
   setPrimeAgentForWebchatRoom,
+  setWebchatUserHandle,
   storeWebchatFileMessage,
   unarchiveRoom,
   unhideRoomForUser,
+  unpinRoomForUser,
   unassignModelFromAgent,
   unwireAgentFromWebchatRoom,
   updateWebchatModel,
@@ -408,6 +416,29 @@ async function handleHttp(
     return json(res, 200, { ok: true, userId, identity: senderIdentity });
   }
 
+  // ── Your @-mention handle (the slug others type to @-mention you) ──────
+  if (url.pathname === '/api/me/handle' && method === 'GET') {
+    return json(res, 200, { handle: getWebchatUserHandle(userId) ?? '' });
+  }
+  if (url.pathname === '/api/me/handle' && method === 'PUT') {
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { handle?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    const handle = typeof body.handle === 'string' ? body.handle.trim().toLowerCase() : '';
+    const result = setWebchatUserHandle(userId, handle);
+    if (!result.ok) {
+      return result.reason === 'taken'
+        ? json(res, 409, { error: 'That handle is already taken' })
+        : json(res, 400, { error: 'Handle must be 1–32 characters: lowercase letters, numbers, and hyphens' });
+    }
+    return json(res, 200, { ok: true, handle });
+  }
+
   // ── Overview ──────────────────────────────────────────────────────────
   if (url.pathname === '/api/overview' && method === 'GET') {
     return json(res, 200, await buildOverview(userId));
@@ -461,6 +492,20 @@ async function handleHttp(
       agents.map((a) => ({ ...a, is_prime: a.id === primeAgentId })),
     );
   }
+  // People you can @-mention in this room: anyone with a handle who can access
+  // it (NOT limited to who's currently connected — a mention notifies on
+  // return). Excludes the requester. Used by the composer's @ autocomplete.
+  const roomMentionableMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/mentionable$/);
+  if (roomMentionableMatch && method === 'GET') {
+    const roomId = decodeURIComponent(roomMentionableMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    const people = getWebchatHandleUsers()
+      .filter((u) => u.userId !== userId && canAccessRoom(u.userId, roomId))
+      .map((u) => ({ handle: u.handle, name: u.displayName || u.handle }));
+    return json(res, 200, people);
+  }
+
   if (roomAgentsMatch && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') {
       return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
@@ -720,6 +765,27 @@ async function handleHttp(
     return json(res, 200, { ok: true });
   }
 
+  // ── Per-user pin (sidebar preference, no auth beyond room access) ──
+  // Pins lift a room into the sticky group at the top of THIS user's sidebar.
+  // Per-user; broadcastRooms re-sends each user their own annotated list, so the
+  // pin syncs live across the user's other devices.
+  const roomPinMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/(pin|unpin)$/);
+  if (roomPinMatch && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') {
+      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    }
+    const roomId = decodeURIComponent(roomPinMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    if (roomPinMatch[2] === 'pin') {
+      pinRoomForUser(userId, roomId);
+    } else {
+      unpinRoomForUser(userId, roomId);
+    }
+    broadcastRooms();
+    return json(res, 200, { ok: true });
+  }
+
   // ── Engage mode (room-scoped) ──
   // Controls what `recomputeEngagePatterns` rewrites un-primed wirings to:
   //   'mention-only' — agents fire only on explicit @-mention (no fallback).
@@ -754,6 +820,31 @@ async function handleHttp(
     recomputeEngagePatterns(roomId);
     broadcastRooms();
     return json(res, 200, { ok: true, mode: body.mode });
+  }
+
+  // Rename a room (its messaging_groups.name). Owner-only; broadcastRooms pushes
+  // the new title to every connected client live.
+  const roomNameMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/name$/);
+  if (roomNameMatch && method === 'PUT') {
+    if (req.headers['x-webchat-csrf'] !== '1') {
+      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    }
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const roomId = decodeURIComponent(roomNameMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { name?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    const name = sanitizeRoomName(body.name);
+    if (name === null) return json(res, 400, { error: 'name must be 1–80 characters' });
+    updateWebchatRoomName(roomId, name);
+    broadcastRooms();
+    return json(res, 200, { ok: true, name });
   }
 
   // Room → agent → model topology for the explore view, scoped to the caller's

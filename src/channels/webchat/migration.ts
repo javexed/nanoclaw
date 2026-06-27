@@ -520,7 +520,6 @@ export const moduleWebchatRoomCredentialMode: Migration = {
   },
 };
 
-
 /**
  * BYOK OAuth: per-room toggle allowing members to connect a Claude *subscription*
  * (OAuth) token, orthogonal to `credential_mode` (which governs API-key BYOK).
@@ -533,6 +532,56 @@ export const moduleWebchatRoomOauthAllowed: Migration = {
   up(db: Database.Database) {
     db.exec(`
       ALTER TABLE webchat_room_settings ADD COLUMN oauth_allowed INTEGER NOT NULL DEFAULT 0;
+    `);
+  },
+};
+
+/**
+ * Per-user @-mention handle. `user_id` is the canonical webchat user id
+ * (e.g. `webchat:tailscale:foo@bar.com`); `handle` is the lowercase slug others
+ * type to @-mention them (`@alice`), UNIQUE so a handle resolves to one user.
+ * Defaults to a slug of the display name on first connect (see ensureWebchatUserHandle).
+ */
+export const moduleWebchatUserHandles: Migration = {
+  version: 113,
+  name: 'webchat-user-handles',
+  up(db: Database.Database) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS webchat_user_handles (
+        user_id    TEXT PRIMARY KEY,
+        handle     TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_webchat_user_handles_handle
+        ON webchat_user_handles(handle);
+    `);
+  },
+};
+
+/**
+ * Per-user room pins. The sidebar sorts rooms by recent activity (newest
+ * message first); pinned rooms are lifted into a sticky group at the top, above
+ * a divider, so the ones you care about don't drift down as other rooms get
+ * traffic. Each user controls their own pins — pinning only affects their view.
+ *
+ * Keyed on the trusted webchat `user_id` (same as webchat_room_reads /
+ * webchat_user_room_hides), so a pin follows the user across all their devices.
+ * `room_id` is `messaging_groups.platform_id` (no FK; deleteWebchatRoom clears
+ * rows in app code).
+ */
+export const moduleWebchatRoomPins: Migration = {
+  version: 114,
+  name: 'webchat-room-pins',
+  up(db: Database.Database) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS webchat_room_pins (
+        user_id   TEXT NOT NULL,
+        room_id   TEXT NOT NULL,
+        pinned_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, room_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_webchat_room_pins_user
+        ON webchat_room_pins(user_id);
     `);
   },
 };

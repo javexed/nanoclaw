@@ -1,4 +1,4 @@
-import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
+import { findByName, findByRouting, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { writeMessageOut, getMaxOutboundSeq } from './db/messages-out.js';
 import {
@@ -121,7 +121,14 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   while (true) {
     if (config.signal?.aborted) return;
     // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
-    const messages = getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system');
+    const rawPending = getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system');
+    // Interrupt rows are control signals delivered by the host (GUI/CLI "stop").
+    // Mid-turn they're caught by the active-stream poll below and abort the
+    // query; one that lands here (between turns / no live stream) has nothing to
+    // stop — consume it so it never starts a turn of its own.
+    const staleInterrupts = rawPending.filter((m) => m.kind === 'interrupt');
+    if (staleInterrupts.length > 0) markCompleted(staleInterrupts.map((m) => m.id));
+    const messages = rawPending.filter((m) => m.kind !== 'interrupt');
     isFirstPoll = false;
     pollCount++;
 
@@ -247,6 +254,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
     // can stamp it on outbound rows — needed for a2a return-path routing.
     setCurrentInReplyTo(routing.inReplyTo);
+    // Rooms this batch came from — a reply defaults back here (origin guard in
+    // dispatchResultText pins a misaddressed lone reply to the originating room).
+    const originDests = resolveOriginDestinations(messages);
     const query = config.provider.query({
       prompt,
       continuation,
@@ -262,6 +272,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         config.provider.onExchangeComplete?.bind(config.provider),
         prompt,
         continuation,
+        originDests,
       );
 
       // Self-heal a dead/stale continuation. Unlike a thrown error (recovered
@@ -287,6 +298,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
           config.provider.onExchangeComplete?.bind(config.provider),
           prompt,
           undefined,
+          originDests,
         );
       }
 
@@ -438,6 +450,7 @@ export async function processQuery(
   onExchangeComplete: ((exchange: ProviderExchange) => void) | undefined,
   initialPrompt: string,
   initialContinuation: string | undefined,
+  originDests: DestinationEntry[] = [],
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -476,6 +489,24 @@ export async function processQuery(
     void (async () => {
       try {
         const pending = getPendingMessages();
+
+        // Interrupt: a host-delivered "stop" signal (GUI Stop button / CLI ESC).
+        // Abort the active stream and mark this turn done — interrupt means
+        // "stop", never "respond", so unlike a slash command we DON'T leave rows
+        // pending for the outer loop: consume the interrupt row(s) and the
+        // triggering batch, then emit a clean 'done' so the host clears the
+        // thinking bubble (a stream that ends with no 'done' is read as a
+        // mid-turn death and warns the room — see src/modules/agent-status).
+        const interruptIds = pending.filter((m) => m.kind === 'interrupt').map((m) => m.id);
+        if (interruptIds.length > 0) {
+          log('Interrupt received — aborting active stream');
+          markCompleted(interruptIds);
+          markCompleted(initialBatchIds);
+          appendStatusEvent('done', null);
+          endedForCommand = true; // stop the poll from re-entering while we abort
+          query.abort();
+          return;
+        }
 
         // Slash commands need a fresh query: /clear resets the SDK's
         // resume id (fixed at sdkQuery() time); admin/passthrough commands
@@ -534,6 +565,14 @@ export async function processQuery(
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
+        // Webchat thinking feed: a follow-up pushed into the active query is a
+        // new sub-turn for the UI. Reset the feed and re-seed 'start' so the
+        // bubble reflects only this follow-up's activity — mirrors the per-turn
+        // reset at the top of the outer poll loop. Without this, a busy room
+        // that streams follow-ups into one long-lived query freezes the feed at
+        // the first sub-turn's snapshot. Cosmetic / best-effort.
+        clearStatusEvents();
+        appendStatusEvent('start', null);
         query.push(prompt);
         archivePrompts.push(prompt);
         markCompleted(keptIds);
@@ -616,8 +655,14 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        // Webchat thinking feed: settle the bubble for this sub-turn. Interim
+        // results inside a still-open query never reach the outer-loop 'done'
+        // (that fires only when the whole query ends), so without this the
+        // bubble would keep showing the last activity line. Cosmetic; the
+        // next follow-up re-seeds 'start'. Pairs with the reset at the push.
+        appendStatusEvent('done', null);
         if (event.text) {
-          const { sent, hasUnwrapped } = dispatchResultText(event.text, routing);
+          const { sent, hasUnwrapped } = dispatchResultText(event.text, routing, originDests);
           if (sent === 0 && event.isError === true) {
             // Non-retryable error turn (e.g. a 403 billing_error) with no
             // <message> envelope: deliver the notice instead of dropping it as
@@ -747,33 +792,93 @@ function deliverErrorResult(text: string, routing: RoutingContext): void {
  * The agent must always wrap output in <message to="name">...</message>
  * blocks, even with a single destination. Bare text is scratchpad only.
  */
-function dispatchResultText(text: string, routing: RoutingContext): { sent: number; hasUnwrapped: boolean } {
+/**
+ * Resolve the channel destination(s) this turn's batch arrived from. A reply
+ * defaults back here (see dispatchResultText's origin guard). Returns one entry
+ * per distinct (channel_type, platform_id) in the batch — usually one, but an
+ * agent-shared session can batch messages from several rooms, and a reply to
+ * ANY of them is a legitimate origin.
+ */
+function resolveOriginDestinations(messages: MessageInRow[]): DestinationEntry[] {
+  const seen = new Set<string>();
+  const dests: DestinationEntry[] = [];
+  for (const m of messages) {
+    if (!m.channel_type || !m.platform_id) continue;
+    const key = `${m.channel_type}:${m.platform_id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const d = findByRouting(m.channel_type, m.platform_id);
+    if (d) dests.push(d);
+  }
+  return dests;
+}
+
+/**
+ * Parse the agent's final text for <message to="name">...</message> blocks and
+ * dispatch each. Text outside blocks is scratchpad.
+ *
+ * Origin guard: a SINGLE reply that resolves to a *channel* the batch did not
+ * come from is almost always the model mis-picking a destination name (the
+ * "agent answered in the wrong room" bug). When that happens we redirect the
+ * block to the originating room. Deliberate cross-room sends still work — they
+ * either address multiple destinations (multiple <message> blocks) or target an
+ * agent-to-agent peer (type 'agent', never guarded). `originDests` is empty in
+ * unit tests, which disables the guard (no behavior change for those paths).
+ */
+function dispatchResultText(
+  text: string,
+  routing: RoutingContext,
+  originDests: DestinationEntry[] = [],
+): { sent: number; hasUnwrapped: boolean } {
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
+  // Collect blocks first so the guard can see whether this is a lone reply
+  // (the misfire signal) vs. a deliberate multi-destination response.
   let match: RegExpExecArray | null;
-  let sent = 0;
   let lastIndex = 0;
   const scratchpadParts: string[] = [];
-
+  const blocks: { toName: string; body: string }[] = [];
   while ((match = MESSAGE_RE.exec(text)) !== null) {
     if (match.index > lastIndex) {
       scratchpadParts.push(text.slice(lastIndex, match.index));
     }
-    const toName = match[1];
-    const body = match[2].trim();
+    blocks.push({ toName: match[1], body: match[2].trim() });
     lastIndex = MESSAGE_RE.lastIndex;
+  }
+  if (lastIndex < text.length) {
+    scratchpadParts.push(text.slice(lastIndex));
+  }
 
-    const dest = findByName(toName);
+  // Channel origins of this batch + the room to redirect a misfire to (prefer
+  // the routing's room — extractRouting's first message — else any batch room).
+  const originChannels = originDests.filter((d) => d.type === 'channel');
+  const originSet = new Set(originChannels.map((d) => `${d.channelType}:${d.platformId}`));
+  const primaryOrigin =
+    originChannels.find((d) => d.channelType === routing.channelType && d.platformId === routing.platformId) ??
+    originChannels[0];
+
+  let sent = 0;
+  for (const { toName, body } of blocks) {
+    let dest = findByName(toName);
     if (!dest) {
       log(`Unknown destination in <message to="${toName}">, dropping block`);
       scratchpadParts.push(`[dropped: unknown destination "${toName}"] ${body}`);
       continue;
     }
+    if (
+      blocks.length === 1 &&
+      dest.type === 'channel' &&
+      primaryOrigin &&
+      !originSet.has(`${dest.channelType}:${dest.platformId}`)
+    ) {
+      log(
+        `Reply addressed to "${dest.name}" but the message came from "${primaryOrigin.name}" — ` +
+          `redirecting to origin (single-reply misfire guard)`,
+      );
+      dest = primaryOrigin;
+    }
     sendToDestination(dest, body, routing);
     sent++;
-  }
-  if (lastIndex < text.length) {
-    scratchpadParts.push(text.slice(lastIndex));
   }
 
   const scratchpad = stripInternalTags(scratchpadParts.join(''));

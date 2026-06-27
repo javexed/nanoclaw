@@ -317,6 +317,104 @@ function renderSettingsModal() {
   $('#notif-toggle').checked = settings.notifications;
 }
 
+// Persist the @handle from the Settings field. Inline feedback (per DESIGN.md):
+// success/taken/invalid all surface on the #handle-status line, not a toast.
+async function saveHandle() {
+  const input = $('#handle-input');
+  const status = $('#handle-status');
+  if (!input || !status) return;
+  const next = input.value.trim().toLowerCase().replace(/^@/, '');
+  const showStatus = (text, ok) => {
+    status.hidden = false;
+    status.textContent = text;
+    status.classList.toggle('ok', !!ok);
+    status.classList.toggle('err', !ok);
+  };
+  if (!/^[a-z0-9-]{1,32}$/.test(next)) {
+    showStatus('Use 1–32 letters, numbers, or hyphens.', false);
+    return;
+  }
+  if (next === myHandle) {
+    showStatus('That’s already your handle.', true);
+    return;
+  }
+  try {
+    const res = await authFetch('/api/me/handle', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+      body: JSON.stringify({ handle: next }),
+    });
+    if (res.ok) {
+      myHandle = (((await res.json()).handle || next) + '').toLowerCase();
+      input.value = myHandle;
+      renderHandleChip();
+      // Keep the popover open briefly showing the inline "Saved." status,
+      // consistent with the prior in-Settings behavior.
+      showStatus('Saved.', true);
+    } else if (res.status === 409) {
+      showStatus('That handle is taken.', false);
+    } else if (res.status === 400) {
+      showStatus('Use 1–32 letters, numbers, or hyphens.', false);
+    } else {
+      showStatus('Couldn’t save — try again.', false);
+    }
+  } catch {
+    showStatus('Couldn’t save — try again.', false);
+  }
+}
+
+// ── Header @handle chip + popover ────────────────────────────────────────────
+// The chip lives top-right in the header; clicking it opens a focused popover to
+// edit + save the handle. The editor (same #handle-input/#handle-save/
+// #handle-status ids) lives here, not in Settings. Inline status only.
+function renderHandleChip() {
+  const chip = $('#handle-chip');
+  if (!chip) return;
+  chip.textContent = myHandle ? `@${myHandle}` : '+ set @handle';
+  chip.classList.toggle('is-unset', !myHandle);
+}
+
+function openHandlePopover() {
+  const pop = $('#handle-popover');
+  const input = $('#handle-input');
+  const status = $('#handle-status');
+  if (!pop) return;
+  if (input) input.value = myHandle || '';
+  if (status) {
+    status.hidden = true;
+    status.textContent = '';
+    status.classList.remove('ok', 'err');
+  }
+  pop.hidden = false;
+  $('#handle-chip')?.setAttribute('aria-expanded', 'true');
+  if (input) input.focus();
+}
+
+function closeHandlePopover() {
+  const pop = $('#handle-popover');
+  if (!pop || pop.hidden) return;
+  pop.hidden = true;
+  $('#handle-chip')?.setAttribute('aria-expanded', 'false');
+}
+
+$('#handle-chip')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const pop = $('#handle-popover');
+  if (pop && pop.hidden) openHandlePopover();
+  else closeHandlePopover();
+});
+$('#handle-popover-close')?.addEventListener('click', closeHandlePopover);
+// Click outside the popover (and not on the chip) closes it.
+document.addEventListener('click', (e) => {
+  const pop = $('#handle-popover');
+  if (!pop || pop.hidden) return;
+  if (pop.contains(e.target) || e.target === $('#handle-chip')) return;
+  closeHandlePopover();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeHandlePopover();
+});
+
 // Apply on load
 applySettings();
 
@@ -657,6 +755,15 @@ $('#notif-toggle').addEventListener('change', async () => {
   saveSettings(settings);
 });
 
+// @handle save — button click and Enter-in-field both commit.
+$('#handle-save')?.addEventListener('click', saveHandle);
+$('#handle-input')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    saveHandle();
+  }
+});
+
 function urlBase64ToUint8Array(base64String) {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
   const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
@@ -740,10 +847,13 @@ async function disableWebPush() {
 
 let ws,
   currentRoom = null,
-  myIdentity = '';
+  myIdentity = '',
+  myHandle = '';
 const pendingMessages = new Map();
 const typingUsers = new Map();
 const unreadRooms = new Set();
+const mentionedRooms = new Set(); // rooms with an unread @-mention of me (distinct badge)
+let roomMentionPeople = []; // current room's human members as @ autocomplete candidates
 let showArchived = sessionStorage.getItem('webchat:showArchived') === '1';
 let showHidden = sessionStorage.getItem('webchat:showHidden') === '1';
 let agentName = '';
@@ -753,6 +863,27 @@ let reconnectDelay = 1000;
 function setLastSeenMessageId(id) {
   lastSeenMessageId = id;
   if (id) sessionStorage.setItem('lastSeenMessageId', id);
+}
+
+// Load my @-mention handle (server-stored, settable in Settings). Used to
+// highlight + notify when a message @-mentions me. Best-effort.
+async function fetchMyHandle() {
+  try {
+    const r = await authFetch('/api/me/handle');
+    if (r.ok) myHandle = ((await r.json()).handle || '').toLowerCase();
+  } catch {
+    /* non-fatal — mentions just won't self-highlight until next load */
+  }
+  // Reflect the loaded handle in the header chip.
+  renderHandleChip();
+}
+
+// True when `text` contains an @-mention of the current user's handle. Mirrors
+// the token boundary used by decorateMentions so highlight + notify agree.
+function messageMentionsMe(text) {
+  if (!myHandle || typeof text !== 'string') return false;
+  const re = new RegExp('(?:^|[^a-z0-9_-])@' + myHandle + '(?![a-z0-9-])', 'i');
+  return re.test(text);
 }
 
 function connect() {
@@ -792,6 +923,8 @@ function connect() {
         // live ones. Never dot the open room (the join that follows reads it).
         msg.rooms.forEach((r) => {
           if (r.unread && r.id !== currentRoom) unreadRooms.add(r.id);
+          if (r.mention && r.id !== currentRoom) mentionedRooms.add(r.id);
+          else if (!r.mention) mentionedRooms.delete(r.id);
           else unreadRooms.delete(r.id);
         });
         if (allAgents.length === 0) {
@@ -807,13 +940,16 @@ function connect() {
         }
         // Catch up on approvals queued while offline / mid-reconnect. Idempotent.
         fetchApprovals();
+        // (Re)load my @-mention handle so self-highlight/notify work this session.
+        fetchMyHandle();
         // Reveal the Permissions header button if the caller is owner.
         // Idempotent: probe runs every reconnect, but the button only
         // toggles visible.
         probeIsOwner();
         // Wirings or prime designations may have changed — refresh the
-        // mention-autocomplete cache for the active room.
+        // mention-autocomplete caches for the active room.
         refreshWiredAgentsForCurrentRoom();
+        fetchMentionablePeople();
         if (currentRoom) {
           // Rejoin after reconnect — catch up on missed messages
           ws.send(JSON.stringify({ type: 'join', room_id: currentRoom }));
@@ -872,9 +1008,21 @@ function connect() {
         break;
       }
       case 'members':
-        if (msg.room_id === currentRoom) renderMembers(msg.members);
+        if (msg.room_id === currentRoom) {
+          renderMembers(msg.members);
+          // Membership may have changed (someone gained/lost access) — refresh
+          // the @-mention candidate pool. (The pool itself comes from the
+          // server, not this connected-members list — see fetchMentionablePeople.)
+          fetchMentionablePeople();
+        }
         break;
       case 'message': {
+        // Bump the room's activity so it floats up in the Recent-sorted sidebar
+        // without waiting for a server rooms refresh.
+        if (msg.room_id && msg.created_at) {
+          roomActivity.set(msg.room_id, Math.max(roomActivity.get(msg.room_id) || 0, msg.created_at));
+          if (lastRoomsList.length) renderRooms(lastRoomsList);
+        }
         // Snapshot the scroll position BEFORE appending. If we check after,
         // the newly-inserted message has already pushed the bottom past our
         // 80px threshold and `isNearBottom()` lies about the user's intent.
@@ -889,9 +1037,11 @@ function connect() {
           msg.sender_type !== 'a2a'
         ) {
           try {
-            new Notification(`${msg.sender}`, {
+            const mentioned = messageMentionsMe(msg.content);
+            new Notification(mentioned ? `${msg.sender} mentioned you` : `${msg.sender}`, {
               body: msg.content.slice(0, 100),
               tag: msg.id || 'nanoclaw-msg',
+              requireInteraction: mentioned,
             });
           } catch {}
         }
@@ -960,12 +1110,22 @@ function connect() {
           updateUnreadDots();
         }
         break;
-      case 'read_cleared':
-        // Another of this user's devices read the room — drop the stale badge.
-        if (msg.room_id && unreadRooms.delete(msg.room_id)) {
+      case 'mention':
+        // Server says an @-mention of me landed in a room I'm not viewing.
+        // Distinct, higher-signal badge than plain unread.
+        if (msg.room_id && msg.room_id !== currentRoom) {
+          mentionedRooms.add(msg.room_id);
+          unreadRooms.add(msg.room_id);
           updateUnreadDots();
         }
         break;
+      case 'read_cleared': {
+        // Another of this user's devices read the room — drop the stale badges.
+        const cleared = (msg.room_id && unreadRooms.delete(msg.room_id)) | 0;
+        const clearedMention = (msg.room_id && mentionedRooms.delete(msg.room_id)) | 0;
+        if (cleared || clearedMention) updateUnreadDots();
+        break;
+      }
       case 'delete_message':
         if (msg.message_id) {
           const el = document.querySelector(`[data-message-id="${CSS.escape(msg.message_id)}"]`);
@@ -1042,49 +1202,37 @@ setInterval(() => {
 
 // ── Rooms ─────────────────────────────────────────────────────────────────
 // ── Room ordering ─────────────────────────────────────────────────────────
-function getSavedRoomOrder() {
-  try {
-    return JSON.parse(localStorage.getItem('room-order') || '[]');
-  } catch {
-    return [];
-  }
-}
-function saveRoomOrder(ids) {
-  localStorage.setItem('room-order', JSON.stringify(ids));
+// Live last-activity overrides keyed by room id. The rooms payload carries a
+// server-computed `last_activity`; as messages arrive while the app is open we
+// bump this map so the active room floats to the top without a server round-trip.
+const roomActivity = new Map();
+function activityOf(room) {
+  return Math.max(room.last_activity || room.created_at || 0, roomActivity.get(room.id) || 0);
 }
 
-let dragSrcLi = null;
+// Sentinel rendered as a horizontal rule between the pinned group and the rest.
+const ROOM_DIVIDER = Symbol('room-divider');
 
 function renderRooms(rooms) {
   const list = $('#room-list');
   list.innerHTML = '';
 
-  // Apply saved order, falling back to created_at.
-  const savedOrder = getSavedRoomOrder();
-  const orderMap = new Map(savedOrder.map((id, i) => [id, i]));
+  // Recent-first: newest activity (last message) at the top. Pinned rooms are
+  // lifted into a sticky group above a divider; the rest follow in activity
+  // order. (Replaces the old manual drag-order, which lived only in this
+  // browser's localStorage and never synced across devices.)
+  const byActivity = (a, b) => activityOf(b) - activityOf(a);
 
-  function cmp(a, b) {
-    const aIdx = orderMap.get(a.id);
-    const bIdx = orderMap.get(b.id);
-    if (aIdx !== undefined && bIdx !== undefined) return aIdx - bIdx;
-    if (aIdx !== undefined) return -1;
-    if (bIdx !== undefined) return 1;
-    return (a.created_at || 0) - (b.created_at || 0);
-  }
-
-  const sorted = [...rooms].sort(cmp);
-
-  // Partition into three buckets:
-  //   - hidden (per-user "hide" preference) — dropped from the sidebar
-  //     entirely unless `showHidden` is on. Per-user state.
-  //   - archived (global archive flag) — visible to everyone with access
-  //     but collected in a collapsed "Archived" section at the bottom,
-  //     revealed by the toggle. Same room can be both archived AND
-  //     hidden (by some users) — hidden wins for those users.
-  //   - active — the rest. Always rendered at the top.
-  const visibleRooms = showHidden ? sorted : sorted.filter((r) => !r.hidden);
+  // Partition:
+  //   - hidden (per-user "hide") — dropped unless `showHidden` is on.
+  //   - archived (global flag) — collected in a collapsed "Archived" section at
+  //     the bottom, revealed by the toggle.
+  //   - active — split into pinned (top) and unpinned, each activity-sorted.
+  const visibleRooms = showHidden ? [...rooms] : rooms.filter((r) => !r.hidden);
   const active = visibleRooms.filter((r) => !r.archived);
-  const archived = visibleRooms.filter((r) => r.archived);
+  const archived = visibleRooms.filter((r) => r.archived).sort(byActivity);
+  const pinned = active.filter((r) => r.pinned).sort(byActivity);
+  const unpinned = active.filter((r) => !r.pinned).sort(byActivity);
   const toggleBtn = $('#archived-toggle');
   if (archived.length === 0) {
     toggleBtn.hidden = true;
@@ -1092,10 +1240,25 @@ function renderRooms(rooms) {
     toggleBtn.hidden = false;
     toggleBtn.textContent = showArchived ? `Hide ${archived.length} archived` : `Show ${archived.length} archived`;
   }
-  const toRender = showArchived ? [...active, ...archived] : active;
+  // Divider sentinel between the pinned group and the rest — only when both
+  // groups are non-empty.
+  const showDivider = pinned.length > 0 && unpinned.length > 0;
+  const toRender = [
+    ...pinned,
+    ...(showDivider ? [ROOM_DIVIDER] : []),
+    ...unpinned,
+    ...(showArchived ? archived : []),
+  ];
 
   for (let i = 0; i < toRender.length; i++) {
     const room = toRender[i];
+    if (room === ROOM_DIVIDER) {
+      const sep = document.createElement('li');
+      sep.className = 'room-divider';
+      sep.setAttribute('role', 'separator');
+      list.appendChild(sep);
+      continue;
+    }
     const li = document.createElement('li');
     const color = roomColor(room.id);
     li.dataset.roomId = room.id;
@@ -1107,11 +1270,27 @@ function renderRooms(rooms) {
     text.style.flex = '1';
     li.appendChild(text);
 
-    if (unreadRooms.has(room.id)) {
+    // A room where you were @-mentioned gets a distinct "@" badge that takes
+    // precedence over the plain unread dot.
+    if (mentionedRooms.has(room.id)) {
+      const badge = document.createElement('span');
+      badge.className = 'mention-dot';
+      badge.textContent = '@';
+      badge.title = 'You were mentioned here';
+      li.appendChild(badge);
+    } else if (unreadRooms.has(room.id)) {
       const dot = document.createElement('span');
       dot.className = 'unread-dot';
       dot.style.background = color;
       li.appendChild(dot);
+    }
+
+    if (room.pinned) {
+      const pin = document.createElement('span');
+      pin.className = 'room-pin-indicator';
+      pin.innerHTML = lucide('pin');
+      pin.setAttribute('aria-label', 'Pinned');
+      li.appendChild(pin);
     }
 
     // Kebab — opens a tiny menu with up to two actions:
@@ -1135,6 +1314,16 @@ function renderRooms(rooms) {
       list.querySelectorAll('.room-menu').forEach((m) => m.remove());
       const menu = document.createElement('div');
       menu.className = 'room-menu';
+
+      const pinBtn = document.createElement('button');
+      pinBtn.type = 'button';
+      pinBtn.textContent = room.pinned ? 'Unpin' : 'Pin';
+      pinBtn.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        menu.remove();
+        await toggleRoomPin(room.id, !room.pinned);
+      });
+      menu.appendChild(pinBtn);
 
       const hideBtn = document.createElement('button');
       hideBtn.type = 'button';
@@ -1170,39 +1359,6 @@ function renderRooms(rooms) {
     if (room.id === currentRoom) li.classList.add('active');
     li.setAttribute('role', 'button');
     li.setAttribute('tabindex', '0');
-    li.setAttribute('draggable', 'true');
-
-    li.addEventListener('dragstart', (e) => {
-      dragSrcLi = li;
-      li.classList.add('dragging');
-      e.dataTransfer.effectAllowed = 'move';
-      e.dataTransfer.setData('text/plain', room.id);
-    });
-    li.addEventListener('dragend', () => {
-      li.classList.remove('dragging');
-      dragSrcLi = null;
-      list.querySelectorAll('.drag-over').forEach((el) => el.classList.remove('drag-over'));
-    });
-    li.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      if (dragSrcLi && dragSrcLi !== li) li.classList.add('drag-over');
-    });
-    li.addEventListener('dragleave', () => li.classList.remove('drag-over'));
-    li.addEventListener('drop', (e) => {
-      e.preventDefault();
-      li.classList.remove('drag-over');
-      if (!dragSrcLi || dragSrcLi === li) return;
-      const items = [...list.children].map((el) => el.dataset.roomId);
-      const fromId = dragSrcLi.dataset.roomId;
-      const toId = li.dataset.roomId;
-      const fromIdx = items.indexOf(fromId);
-      const toIdx = items.indexOf(toId);
-      items.splice(fromIdx, 1);
-      items.splice(toIdx, 0, fromId);
-      saveRoomOrder(items.filter(Boolean));
-      renderRooms(lastRoomsList);
-    });
 
     li.addEventListener('click', () => joinRoom(room.id, room.name));
     li.addEventListener('keydown', (e) => {
@@ -1240,6 +1396,26 @@ async function toggleRoomArchive(roomId, archive) {
   }
 }
 
+async function toggleRoomPin(roomId, pin) {
+  // PER-USER pin. Optimistic flip + re-render, same pattern as hide/archive.
+  // The server replays authoritative state via broadcastRooms (which also syncs
+  // the pin to this user's other devices).
+  const target = lastRoomsList.find((r) => r.id === roomId);
+  if (target) target.pinned = pin;
+  renderRooms(lastRoomsList);
+  try {
+    const res = await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/${pin ? 'pin' : 'unpin'}`, {
+      method: 'POST',
+      headers: { 'X-Webchat-CSRF': '1' },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    console.error('toggleRoomPin failed:', err);
+    if (target) target.pinned = !pin; // roll back
+    renderRooms(lastRoomsList);
+  }
+}
+
 async function toggleRoomHide(roomId, hide) {
   // PER-USER hide. Optimistic flip, same pattern as toggleRoomArchive.
   // Lives on a separate endpoint and table from archive so the two
@@ -1268,12 +1444,12 @@ function joinRoom(roomId, roomName, jumpMessageId) {
   closeAgentDetail();
   closeRoomDetail();
   closeModelDetail();
-  // Reset any in-progress turn state from the previous room so its bubble /
-  // elapsed timer / reasoning trace can't leak into the new room.
-  endAgentTurn();
-  reasoningLog = [];
+  // Reset any in-progress turn state from the previous room so its bubbles /
+  // elapsed timer / reasoning traces can't leak into the new room.
+  endAllAgentTurns();
   currentRoom = roomId;
   unreadRooms.delete(roomId);
+  mentionedRooms.delete(roomId);
   updateUnreadDots();
   updateByokBanner(roomId);
   // Set agent name for thinking bubble from the agent wired to this room.
@@ -1297,9 +1473,10 @@ function joinRoom(roomId, roomName, jumpMessageId) {
   document.querySelectorAll('#room-list li').forEach((li) => {
     li.classList.toggle('active', li.dataset.roomId === roomId);
   });
-  // Prime the mention-autocomplete cache so the first '@' the user types
+  // Prime the mention-autocomplete caches so the first '@' the user types
   // doesn't have to wait on a fetch.
   refreshWiredAgentsForCurrentRoom();
+  fetchMentionablePeople();
 }
 
 // ── Message search (FTS) ────────────────────────────────────────────────────
@@ -1316,6 +1493,8 @@ function clearRoomSearch() {
   }
   const roomList = $('#room-list');
   if (roomList) roomList.hidden = false;
+  const close = $('#room-search-close');
+  if (close) close.hidden = true;
 }
 
 function renderSearchResults(results) {
@@ -1348,6 +1527,10 @@ function renderSearchResults(results) {
 
 $('#room-search')?.addEventListener('input', (e) => {
   const q = e.target.value.trim();
+  // Show the close/back affordance whenever a query is active (immediate, not
+  // debounced) so the dismissal control is there the moment search begins.
+  const closeBtn = $('#room-search-close');
+  if (closeBtn) closeBtn.hidden = !q;
   clearTimeout(searchDebounce);
   if (!q) {
     clearRoomSearch();
@@ -1363,6 +1546,16 @@ $('#room-search')?.addEventListener('input', (e) => {
       renderSearchResults([]);
     }
   }, 250);
+});
+
+// Close/back button — the visible dismissal affordance the search pane lacked.
+// Mobile has no Escape key and the native search clear is unreliable, so this is
+// the tap target that returns you to the room list (same effect as Escape).
+$('#room-search-close')?.addEventListener('click', () => {
+  const input = $('#room-search');
+  if (input) input.value = '';
+  clearRoomSearch();
+  if (input) input.blur();
 });
 
 $('#search-results')?.addEventListener('click', (e) => {
@@ -1439,8 +1632,21 @@ function agentColor(name) {
 
 function formatTime(ts) {
   if (!ts) return '';
-  const d = new Date(typeof ts === 'number' ? ts : ts);
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const d = new Date(ts);
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  // Today's messages stay time-only to avoid clutter; anything older gets a date
+  // so you can tell at a glance how old it is.
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) return time;
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (d.toDateString() === yesterday.toDateString()) return `Yesterday ${time}`;
+  // Same calendar year → "Jun 20, 14:32"; older → include the year.
+  const dateOpts =
+    d.getFullYear() === now.getFullYear()
+      ? { month: 'short', day: 'numeric' }
+      : { month: 'short', day: 'numeric', year: 'numeric' };
+  return `${d.toLocaleDateString([], dateOpts)}, ${time}`;
 }
 
 // Render an in-room approval card. Actionable (approve/deny buttons) only for
@@ -1522,15 +1728,25 @@ function appendMessage(msg, statusText, beforeNode) {
   // then clear it so only the first reply of the turn carries it.
   let thoughtsForThisMsg = null;
   if (isAgent) {
-    if (reasoningLog.length > 0) {
-      thoughtsForThisMsg = reasoningLog.slice();
-      reasoningLog = [];
+    // Fold THIS agent's reasoning onto its reply and clear ITS bubble only — not
+    // another agent's that may still be thinking. Match the reply's sender to its
+    // bubble by name; if there's a lone bubble (single-agent room), use it even
+    // on a name mismatch.
+    let senderBubble = bubbleFor(msg.sender);
+    if (!senderBubble) {
+      const all = document.querySelectorAll('#messages .thinking-bubble');
+      if (all.length === 1) senderBubble = all[0];
     }
-    if (typeof endAgentTurn === 'function') endAgentTurn();
-    const tb = $('#messages .thinking-bubble');
-    if (tb) tb.remove();
+    if (senderBubble) {
+      const log = senderBubble._turn && senderBubble._turn.reasoningLog;
+      if (log && log.length > 0) thoughtsForThisMsg = log.slice();
+      endAgentTurn(senderBubble.dataset.agent);
+    }
   }
   div.className = isA2a ? 'msg a2a' : isMine ? 'msg mine' : isAgent ? 'msg agent' : 'msg other';
+  // Highlight messages that @-mention me (not my own). Bubble-level accent +
+  // the per-token .mention-me chip from decorateMentions.
+  if (!isMine && messageMentionsMe(isA2a ? a2aText : msg.content)) div.classList.add('mentions-me');
   if (msg.id) div.dataset.messageId = msg.id;
   if (isA2a) {
     // Tint the card's accent bar in the sending agent's colour (see .msg.a2a
@@ -1622,6 +1838,8 @@ function appendMessage(msg, statusText, beforeNode) {
     const time = document.createElement('div');
     time.className = 'timestamp';
     time.textContent = timeStr;
+    // Full date + time on hover, for exact age regardless of the compact label.
+    if (msg.created_at) time.title = new Date(msg.created_at).toLocaleString();
     div.appendChild(time);
   }
   if (isMine && statusText) {
@@ -2594,6 +2812,28 @@ async function refreshWiredAgentsForCurrentRoom() {
   }
 }
 
+// People you can @-mention here: anyone with a handle who can access the room,
+// online or not (mentions notify on return). Sourced from the server, NOT the
+// connected-members list — so you can mention offline teammates and the list
+// isn't empty just because you're the only one currently in the room.
+async function fetchMentionablePeople() {
+  const roomId = currentRoom;
+  if (!roomId) {
+    roomMentionPeople = [];
+    return;
+  }
+  try {
+    const res = await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/mentionable`);
+    if (!res.ok) return; // leave stale on error rather than blanking
+    const people = await res.json();
+    if (currentRoom === roomId) {
+      roomMentionPeople = people.map((p) => ({ folder: p.handle, name: p.name, isUser: true }));
+    }
+  } catch {
+    // network blip — leave stale cache
+  }
+}
+
 let mentionPopover = null;
 let mentionStart = -1;
 let mentionMatches = [];
@@ -2636,7 +2876,12 @@ function renderMentionPopover(input) {
       name.textContent = ` — ${agent.name}`;
       item.appendChild(name);
     }
-    if (agent.is_prime) {
+    if (agent.isUser) {
+      const badge = document.createElement('span');
+      badge.className = 'mention-popover-person';
+      badge.textContent = 'person';
+      item.appendChild(badge);
+    } else if (agent.is_prime) {
       const badge = document.createElement('span');
       badge.className = 'mention-popover-prime';
       badge.textContent = 'default';
@@ -2661,7 +2906,18 @@ function renderMentionPopover(input) {
 }
 
 function tryActivateMention(input) {
-  if (wiredAgentsForCurrentRoom.length === 0) {
+  // Candidates: wired agents (trigger the agent) + human members with handles
+  // (notify/surface only). De-dup by folder so a handle that collides with an
+  // agent folder doesn't double-list.
+  const seen = new Set();
+  const mentionPool = [];
+  for (const a of [...wiredAgentsForCurrentRoom, ...roomMentionPeople]) {
+    const key = (a.folder || '').toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    mentionPool.push(a);
+  }
+  if (mentionPool.length === 0) {
     dismissMentionPopover();
     return;
   }
@@ -2692,7 +2948,7 @@ function tryActivateMention(input) {
   }
   mentionStart = i;
   const token = value.slice(i + 1, cursor).toLowerCase();
-  mentionMatches = wiredAgentsForCurrentRoom
+  mentionMatches = mentionPool
     .filter((a) => a.folder.toLowerCase().startsWith(token))
     .slice(0, 8);
   mentionSelectedIndex = 0;
@@ -2788,6 +3044,7 @@ function decorateMentions(bubble) {
       if (fullStart > last) frag.appendChild(document.createTextNode(txt.slice(last, fullStart)));
       const span = document.createElement('span');
       span.className = 'mention';
+      if (myHandle && m[2].toLowerCase() === myHandle) span.classList.add('mention-me');
       span.textContent = `@${m[2]}`;
       frag.appendChild(span);
       last = fullStart + 1 + m[2].length;
@@ -2802,18 +3059,32 @@ function decorateMentions(bubble) {
 // ── Members panel ─────────────────────────────────────────────────────────
 let currentMembers = [];
 
+let membersFilter = ''; // lowercased; filters the room members list
+
 function renderMembers(members) {
   currentMembers = members;
-  const list = $('#members-list');
   const toggle = $('#members-toggle');
-  toggle.textContent = members.length;
+  toggle.textContent = members.length; // full count — independent of the filter
   toggle.hidden = !currentRoom;
+  paintMembersList();
+}
 
+// Render #members-list from currentMembers, applying the search filter. Split
+// from renderMembers so the search box can re-paint without a re-fetch.
+function paintMembersList() {
+  const list = $('#members-list');
   list.innerHTML = '';
-  const sorted = [...members].sort((a, b) => {
+  let sorted = [...currentMembers].sort((a, b) => {
     if (a.identity_type !== b.identity_type) return a.identity_type === 'agent' ? -1 : 1;
     return a.identity.localeCompare(b.identity);
   });
+  if (membersFilter) {
+    sorted = sorted.filter((m) => `${m.identity} ${m.handle || ''}`.toLowerCase().includes(membersFilter));
+  }
+  if (sorted.length === 0) {
+    list.innerHTML = '<li class="member-empty">No members match.</li>';
+    return;
+  }
   for (const m of sorted) {
     const li = document.createElement('li');
     const dot = document.createElement('span');
@@ -2828,6 +3099,12 @@ function renderMembers(members) {
       tag.className = 'member-tag';
       tag.textContent = 'AGENT';
       li.appendChild(tag);
+    } else if (m.handle) {
+      // Show how to @-mention this person, right-aligned like the AGENT tag.
+      const handle = document.createElement('span');
+      handle.className = 'member-handle';
+      handle.textContent = `@${m.handle}`;
+      li.appendChild(handle);
     }
     list.appendChild(li);
   }
@@ -2844,6 +3121,10 @@ function toggleMembersPanel() {
 
 $('#members-toggle').addEventListener('click', toggleMembersPanel);
 $('#members-close').addEventListener('click', toggleMembersPanel);
+$('#members-search')?.addEventListener('input', (e) => {
+  membersFilter = e.target.value.trim().toLowerCase();
+  paintMembersList();
+});
 $('#members-overlay').addEventListener('click', toggleMembersPanel);
 
 // ── Detail-panel backdrop (mobile-only via CSS) ─────────────────────────────
@@ -3626,6 +3907,8 @@ function userRoleSummary(u) {
   return parts.join(' · ') || 'no roles';
 }
 
+let permsUserFilter = ''; // lowercased; filters the user list by name + id
+
 function renderPermsUserList() {
   const list = $('#perms-user-list');
   list.innerHTML = '';
@@ -3642,7 +3925,16 @@ function renderPermsUserList() {
     if (ta !== tb) return ta - tb;
     return userDisplayName(a).localeCompare(userDisplayName(b));
   });
-  sorted.forEach((u) => {
+  // Filter by the search box — match on display name AND the namespaced id, so
+  // you can find someone by handle/email or by channel prefix (e.g. "slack:").
+  const rows = permsUserFilter
+    ? sorted.filter((u) => `${userDisplayName(u)} ${u.id}`.toLowerCase().includes(permsUserFilter))
+    : sorted;
+  if (rows.length === 0) {
+    list.innerHTML = '<li class="perms-empty" style="padding:16px;">No users match.</li>';
+    return;
+  }
+  rows.forEach((u) => {
     const li = document.createElement('li');
     li.tabIndex = 0;
     if (u.id === permsSelectedUserId) li.classList.add('active');
@@ -3681,6 +3973,11 @@ function renderPermsUserList() {
     list.appendChild(li);
   });
 }
+
+$('#perms-user-search')?.addEventListener('input', (e) => {
+  permsUserFilter = e.target.value.trim().toLowerCase();
+  renderPermsUserList();
+});
 
 function permsSelectUser(userId) {
   permsSelectedUserId = userId;
@@ -4928,6 +5225,17 @@ async function openRoomDetail(roomId) {
   const room = lastRoomsList.find((r) => r.id === roomId);
   $('#room-detail-title').textContent = room ? `${room.name} — settings` : 'Room settings';
 
+  // Rename field — owner-only (the server also enforces). Prefilled with the
+  // current name; saving PUTs /name and the server's broadcastRooms refreshes
+  // the sidebar + this panel's title.
+  const renameField = $('#room-rename-field');
+  if (isOwnerView && room) {
+    renameField.hidden = false;
+    $('#room-rename-input').value = room.name || '';
+  } else {
+    renameField.hidden = true;
+  }
+
   // Hide the add-agent form when opening
   $('#room-add-agent-form').hidden = true;
 
@@ -4977,6 +5285,30 @@ function closeRoomDetail() {
   $('#room-edit-view').hidden = false;
   $('#room-create-view').hidden = true;
   selectedRoomId = null;
+}
+
+// Rename the selected room. Owner-only (the field is hidden otherwise, and the
+// server re-checks). The server's broadcastRooms() pushes the new name, so the
+// sidebar + panel title update via the 'rooms' handler — no manual refresh.
+async function saveRoomName() {
+  const id = selectedRoomId;
+  if (!id) return;
+  const name = $('#room-rename-input').value.trim();
+  if (!name) {
+    showToast('Enter a room name', { kind: 'error' });
+    return;
+  }
+  try {
+    const r = await authFetch(`/api/rooms/${encodeURIComponent(id)}/name`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    showToast('Room renamed', { kind: 'success' });
+  } catch (err) {
+    showToast('Rename failed: ' + (err.message || err), { kind: 'error' });
+  }
 }
 
 // Engage mode for the currently-loaded room. Populated alongside the agents
@@ -5322,6 +5654,13 @@ $('#room-oauth-allowed')?.addEventListener('change', async (e) => {
     showToast('Failed to update: ' + (err.error || r.statusText), { kind: 'error' });
   }
 });
+$('#room-rename-save')?.addEventListener('click', saveRoomName);
+$('#room-rename-input')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    saveRoomName();
+  }
+});
 $('#room-archive-toggle').addEventListener('click', async () => {
   if (!selectedRoomId) return;
   const room = lastRoomsList.find((r) => r.id === selectedRoomId);
@@ -5473,18 +5812,21 @@ function renderTypingIndicator() {
   const el = $('#typing-indicator');
   const entries = [...typingUsers.entries()];
   const userTypers = entries.filter(([, v]) => v.identity_type !== 'agent');
-  const hasAgent = entries.some(([, v]) => v.identity_type === 'agent');
+  const typingAgents = entries.filter(([, v]) => v.identity_type === 'agent').map(([n]) => n);
 
-  // The thinking bubble shows while a turn is active (authoritative, from the
-  // status feed) OR while the heartbeat-driven typing signal says the agent is
-  // working (covers pre-status warm containers). It clears only when BOTH are
-  // false — so a quiet stretch in the typing signal can't drop a live turn's
-  // bubble out from under the user.
-  let bubble = $('#messages .thinking-bubble');
-  if (agentTurnActive || hasAgent) {
-    if (!bubble) bubble = ensureThinkingBubble();
-  } else if (bubble) {
-    bubble.remove();
+  // Per-agent thinking bubbles persist while EITHER an authoritative status turn
+  // owns them (data-statusLive, cleared by removal on 'done') OR the heartbeat
+  // typing signal says that agent is working (covers pre-status warm containers).
+  // So a quiet typing stretch never drops a live turn's bubble. Ensure a bubble
+  // for each typing agent; remove only bubbles that are neither status-live nor
+  // currently typing.
+  for (const name of typingAgents) {
+    if (!bubbleFor(name)) ensureThinkingBubble(name);
+  }
+  for (const b of document.querySelectorAll('#messages .thinking-bubble')) {
+    if (b.dataset.statusLive === '1') continue;
+    if (typingAgents.includes(b.dataset.agent)) continue;
+    b.remove();
   }
 
   if (userTypers.length > 0) {
@@ -5525,29 +5867,32 @@ const TOOL_LABELS = {
 //   stalled   → turn ended abnormally (agent died/killed); notice + clear
 function handleStatusEvent(msg) {
   if (msg.room_id !== currentRoom) return;
+  // Each frame names its agent (host stamps agent_name); fall back to the room's
+  // single agent name so old/unattributed frames still land on one bubble.
+  const name = msg.agent_name || agentName || 'Agent';
   switch (msg.event) {
     case 'start':
-      beginAgentTurn();
+      beginAgentTurn(name);
       break;
     case 'tool': {
-      markTurnActivity();
+      markTurnActivity(name);
       const verb = msg.text ? TOOL_LABELS[msg.text] || `Using ${msg.text}` : 'Working';
-      updateThinkingBubble(verb, msg.detail || null);
+      updateThinkingBubble(name, verb, msg.detail || null);
       break;
     }
     case 'progress':
-      markTurnActivity();
-      if (msg.text) setThinkingMilestone(msg.text);
+      markTurnActivity(name);
+      if (msg.text) setThinkingMilestone(name, msg.text);
       break;
     case 'reasoning':
-      markTurnActivity();
-      if (msg.text) pushReasoning(msg.text);
+      markTurnActivity(name);
+      if (msg.text) pushReasoning(name, msg.text);
       break;
     case 'done':
-      endAgentTurn();
+      endAgentTurn(name);
       break;
     case 'stalled':
-      endAgentTurn();
+      endAgentTurn(name);
       appendSystem(msg.text || 'The agent stopped responding. You may want to resend your message.');
       break;
   }
@@ -5558,79 +5903,115 @@ function handleStatusEvent(msg) {
 // stalled), NOT the heartbeat-driven typing signal — so it stays up through
 // long quiet operations and only clears on a real terminal signal. While a
 // turn is active an elapsed counter ticks so liveness is always explicit.
-let agentTurnActive = false;
-let turnStartedAt = 0;
-let lastTurnActivityAt = 0;
-let turnElapsedTimer = null;
+// Per-agent turn state lives ON each bubble element (._turn = {startedAt,
+// lastActivityAt, reasoningLog}), keyed by agent name (data-agent). A
+// multi-agent room shows one bubble per agent instead of interleaving everyone's
+// activity into one; a single-agent room is unchanged. One shared ticker updates
+// every live bubble's elapsed counter.
 const TURN_QUIET_MS = 5000; // after this much silence, say "still working"
+const REASONING_LOG_MAX = 500; // cap a single agent's retained reasoning lines
+let turnElapsedTimer = null;
 
-// Full reasoning trace for the current turn (every line, uncapped by the feed's
-// fade) — powers the click-to-expand full view and the "Thoughts" disclosure
-// folded onto the agent's reply. Session-lived; cleared on turn start / room
-// switch. Bounded so a pathological turn can't grow it without limit.
-let reasoningLog = [];
-const REASONING_LOG_MAX = 500;
-
-function beginAgentTurn() {
-  agentTurnActive = true;
-  turnStartedAt = Date.now();
-  lastTurnActivityAt = Date.now();
-  reasoningLog = [];
-  ensureThinkingBubble();
+// Selector-safe lookup of a specific agent's bubble.
+function bubbleFor(name) {
+  const k = window.CSS && CSS.escape ? CSS.escape(name || 'Agent') : name || 'Agent';
+  return $(`#messages .thinking-bubble[data-agent="${k}"]`);
+}
+function ensureElapsedTimer() {
   if (!turnElapsedTimer) turnElapsedTimer = setInterval(updateTurnElapsed, 1000);
-  updateTurnElapsed();
 }
 
-function endAgentTurn() {
-  agentTurnActive = false;
+function beginAgentTurn(name) {
+  const bubble = ensureThinkingBubble(name);
+  bubble._turn = { startedAt: Date.now(), lastActivityAt: Date.now(), reasoningLog: [] };
+  // Mark the bubble as owned by an active status turn so the typing-heartbeat
+  // path won't remove it during a quiet stretch; cleared by removal on 'done'.
+  bubble.dataset.statusLive = '1';
+  ensureElapsedTimer();
+  updateTurnElapsed();
+  return bubble;
+}
+
+function endAgentTurn(name) {
+  const bubble = bubbleFor(name);
+  if (bubble) bubble.remove();
+  if (turnElapsedTimer && !$('#messages .thinking-bubble')) {
+    clearInterval(turnElapsedTimer);
+    turnElapsedTimer = null;
+  }
+}
+
+// Remove every agent's bubble (room switch / reset).
+function endAllAgentTurns() {
+  for (const b of document.querySelectorAll('#messages .thinking-bubble')) b.remove();
   if (turnElapsedTimer) {
     clearInterval(turnElapsedTimer);
     turnElapsedTimer = null;
   }
-  const bubble = $('#messages .thinking-bubble');
-  if (bubble) bubble.remove();
 }
 
-function markTurnActivity() {
-  lastTurnActivityAt = Date.now();
+function markTurnActivity(name) {
+  const bubble = bubbleFor(name);
+  if (bubble && bubble._turn) bubble._turn.lastActivityAt = Date.now();
 }
 
 function updateTurnElapsed() {
-  if (!agentTurnActive) return;
-  const bubble = $('#messages .thinking-bubble');
-  const el = bubble && bubble.querySelector('.thinking-elapsed');
-  if (!el) return;
-  const secs = Math.floor((Date.now() - turnStartedAt) / 1000);
-  if (secs < 2) {
-    el.textContent = '';
-    return;
+  let any = false;
+  for (const bubble of document.querySelectorAll('#messages .thinking-bubble')) {
+    any = true;
+    const t = bubble._turn;
+    const el = bubble.querySelector('.thinking-elapsed');
+    if (!t || !el) continue;
+    const secs = Math.floor((Date.now() - t.startedAt) / 1000);
+    if (secs < 2) {
+      el.textContent = '';
+      continue;
+    }
+    const quiet = Date.now() - t.lastActivityAt > TURN_QUIET_MS;
+    el.textContent = quiet ? ` · still working ${secs}s` : ` · ${secs}s`;
   }
-  const quiet = Date.now() - lastTurnActivityAt > TURN_QUIET_MS;
-  el.textContent = quiet ? ` · still working ${secs}s` : ` · ${secs}s`;
+  if (!any && turnElapsedTimer) {
+    clearInterval(turnElapsedTimer);
+    turnElapsedTimer = null;
+  }
 }
 
 const THINKING_DETAIL_MAX = 64;
+
+// Interrupt ONE agent's in-progress turn (per-agent Stop) — sends a "stop" over
+// the WS targeting that agent (the host resolves the name to its session). The
+// GUI equivalent of the CLI's ESC. Removes that agent's bubble optimistically;
+// the host's stream-abort + 'done' keep it gone.
+function interruptAgent(name) {
+  if (!currentRoom || !ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: 'interrupt', room_id: currentRoom, agent_name: name || null }));
+  endAgentTurn(name);
+  appendSystem(name ? `Stopped ${name}.` : 'Stopped.');
+}
 
 // Ensure the thinking bubble exists and is laid out with: a verb in the sender
 // line, a target line (the file/command/query), a milestone line (latest
 // progress), and the animated dots. Shared with the heartbeat typing path —
 // both create-or-reuse the single `.thinking-bubble`, so activity persists
 // through the turn and clears when the agent's message lands.
-function ensureThinkingBubble() {
-  let bubble = $('#messages .thinking-bubble');
+function ensureThinkingBubble(name) {
+  const key = name || agentName || 'Agent';
+  let bubble = bubbleFor(key);
   if (bubble) return bubble;
   // Same shouldScroll formula as the 'message' handler — honors forceScrollCount
   // so the bubble follows even when a smooth scroll is still mid-animation.
   const shouldScroll = isNearBottom() || (forceScrollCount > 0 && !userScrolledAway);
   bubble = document.createElement('div');
   bubble.className = 'msg agent thinking-bubble';
+  bubble.dataset.agent = key; // one bubble per agent, keyed by name
+  bubble._turn = { startedAt: Date.now(), lastActivityAt: Date.now(), reasoningLog: [] };
   // Sender line: icon + "{agent} — " + a verb span (refined by tool events) +
   // an elapsed span (ticked while the turn is active). Verb/elapsed live in
   // their own spans so each updates without clobbering the other.
   const sender = document.createElement('div');
   sender.className = 'sender';
   sender.appendChild(lucideEl('bot'));
-  sender.appendChild(document.createTextNode(` ${agentName || 'Agent'} — `));
+  sender.appendChild(document.createTextNode(` ${key} — `));
   const verb = document.createElement('span');
   verb.className = 'thinking-verb';
   verb.textContent = 'Thinking';
@@ -5643,6 +6024,19 @@ function ensureThinkingBubble() {
   chevron.className = 'thinking-chevron';
   chevron.appendChild(lucideEl('chevron-right'));
   sender.appendChild(chevron);
+  // Stop button — interrupt the in-progress turn (the GUI equivalent of CLI ESC).
+  // stopPropagation so it doesn't also fire the bubble's expand-toggle handler.
+  const stop = document.createElement('button');
+  stop.type = 'button';
+  stop.className = 'thinking-stop';
+  stop.title = 'Stop the agent';
+  stop.setAttribute('aria-label', 'Stop the agent');
+  stop.innerHTML = '<span class="stop-square" aria-hidden="true"></span>Stop';
+  stop.addEventListener('click', (e) => {
+    e.stopPropagation();
+    interruptAgent(key);
+  });
+  sender.appendChild(stop);
   bubble.appendChild(sender);
   const content = document.createElement('div');
   content.className = 'bubble';
@@ -5678,11 +6072,12 @@ function toggleThinkingExpanded(bubble) {
 function renderFullTrace(bubble) {
   const el = bubble.querySelector('.thinking-fulltrace');
   if (!el) return;
-  if (reasoningLog.length === 0) {
+  const log = (bubble._turn && bubble._turn.reasoningLog) || [];
+  if (log.length === 0) {
     el.textContent = 'No reasoning captured for this turn yet.';
   } else {
     el.textContent = '';
-    for (const line of reasoningLog) {
+    for (const line of log) {
       const row = document.createElement('div');
       row.className = 'thinking-fulltrace-line';
       row.textContent = line;
@@ -5692,8 +6087,8 @@ function renderFullTrace(bubble) {
   el.scrollTop = el.scrollHeight;
 }
 
-function updateThinkingBubble(label, detail) {
-  const bubble = ensureThinkingBubble();
+function updateThinkingBubble(name, label, detail) {
+  const bubble = ensureThinkingBubble(name);
   const verbEl = bubble.querySelector('.thinking-verb');
   if (verbEl) verbEl.textContent = label;
   const target = bubble.querySelector('.thinking-target');
@@ -5709,8 +6104,8 @@ function updateThinkingBubble(label, detail) {
   }
 }
 
-function setThinkingMilestone(text) {
-  const bubble = ensureThinkingBubble();
+function setThinkingMilestone(name, text) {
+  const bubble = ensureThinkingBubble(name);
   const el = bubble.querySelector('.thinking-milestone');
   if (el) {
     el.textContent = text;
@@ -5728,12 +6123,13 @@ const REASONING_FADE_MS = 500; // fade-out transition duration (matches CSS)
 // under the top gradient mask. Each line also self-fades after REASONING_FEED_TTL
 // so the feed drains when reasoning pauses; the whole thing clears with the
 // bubble when the agent's message lands. A bounded DOM buffer caps memory.
-function pushReasoning(text) {
-  const bubble = ensureThinkingBubble();
+function pushReasoning(name, text) {
+  const bubble = ensureThinkingBubble(name);
+  if (!bubble._turn) bubble._turn = { startedAt: Date.now(), lastActivityAt: Date.now(), reasoningLog: [] };
 
   // Retain the full line for the click-to-expand view and the reply disclosure.
-  reasoningLog.push(text);
-  if (reasoningLog.length > REASONING_LOG_MAX) reasoningLog.shift();
+  bubble._turn.reasoningLog.push(text);
+  if (bubble._turn.reasoningLog.length > REASONING_LOG_MAX) bubble._turn.reasoningLog.shift();
   // If the user is currently viewing the expanded trace, keep it live.
   if (bubble.classList.contains('expanded')) renderFullTrace(bubble);
 
