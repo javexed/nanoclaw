@@ -317,6 +317,87 @@ function renderSettingsModal() {
   $('#notif-toggle').checked = settings.notifications;
 }
 
+// ── Workspace credentials policy (Settings → Member credentials, owner-only) ──
+let credConfigWired = false;
+async function renderCredentialsSettings() {
+  const section = $('#settings-credentials');
+  if (!section) return;
+  let cfg;
+  try {
+    const r = await authFetch('/api/webchat/credentials-config');
+    if (!r.ok) {
+      section.hidden = true;
+      return;
+    }
+    cfg = await r.json();
+  } catch {
+    section.hidden = true;
+    return;
+  }
+  if (!cfg.canEdit) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+  document.querySelectorAll('#cred-default-mode .setting-option').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.value === cfg.defaultMode);
+  });
+  const setChecked = (id, v) => {
+    const el = $(id);
+    if (el) el.checked = !!v;
+  };
+  setChecked('#cred-allow-anthropic-key', cfg.allowAnthropicKey);
+  setChecked('#cred-allow-claude-oauth', cfg.allowClaudeOauth);
+  setChecked('#cred-allow-openai-key', cfg.allowOpenaiKey);
+  setChecked('#cred-allow-codex-oauth', cfg.allowCodexOauth);
+  // Codex types are inert until the provider is installed — grey + disable them.
+  const codexGroup = $('#cred-codex-group');
+  if (codexGroup) codexGroup.classList.toggle('is-disabled', !cfg.codexAvailable);
+  const codexHint = $('#cred-codex-hint');
+  if (codexHint) codexHint.hidden = !!cfg.codexAvailable;
+  ['#cred-allow-openai-key', '#cred-allow-codex-oauth'].forEach((s) => {
+    const el = $(s);
+    if (el) el.disabled = !cfg.codexAvailable;
+  });
+
+  if (credConfigWired) return;
+  credConfigWired = true;
+  const putConfig = async (patch) => {
+    const r = await authFetch('/api/webchat/credentials-config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+      body: JSON.stringify(patch),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      showToast('Failed to save: ' + (err.error || r.statusText), { kind: 'error' });
+      renderCredentialsSettings(); // resync to server truth
+      return false;
+    }
+    return true;
+  };
+  document.querySelectorAll('#cred-default-mode .setting-option').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      if (await putConfig({ defaultMode: btn.dataset.value })) {
+        document
+          .querySelectorAll('#cred-default-mode .setting-option')
+          .forEach((b) => b.classList.toggle('active', b === btn));
+      }
+    });
+  });
+  const wireCheck = (id, key) => {
+    const el = $(id);
+    if (!el) return;
+    el.addEventListener('change', async () => {
+      if (!(await putConfig({ [key]: el.checked }))) el.checked = !el.checked;
+    });
+  };
+  wireCheck('#cred-allow-anthropic-key', 'allowAnthropicKey');
+  wireCheck('#cred-allow-claude-oauth', 'allowClaudeOauth');
+  wireCheck('#cred-allow-openai-key', 'allowOpenaiKey');
+  wireCheck('#cred-allow-codex-oauth', 'allowCodexOauth');
+}
+
 // Persist the @handle from the Settings field. Inline feedback (per DESIGN.md):
 // success/taken/invalid all surface on the #handle-status line, not a toast.
 async function saveHandle() {
@@ -421,6 +502,7 @@ applySettings();
 // Settings modal open/close
 function openSettings() {
   renderSettingsModal();
+  renderCredentialsSettings();
   $('#settings-overlay').hidden = false;
   // Focus trap
   const modal = $('#settings-overlay .modal');
@@ -2037,9 +2119,11 @@ async function updateByokBanner(roomId) {
       hideAll();
       return;
     }
-    const { connected, mode, oauthAllowed } = await r.json();
-    // BYOK is surfaced when the room takes personal keys OR allows subscriptions.
-    if (mode === 'disabled' && !oauthAllowed) {
+    const { connected, mode, oauthAllowed, apiKeyAllowed = true } = await r.json();
+    // API keys are offered only when the room is on AND the workspace accepts them.
+    const apiOffered = mode !== 'disabled' && apiKeyAllowed;
+    // BYOK is surfaced when the room offers API keys OR the workspace allows OAuth.
+    if (!apiOffered && !oauthAllowed) {
       hideAll();
       return;
     }
@@ -2068,7 +2152,6 @@ async function updateByokBanner(roomId) {
     if (oauthForm) oauthForm.hidden = true;
     // Generic "member credentials" wording; the buttons below say HOW (the
     // Claude-subscription helper, or an API key).
-    const apiOffered = mode !== 'disabled';
     if (text)
       text.textContent =
         mode === 'required'
@@ -5259,23 +5342,15 @@ async function openRoomDetail(roomId) {
       authFetch(`/api/rooms/${encodeURIComponent(roomId)}/credential-mode`)
         .then((r) => (r.ok ? r.json() : null))
         .then((d) => {
-          if (d) {
-            const radio = document.querySelector(`input[name="room-credential-mode"][value="${d.mode}"]`);
-            if (radio) radio.checked = true;
-          }
+          if (!d) return;
+          // d.mode is the per-room override ('inherit' when unset); d.defaultMode
+          // is the workspace default shown on the Default option.
+          const radio = document.querySelector(`input[name="room-credential-mode"][value="${d.mode}"]`);
+          if (radio) radio.checked = true;
+          const hint = $('#room-cred-default-hint');
+          if (hint) hint.textContent = d.defaultMode ? `(${d.defaultMode})` : '';
         })
         .catch(() => {});
-      authFetch(`/api/rooms/${encodeURIComponent(roomId)}/oauth-allowed`)
-        .then((r) => (r.ok ? r.json() : null))
-        .then((d) => {
-          const cb = $('#room-oauth-allowed');
-          if (d && cb) cb.checked = !!d.allowed;
-        })
-        .catch(() => {});
-      // Codex OAuth isn't wired on this instance yet — keep it off; the change
-      // handler explains what to do if someone tries to enable it.
-      const codexCb = $('#room-codex-oauth-allowed');
-      if (codexCb) codexCb.checked = false;
     } else {
       credSection.hidden = true;
     }
@@ -5643,38 +5718,8 @@ $('#room-credential-modes')?.addEventListener('change', async (e) => {
     showToast('Failed to set mode: ' + (err.error || r.statusText), { kind: 'error' });
   }
 });
-
-// Codex OAuth isn't supported on this instance yet (the Codex provider/backend
-// isn't installed). Rather than silently do nothing, explain what an admin must
-// do, then snap the toggle back off.
-$('#room-codex-oauth-allowed')?.addEventListener('change', (e) => {
-  if (!e.target.checked) return;
-  e.target.checked = false;
-  showToast(
-    'Codex support isn’t set up yet — ask an admin to add it (/add-codex) and wire a Codex agent to this room.',
-    {
-      kind: 'info',
-      timeout: 9000,
-    },
-  );
-});
-$('#room-oauth-allowed')?.addEventListener('change', async (e) => {
-  if (!selectedRoomId) return;
-  const allowed = !!e.target.checked;
-  const r = await authFetch(`/api/rooms/${encodeURIComponent(selectedRoomId)}/oauth-allowed`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
-    body: JSON.stringify({ allowed }),
-  });
-  if (r.ok) {
-    showToast(`Subscription (OAuth) connections ${allowed ? 'allowed' : 'disallowed'}.`, { kind: 'success' });
-    if (selectedRoomId === currentRoom) updateByokBanner(currentRoom);
-  } else {
-    e.target.checked = !allowed; // revert on failure
-    const err = await r.json().catch(() => ({}));
-    showToast('Failed to update: ' + (err.error || r.statusText), { kind: 'error' });
-  }
-});
+// Per-room credential TYPES moved to Settings → Member credentials (global); the
+// room only sets the mode override above.
 $('#room-rename-save')?.addEventListener('click', saveRoomName);
 $('#room-rename-input')?.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {

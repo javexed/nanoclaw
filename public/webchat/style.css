@@ -5022,3 +5022,34 @@ a.lightbox-btn {
 .room-rename-row .btn {
   flex: 0 0 auto;
 }
+
+/* Settings → Member credentials (workspace policy, owner only). */
+.settings-credentials .settings-section-title {
+  margin-top: 8px;
+}
+.cred-type-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.cred-type-row input {
+  flex: none;
+  margin: 0;
+}
+.cred-hint {
+  color: var(--text-dim);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: var(--fs-xs);
+}
+/* A credential group that's unavailable (e.g. Codex before /add-codex). */
+.setting-group.is-disabled {
+  opacity: 0.5;
+}
+.setting-group.is-disabled .cred-type-row {
+  cursor: not-allowed;
+}

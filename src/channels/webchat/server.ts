@@ -596,7 +596,7 @@ async function handleHttp(
   // Read by anyone (the room UIs need it); only the owner can change it.
   if (url.pathname === '/api/webchat/credentials-config' && (method === 'GET' || method === 'PUT')) {
     if (method === 'GET') {
-      return json(res, 200, { ...getCredentialsConfig(), codexAvailable: codexAvailable() });
+      return json(res, 200, { ...getCredentialsConfig(), codexAvailable: codexAvailable(), canEdit: isOwner(userId) });
     }
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
