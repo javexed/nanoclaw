@@ -184,6 +184,9 @@
               <span>Members</span>
               <button id="members-close" class="members-close"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
             </div>
+            <div class="list-search-wrap">
+              <input id="members-search" class="model-picker-search" type="search" placeholder="Search members…" autocomplete="off" aria-label="Search members" />
+            </div>
             <ul id="members-list"></ul>
           </aside>
           <aside id="agent-detail" class="agent-detail" hidden>
@@ -475,6 +478,9 @@
         </div>
         <div id="perms-body" class="perms-body" data-mode="list">
           <aside class="perms-list-pane">
+            <div class="list-search-wrap">
+              <input id="perms-user-search" class="model-picker-search" type="search" placeholder="Search users…" autocomplete="off" aria-label="Search users" />
+            </div>
             <ul id="perms-user-list" class="perms-user-list"></ul>
             <button id="perms-new-btn" class="btn btn-secondary btn-list-footer">+ New user</button>
           </aside>

@@ -1968,6 +1968,11 @@ a.lightbox-btn {
   list-style: none;
   padding: 8px 0;
 }
+.member-empty {
+  padding: 10px 14px;
+  color: var(--text-dim);
+  font-size: var(--fs-sm, 0.85rem);
+}
 #members-list li {
   padding: 6px 14px;
   font-size: 0.867rem;
@@ -3439,6 +3444,13 @@ a.lightbox-btn {
   outline: 2px solid var(--accent);
   outline-offset: 0;
   border-color: var(--accent);
+}
+/* Inset wrapper for a list-filter input (permissions users, room members) — the
+   input keeps its own bottom margin, so this just adds side/top breathing room
+   and stays fixed while the list below scrolls. */
+.list-search-wrap {
+  padding: 8px 8px 0;
+  flex-shrink: 0;
 }
 .model-picker-list {
   list-style: none;
