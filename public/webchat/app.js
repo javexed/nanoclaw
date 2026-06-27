@@ -1617,8 +1617,21 @@ function agentColor(name) {
 
 function formatTime(ts) {
   if (!ts) return '';
-  const d = new Date(typeof ts === 'number' ? ts : ts);
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const d = new Date(ts);
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  // Today's messages stay time-only to avoid clutter; anything older gets a date
+  // so you can tell at a glance how old it is.
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) return time;
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (d.toDateString() === yesterday.toDateString()) return `Yesterday ${time}`;
+  // Same calendar year → "Jun 20, 14:32"; older → include the year.
+  const dateOpts =
+    d.getFullYear() === now.getFullYear()
+      ? { month: 'short', day: 'numeric' }
+      : { month: 'short', day: 'numeric', year: 'numeric' };
+  return `${d.toLocaleDateString([], dateOpts)}, ${time}`;
 }
 
 // Render an in-room approval card. Actionable (approve/deny buttons) only for
@@ -1810,6 +1823,8 @@ function appendMessage(msg, statusText, beforeNode) {
     const time = document.createElement('div');
     time.className = 'timestamp';
     time.textContent = timeStr;
+    // Full date + time on hover, for exact age regardless of the compact label.
+    if (msg.created_at) time.title = new Date(msg.created_at).toLocaleString();
     div.appendChild(time);
   }
   if (isMine && statusText) {
