@@ -2323,9 +2323,11 @@ a.lightbox-btn {
   flex-direction: row;
   align-items: center;
   gap: 8px;
+  cursor: pointer;
 }
 .room-cred-check input {
   flex: none;
+  margin: 0;
 }
 /* ── Buttons — role-based set: .btn base + four role modifiers. See DESIGN.md §2.
    Icon buttons (.lightbox-btn, .settings-btn, .file-picker-btn) and the

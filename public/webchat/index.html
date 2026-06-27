@@ -126,7 +126,7 @@
              Settings so the @handle lives where it's surfaced. -->
         <div id="handle-popover" class="handle-popover" role="dialog" aria-label="Your handle" hidden>
           <div class="handle-popover-header">
-            <span>Your @handle</span>
+            <span></span>
             <button id="handle-popover-close" class="handle-popover-close" type="button" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg></button>
           </div>
           <div class="handle-row">
@@ -144,7 +144,6 @@
             <button id="handle-save" type="button" class="btn btn-secondary">Save</button>
           </div>
           <p id="handle-status" class="handle-status" hidden></p>
-          <p class="setting-help">Account-wide — how others @mention you in any room.</p>
         </div>
         <div id="connection-banner" class="connection-banner">Connection lost. Reconnecting…</div>
         <div id="byok-banner" class="byok-banner" hidden>
@@ -330,9 +329,8 @@
                   </label>
                   <label class="room-cred-row room-cred-check">
                     <input type="checkbox" id="room-oauth-allowed" />
-                    <span>Allow Claude subscription (OAuth) connections</span>
+                    <span>Allow Claude OAuth</span>
                   </label>
-                  <p class="setting-help">Members connect from the in-room banner; their turns then run on their own account.</p>
                 </div>
                 <div>
                   <span class="form-label">Wired agents</span>
