@@ -551,3 +551,59 @@ export const moduleWebchatRoomPins: Migration = {
     `);
   },
 };
+
+/**
+ * Per-room threads. A webchat "thread" maps to an agent session via `thread_id`
+ * (the session key), so each thread is an isolated conversation. See
+ * docs/design/webchat-threads.md.
+ *
+ *   - `webchat_threads` is the thread registry; `thread_id` becomes
+ *     `session.thread_id` for that room. Ids: 'main' (implicit default),
+ *     'agent:<folder>' (per-agent lane), or a uuid (manual topic thread).
+ *   - `webchat_messages.thread_id` partitions history per thread; the column
+ *     default 'main' migrates all existing rows into each room's main thread
+ *     with no data loss and no visible change.
+ *   - `webchat_thread_reads` widens the per-room read marker to per-thread;
+ *     existing `webchat_room_reads` rows seed the 'main' thread marker.
+ */
+export const moduleWebchatThreads: Migration = {
+  version: 115,
+  name: 'webchat-threads',
+  up(db: Database.Database) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS webchat_threads (
+        room_id    TEXT NOT NULL,
+        thread_id  TEXT NOT NULL,
+        title      TEXT NOT NULL,
+        kind       TEXT NOT NULL DEFAULT 'topic',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (room_id, thread_id)
+      );
+      CREATE TABLE IF NOT EXISTS webchat_thread_reads (
+        user_id      TEXT NOT NULL,
+        room_id      TEXT NOT NULL,
+        thread_id    TEXT NOT NULL,
+        last_read_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, room_id, thread_id)
+      );
+    `);
+    // ADD COLUMN is not idempotent — guard it so a re-run (or a partial prior
+    // apply) doesn't throw "duplicate column name".
+    const hasThreadCol = (db.prepare("PRAGMA table_info('webchat_messages')").all() as Array<{ name: string }>).some(
+      (c) => c.name === 'thread_id',
+    );
+    if (!hasThreadCol) {
+      db.exec(`ALTER TABLE webchat_messages ADD COLUMN thread_id TEXT NOT NULL DEFAULT 'main'`);
+    }
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_webchat_messages_thread
+        ON webchat_messages(room_id, thread_id, created_at);
+    `);
+    // Seed per-thread read markers from existing per-room markers (→ 'main').
+    db.exec(`
+      INSERT OR IGNORE INTO webchat_thread_reads (user_id, room_id, thread_id, last_read_at)
+        SELECT user_id, room_id, 'main', last_read_at FROM webchat_room_reads;
+    `);
+  },
+};

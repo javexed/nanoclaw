@@ -47,6 +47,8 @@ describe('moduleWebchat migration', () => {
       'webchat_room_primes',
       'webchat_room_reads',
       'webchat_room_settings',
+      'webchat_thread_reads',
+      'webchat_threads',
       'webchat_user_handles',
       'webchat_user_room_hides',
     ]);
@@ -62,6 +64,7 @@ describe('moduleWebchat migration', () => {
         'idx_webchat_agent_models_model',
         'idx_webchat_approvals_platform',
         'idx_webchat_messages_room',
+        'idx_webchat_messages_thread',
         'idx_webchat_push_identity',
         'idx_webchat_room_pins_user',
         'idx_webchat_room_reads_user',
@@ -88,6 +91,7 @@ describe('moduleWebchat migration', () => {
       'webchat-room-primes',
       'webchat-room-reads',
       'webchat-room-settings',
+      'webchat-threads',
       'webchat-user-archives',
       'webchat-user-handles',
     ]);

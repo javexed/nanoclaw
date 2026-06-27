@@ -40,6 +40,8 @@ export interface FileMeta {
 export interface WebchatMessage {
   id: string;
   room_id: string;
+  /** Thread this message belongs to. 'main' is the room's default thread. */
+  thread_id: string;
   sender: string;
   sender_type: string;
   content: string;
@@ -51,6 +53,7 @@ export interface WebchatMessage {
 interface WebchatMessageRow {
   id: string;
   room_id: string;
+  thread_id: string;
   sender: string;
   sender_type: string;
   content: string;
@@ -287,6 +290,12 @@ export function deleteWebchatRoom(id: string): void {
   db.prepare(`DELETE FROM webchat_room_archives WHERE room_id = ?`).run(id);
   db.prepare(`DELETE FROM webchat_room_reads WHERE room_id = ?`).run(id);
   db.prepare(`DELETE FROM webchat_room_pins WHERE room_id = ?`).run(id);
+  // Thread registry + per-thread read markers (guarded — the threads migration
+  // may predate this room's data, but the tables exist once migrated).
+  if (hasTable(db, 'webchat_threads')) {
+    db.prepare(`DELETE FROM webchat_thread_reads WHERE room_id = ?`).run(id);
+    db.prepare(`DELETE FROM webchat_threads WHERE room_id = ?`).run(id);
+  }
   // Drop any agent_destinations rows pointing at this room. target_id has no
   // FK so they wouldn't block, just rot. Guarded — a2a module may not be installed.
   if (hasTable(db, 'agent_destinations')) {
@@ -525,10 +534,12 @@ export function storeWebchatMessage(
   sender: string,
   senderType: string,
   content: string,
+  threadId = 'main',
 ): WebchatMessage {
   const msg: WebchatMessage = {
     id: randomUUID(),
     room_id: roomId,
+    thread_id: threadId,
     sender,
     sender_type: senderType,
     content,
@@ -538,8 +549,8 @@ export function storeWebchatMessage(
   };
   getDb()
     .prepare(
-      `INSERT INTO webchat_messages (id, room_id, sender, sender_type, content, message_type, file_meta, created_at)
-       VALUES (@id, @room_id, @sender, @sender_type, @content, @message_type, @file_meta, @created_at)`,
+      `INSERT INTO webchat_messages (id, room_id, thread_id, sender, sender_type, content, message_type, file_meta, created_at)
+       VALUES (@id, @room_id, @thread_id, @sender, @sender_type, @content, @message_type, @file_meta, @created_at)`,
     )
     .run({ ...msg, file_meta: null });
   return msg;
@@ -563,10 +574,12 @@ export function storeWebchatApprovalCard(
     action: string;
     approvers: string[];
   },
+  threadId = 'main',
 ): WebchatMessage {
   const msg: WebchatMessage = {
     id: `appr-card-${payload.questionId}`,
     room_id: roomId,
+    thread_id: threadId,
     sender,
     sender_type: 'agent',
     content: JSON.stringify(payload),
@@ -576,8 +589,8 @@ export function storeWebchatApprovalCard(
   };
   getDb()
     .prepare(
-      `INSERT OR REPLACE INTO webchat_messages (id, room_id, sender, sender_type, content, message_type, file_meta, created_at)
-       VALUES (@id, @room_id, @sender, @sender_type, @content, @message_type, @file_meta, @created_at)`,
+      `INSERT OR REPLACE INTO webchat_messages (id, room_id, thread_id, sender, sender_type, content, message_type, file_meta, created_at)
+       VALUES (@id, @room_id, @thread_id, @sender, @sender_type, @content, @message_type, @file_meta, @created_at)`,
     )
     .run({ ...msg, file_meta: null });
   return msg;
@@ -614,10 +627,17 @@ export function markRoomApprovalResolved(approvalId: string, resolvedBy: string)
  * `{to, text}` — the client renders a "from → to" label. `sender` is the
  * source agent's display name; no users-table row is created (display only).
  */
-export function storeWebchatA2aMessage(roomId: string, fromName: string, toName: string, text: string): WebchatMessage {
+export function storeWebchatA2aMessage(
+  roomId: string,
+  fromName: string,
+  toName: string,
+  text: string,
+  threadId = 'main',
+): WebchatMessage {
   const msg: WebchatMessage = {
     id: randomUUID(),
     room_id: roomId,
+    thread_id: threadId,
     sender: fromName,
     sender_type: 'a2a',
     content: JSON.stringify({ to: toName, text }),
@@ -627,8 +647,8 @@ export function storeWebchatA2aMessage(roomId: string, fromName: string, toName:
   };
   getDb()
     .prepare(
-      `INSERT INTO webchat_messages (id, room_id, sender, sender_type, content, message_type, file_meta, created_at)
-       VALUES (@id, @room_id, @sender, @sender_type, @content, @message_type, @file_meta, @created_at)`,
+      `INSERT INTO webchat_messages (id, room_id, thread_id, sender, sender_type, content, message_type, file_meta, created_at)
+       VALUES (@id, @room_id, @thread_id, @sender, @sender_type, @content, @message_type, @file_meta, @created_at)`,
     )
     .run({ ...msg, file_meta: null });
   return msg;
@@ -659,10 +679,12 @@ export function storeWebchatFileMessage(
   senderType: string,
   caption: string,
   fileMeta: FileMeta,
+  threadId = 'main',
 ): WebchatMessage {
   const msg: WebchatMessage = {
     id: randomUUID(),
     room_id: roomId,
+    thread_id: threadId,
     sender,
     sender_type: senderType,
     content: caption,
@@ -672,17 +694,25 @@ export function storeWebchatFileMessage(
   };
   getDb()
     .prepare(
-      `INSERT INTO webchat_messages (id, room_id, sender, sender_type, content, message_type, file_meta, created_at)
-       VALUES (@id, @room_id, @sender, @sender_type, @content, @message_type, @file_meta, @created_at)`,
+      `INSERT INTO webchat_messages (id, room_id, thread_id, sender, sender_type, content, message_type, file_meta, created_at)
+       VALUES (@id, @room_id, @thread_id, @sender, @sender_type, @content, @message_type, @file_meta, @created_at)`,
     )
     .run({ ...msg, file_meta: JSON.stringify(fileMeta) });
   return msg;
 }
 
-export function getWebchatMessages(roomId: string, limit = 200): WebchatMessage[] {
-  const rows = getDb()
-    .prepare(`SELECT * FROM webchat_messages WHERE room_id = ? ORDER BY created_at DESC LIMIT ?`)
-    .all(roomId, limit) as WebchatMessageRow[];
+export function getWebchatMessages(roomId: string, limit = 200, threadId?: string): WebchatMessage[] {
+  const rows = (
+    threadId === undefined
+      ? getDb()
+          .prepare(`SELECT * FROM webchat_messages WHERE room_id = ? ORDER BY created_at DESC LIMIT ?`)
+          .all(roomId, limit)
+      : getDb()
+          .prepare(
+            `SELECT * FROM webchat_messages WHERE room_id = ? AND thread_id = ? ORDER BY created_at DESC LIMIT ?`,
+          )
+          .all(roomId, threadId, limit)
+  ) as WebchatMessageRow[];
   return rows.reverse().map(rowToMessage);
 }
 
@@ -701,18 +731,33 @@ export function deleteWebchatMessage(messageId: string, requesterIdentity: strin
   return result.changes > 0;
 }
 
-export function getWebchatMessagesAfterId(roomId: string, afterId: string, limit = 500): WebchatMessage[] {
+export function getWebchatMessagesAfterId(
+  roomId: string,
+  afterId: string,
+  limit = 500,
+  threadId?: string,
+): WebchatMessage[] {
   const anchor = getDb().prepare(`SELECT created_at FROM webchat_messages WHERE id = ?`).get(afterId) as
     | { created_at: number }
     | undefined;
   if (!anchor) return [];
-  const rows = getDb()
-    .prepare(
-      `SELECT * FROM webchat_messages
-       WHERE room_id = ? AND created_at > ?
-       ORDER BY created_at LIMIT ?`,
-    )
-    .all(roomId, anchor.created_at, limit) as WebchatMessageRow[];
+  const rows = (
+    threadId === undefined
+      ? getDb()
+          .prepare(
+            `SELECT * FROM webchat_messages
+             WHERE room_id = ? AND created_at > ?
+             ORDER BY created_at LIMIT ?`,
+          )
+          .all(roomId, anchor.created_at, limit)
+      : getDb()
+          .prepare(
+            `SELECT * FROM webchat_messages
+             WHERE room_id = ? AND thread_id = ? AND created_at > ?
+             ORDER BY created_at LIMIT ?`,
+          )
+          .all(roomId, threadId, anchor.created_at, limit)
+  ) as WebchatMessageRow[];
   return rows.map(rowToMessage);
 }
 
@@ -764,19 +809,169 @@ export function searchWebchatMessages(roomIds: string[], rawQuery: string, limit
     .all(match, ...roomIds, limit) as WebchatSearchResult[];
 }
 
-export function getWebchatMessagesBeforeId(roomId: string, beforeId: string, limit = 50): WebchatMessage[] {
+export function getWebchatMessagesBeforeId(
+  roomId: string,
+  beforeId: string,
+  limit = 50,
+  threadId?: string,
+): WebchatMessage[] {
   const anchor = getDb().prepare(`SELECT created_at FROM webchat_messages WHERE id = ?`).get(beforeId) as
     | { created_at: number }
     | undefined;
   if (!anchor) return [];
+  const rows = (
+    threadId === undefined
+      ? getDb()
+          .prepare(
+            `SELECT * FROM webchat_messages
+             WHERE room_id = ? AND created_at < ?
+             ORDER BY created_at DESC LIMIT ?`,
+          )
+          .all(roomId, anchor.created_at, limit)
+      : getDb()
+          .prepare(
+            `SELECT * FROM webchat_messages
+             WHERE room_id = ? AND thread_id = ? AND created_at < ?
+             ORDER BY created_at DESC LIMIT ?`,
+          )
+          .all(roomId, threadId, anchor.created_at, limit)
+  ) as WebchatMessageRow[];
+  return rows.reverse().map(rowToMessage);
+}
+
+// ── Threads ──
+// A webchat thread maps to an agent session (thread_id = session.thread_id), so
+// each thread is an isolated conversation. 'main' is every room's implicit
+// default thread. See docs/design/webchat-threads.md.
+
+export const MAIN_THREAD = 'main';
+
+export interface WebchatThread {
+  room_id: string;
+  thread_id: string;
+  title: string;
+  kind: 'main' | 'agent' | 'topic';
+  created_at: number;
+  updated_at: number;
+}
+
+/** Ensure a thread row exists; idempotent (never clobbers an existing title).
+ * Returns the thread_id. Used for lazy 'main' and per-agent lanes. */
+export function ensureThread(roomId: string, threadId: string, title: string, kind: WebchatThread['kind']): string {
+  const now = Date.now();
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_threads (room_id, thread_id, title, kind, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(room_id, thread_id) DO NOTHING`,
+    )
+    .run(roomId, threadId, title, kind, now, now);
+  return threadId;
+}
+
+/** Ensure the room's 'main' thread exists. */
+export function ensureMainThread(roomId: string): string {
+  return ensureThread(roomId, MAIN_THREAD, 'Main', 'main');
+}
+
+/** Ensure a per-agent lane ('agent:<folder>'); returns its thread_id. */
+export function ensureAgentThread(roomId: string, folder: string, displayName: string): string {
+  return ensureThread(roomId, `agent:${folder}`, displayName, 'agent');
+}
+
+/** Create a manual topic thread (uuid). Returns the new thread. */
+export function createWebchatThread(roomId: string, title: string): WebchatThread {
+  const now = Date.now();
+  const thread: WebchatThread = {
+    room_id: roomId,
+    thread_id: randomUUID(),
+    title,
+    kind: 'topic',
+    created_at: now,
+    updated_at: now,
+  };
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_threads (room_id, thread_id, title, kind, created_at, updated_at)
+       VALUES (@room_id, @thread_id, @title, @kind, @created_at, @updated_at)`,
+    )
+    .run(thread);
+  return thread;
+}
+
+/** All threads in a room, 'main' first, then by most-recent activity. */
+export function listWebchatThreads(roomId: string): WebchatThread[] {
+  return getDb()
+    .prepare(
+      `SELECT * FROM webchat_threads WHERE room_id = ?
+       ORDER BY (kind = 'main') DESC, updated_at DESC`,
+    )
+    .all(roomId) as WebchatThread[];
+}
+
+export function getWebchatThread(roomId: string, threadId: string): WebchatThread | undefined {
+  return getDb().prepare(`SELECT * FROM webchat_threads WHERE room_id = ? AND thread_id = ?`).get(roomId, threadId) as
+    | WebchatThread
+    | undefined;
+}
+
+export function renameWebchatThread(roomId: string, threadId: string, title: string): void {
+  getDb()
+    .prepare(`UPDATE webchat_threads SET title = ?, updated_at = ? WHERE room_id = ? AND thread_id = ?`)
+    .run(title, Date.now(), roomId, threadId);
+}
+
+/** Touch a thread's updated_at (called on new activity so the sort reflects it). */
+export function touchWebchatThread(roomId: string, threadId: string): void {
+  getDb()
+    .prepare(`UPDATE webchat_threads SET updated_at = ? WHERE room_id = ? AND thread_id = ?`)
+    .run(Date.now(), roomId, threadId);
+}
+
+/** Delete a thread + its messages + its read markers. 'main' is not deletable
+ * (the caller enforces; this guards too). Session teardown is the caller's job. */
+export function deleteWebchatThread(roomId: string, threadId: string): void {
+  if (threadId === MAIN_THREAD) return;
+  const db = getDb();
+  db.prepare(`DELETE FROM webchat_messages WHERE room_id = ? AND thread_id = ?`).run(roomId, threadId);
+  db.prepare(`DELETE FROM webchat_thread_reads WHERE room_id = ? AND thread_id = ?`).run(roomId, threadId);
+  db.prepare(`DELETE FROM webchat_threads WHERE room_id = ? AND thread_id = ?`).run(roomId, threadId);
+}
+
+/** Mark a thread read for a user (monotonic high-water mark). */
+export function markThreadRead(userId: string, roomId: string, threadId: string, ts: number = Date.now()): void {
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_thread_reads (user_id, room_id, thread_id, last_read_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(user_id, room_id, thread_id)
+         DO UPDATE SET last_read_at = MAX(last_read_at, excluded.last_read_at)`,
+    )
+    .run(userId, roomId, threadId, ts);
+}
+
+/** Thread ids in a room with unread messages for this user (newest message
+ * newer than the user's per-thread marker; no marker = unread if any message). */
+export function getUnreadThreadIdsForRoom(userId: string, roomId: string): Set<string> {
   const rows = getDb()
     .prepare(
-      `SELECT * FROM webchat_messages
-       WHERE room_id = ? AND created_at < ?
-       ORDER BY created_at DESC LIMIT ?`,
+      `SELECT m.thread_id AS thread_id
+         FROM webchat_messages m
+         LEFT JOIN webchat_thread_reads r
+           ON r.room_id = m.room_id AND r.thread_id = m.thread_id AND r.user_id = ?
+        WHERE m.room_id = ?
+        GROUP BY m.thread_id
+       HAVING MAX(m.created_at) > COALESCE(MAX(r.last_read_at), 0)`,
     )
-    .all(roomId, anchor.created_at, limit) as WebchatMessageRow[];
-  return rows.reverse().map(rowToMessage);
+    .all(userId, roomId) as { thread_id: string }[];
+  return new Set(rows.map((r) => r.thread_id));
+}
+
+/** Drop a room's thread registry + per-thread read markers (delete cascade). */
+export function clearThreadsForRoom(roomId: string): void {
+  const db = getDb();
+  db.prepare(`DELETE FROM webchat_thread_reads WHERE room_id = ?`).run(roomId);
+  db.prepare(`DELETE FROM webchat_threads WHERE room_id = ?`).run(roomId);
 }
 
 // ── Push subscriptions ──
