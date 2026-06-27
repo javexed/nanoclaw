@@ -1,42 +1,67 @@
 /**
- * BYOK onboarding orchestration: connect/revoke a member's Anthropic credential.
+ * BYOK onboarding orchestration: connect/revoke a member's model credential.
  *
- * The member's credential — an API key OR a Claude subscription/OAuth token —
- * lives in the OneCLI vault. Their per-(group,user) OneCLI agent is assigned:
- * their Anthropic secret PLUS the group's non-anthropic tool secrets (mirrored
- * at onboard time) — so a per-member container authenticates Anthropic with the
- * member's own credential (swapped in by OneCLI on the wire) and the group's
- * tools for everything else. The host never holds the credential.
+ * The member's credential — an API key OR a subscription/OAuth token — lives in
+ * the OneCLI vault. Which vault type it takes is provider-specific: a Claude room
+ * (`container_configs.provider != 'codex'`) stores an `anthropic` secret; a Codex
+ * room stores an `openai` secret (the member's ChatGPT/Codex `auth.json` for
+ * OAuth, or an OpenAI key). Their per-(group,user) OneCLI agent is assigned that
+ * secret PLUS the group's other tool secrets (mirrored at onboard time) — so a
+ * per-member container authenticates the model with the member's own credential
+ * (swapped in by OneCLI on the wire) and the group's tools for everything else.
+ * The host never holds the credential.
  *
  * Idempotent: re-onboarding updates the secret value and re-merges assignments.
  * The OneCLI calls go through an injectable OnecliAdmin (real CLI in prod, fake
  * in tests).
  */
 import { log } from '../../log.js';
+import { getContainerConfig } from '../../db/container-configs.js';
 import { byokAgentIdentifier, userSlug } from './identity.js';
-import { getByokCredential, getUserSecretId, setByokStatus, upsertByokCredential, type ByokCredType } from './db.js';
+import {
+  getByokCredential,
+  getUserSecretId,
+  setByokStatus,
+  upsertByokCredential,
+  type ByokCredType,
+  type ByokProvider,
+} from './db.js';
 import type { OnecliAdmin } from './onecli-admin.js';
 
+/** The agent group's provider, mapped to the two BYOK-supported families. */
+function groupProvider(agentGroupId: string): ByokProvider {
+  return getContainerConfig(agentGroupId)?.provider === 'codex' ? 'codex' : 'claude';
+}
+
+/** The vault secret type that holds a member's credential for a provider. */
+function secretTypeFor(provider: ByokProvider): 'anthropic' | 'openai' {
+  return provider === 'codex' ? 'openai' : 'anthropic';
+}
+
 /**
- * The group's non-anthropic tool secret ids, to mirror onto a per-member agent
- * so its container keeps working tools (Gmail, GitHub, …) while its Anthropic
- * credential comes from the member.
+ * The group's tool secret ids EXCLUDING the member-supplied credential type, to
+ * mirror onto a per-member agent so its container keeps working tools (Gmail,
+ * GitHub, …) while its model credential (Anthropic for Claude, OpenAI for Codex)
+ * comes from the member.
  */
-async function groupToolSecretIds(admin: OnecliAdmin, agentGroupId: string): Promise<string[]> {
+async function groupToolSecretIds(admin: OnecliAdmin, agentGroupId: string, credSecretType: string): Promise<string[]> {
   const groupAgentUuid = await admin.findAgentId(agentGroupId);
   if (!groupAgentUuid) return [];
   const groupIds = await admin.listAgentSecretIds(groupAgentUuid);
   const typeById = new Map((await admin.listAllSecrets()).map((s) => [s.id, s.type]));
-  return groupIds.filter((id) => typeById.get(id) !== 'anthropic');
+  return groupIds.filter((id) => typeById.get(id) !== credSecretType);
 }
 
 /**
- * Shared onboarding for both credential kinds. The only difference between an
- * API key and an OAuth/subscription token is `credType` (recorded for display +
- * OAuth-mode spawn) — both are stored as the member's Anthropic vault secret and
- * swapped in by OneCLI on the wire. OneCLI's `anthropic` secret type accepts
- * both `sk-ant-api…` and `sk-ant-oat…` values (the operator subscription flow
- * in setup/register-claude-token.sh uses the same `--type anthropic`).
+ * Shared onboarding for both credential kinds across both providers. `credType`
+ * (api_key | oauth_token) is recorded for display + spawn mode; the group's
+ * provider decides the vault secret type and how the value is stored:
+ *
+ *   Claude → `anthropic` secret (accepts both `sk-ant-api…` and `sk-ant-oat…`,
+ *            same as setup/register-claude-token.sh); swapped in on the wire.
+ *   Codex  → `openai` secret. OAuth stores the whole ChatGPT/Codex `auth.json`
+ *            (host chatgpt.com); API key stores the key (host api.openai.com).
+ *            OneCLI's gateway serves it as the sentinel auth.json stub.
  */
 async function onboardSecret(
   admin: OnecliAdmin,
@@ -46,12 +71,22 @@ async function onboardSecret(
   credential: string,
   credType: ByokCredType,
 ): Promise<void> {
-  // 1. The member's Anthropic secret — reuse across their groups; update on re-onboard.
-  let secretId = getUserSecretId(userId);
+  const provider = groupProvider(agentGroupId);
+  const credSecretType = secretTypeFor(provider);
+  // Codex OAuth credentials are the whole auth.json → stored via --file.
+  const asFile = provider === 'codex' && credType === 'oauth_token';
+
+  // 1. The member's model secret for this provider — reuse across their
+  //    same-provider groups; update on re-onboard.
+  let secretId = getUserSecretId(userId, provider);
   if (secretId) {
-    await admin.updateSecretValue(secretId, credential);
+    await admin.updateSecretValue(secretId, credential, asFile);
   } else {
-    secretId = await admin.createAnthropicSecret(`BYOK ${userSlug(userId)}`, credential);
+    const name = provider === 'codex' ? `BYOK ${userSlug(userId)} (codex)` : `BYOK ${userSlug(userId)}`;
+    secretId =
+      provider === 'codex'
+        ? await admin.createOpenAISecret(name, credential, credType)
+        : await admin.createAnthropicSecret(name, credential);
   }
 
   // 2. The per-member OneCLI agent (the identity the container spawns under).
@@ -59,14 +94,20 @@ async function onboardSecret(
   const agentUuid = await admin.ensureAgent(`${displayName} (BYOK)`, identifier);
   await admin.setSecretMode(agentUuid, 'selective');
 
-  // 3. Mirror the group's non-anthropic tool secrets + the member's Anthropic secret.
-  const toolSecretIds = await groupToolSecretIds(admin, agentGroupId);
+  // 3. Mirror the group's other tool secrets + the member's model secret.
+  const toolSecretIds = await groupToolSecretIds(admin, agentGroupId, credSecretType);
   const merged = Array.from(new Set([secretId, ...toolSecretIds]));
   await admin.setSecrets(agentUuid, merged);
 
   // 4. Persist the mapping (identifier = the container's externalId for approval routing).
-  upsertByokCredential(userId, agentGroupId, identifier, secretId, credType);
-  log.info('BYOK credential onboarded', { userId, agentGroupId, credType, toolSecrets: toolSecretIds.length });
+  upsertByokCredential(userId, agentGroupId, identifier, secretId, credType, provider);
+  log.info('BYOK credential onboarded', {
+    userId,
+    agentGroupId,
+    provider,
+    credType,
+    toolSecrets: toolSecretIds.length,
+  });
 }
 
 export function onboardByokCredential(
@@ -80,12 +121,12 @@ export function onboardByokCredential(
 }
 
 /**
- * OAuth (subscription) onboarding: connect a member's Claude `setup-token`.
- *
- * Identical to the API-key path — the token lives in the OneCLI vault and is
- * swapped in on the wire — except cred_type='oauth_token', which puts the
- * per-member container in OAuth mode at spawn (sentinel CLAUDE_CODE_OAUTH_TOKEN,
- * routed through OneCLI; see src/modules/byok/index.ts).
+ * OAuth (subscription) onboarding: connect a member's subscription credential —
+ * a Claude `setup-token` for a Claude room, or a ChatGPT/Codex `auth.json` for a
+ * Codex room. The value lives in the OneCLI vault and is swapped in on the wire.
+ * cred_type='oauth_token' drives spawn mode: a Claude room gets the sentinel
+ * CLAUDE_CODE_OAUTH_TOKEN; a Codex room needs no env (auth rides the gateway
+ * auth.json stub). See src/modules/byok/index.ts.
  */
 export function onboardByokOauth(
   admin: OnecliAdmin,

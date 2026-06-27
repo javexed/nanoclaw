@@ -56,11 +56,13 @@ registerAgentIdentityResolver((agentGroupId, threadId) => {
   return null;
 });
 
-// OAuth members: put their per-member container in subscription/OAuth mode with
-// a SENTINEL token and route Anthropic THROUGH OneCLI (no NO_PROXY) — OneCLI
+// Claude OAuth members: put their per-member container in subscription/OAuth mode
+// with a SENTINEL token and route Anthropic THROUGH OneCLI (no NO_PROXY) — OneCLI
 // swaps the sentinel for the member's real token, stored in their vault. The
 // real token never enters the container. API-key members get {} here (their key
-// is injected as x-api-key by OneCLI, no OAuth mode needed).
+// is injected as x-api-key by OneCLI, no OAuth mode needed). Codex members also
+// get {}: `userHasActiveOauth` is Claude-scoped, and Codex auth rides OneCLI's
+// gateway auth.json stub (keyed by the per-member identity) — no env var.
 registerContainerEnvResolver((agentGroupId, threadId): Record<string, string> => {
   if (!threadId || !userHasActiveOauth(threadId, agentGroupId)) return {};
   return { CLAUDE_CODE_OAUTH_TOKEN: OAUTH_SENTINEL };

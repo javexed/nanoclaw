@@ -16,9 +16,30 @@
  */
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import type { ByokCredType } from './db.js';
+import { writeFileSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { randomBytes } from 'crypto';
 
 const pexec = promisify(execFile);
 const TIMEOUT_MS = 20_000;
+
+/**
+ * Run `fn` with a path to a 0600 temp file holding `content`, then shred it.
+ * Used for Codex OAuth credentials — the whole `auth.json` is too large/sensitive
+ * to pass via `--value` (which lands in argv / the host process list); onecli's
+ * `secrets create/update --file` reads it off disk instead.
+ */
+async function withSecretFile<T>(content: string, fn: (path: string) => Promise<T>): Promise<T> {
+  const path = join(tmpdir(), `byok-${randomBytes(12).toString('hex')}.json`);
+  writeFileSync(path, content, { mode: 0o600 });
+  try {
+    return await fn(path);
+  } finally {
+    rmSync(path, { force: true });
+  }
+}
 
 async function onecli(args: string[]): Promise<unknown> {
   try {
@@ -60,7 +81,16 @@ export interface OnecliAdmin {
   /** Idempotently ensure an agent exists for the identifier; returns its uuid. */
   ensureAgent(name: string, identifier: string): Promise<string>;
   createAnthropicSecret(name: string, value: string): Promise<string>;
-  updateSecretValue(secretId: string, value: string): Promise<void>;
+  /**
+   * Create the member's OpenAI/Codex vault secret. `oauth_token` stores the whole
+   * ChatGPT/Codex `auth.json` via `--file` (host pattern `chatgpt.com`); `api_key`
+   * stores the key via `--value` (host pattern `api.openai.com`). Mirrors how the
+   * Codex provider's operator credential is registered (setup/providers/codex.ts).
+   */
+  createOpenAISecret(name: string, value: string, credType: ByokCredType): Promise<string>;
+  /** Update a secret's value. `asFile=true` writes the value (e.g. a refreshed
+   *  Codex auth.json) via `--file` instead of `--value`. */
+  updateSecretValue(secretId: string, value: string, asFile?: boolean): Promise<void>;
   deleteSecret(secretId: string): Promise<void>;
   setSecretMode(agentId: string, mode: 'selective' | 'all'): Promise<void>;
   /** Secret IDs assigned to an agent. `agents secrets --id` returns bare id strings. */
@@ -85,13 +115,62 @@ export const realOnecliAdmin: OnecliAdmin = {
   },
   async createAnthropicSecret(name, value) {
     const r = await onecli([
-      'secrets', 'create', '--name', name, '--type', 'anthropic', '--value', value, '--host-pattern', 'api.anthropic.com',
+      'secrets',
+      'create',
+      '--name',
+      name,
+      '--type',
+      'anthropic',
+      '--value',
+      value,
+      '--host-pattern',
+      'api.anthropic.com',
     ]);
     const id = createdId(r);
     if (!id) throw new Error('onecli: secrets create returned no id');
     return id;
   },
-  async updateSecretValue(secretId, value) {
+  async createOpenAISecret(name, value, credType) {
+    // OAuth (ChatGPT/Codex subscription): the whole auth.json, stored via --file,
+    // host chatgpt.com. API key: --value, host api.openai.com. The gateway serves
+    // the value as the sentinel auth.json stub and swaps it on the wire.
+    const r =
+      credType === 'oauth_token'
+        ? await withSecretFile(value, (path) =>
+            onecli([
+              'secrets',
+              'create',
+              '--name',
+              name,
+              '--type',
+              'openai',
+              '--file',
+              path,
+              '--host-pattern',
+              'chatgpt.com',
+            ]),
+          )
+        : await onecli([
+            'secrets',
+            'create',
+            '--name',
+            name,
+            '--type',
+            'openai',
+            '--value',
+            value,
+            '--host-pattern',
+            'api.openai.com',
+          ]);
+    const id = createdId(r);
+    if (!id) throw new Error('onecli: secrets create returned no id');
+    return id;
+  },
+  async updateSecretValue(secretId, value, asFile = false) {
+    if (asFile) {
+      await withSecretFile(value, (path) => onecli(['secrets', 'update', '--id', secretId, '--file', path]));
+      return;
+    }
     await onecli(['secrets', 'update', '--id', secretId, '--value', value]);
   },
   async deleteSecret(secretId) {

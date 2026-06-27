@@ -6,6 +6,16 @@ import { onboardByokCredential, onboardByokOauth, revokeByokCredential } from '.
 import { getByokCredential, userHasActiveKey, userHasActiveOauth, getUserSecretId } from './db.js';
 import { byokAgentIdentifier } from './identity.js';
 import type { OnecliAdmin } from './onecli-admin.js';
+import { ensureContainerConfig, updateContainerConfigScalars } from '../../db/container-configs.js';
+
+/** Make `id` a Codex-provider agent group (parent row required by the FK). */
+function makeCodexGroup(id: string): void {
+  getDb()
+    .prepare(`INSERT INTO agent_groups (id, name, folder, created_at) VALUES (?, ?, ?, ?)`)
+    .run(id, id, id, new Date().toISOString());
+  ensureContainerConfig(id);
+  updateContainerConfigScalars(id, { provider: 'codex' });
+}
 
 /** In-memory fake OneCLI vault: tracks secrets (id→type), agents, assignments. */
 function fakeAdmin() {
@@ -25,6 +35,11 @@ function fakeAdmin() {
     async createAnthropicSecret(_name, value) {
       const id = `sec-${++n}`;
       secrets.set(id, { value, type: 'anthropic' });
+      return id;
+    },
+    async createOpenAISecret(_name, value, _credType) {
+      const id = `sec-${++n}`;
+      secrets.set(id, { value, type: 'openai' });
       return id;
     },
     async updateSecretValue(secretId, value) {
@@ -148,6 +163,57 @@ describe('onboardByokOauth (vault-only — token stored in OneCLI, swapped on th
     expect(userHasActiveKey('webchat:alice', 'ag-1')).toBe(false);
     expect(agents.get(ident)!.secretIds).not.toContain(userSecret); // member secret removed
     expect(agents.get(ident)!.secretIds).toContain('grp-gmail'); // tools left
+  });
+});
+
+describe('Codex provider (per-member ChatGPT/Codex credential)', () => {
+  it('OAuth: stores the auth.json as an OpenAI secret, excludes the group openai cred, no Claude sentinel', async () => {
+    const { admin, seedGroupAgent, agents, secrets } = fakeAdmin();
+    makeCodexGroup('ag-cdx');
+    seedGroupAgent('ag-cdx', [
+      { id: 'grp-openai', type: 'openai' }, // the group's own Codex credential — must NOT be mirrored
+      { id: 'grp-gmail', type: 'generic' }, // a real tool — must be mirrored
+    ]);
+    const authJson = '{"tokens":{"access_token":"xyz"},"OPENAI_API_KEY":null}';
+    await onboardByokOauth(admin, 'webchat:carol', 'ag-cdx', 'Carol', authJson);
+
+    const ident = byokAgentIdentifier('ag-cdx', 'webchat:carol');
+    const row = getByokCredential('webchat:carol', 'ag-cdx')!;
+    expect(row.provider).toBe('codex');
+    expect(row.cred_type).toBe('oauth_token');
+    expect(secrets.get(row.secret_id!)!.type).toBe('openai'); // openai, not anthropic
+    expect(secrets.get(row.secret_id!)!.value).toBe(authJson); // the whole auth.json
+    expect(userHasActiveKey('webchat:carol', 'ag-cdx')).toBe(true); // drives per-member session
+    expect(userHasActiveOauth('webchat:carol', 'ag-cdx')).toBe(false); // Claude-scoped → no sentinel for Codex
+    // Member's openai secret + the group's gmail; NOT the group's openai credential.
+    expect(agents.get(ident)!.secretIds.sort()).toEqual([row.secret_id!, 'grp-gmail'].sort());
+  });
+
+  it('API key: stores the key as an OpenAI secret', async () => {
+    const { admin, secrets } = fakeAdmin();
+    makeCodexGroup('ag-cdx');
+    await onboardByokCredential(admin, 'webchat:dave', 'ag-cdx', 'Dave', 'sk-openai-dave');
+    const row = getByokCredential('webchat:dave', 'ag-cdx')!;
+    expect(row.provider).toBe('codex');
+    expect(row.cred_type).toBe('api_key');
+    expect(secrets.get(row.secret_id!)!.type).toBe('openai');
+    expect(secrets.get(row.secret_id!)!.value).toBe('sk-openai-dave');
+  });
+
+  it('a member in both a Claude room and a Codex room keeps two distinct secrets', async () => {
+    const { admin, secrets } = fakeAdmin();
+    makeCodexGroup('ag-cdx');
+    // 'ag-claude' has no container_config row → defaults to claude.
+    await onboardByokCredential(admin, 'webchat:erin', 'ag-claude', 'Erin', 'sk-ant-erin');
+    await onboardByokOauth(admin, 'webchat:erin', 'ag-cdx', 'Erin', '{"tokens":{}}');
+    const claudeSecret = getByokCredential('webchat:erin', 'ag-claude')!.secret_id!;
+    const codexSecret = getByokCredential('webchat:erin', 'ag-cdx')!.secret_id!;
+    expect(claudeSecret).not.toBe(codexSecret); // not collapsed into one secret
+    expect(secrets.get(claudeSecret)!.type).toBe('anthropic');
+    expect(secrets.get(codexSecret)!.type).toBe('openai');
+    // Provider-scoped reuse picks the right one.
+    expect(getUserSecretId('webchat:erin', 'claude')).toBe(claudeSecret);
+    expect(getUserSecretId('webchat:erin', 'codex')).toBe(codexSecret);
   });
 });
 

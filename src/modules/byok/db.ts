@@ -8,6 +8,13 @@ import { getDb } from '../../db/connection.js';
 
 export type ByokStatus = 'active' | 'revoked';
 export type ByokCredType = 'api_key' | 'oauth_token';
+/**
+ * Which agent provider this credential is for — pinned from the group's
+ * `container_configs.provider` at onboard time. 'claude' → `anthropic` vault
+ * secret; 'codex' → `openai` secret (the member's ChatGPT/Codex auth.json or
+ * OpenAI key). Drives secret-reuse scoping and Claude-OAuth-sentinel injection.
+ */
+export type ByokProvider = 'claude' | 'codex';
 
 export interface ByokCredentialRow {
   user_id: string;
@@ -16,6 +23,7 @@ export interface ByokCredentialRow {
   secret_id: string | null;
   status: ByokStatus;
   cred_type: ByokCredType;
+  provider: ByokProvider;
   created_at: string;
   updated_at: string;
 }
@@ -34,20 +42,30 @@ export function userHasActiveKey(userId: string, agentGroupId: string): boolean 
 }
 
 /**
- * True when the user's active credential is a subscription/OAuth token, so the
- * per-member container must be spawned in OAuth mode (sentinel
+ * True when the user's active credential is a *Claude* subscription/OAuth token,
+ * so the per-member container must be spawned in OAuth mode (sentinel
  * CLAUDE_CODE_OAUTH_TOKEN; the real token is swapped in by OneCLI on the wire).
+ * Codex OAuth is deliberately excluded — Codex auth rides OneCLI's gateway
+ * auth.json stub (no env var), so a Codex member needs no sentinel.
  */
 export function userHasActiveOauth(userId: string, agentGroupId: string): boolean {
   const row = getByokCredential(userId, agentGroupId);
-  return row?.status === 'active' && row.cred_type === 'oauth_token';
+  return row?.status === 'active' && row.cred_type === 'oauth_token' && row.provider === 'claude';
 }
 
-/** The user's existing vault secret id (reused across their agent-group rows), if any. */
-export function getUserSecretId(userId: string): string | null {
+/**
+ * The user's existing vault secret id for a given provider (reused across their
+ * same-provider agent-group rows), if any. Scoped by provider so a member in
+ * both a Claude room and a Codex room keeps two distinct secrets — their
+ * `anthropic` key and their `openai` credential never collide.
+ */
+export function getUserSecretId(userId: string, provider: ByokProvider = 'claude'): string | null {
   const row = getDb()
-    .prepare(`SELECT secret_id FROM byok_credentials WHERE user_id = ? AND secret_id IS NOT NULL LIMIT 1`)
-    .get(userId) as { secret_id: string } | undefined;
+    .prepare(
+      `SELECT secret_id FROM byok_credentials
+         WHERE user_id = ? AND provider = ? AND secret_id IS NOT NULL LIMIT 1`,
+    )
+    .get(userId, provider) as { secret_id: string } | undefined;
   return row?.secret_id ?? null;
 }
 
@@ -79,21 +97,23 @@ export function upsertByokCredential(
   onecliAgentId: string,
   secretId: string | null,
   credType: ByokCredType = 'api_key',
+  provider: ByokProvider = 'claude',
 ): void {
   const now = new Date().toISOString();
   getDb()
     .prepare(
       `INSERT INTO byok_credentials
-         (user_id, agent_group_id, onecli_agent_id, secret_id, status, cred_type, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
+         (user_id, agent_group_id, onecli_agent_id, secret_id, status, cred_type, provider, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)
        ON CONFLICT (user_id, agent_group_id) DO UPDATE SET
          onecli_agent_id = excluded.onecli_agent_id,
          secret_id       = excluded.secret_id,
          status          = 'active',
          cred_type       = excluded.cred_type,
+         provider        = excluded.provider,
          updated_at      = excluded.updated_at`,
     )
-    .run(userId, agentGroupId, onecliAgentId, secretId, credType, now, now);
+    .run(userId, agentGroupId, onecliAgentId, secretId, credType, provider, now, now);
 }
 
 export function setByokStatus(userId: string, agentGroupId: string, status: ByokStatus): void {
