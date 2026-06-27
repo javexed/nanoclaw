@@ -23,6 +23,8 @@ import {
   deleteWebchatThread,
   markThreadRead,
   getUnreadThreadIdsForRoom,
+  threadToSessionKey,
+  sessionKeyToThread,
 } from './db.js';
 
 beforeEach(() => {
@@ -32,6 +34,29 @@ beforeEach(() => {
 });
 afterEach(() => {
   closeDb();
+});
+
+describe('session-key mapping (slice 1)', () => {
+  it("maps 'main'/absent to the legacy null session, named threads to themselves", () => {
+    // main/absent → null: a thread-less room keeps its existing session
+    expect(threadToSessionKey(MAIN_THREAD)).toBeNull();
+    expect(threadToSessionKey(null)).toBeNull();
+    expect(threadToSessionKey(undefined)).toBeNull();
+    expect(threadToSessionKey('')).toBeNull();
+    // named threads key their own session
+    expect(threadToSessionKey('agent:sarah')).toBe('agent:sarah');
+    expect(threadToSessionKey('u_abc')).toBe('u_abc');
+  });
+  it('inverse maps a session key back to the stored/UI thread', () => {
+    expect(sessionKeyToThread(null)).toBe(MAIN_THREAD);
+    expect(sessionKeyToThread(undefined)).toBe(MAIN_THREAD);
+    expect(sessionKeyToThread('agent:sarah')).toBe('agent:sarah');
+  });
+  it('round-trips named threads', () => {
+    for (const t of ['agent:max', 'u_xyz']) {
+      expect(sessionKeyToThread(threadToSessionKey(t))).toBe(t);
+    }
+  });
 });
 
 describe('migration', () => {

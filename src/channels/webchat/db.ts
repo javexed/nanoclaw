@@ -846,6 +846,21 @@ export function getWebchatMessagesBeforeId(
 
 export const MAIN_THREAD = 'main';
 
+/**
+ * Map a stored/UI thread id to the SESSION key. 'main' (and absent) key the
+ * legacy null-thread session, so a room that never uses threads keeps its exact
+ * existing session/continuity; named threads key their own session. This is
+ * what makes turning threads on a no-op until a real thread is used.
+ */
+export function threadToSessionKey(threadId: string | null | undefined): string | null {
+  return !threadId || threadId === MAIN_THREAD ? null : threadId;
+}
+
+/** Inverse: a session's thread_id (null/absent) → the stored/UI thread ('main'). */
+export function sessionKeyToThread(threadId: string | null | undefined): string {
+  return threadId ?? MAIN_THREAD;
+}
+
 export interface WebchatThread {
   room_id: string;
   thread_id: string;

@@ -58,6 +58,7 @@ import {
   storeWebchatApprovalCard,
   storeWebchatMessage,
   storeWebchatFileMessage,
+  sessionKeyToThread,
   userForApprovalInbox,
   type FileMeta,
   type WebchatRoomAgent,
@@ -84,12 +85,16 @@ function createAdapter(): ChannelAdapter {
   const adapter: ChannelAdapter = {
     name: 'webchat',
     channelType: CHANNEL_TYPE,
-    supportsThreads: false,
+    // Threads on: the router keys a per-thread session per (room, thread). A
+    // null/main thread keys the legacy null-thread session, so thread-less rooms
+    // are unchanged until the client sends a real thread id. See
+    // docs/design/webchat-threads.md and threadToSessionKey().
+    supportsThreads: true,
 
     async setup(config: ChannelSetup): Promise<void> {
       adapterConfig = config;
       server = await startWebchatServer({
-        onInbound: (roomId, message) => {
+        onInbound: (roomId, message, threadId) => {
           // Surface the room's display name to the router so messaging_groups
           // gets a friendly label on first sight (mirrors discord/slack).
           const room = getWebchatRoom(roomId);
@@ -98,8 +103,8 @@ function createAdapter(): ChannelAdapter {
           }
           // Standard inbound — userId resolution + access gating happens in
           // the router/permissions module via the `senderId` field that the
-          // server attaches to message.content.
-          void config.onInbound(roomId, null, message);
+          // server attaches to message.content. threadId is the session key.
+          void config.onInbound(roomId, threadId, message);
         },
         onAction: (questionId, selectedOption, userId) => {
           config.onAction(questionId, selectedOption, userId);
@@ -149,7 +154,7 @@ function createAdapter(): ChannelAdapter {
       return platformId;
     },
 
-    async deliver(platformId, _threadId, message: OutboundMessage): Promise<string | undefined> {
+    async deliver(platformId, threadId, message: OutboundMessage): Promise<string | undefined> {
       if (!server) return undefined;
 
       // Approval inbox path: ask_question payloads (and only those) to a
@@ -200,9 +205,12 @@ function createAdapter(): ChannelAdapter {
       if (!producer) producer = findActiveAgentForWebchatRoom(roomId);
       const senderName = producer?.name ?? agentDisplayName();
       const text = extractText(message);
+      // The reply belongs to the producing session's thread. The session key
+      // (null = main) maps back to the stored/UI thread id.
+      const storeThread = sessionKeyToThread(threadId);
       let storedMessageId: string | null = null;
       if (text !== null && text.length > 0) {
-        const stored = storeWebchatMessage(roomId, senderName, 'agent', text);
+        const stored = storeWebchatMessage(roomId, senderName, 'agent', text, storeThread);
         server.broadcast(roomId, { type: 'message', ...stored });
         storedMessageId = stored.id;
       }
@@ -216,7 +224,7 @@ function createAdapter(): ChannelAdapter {
             mime: guessMime(file.filename),
             size: file.data.length,
           };
-          const stored = storeWebchatFileMessage(roomId, senderName, 'agent', file.filename, meta);
+          const stored = storeWebchatFileMessage(roomId, senderName, 'agent', file.filename, meta, storeThread);
           server.broadcast(roomId, { type: 'message', ...stored });
         }
       }
@@ -239,7 +247,7 @@ function createAdapter(): ChannelAdapter {
         // `sender` here would auto-create `webchat:<AgentName>` rows in the
         // users table on every loop-back, cluttering the permissions tab with
         // pseudo-users that have no roles or memberships.
-        adapterConfig.onInbound(roomId, null, {
+        adapterConfig.onInbound(roomId, threadId, {
           id: loopbackId,
           kind: 'chat',
           content: {

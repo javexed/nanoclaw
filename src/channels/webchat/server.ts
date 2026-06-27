@@ -212,7 +212,8 @@ const STATIC_MIME: Record<string, string> = {
 };
 
 export interface WebchatServerHooks {
-  onInbound: (roomId: string, message: InboundMessage) => void;
+  /** `threadId` is the session key (null = the room's main/default thread). */
+  onInbound: (roomId: string, message: InboundMessage, threadId: string | null) => void;
   onAction: (questionId: string, selectedOption: string, userId: string) => void;
 }
 
@@ -742,7 +743,15 @@ async function handleHttp(
     });
     if (!csrfOk) return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     if (!accessOk) return json(res, 403, { error: 'Access denied' });
-    return handleMultipartUpload(req, res, roomId, senderIdentity, userId, hooks);
+    return handleMultipartUpload(
+      req,
+      res,
+      roomId,
+      senderIdentity,
+      userId,
+      hooks,
+      url.searchParams.get('thread_id') || undefined,
+    );
   }
   const chunkMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/upload\/chunk$/);
   if (chunkMatch && method === 'POST') {
@@ -759,7 +768,15 @@ async function handleHttp(
     });
     if (!csrfOk) return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     if (!accessOk) return json(res, 403, { error: 'Access denied' });
-    return handleChunkedUpload(req, res, roomId, senderIdentity, userId, hooks);
+    return handleChunkedUpload(
+      req,
+      res,
+      roomId,
+      senderIdentity,
+      userId,
+      hooks,
+      url.searchParams.get('thread_id') || undefined,
+    );
   }
   const fileMatch = url.pathname.match(/^\/api\/files\/([^/]+)\/([^/]+)$/);
   if (fileMatch && method === 'GET') {
