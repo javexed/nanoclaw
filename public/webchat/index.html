@@ -317,6 +317,23 @@
                     <button type="button" id="room-rename-save" class="btn btn-secondary">Save</button>
                   </span>
                 </label>
+                <!-- BYOK enablement (owner/admin only; shown by openRoomDetail when room.canArchive). -->
+                <div id="room-credential-mode-section" class="room-cred-section" hidden>
+                  <h4 class="room-cred-title">Member credentials</h4>
+                  <label class="room-cred-row">
+                    <span>Mode</span>
+                    <select id="room-credential-mode">
+                      <option value="disabled">Disabled — one shared agent (default)</option>
+                      <option value="optional">Optional — members may connect their own key</option>
+                      <option value="required">Required — every member must connect their own key</option>
+                    </select>
+                  </label>
+                  <label class="room-cred-row room-cred-check">
+                    <input type="checkbox" id="room-oauth-allowed" />
+                    <span>Allow Claude subscription (OAuth) connections</span>
+                  </label>
+                  <p class="setting-help">Members connect from the in-room banner; their turns then run on their own account.</p>
+                </div>
                 <div>
                   <span class="form-label">Wired agents</span>
                   <ul id="room-wired-agents" class="room-wired-agents"></ul>
@@ -340,23 +357,6 @@
                       <button type="button" id="room-add-agent-new-submit" class="btn btn-primary">Create &amp; wire</button>
                     </div>
                   </div>
-                </div>
-                <!-- BYOK enablement (owner/admin only; shown by openRoomDetail when room.canArchive). -->
-                <div id="room-credential-mode-section" class="room-cred-section" hidden>
-                  <h4 class="room-cred-title">Personal API keys (BYOK)</h4>
-                  <label class="room-cred-row">
-                    <span>Mode</span>
-                    <select id="room-credential-mode">
-                      <option value="disabled">Disabled — one shared agent (default)</option>
-                      <option value="optional">Optional — members may connect their own key</option>
-                      <option value="required">Required — every member must connect their own key</option>
-                    </select>
-                  </label>
-                  <label class="room-cred-row room-cred-check">
-                    <input type="checkbox" id="room-oauth-allowed" />
-                    <span>Allow Claude subscription (OAuth) connections</span>
-                  </label>
-                  <p class="setting-help">Members connect from the in-room banner; their turns then run on their own account.</p>
                 </div>
                 <div class="agent-detail-actions">
                   <button type="button" id="room-archive-toggle" class="btn btn-secondary" hidden>Archive room</button>
