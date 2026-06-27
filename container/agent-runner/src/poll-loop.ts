@@ -1,4 +1,4 @@
-import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
+import { findByName, findByRouting, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { writeMessageOut, getMaxOutboundSeq } from './db/messages-out.js';
 import {
@@ -254,6 +254,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
     // can stamp it on outbound rows — needed for a2a return-path routing.
     setCurrentInReplyTo(routing.inReplyTo);
+    // Rooms this batch came from — a reply defaults back here (origin guard in
+    // dispatchResultText pins a misaddressed lone reply to the originating room).
+    const originDests = resolveOriginDestinations(messages);
     const query = config.provider.query({
       prompt,
       continuation,
@@ -269,6 +272,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         config.provider.onExchangeComplete?.bind(config.provider),
         prompt,
         continuation,
+        originDests,
       );
 
       // Self-heal a dead/stale continuation. Unlike a thrown error (recovered
@@ -294,6 +298,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
           config.provider.onExchangeComplete?.bind(config.provider),
           prompt,
           undefined,
+          originDests,
         );
       }
 
@@ -445,6 +450,7 @@ export async function processQuery(
   onExchangeComplete: ((exchange: ProviderExchange) => void) | undefined,
   initialPrompt: string,
   initialContinuation: string | undefined,
+  originDests: DestinationEntry[] = [],
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -656,7 +662,7 @@ export async function processQuery(
         // next follow-up re-seeds 'start'. Pairs with the reset at the push.
         appendStatusEvent('done', null);
         if (event.text) {
-          const { sent, hasUnwrapped } = dispatchResultText(event.text, routing);
+          const { sent, hasUnwrapped } = dispatchResultText(event.text, routing, originDests);
           if (sent === 0 && event.isError === true) {
             // Non-retryable error turn (e.g. a 403 billing_error) with no
             // <message> envelope: deliver the notice instead of dropping it as
@@ -786,33 +792,93 @@ function deliverErrorResult(text: string, routing: RoutingContext): void {
  * The agent must always wrap output in <message to="name">...</message>
  * blocks, even with a single destination. Bare text is scratchpad only.
  */
-function dispatchResultText(text: string, routing: RoutingContext): { sent: number; hasUnwrapped: boolean } {
+/**
+ * Resolve the channel destination(s) this turn's batch arrived from. A reply
+ * defaults back here (see dispatchResultText's origin guard). Returns one entry
+ * per distinct (channel_type, platform_id) in the batch — usually one, but an
+ * agent-shared session can batch messages from several rooms, and a reply to
+ * ANY of them is a legitimate origin.
+ */
+function resolveOriginDestinations(messages: MessageInRow[]): DestinationEntry[] {
+  const seen = new Set<string>();
+  const dests: DestinationEntry[] = [];
+  for (const m of messages) {
+    if (!m.channel_type || !m.platform_id) continue;
+    const key = `${m.channel_type}:${m.platform_id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const d = findByRouting(m.channel_type, m.platform_id);
+    if (d) dests.push(d);
+  }
+  return dests;
+}
+
+/**
+ * Parse the agent's final text for <message to="name">...</message> blocks and
+ * dispatch each. Text outside blocks is scratchpad.
+ *
+ * Origin guard: a SINGLE reply that resolves to a *channel* the batch did not
+ * come from is almost always the model mis-picking a destination name (the
+ * "agent answered in the wrong room" bug). When that happens we redirect the
+ * block to the originating room. Deliberate cross-room sends still work — they
+ * either address multiple destinations (multiple <message> blocks) or target an
+ * agent-to-agent peer (type 'agent', never guarded). `originDests` is empty in
+ * unit tests, which disables the guard (no behavior change for those paths).
+ */
+function dispatchResultText(
+  text: string,
+  routing: RoutingContext,
+  originDests: DestinationEntry[] = [],
+): { sent: number; hasUnwrapped: boolean } {
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
+  // Collect blocks first so the guard can see whether this is a lone reply
+  // (the misfire signal) vs. a deliberate multi-destination response.
   let match: RegExpExecArray | null;
-  let sent = 0;
   let lastIndex = 0;
   const scratchpadParts: string[] = [];
-
+  const blocks: { toName: string; body: string }[] = [];
   while ((match = MESSAGE_RE.exec(text)) !== null) {
     if (match.index > lastIndex) {
       scratchpadParts.push(text.slice(lastIndex, match.index));
     }
-    const toName = match[1];
-    const body = match[2].trim();
+    blocks.push({ toName: match[1], body: match[2].trim() });
     lastIndex = MESSAGE_RE.lastIndex;
+  }
+  if (lastIndex < text.length) {
+    scratchpadParts.push(text.slice(lastIndex));
+  }
 
-    const dest = findByName(toName);
+  // Channel origins of this batch + the room to redirect a misfire to (prefer
+  // the routing's room — extractRouting's first message — else any batch room).
+  const originChannels = originDests.filter((d) => d.type === 'channel');
+  const originSet = new Set(originChannels.map((d) => `${d.channelType}:${d.platformId}`));
+  const primaryOrigin =
+    originChannels.find((d) => d.channelType === routing.channelType && d.platformId === routing.platformId) ??
+    originChannels[0];
+
+  let sent = 0;
+  for (const { toName, body } of blocks) {
+    let dest = findByName(toName);
     if (!dest) {
       log(`Unknown destination in <message to="${toName}">, dropping block`);
       scratchpadParts.push(`[dropped: unknown destination "${toName}"] ${body}`);
       continue;
     }
+    if (
+      blocks.length === 1 &&
+      dest.type === 'channel' &&
+      primaryOrigin &&
+      !originSet.has(`${dest.channelType}:${dest.platformId}`)
+    ) {
+      log(
+        `Reply addressed to "${dest.name}" but the message came from "${primaryOrigin.name}" — ` +
+          `redirecting to origin (single-reply misfire guard)`,
+      );
+      dest = primaryOrigin;
+    }
     sendToDestination(dest, body, routing);
     sent++;
-  }
-  if (lastIndex < text.length) {
-    scratchpadParts.push(text.slice(lastIndex));
   }
 
   const scratchpad = stripInternalTags(scratchpadParts.join(''));
