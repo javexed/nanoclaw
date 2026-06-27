@@ -605,5 +605,13 @@ export const moduleWebchatThreads: Migration = {
       INSERT OR IGNORE INTO webchat_thread_reads (user_id, room_id, thread_id, last_read_at)
         SELECT user_id, room_id, 'main', last_read_at FROM webchat_room_reads;
     `);
+    // Per-room auto-thread setting (confirm-first per-agent lanes). NULL = unset
+    // → effective default is "on for multi-agent rooms" (computed at read).
+    const hasAutoThread = (
+      db.prepare("PRAGMA table_info('webchat_room_settings')").all() as Array<{ name: string }>
+    ).some((c) => c.name === 'auto_thread');
+    if (!hasAutoThread) {
+      db.exec(`ALTER TABLE webchat_room_settings ADD COLUMN auto_thread INTEGER`);
+    }
   },
 };

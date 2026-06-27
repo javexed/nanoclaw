@@ -994,6 +994,70 @@ export function getUnreadThreadIdsForRoom(userId: string, roomId: string): Set<s
   return new Set(rows.map((r) => r.thread_id));
 }
 
+// ── Auto-spawn (confirm-first per-agent lanes) ──
+// The setting gates whether the UI OFFERS to move a single-mention message in
+// `main` into that agent's lane. NULL = unset → effective default "on for
+// multi-agent rooms". The backend never moves a message; it only suggests.
+
+/** Raw stored auto_thread setting: null (unset) | 0 (off) | 1 (on). */
+export function getRoomAutoThread(roomId: string): number | null {
+  const row = getDb().prepare(`SELECT auto_thread FROM webchat_room_settings WHERE room_id = ?`).get(roomId) as
+    | { auto_thread: number | null }
+    | undefined;
+  return row?.auto_thread ?? null;
+}
+
+export function setRoomAutoThread(roomId: string, on: boolean): void {
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_room_settings (room_id, auto_thread, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(room_id) DO UPDATE SET auto_thread = excluded.auto_thread, updated_at = excluded.updated_at`,
+    )
+    .run(roomId, on ? 1 : 0, Date.now());
+}
+
+export interface ThreadSuggestion {
+  threadId: string;
+  folder: string;
+  title: string;
+}
+
+/** True if `text` @mentions this agent (by folder or display-name slug). */
+function agentMentioned(text: string, agent: WebchatRoomAgent): boolean {
+  const hay = text.toLowerCase();
+  const candidates = [agent.folder, agent.name].map((s) => s.toLowerCase().replace(/\s+/g, ''));
+  // match '@' + handle with a non-word char (or end) after, so '@max' doesn't
+  // fire on '@maxwell'.
+  return candidates.some((c) => c.length > 0 && new RegExp(`@${escapeRegex(c)}(?![\\w-])`).test(hay));
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Confirm-first auto-spawn: should the UI offer to move this message into a
+ * per-agent lane? Returns the suggested lane, or null. PURE + deterministic
+ * (design §5). Suggests iff: from `main`, multi-agent room, setting on (null →
+ * on), and EXACTLY ONE wired agent is @mentioned. Never moves anything itself.
+ */
+export function suggestAgentThread(params: {
+  text: string;
+  agents: WebchatRoomAgent[];
+  currentThread: string;
+  autoThread: number | null;
+}): ThreadSuggestion | null {
+  if (params.currentThread !== MAIN_THREAD) return null; // only from main
+  if (params.agents.length < 2) return null; // single-agent/DM: no benefit
+  const enabled = params.autoThread === null ? true : params.autoThread === 1;
+  if (!enabled) return null;
+  const mentioned = params.agents.filter((a) => agentMentioned(params.text, a));
+  if (mentioned.length !== 1) return null; // zero or 2+ → stay in main
+  const a = mentioned[0];
+  return { threadId: `agent:${a.folder}`, folder: a.folder, title: a.name };
+}
+
 /** Drop a room's thread registry + per-thread read markers (delete cascade). */
 export function clearThreadsForRoom(roomId: string): void {
   const db = getDb();

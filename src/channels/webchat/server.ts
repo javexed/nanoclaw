@@ -22,6 +22,8 @@
  *   PATCH /api/rooms/:id/threads/:tid            rename a thread ({ title })  [member]
  *   DELETE /api/rooms/:id/threads/:tid           delete a thread + its session  [owner]
  *   PUT  /api/rooms/:id/threads/:tid/read        mark a thread read  [member]
+ *   GET  /api/rooms/:id/auto-thread              read auto-spawn setting
+ *   PUT  /api/rooms/:id/auto-thread              set { enabled } auto-spawn  [owner]
  *   GET  /api/rooms/:id/messages                 history (?after_id= catch-up, ?before_id= scroll-back, ?thread_id=)
  *   POST /api/rooms/:id/archive                  mark room archived (owner + admin) — global
  *   POST /api/rooms/:id/unarchive                clear global archive (owner + admin)
@@ -165,6 +167,8 @@ import {
   getUnreadThreadIdsForRoom,
   markThreadRead,
   sanitizeThreadTitle,
+  getRoomAutoThread,
+  setRoomAutoThread,
   getWebchatTopology,
   getWebchatModel,
   getWebchatPendingApprovalsForUser,
@@ -682,6 +686,33 @@ async function handleHttp(
     updateWebchatRoomName(roomId, name);
     broadcastRooms();
     return json(res, 200, { ok: true, name });
+  }
+
+  // Auto-thread setting (confirm-first per-agent lanes). Read = member; write =
+  // owner. null → effective default (on for multi-agent rooms).
+  const roomAutoThreadMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/auto-thread$/);
+  if (roomAutoThreadMatch && method === 'GET') {
+    const roomId = decodeURIComponent(roomAutoThreadMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    return json(res, 200, { auto_thread: getRoomAutoThread(roomId) });
+  }
+  if (roomAutoThreadMatch && method === 'PUT') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const roomId = decodeURIComponent(roomAutoThreadMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { enabled?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    if (typeof body.enabled !== 'boolean') return json(res, 400, { error: 'enabled (boolean) required' });
+    setRoomAutoThread(roomId, body.enabled);
+    return json(res, 200, { ok: true, enabled: body.enabled });
   }
 
   // ── Threads (per-room) ────────────────────────────────────────────────

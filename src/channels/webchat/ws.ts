@@ -38,6 +38,9 @@ import {
   storeWebchatMessage,
   MAIN_THREAD,
   threadToSessionKey,
+  suggestAgentThread,
+  getAgentsForWebchatRoom,
+  getRoomAutoThread,
 } from './db.js';
 import { canAccessRoom } from './access.js';
 import { redactSensitiveData } from './redact.js';
@@ -319,6 +322,19 @@ export function setupWebSocket(
         );
 
         send({ ...outgoing, content: redactSensitiveData(stored.content) });
+
+        // Confirm-first auto-spawn: if this was a single-mention message in
+        // `main` of a multi-agent room (and the setting allows), OFFER to move
+        // it into that agent's lane. We never move it — the client decides.
+        const suggestion = suggestAgentThread({
+          text,
+          agents: getAgentsForWebchatRoom(client.room_id),
+          currentThread: storeThread,
+          autoThread: getRoomAutoThread(client.room_id),
+        });
+        if (suggestion) {
+          send({ type: 'thread_suggestion', room_id: client.room_id, message_id: stored.id, suggestion });
+        }
         return;
       }
 
