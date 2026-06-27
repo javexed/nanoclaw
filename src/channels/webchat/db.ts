@@ -894,6 +894,18 @@ export function ensureAgentThread(roomId: string, folder: string, displayName: s
   return ensureThread(roomId, `agent:${folder}`, displayName, 'agent');
 }
 
+/** Clean a user-supplied thread title: strip control chars, collapse
+ * whitespace, trim, bound to 80. Returns null when empty/too-long. */
+export function sanitizeThreadTitle(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const t = raw
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return !t || t.length > 80 ? null : t;
+}
+
 /** Create a manual topic thread (uuid). Returns the new thread. */
 export function createWebchatThread(roomId: string, title: string): WebchatThread {
   const now = Date.now();

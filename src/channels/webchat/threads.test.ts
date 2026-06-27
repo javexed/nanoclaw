@@ -25,7 +25,12 @@ import {
   getUnreadThreadIdsForRoom,
   threadToSessionKey,
   sessionKeyToThread,
+  sanitizeThreadTitle,
 } from './db.js';
+import { createSession } from '../../db/sessions.js';
+import { createAgentGroup } from '../../db/agent-groups.js';
+import { findSessionsByMessagingGroupThread } from '../../session-teardown.js';
+import { getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 
 beforeEach(() => {
   initTestDb();
@@ -56,6 +61,45 @@ describe('session-key mapping (slice 1)', () => {
     for (const t of ['agent:max', 'u_xyz']) {
       expect(sessionKeyToThread(threadToSessionKey(t))).toBe(t);
     }
+  });
+});
+
+describe('thread title sanitizer (slice 2)', () => {
+  it('trims/collapses/bounds; rejects empty, too-long, non-string', () => {
+    expect(sanitizeThreadTitle('  Q3   plan ')).toBe('Q3 plan');
+    expect(sanitizeThreadTitle('')).toBeNull();
+    expect(sanitizeThreadTitle('   ')).toBeNull();
+    expect(sanitizeThreadTitle(42)).toBeNull();
+    expect(sanitizeThreadTitle('a'.repeat(80))).toBe('a'.repeat(80));
+    expect(sanitizeThreadTitle('a'.repeat(81))).toBeNull();
+  });
+});
+
+describe('per-thread session teardown lookup (slice 2)', () => {
+  const sess = (id: string, threadId: string | null, mgId: string) => ({
+    id,
+    agent_group_id: 'ag1',
+    messaging_group_id: mgId,
+    thread_id: threadId,
+    agent_provider: 'claude',
+    status: 'active' as const,
+    container_status: 'stopped' as const,
+    last_active: new Date().toISOString(),
+    created_at: new Date().toISOString(),
+  });
+  it('finds sessions for (room mg, thread); ignores other threads', () => {
+    const mg = getMessagingGroupByPlatform('webchat', 'room-1')!;
+    createAgentGroup({
+      id: 'ag1',
+      name: 'A',
+      folder: 'a',
+      agent_provider: 'claude',
+      created_at: new Date().toISOString(),
+    });
+    createSession(sess('s-q3', 'u_q3', mg.id));
+    createSession(sess('s-main', null, mg.id));
+    expect(findSessionsByMessagingGroupThread(mg.id, 'u_q3').map((f) => f.sessionId)).toEqual(['s-q3']);
+    expect(findSessionsByMessagingGroupThread(mg.id, 'nope')).toEqual([]);
   });
 });
 
