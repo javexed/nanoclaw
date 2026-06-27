@@ -1934,41 +1934,93 @@ $('#byok-chip')?.addEventListener('click', async () => {
 });
 
 // ── BYOK OAuth: connect a Claude subscription token ────────────────────────
-$('#byok-oauth-btn')?.addEventListener('click', () => {
+// Browser-mint OAuth: no terminal. Opening the form starts a server-side mint
+// (a throwaway container runs `claude setup-token`), surfaces the sign-in URL,
+// takes the pasted code, and onboards the resulting token per-member.
+let byokOauthSessionId = null;
+
+function byokOauthStatus(msg, kind) {
+  const el = $('#byok-oauth-status');
+  if (!el) return;
+  if (!msg) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  el.textContent = msg;
+  el.className = 'byok-oauth-status' + (kind ? ' ' + kind : '');
+}
+
+$('#byok-oauth-btn')?.addEventListener('click', async () => {
   const form = $('#byok-oauth-form');
   if (!form) return;
   form.hidden = false;
-  $('#byok-oauth-input')?.focus();
+  $('#byok-oauth-step2').hidden = true;
+  $('#byok-oauth-submit').hidden = true;
+  const code = $('#byok-oauth-code');
+  if (code) code.value = '';
+  const ack = $('#byok-oauth-ack');
+  if (ack) ack.checked = false;
+  byokOauthStatus('Preparing sign-in…', '');
+  try {
+    const r = await authFetch('/api/byok/oauth/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+      body: JSON.stringify({ roomId: currentRoom }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.statusText);
+    byokOauthSessionId = data.sessionId;
+    $('#byok-oauth-link').href = data.url;
+    $('#byok-oauth-step2').hidden = false;
+    $('#byok-oauth-submit').hidden = false;
+    byokOauthStatus('', '');
+    $('#byok-oauth-link').focus();
+  } catch (err) {
+    byokOauthStatus(err.message || 'Could not start sign-in.', 'error');
+  }
 });
 
 $('#byok-oauth-cancel')?.addEventListener('click', () => {
+  if (byokOauthSessionId) {
+    authFetch('/api/byok/oauth/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+      body: JSON.stringify({ sessionId: byokOauthSessionId }),
+    }).catch(() => {});
+    byokOauthSessionId = null;
+  }
   const form = $('#byok-oauth-form');
   if (form) form.hidden = true;
-  const input = $('#byok-oauth-input');
-  if (input) input.value = '';
-  const ack = $('#byok-oauth-ack');
-  if (ack) ack.checked = false;
 });
 
 $('#byok-oauth-submit')?.addEventListener('click', async () => {
-  const token = ($('#byok-oauth-input')?.value || '').trim();
+  const code = ($('#byok-oauth-code')?.value || '').trim();
   const acknowledged = !!$('#byok-oauth-ack')?.checked;
-  if (!token) return;
+  if (!code || !byokOauthSessionId) return;
   if (!acknowledged) {
     showToast('Please tick the acknowledgment to continue.', { kind: 'error' });
     return;
   }
-  const r = await authFetch('/api/byok/credential', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
-    body: JSON.stringify({ roomId: currentRoom, type: 'oauth_token', token, acknowledged }),
-  });
-  if (r.ok) {
+  const btn = $('#byok-oauth-submit');
+  btn.disabled = true;
+  byokOauthStatus('Saving your subscription… (this can take a few seconds)', '');
+  try {
+    const r = await authFetch('/api/byok/oauth/code', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+      body: JSON.stringify({ roomId: currentRoom, sessionId: byokOauthSessionId, code, acknowledged }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.statusText);
+    byokOauthSessionId = null;
     showToast('Connected your Claude subscription.', { kind: 'success' });
+    $('#byok-oauth-form').hidden = true;
     await updateByokBanner(currentRoom);
-  } else {
-    const err = await r.json().catch(() => ({}));
-    showToast('Failed to connect subscription: ' + (err.error || r.statusText), { kind: 'error' });
+  } catch (err) {
+    byokOauthStatus(err.message || 'Could not connect.', 'error');
+  } finally {
+    btn.disabled = false;
   }
 });
 
