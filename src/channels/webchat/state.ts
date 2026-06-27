@@ -22,9 +22,14 @@ import {
   getArchivedRoomIds,
   getHiddenRoomIdsForUser,
   getSharedWebchatRooms,
+  getMentionedRoomIdsForUser,
+  getPinnedRoomIdsForUser,
+  getRoomLastActivity,
   getUnreadRoomIdsForUser,
   getWebchatRoom,
+  getWebchatUserHandle,
   markRoomRead,
+  resolveHandlesToUserIds,
   storeWebchatA2aMessage,
   type WebchatRoom,
 } from './db.js';
@@ -62,6 +67,8 @@ export function removeClient(id: string): WSClient | undefined {
 interface MemberInfo {
   identity: string;
   identity_type: 'user' | 'agent';
+  /** Human members' @-mention handle, for the client's @ autocomplete. */
+  handle?: string;
 }
 
 // Tracked separately from `clients` because the agent isn't a WS client —
@@ -74,7 +81,11 @@ export function getMemberList(roomId: string): MemberInfo[] {
   for (const c of clients.values()) {
     if (c.room_id === roomId && !seen.has(c.identity)) {
       seen.add(c.identity);
-      members.push({ identity: c.identity, identity_type: c.identity_type });
+      members.push({
+        identity: c.identity,
+        identity_type: c.identity_type,
+        handle: getWebchatUserHandle(c.userId) ?? undefined,
+      });
     }
   }
   const agentIdentity = activeAgents.get(roomId);
@@ -82,6 +93,15 @@ export function getMemberList(roomId: string): MemberInfo[] {
     members.push({ identity: agentIdentity, identity_type: 'agent' });
   }
   return members;
+}
+
+/** Extract @-mention handle tokens (`@alice`) from message text, lowercased. */
+export function extractHandles(text: string): string[] {
+  const re = /(?:^|[^a-z0-9_-])@([a-z0-9-]{1,32})/gi;
+  const out: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) out.push(m[1].toLowerCase());
+  return out;
 }
 
 export function broadcast(roomId: string, msg: object, excludeId?: string): void {
@@ -92,11 +112,23 @@ export function broadcast(roomId: string, msg: object, excludeId?: string): void
   const payload = JSON.stringify(outgoing);
   const notifyPayload = isMessage ? JSON.stringify({ type: 'unread', room_id: roomId }) : '';
 
+  // Resolve @-handle mentions to user ids so a mentioned recipient who isn't in
+  // the room gets a distinct `mention` signal (room badge) instead of a plain
+  // unread. Parsed from the original text — redaction never touches @handles.
+  // In-room recipients render the highlight + fire a mention notification client
+  // side from their own handle, so no per-recipient payload is needed here.
+  // (Web-push stays generic for now — subscriptions are keyed by display name,
+  // not user id, so per-recipient mention tailoring is a follow-up.)
+  const mentionedUserIds = isMessage
+    ? new Set(resolveHandlesToUserIds(extractHandles((msg as { content?: string }).content || '')))
+    : new Set<string>();
+  const mentionPayload = JSON.stringify({ type: 'mention', room_id: roomId });
+
   for (const c of clients.values()) {
     if (c.id === excludeId || c.ws.readyState !== WebSocket.OPEN) continue;
     try {
       if (c.room_id === roomId) c.ws.send(payload);
-      else if (isMessage) c.ws.send(notifyPayload);
+      else if (isMessage) c.ws.send(mentionedUserIds.has(c.userId) ? mentionPayload : notifyPayload);
     } catch {
       // Socket may have closed between readyState check and send — ignore.
     }
@@ -244,25 +276,45 @@ export function annotateRoomsForUser(
   userId: string,
   allRooms: WebchatRoom[] = getAllWebchatRooms(),
   archivedSet: Set<string> = getArchivedRoomIds(),
-): Array<WebchatRoom & { archived: boolean; hidden: boolean; canArchive: boolean; unread: boolean }> {
+  activityMap: Map<string, number> = getRoomLastActivity(),
+): Array<
+  WebchatRoom & {
+    archived: boolean;
+    hidden: boolean;
+    canArchive: boolean;
+    unread: boolean;
+    mention: boolean;
+    pinned: boolean;
+    last_activity: number;
+  }
+> {
   const visible = filterRoomsForUser(userId, allRooms);
   const hiddenSet = getHiddenRoomIdsForUser(userId); // per-user
   const unreadSet = getUnreadRoomIdsForUser(userId); // per-user
+  const mentionSet = getMentionedRoomIdsForUser(userId, getWebchatUserHandle(userId) ?? ''); // per-user
+  const pinnedSet = getPinnedRoomIdsForUser(userId); // per-user
   return visible.map((r) => ({
     ...r,
     archived: archivedSet.has(r.id),
     hidden: hiddenSet.has(r.id),
     canArchive: canArchiveRoom(userId, r.id),
     unread: unreadSet.has(r.id),
+    mention: mentionSet.has(r.id),
+    pinned: pinnedSet.has(r.id),
+    // Newest-message time drives the "Recent" sort; fall back to created_at.
+    last_activity: activityMap.get(r.id) ?? r.created_at,
   }));
 }
 
 export function broadcastRooms(): void {
   const allRooms = getAllWebchatRooms();
   const archivedSet = getArchivedRoomIds(); // global, computed once per broadcast
+  const activityMap = getRoomLastActivity(); // global, computed once per broadcast
   for (const c of clients.values()) {
     if (c.ws.readyState !== WebSocket.OPEN) continue;
-    c.ws.send(JSON.stringify({ type: 'rooms', rooms: annotateRoomsForUser(c.userId, allRooms, archivedSet) }));
+    c.ws.send(
+      JSON.stringify({ type: 'rooms', rooms: annotateRoomsForUser(c.userId, allRooms, archivedSet, activityMap) }),
+    );
   }
 }
 

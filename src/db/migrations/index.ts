@@ -33,6 +33,8 @@ import {
   moduleWebchatMessageFts,
   moduleWebchatAgentStatus,
   moduleWebchatRoomReads,
+  moduleWebchatUserHandles,
+  moduleWebchatRoomPins,
   moduleWebchatRoomCredentialMode,
   moduleWebchatRoomOauthAllowed,
 } from '../../channels/webchat/migration.js';
@@ -81,6 +83,8 @@ export const migrations: Migration[] = [
   moduleWebchatMessageFts,
   moduleWebchatAgentStatus,
   moduleWebchatRoomReads,
+  moduleWebchatUserHandles,
+  moduleWebchatRoomPins,
   moduleWebchatRoomCredentialMode,
   moduleWebchatRoomOauthAllowed,
   migration020,

@@ -43,9 +43,11 @@ describe('moduleWebchat migration', () => {
       'webchat_models',
       'webchat_push_subscriptions',
       'webchat_room_archives',
+      'webchat_room_pins',
       'webchat_room_primes',
       'webchat_room_reads',
       'webchat_room_settings',
+      'webchat_user_handles',
       'webchat_user_room_hides',
     ]);
   });
@@ -61,7 +63,9 @@ describe('moduleWebchat migration', () => {
         'idx_webchat_approvals_platform',
         'idx_webchat_messages_room',
         'idx_webchat_push_identity',
+        'idx_webchat_room_pins_user',
         'idx_webchat_room_reads_user',
+        'idx_webchat_user_handles_handle',
         'idx_webchat_user_hides_user',
       ].sort(),
     );
@@ -82,10 +86,12 @@ describe('moduleWebchat migration', () => {
       'webchat-models',
       'webchat-room-credential-mode',
       'webchat-room-oauth-allowed',
+      'webchat-room-pins',
       'webchat-room-primes',
       'webchat-room-reads',
       'webchat-room-settings',
       'webchat-user-archives',
+      'webchat-user-handles',
     ]);
   });
 

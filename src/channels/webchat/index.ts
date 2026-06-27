@@ -274,6 +274,7 @@ function createAdapter(): ChannelAdapter {
       server.broadcast(platformId, {
         type: 'status',
         room_id: platformId,
+        agent_name: status.agentName ?? null,
         event: status.kind,
         text: redact(status.text),
         detail: redact(status.detail),
