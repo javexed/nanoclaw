@@ -189,11 +189,22 @@ import { redactSensitiveData } from './redact.js';
 import { hasAdminPrivilege, isAnyAdmin, isGlobalAdmin, isOwner, warnIfNoPermissionsModule } from './roles.js';
 import { canAccessRoom, canArchiveRoom, filterRoomsForUser } from './access.js';
 import {
-  getRoomCredentialMode,
-  setRoomCredentialMode,
   getRoomOauthAllowed,
   setRoomOauthAllowed,
+  getEffectiveRoomMode,
+  getRoomModeOverride,
+  setRoomModeOverride,
+  getCredentialsConfig,
+  setCredentialsConfig,
+  type CredentialsConfig,
+  type CredentialMode,
 } from './db.js';
+import { listProviderContainerConfigNames } from '../../providers/provider-container-registry.js';
+
+/** Auto-detect: the Codex provider is installed when it's registered a container config. */
+function codexAvailable(): boolean {
+  return listProviderContainerConfigNames().includes('codex');
+}
 import { onboardByokCredential, onboardByokOauth, revokeByokCredential } from '../../modules/byok/onboard.js';
 import { startClaudeMint, mintClaudeToken, cancelMint } from './oauth-mint.js';
 import { realOnecliAdmin } from '../../modules/byok/onecli-admin.js';
@@ -523,7 +534,13 @@ async function handleHttp(
     const roomId = decodeURIComponent(roomCredModeMatch[1]);
     if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
     if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
-    return json(res, 200, { mode: getRoomCredentialMode(roomId) });
+    // The per-room OVERRIDE ('inherit' when unset); the effective mode is what the
+    // room actually runs (override, else the global default).
+    return json(res, 200, {
+      mode: getRoomModeOverride(roomId) ?? 'inherit',
+      effectiveMode: getEffectiveRoomMode(roomId),
+      defaultMode: getCredentialsConfig().defaultMode,
+    });
   }
   if (roomCredModeMatch && method === 'PUT') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
@@ -540,10 +557,11 @@ async function handleHttp(
     } catch {
       return json(res, 400, { error: 'Invalid JSON' });
     }
-    if (body.mode !== 'disabled' && body.mode !== 'optional' && body.mode !== 'required') {
-      return json(res, 400, { error: "mode must be 'disabled', 'optional', or 'required'" });
+    if (body.mode !== 'inherit' && body.mode !== 'disabled' && body.mode !== 'optional' && body.mode !== 'required') {
+      return json(res, 400, { error: "mode must be 'inherit', 'disabled', 'optional', or 'required'" });
     }
-    setRoomCredentialMode(roomId, body.mode);
+    // 'inherit' clears the override so the room follows the global default.
+    setRoomModeOverride(roomId, body.mode === 'inherit' ? null : body.mode);
     return json(res, 200, { ok: true, mode: body.mode });
   }
 
@@ -574,13 +592,44 @@ async function handleHttp(
     return json(res, 200, { ok: true, allowed: body.allowed });
   }
 
+  // ── BYOK: workspace credentials policy — accepted TYPES + default room mode ──
+  // Read by anyone (the room UIs need it); only the owner can change it.
+  if (url.pathname === '/api/webchat/credentials-config' && (method === 'GET' || method === 'PUT')) {
+    if (method === 'GET') {
+      return json(res, 200, { ...getCredentialsConfig(), codexAvailable: codexAvailable() });
+    }
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: Record<string, unknown>;
+    try {
+      body = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    const patch: Partial<CredentialsConfig> = {};
+    if (body.defaultMode !== undefined) {
+      if (body.defaultMode !== 'disabled' && body.defaultMode !== 'optional' && body.defaultMode !== 'required')
+        return json(res, 400, { error: "defaultMode must be 'disabled', 'optional', or 'required'" });
+      patch.defaultMode = body.defaultMode as CredentialMode;
+    }
+    for (const k of ['allowAnthropicKey', 'allowClaudeOauth', 'allowOpenaiKey', 'allowCodexOauth'] as const) {
+      if (body[k] === undefined) continue;
+      if (typeof body[k] !== 'boolean') return json(res, 400, { error: `${k} must be a boolean` });
+      patch[k] = body[k] as boolean;
+    }
+    // Codex types are inert until the provider is installed — refuse to enable them.
+    if ((patch.allowCodexOauth || patch.allowOpenaiKey) && !codexAvailable())
+      return json(res, 400, { error: 'Codex support isn’t installed yet — add it with /add-codex first.' });
+    setCredentialsConfig(patch);
+    return json(res, 200, { ...getCredentialsConfig(), codexAvailable: codexAvailable() });
+  }
+
   // ── BYOK: a member connects / disconnects THEIR own Anthropic key ──────────
   // userId is the server-resolved caller — a user can only manage their own key.
   if (url.pathname === '/api/byok/credential' && (method === 'POST' || method === 'DELETE' || method === 'GET')) {
-    const reqRoomId =
-      method === 'GET'
-        ? (url.searchParams.get('roomId') ?? '')
-        : undefined; // POST/DELETE read roomId from the body below
+    const reqRoomId = method === 'GET' ? (url.searchParams.get('roomId') ?? '') : undefined; // POST/DELETE read roomId from the body below
     if (method === 'GET') {
       const roomId = decodeURIComponent(reqRoomId ?? '');
       if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
@@ -588,13 +637,16 @@ async function handleHttp(
       const groups = getAgentsForWebchatRoom(roomId);
       const connected = groups.length > 0 && groups.every((g) => userHasActiveKey(userId, g.id));
       // Report the connected credential type so the UI shows the right banner.
-      const credType =
-        connected && groups[0] ? (getByokCredential(userId, groups[0].id)?.cred_type ?? null) : null;
+      const credType = connected && groups[0] ? (getByokCredential(userId, groups[0].id)?.cred_type ?? null) : null;
+      // Effective mode (room override → global default); credential TYPES are
+      // workspace-wide (Credentials admin page), not per-room.
+      const cfg = getCredentialsConfig();
       return json(res, 200, {
         connected,
         credType,
-        mode: getRoomCredentialMode(roomId),
-        oauthAllowed: getRoomOauthAllowed(roomId),
+        mode: getEffectiveRoomMode(roomId),
+        oauthAllowed: cfg.allowClaudeOauth,
+        apiKeyAllowed: cfg.allowAnthropicKey,
       });
     }
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
@@ -612,19 +664,26 @@ async function handleHttp(
     const groups = getAgentsForWebchatRoom(roomId);
     if (groups.length === 0) return json(res, 400, { error: 'Room has no wired agent' });
     const credType = body.type === 'oauth_token' ? 'oauth_token' : 'api_key';
+    const cfg = getCredentialsConfig();
     try {
       if (method === 'POST' && credType === 'oauth_token') {
-        // Gate 1: the room must allow OAuth (owner/admin opt-in).
-        if (!getRoomOauthAllowed(roomId))
-          return json(res, 403, { error: 'This room does not allow subscription (OAuth) connections.' });
+        // Gate 1: the workspace must accept Claude subscriptions (Credentials page).
+        if (!cfg.allowClaudeOauth)
+          return json(res, 403, { error: 'This workspace does not accept Claude subscription (OAuth) connections.' });
         // Gate 2: explicit own-use acknowledgment.
         if (body.acknowledged !== true)
-          return json(res, 400, { error: 'You must acknowledge this connects your own subscription for your own use.' });
+          return json(res, 400, {
+            error: 'You must acknowledge this connects your own subscription for your own use.',
+          });
         const token = typeof body.token === 'string' ? body.token.trim() : '';
         if (!/^sk-ant-oat/.test(token))
-          return json(res, 400, { error: 'Expected a Claude subscription token from `claude setup-token` (sk-ant-oat…)' });
+          return json(res, 400, {
+            error: 'Expected a Claude subscription token from `claude setup-token` (sk-ant-oat…)',
+          });
         for (const g of groups) await onboardByokOauth(realOnecliAdmin, userId, g.id, userId, token);
       } else if (method === 'POST') {
+        if (!cfg.allowAnthropicKey)
+          return json(res, 403, { error: 'This workspace does not accept Anthropic API keys.' });
         const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
         if (!/^sk-ant-/.test(apiKey)) return json(res, 400, { error: 'Expected an Anthropic API key (sk-ant-…)' });
         for (const g of groups) await onboardByokCredential(realOnecliAdmin, userId, g.id, userId, apiKey);
@@ -664,8 +723,8 @@ async function handleHttp(
     const roomId = typeof body.roomId === 'string' ? body.roomId : '';
     if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
     if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
-    if (!getRoomOauthAllowed(roomId))
-      return json(res, 403, { error: 'This room does not allow subscription (OAuth) connections.' });
+    if (!getCredentialsConfig().allowClaudeOauth)
+      return json(res, 403, { error: 'This workspace does not accept Claude subscription (OAuth) connections.' });
     const groups = getAgentsForWebchatRoom(roomId);
     if (groups.length === 0) return json(res, 400, { error: 'Room has no wired agent' });
     try {

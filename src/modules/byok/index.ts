@@ -14,7 +14,7 @@ import { registerAgentIdentityResolver, registerContainerEnvResolver } from '../
 import { writeMemberTranscript } from './fanout.js';
 import { getDb, hasTable } from '../../db/connection.js';
 import { registerApprovalAgentGroupFallback } from '../approvals/onecli-approvals.js';
-import { getRoomCredentialMode, getRoomOauthAllowed } from '../../channels/webchat/db.js';
+import { getEffectiveRoomMode, getCredentialsConfig } from '../../channels/webchat/db.js';
 import { userHasActiveKey, userHasActiveOauth, agentGroupForByokAgent } from './db.js';
 import { byokAgentIdentifier } from './identity.js';
 
@@ -29,8 +29,10 @@ registerSessionKeyResolver((mg, agentGroupId, userId) => {
   // BYOK is webchat-only and opt-in per room. Fail safe to no override.
   if (mg.channel_type !== 'webchat' || !userId) return null;
   if (!hasTable(getDb(), 'webchat_room_settings')) return null;
-  const mode = getRoomCredentialMode(mg.platform_id);
-  const oauthAllowed = getRoomOauthAllowed(mg.platform_id);
+  // Effective mode = the room's override, else the global default. OAuth/key
+  // allowances are workspace-wide (set on the Credentials admin page).
+  const mode = getEffectiveRoomMode(mg.platform_id);
+  const oauthAllowed = getCredentialsConfig().allowClaudeOauth;
   // BYOK entirely off for this room (no API-key mode AND no OAuth) → no override.
   if (mode === 'disabled' && !oauthAllowed) return null;
   // A member with their own credential — API key OR OAuth subscription — gets

@@ -585,3 +585,47 @@ export const moduleWebchatRoomPins: Migration = {
     `);
   },
 };
+
+/**
+ * Workspace-wide credentials policy + per-room mode inheritance.
+ *
+ * `webchat_settings` is a singleton (id=1) holding which member-credential TYPES
+ * the workspace accepts ({API key | OAuth} × {Claude | Codex}) and the default
+ * room mode. Types are global so they're configured once, not per room. The
+ * per-room control becomes an OVERRIDE: `credential_mode_override` is nullable —
+ * NULL means "inherit the global default", a value means this room overrides it.
+ * New/untouched rooms (NULL) inherit automatically.
+ *
+ * Migration preserves current behavior: any room previously set to optional/
+ * required keeps that as an explicit override, and `allow_claude_oauth` seeds to
+ * 1 if any room had the old per-room `oauth_allowed` on (so existing OAuth rooms
+ * keep working). Anthropic keys default on; Codex types default off (and are
+ * inert until the Codex provider is installed).
+ */
+export const moduleWebchatCredentialsConfig: Migration = {
+  version: 115,
+  name: 'webchat-credentials-config',
+  up(db: Database.Database) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS webchat_settings (
+        id                      INTEGER PRIMARY KEY CHECK (id = 1),
+        default_credential_mode TEXT    NOT NULL DEFAULT 'disabled',
+        allow_anthropic_key     INTEGER NOT NULL DEFAULT 1,
+        allow_claude_oauth      INTEGER NOT NULL DEFAULT 0,
+        allow_openai_key        INTEGER NOT NULL DEFAULT 0,
+        allow_codex_oauth       INTEGER NOT NULL DEFAULT 0,
+        updated_at              INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT OR IGNORE INTO webchat_settings (id, allow_claude_oauth, updated_at)
+        VALUES (
+          1,
+          (SELECT CASE WHEN EXISTS (SELECT 1 FROM webchat_room_settings WHERE oauth_allowed = 1) THEN 1 ELSE 0 END),
+          0
+        );
+      ALTER TABLE webchat_room_settings ADD COLUMN credential_mode_override TEXT;
+      UPDATE webchat_room_settings
+         SET credential_mode_override = credential_mode
+       WHERE credential_mode IN ('optional', 'required');
+    `);
+  },
+};
