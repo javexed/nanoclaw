@@ -2042,7 +2042,7 @@ async function updateByokBanner(roomId) {
       hideAll();
       return;
     }
-    const { connected, mode, credType, oauthAllowed } = await r.json();
+    const { connected, mode, oauthAllowed } = await r.json();
     // BYOK is surfaced when the room takes personal keys OR allows subscriptions.
     if (mode === 'disabled' && !oauthAllowed) {
       hideAll();
@@ -2055,10 +2055,7 @@ async function updateByokBanner(roomId) {
       banner.hidden = true;
       if (chip) {
         chip.hidden = false;
-        chip.title =
-          credType === 'oauth_token'
-            ? 'Billing your Claude subscription · click to disconnect'
-            : 'Billing your personal Anthropic key · click to disconnect';
+        chip.title = 'Your member credential · click to disconnect';
       }
       return;
     }
@@ -2074,21 +2071,14 @@ async function updateByokBanner(roomId) {
     input.hidden = true;
     input.value = '';
     if (oauthForm) oauthForm.hidden = true;
-    // Describe only what this room actually offers, so the text matches the
-    // buttons shown (API key via "Connect your key"; subscription via the
-    // separate "Use my Claude subscription" button).
+    // Generic "member credentials" wording; the buttons below say HOW (the
+    // Claude-subscription helper, or an API key).
     const apiOffered = mode !== 'disabled';
-    const what =
-      apiOffered && oauthAllowed
-        ? 'your Anthropic key or Claude subscription'
-        : oauthAllowed
-          ? 'your Claude subscription'
-          : 'your Anthropic key';
     if (text)
       text.textContent =
         mode === 'required'
-          ? `This room requires ${what}.`
-          : `Connect ${what} to bill this room to your own account.`;
+          ? 'This room requires your member credentials.'
+          : 'Connect your member credentials to bill this room to your own account.';
     connectBtn.hidden = !apiOffered;
     if (oauthBtn) oauthBtn.hidden = !oauthAllowed;
   } catch {
