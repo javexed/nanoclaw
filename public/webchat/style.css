@@ -526,8 +526,16 @@ body {
   flex-shrink: 0;
   vertical-align: middle;
 }
-#room-list li.dragging {
-  opacity: 0.4;
+#room-list li .room-pin-indicator {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-dim);
+  margin-left: 4px;
+  flex-shrink: 0;
+}
+#room-list li .room-pin-indicator svg {
+  width: 13px;
+  height: 13px;
 }
 #room-list li.archived {
   opacity: 0.55;
@@ -584,8 +592,17 @@ body {
 .archived-toggle:hover {
   color: var(--text);
 }
-#room-list li.drag-over {
-  border-top: 2px solid var(--accent);
+/* Separates the pinned group from the rest of the (activity-sorted) rooms.
+   Non-interactive — purely a visual rule. */
+#room-list li.room-divider {
+  height: 0;
+  margin: 6px 10px;
+  padding: 0;
+  border-top: 1px solid var(--border);
+  border-left: none;
+  list-style: none;
+  cursor: default;
+  pointer-events: none;
 }
 
 /* Agent list */

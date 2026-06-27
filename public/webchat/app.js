@@ -1017,6 +1017,12 @@ function connect() {
         }
         break;
       case 'message': {
+        // Bump the room's activity so it floats up in the Recent-sorted sidebar
+        // without waiting for a server rooms refresh.
+        if (msg.room_id && msg.created_at) {
+          roomActivity.set(msg.room_id, Math.max(roomActivity.get(msg.room_id) || 0, msg.created_at));
+          if (lastRoomsList.length) renderRooms(lastRoomsList);
+        }
         // Snapshot the scroll position BEFORE appending. If we check after,
         // the newly-inserted message has already pushed the bottom past our
         // 80px threshold and `isNearBottom()` lies about the user's intent.
@@ -1196,49 +1202,37 @@ setInterval(() => {
 
 // ── Rooms ─────────────────────────────────────────────────────────────────
 // ── Room ordering ─────────────────────────────────────────────────────────
-function getSavedRoomOrder() {
-  try {
-    return JSON.parse(localStorage.getItem('room-order') || '[]');
-  } catch {
-    return [];
-  }
-}
-function saveRoomOrder(ids) {
-  localStorage.setItem('room-order', JSON.stringify(ids));
+// Live last-activity overrides keyed by room id. The rooms payload carries a
+// server-computed `last_activity`; as messages arrive while the app is open we
+// bump this map so the active room floats to the top without a server round-trip.
+const roomActivity = new Map();
+function activityOf(room) {
+  return Math.max(room.last_activity || room.created_at || 0, roomActivity.get(room.id) || 0);
 }
 
-let dragSrcLi = null;
+// Sentinel rendered as a horizontal rule between the pinned group and the rest.
+const ROOM_DIVIDER = Symbol('room-divider');
 
 function renderRooms(rooms) {
   const list = $('#room-list');
   list.innerHTML = '';
 
-  // Apply saved order, falling back to created_at.
-  const savedOrder = getSavedRoomOrder();
-  const orderMap = new Map(savedOrder.map((id, i) => [id, i]));
+  // Recent-first: newest activity (last message) at the top. Pinned rooms are
+  // lifted into a sticky group above a divider; the rest follow in activity
+  // order. (Replaces the old manual drag-order, which lived only in this
+  // browser's localStorage and never synced across devices.)
+  const byActivity = (a, b) => activityOf(b) - activityOf(a);
 
-  function cmp(a, b) {
-    const aIdx = orderMap.get(a.id);
-    const bIdx = orderMap.get(b.id);
-    if (aIdx !== undefined && bIdx !== undefined) return aIdx - bIdx;
-    if (aIdx !== undefined) return -1;
-    if (bIdx !== undefined) return 1;
-    return (a.created_at || 0) - (b.created_at || 0);
-  }
-
-  const sorted = [...rooms].sort(cmp);
-
-  // Partition into three buckets:
-  //   - hidden (per-user "hide" preference) — dropped from the sidebar
-  //     entirely unless `showHidden` is on. Per-user state.
-  //   - archived (global archive flag) — visible to everyone with access
-  //     but collected in a collapsed "Archived" section at the bottom,
-  //     revealed by the toggle. Same room can be both archived AND
-  //     hidden (by some users) — hidden wins for those users.
-  //   - active — the rest. Always rendered at the top.
-  const visibleRooms = showHidden ? sorted : sorted.filter((r) => !r.hidden);
+  // Partition:
+  //   - hidden (per-user "hide") — dropped unless `showHidden` is on.
+  //   - archived (global flag) — collected in a collapsed "Archived" section at
+  //     the bottom, revealed by the toggle.
+  //   - active — split into pinned (top) and unpinned, each activity-sorted.
+  const visibleRooms = showHidden ? [...rooms] : rooms.filter((r) => !r.hidden);
   const active = visibleRooms.filter((r) => !r.archived);
-  const archived = visibleRooms.filter((r) => r.archived);
+  const archived = visibleRooms.filter((r) => r.archived).sort(byActivity);
+  const pinned = active.filter((r) => r.pinned).sort(byActivity);
+  const unpinned = active.filter((r) => !r.pinned).sort(byActivity);
   const toggleBtn = $('#archived-toggle');
   if (archived.length === 0) {
     toggleBtn.hidden = true;
@@ -1246,10 +1240,25 @@ function renderRooms(rooms) {
     toggleBtn.hidden = false;
     toggleBtn.textContent = showArchived ? `Hide ${archived.length} archived` : `Show ${archived.length} archived`;
   }
-  const toRender = showArchived ? [...active, ...archived] : active;
+  // Divider sentinel between the pinned group and the rest — only when both
+  // groups are non-empty.
+  const showDivider = pinned.length > 0 && unpinned.length > 0;
+  const toRender = [
+    ...pinned,
+    ...(showDivider ? [ROOM_DIVIDER] : []),
+    ...unpinned,
+    ...(showArchived ? archived : []),
+  ];
 
   for (let i = 0; i < toRender.length; i++) {
     const room = toRender[i];
+    if (room === ROOM_DIVIDER) {
+      const sep = document.createElement('li');
+      sep.className = 'room-divider';
+      sep.setAttribute('role', 'separator');
+      list.appendChild(sep);
+      continue;
+    }
     const li = document.createElement('li');
     const color = roomColor(room.id);
     li.dataset.roomId = room.id;
@@ -1276,6 +1285,14 @@ function renderRooms(rooms) {
       li.appendChild(dot);
     }
 
+    if (room.pinned) {
+      const pin = document.createElement('span');
+      pin.className = 'room-pin-indicator';
+      pin.innerHTML = lucide('pin');
+      pin.setAttribute('aria-label', 'Pinned');
+      li.appendChild(pin);
+    }
+
     // Kebab — opens a tiny menu with up to two actions:
     //   - Hide / Unhide (per-user sidebar preference) — always present
     //     for anyone with room access.
@@ -1297,6 +1314,16 @@ function renderRooms(rooms) {
       list.querySelectorAll('.room-menu').forEach((m) => m.remove());
       const menu = document.createElement('div');
       menu.className = 'room-menu';
+
+      const pinBtn = document.createElement('button');
+      pinBtn.type = 'button';
+      pinBtn.textContent = room.pinned ? 'Unpin' : 'Pin';
+      pinBtn.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        menu.remove();
+        await toggleRoomPin(room.id, !room.pinned);
+      });
+      menu.appendChild(pinBtn);
 
       const hideBtn = document.createElement('button');
       hideBtn.type = 'button';
@@ -1332,39 +1359,6 @@ function renderRooms(rooms) {
     if (room.id === currentRoom) li.classList.add('active');
     li.setAttribute('role', 'button');
     li.setAttribute('tabindex', '0');
-    li.setAttribute('draggable', 'true');
-
-    li.addEventListener('dragstart', (e) => {
-      dragSrcLi = li;
-      li.classList.add('dragging');
-      e.dataTransfer.effectAllowed = 'move';
-      e.dataTransfer.setData('text/plain', room.id);
-    });
-    li.addEventListener('dragend', () => {
-      li.classList.remove('dragging');
-      dragSrcLi = null;
-      list.querySelectorAll('.drag-over').forEach((el) => el.classList.remove('drag-over'));
-    });
-    li.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      if (dragSrcLi && dragSrcLi !== li) li.classList.add('drag-over');
-    });
-    li.addEventListener('dragleave', () => li.classList.remove('drag-over'));
-    li.addEventListener('drop', (e) => {
-      e.preventDefault();
-      li.classList.remove('drag-over');
-      if (!dragSrcLi || dragSrcLi === li) return;
-      const items = [...list.children].map((el) => el.dataset.roomId);
-      const fromId = dragSrcLi.dataset.roomId;
-      const toId = li.dataset.roomId;
-      const fromIdx = items.indexOf(fromId);
-      const toIdx = items.indexOf(toId);
-      items.splice(fromIdx, 1);
-      items.splice(toIdx, 0, fromId);
-      saveRoomOrder(items.filter(Boolean));
-      renderRooms(lastRoomsList);
-    });
 
     li.addEventListener('click', () => joinRoom(room.id, room.name));
     li.addEventListener('keydown', (e) => {
@@ -1398,6 +1392,26 @@ async function toggleRoomArchive(roomId, archive) {
   } catch (err) {
     console.error('toggleRoomArchive failed:', err);
     if (target) target.archived = !archive; // roll back
+    renderRooms(lastRoomsList);
+  }
+}
+
+async function toggleRoomPin(roomId, pin) {
+  // PER-USER pin. Optimistic flip + re-render, same pattern as hide/archive.
+  // The server replays authoritative state via broadcastRooms (which also syncs
+  // the pin to this user's other devices).
+  const target = lastRoomsList.find((r) => r.id === roomId);
+  if (target) target.pinned = pin;
+  renderRooms(lastRoomsList);
+  try {
+    const res = await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/${pin ? 'pin' : 'unpin'}`, {
+      method: 'POST',
+      headers: { 'X-Webchat-CSRF': '1' },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    console.error('toggleRoomPin failed:', err);
+    if (target) target.pinned = !pin; // roll back
     renderRooms(lastRoomsList);
   }
 }

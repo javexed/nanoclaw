@@ -286,6 +286,7 @@ export function deleteWebchatRoom(id: string): void {
   db.prepare(`DELETE FROM webchat_user_room_hides WHERE room_id = ?`).run(id);
   db.prepare(`DELETE FROM webchat_room_archives WHERE room_id = ?`).run(id);
   db.prepare(`DELETE FROM webchat_room_reads WHERE room_id = ?`).run(id);
+  db.prepare(`DELETE FROM webchat_room_pins WHERE room_id = ?`).run(id);
   // Drop any agent_destinations rows pointing at this room. target_id has no
   // FK so they wouldn't block, just rot. Guarded — a2a module may not be installed.
   if (hasTable(db, 'agent_destinations')) {
@@ -1068,6 +1069,50 @@ export function getUnreadRoomIdsForUser(userId: string): Set<string> {
 /** Drop a room's read markers — called from deleteWebchatRoom's cascade. */
 export function clearReadsForRoom(roomId: string): void {
   getDb().prepare(`DELETE FROM webchat_room_reads WHERE room_id = ?`).run(roomId);
+}
+
+// ── Per-user room pins (sticky group at the top of the sidebar) ──
+// Pins are per-(user, room), keyed on the trusted webchat user_id, so a pin
+// follows the user across devices (same model as read markers/hides).
+
+/** Pin a room for a user. Idempotent — re-pinning keeps the original pinned_at. */
+export function pinRoomForUser(userId: string, roomId: string, ts: number = Date.now()): void {
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_room_pins (user_id, room_id, pinned_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(user_id, room_id) DO NOTHING`,
+    )
+    .run(userId, roomId, ts);
+}
+
+export function unpinRoomForUser(userId: string, roomId: string): void {
+  getDb().prepare(`DELETE FROM webchat_room_pins WHERE user_id = ? AND room_id = ?`).run(userId, roomId);
+}
+
+export function getPinnedRoomIdsForUser(userId: string): Set<string> {
+  const rows = getDb().prepare(`SELECT room_id FROM webchat_room_pins WHERE user_id = ?`).all(userId) as {
+    room_id: string;
+  }[];
+  return new Set(rows.map((r) => r.room_id));
+}
+
+/** Drop a room's pins — called from deleteWebchatRoom's cascade. */
+export function clearPinsForRoom(roomId: string): void {
+  getDb().prepare(`DELETE FROM webchat_room_pins WHERE room_id = ?`).run(roomId);
+}
+
+/**
+ * Newest message `created_at` per room — the sort key for the "Recent" sidebar
+ * order. Rooms with no messages are absent; the view falls back to the room's
+ * own `created_at`. The `idx_webchat_messages_room` index makes the per-room MAX
+ * cheap.
+ */
+export function getRoomLastActivity(): Map<string, number> {
+  const rows = getDb()
+    .prepare(`SELECT room_id, MAX(created_at) AS last_at FROM webchat_messages GROUP BY room_id`)
+    .all() as { room_id: string; last_at: number }[];
+  return new Map(rows.map((r) => [r.room_id, r.last_at]));
 }
 
 // ── User @-mention handles ──────────────────────────────────────────────────

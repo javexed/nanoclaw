@@ -160,11 +160,13 @@ import {
   updateWebchatRoomName,
   hideRoomForUser,
   listWebchatModels,
+  pinRoomForUser,
   setPrimeAgentForWebchatRoom,
   setWebchatUserHandle,
   storeWebchatFileMessage,
   unarchiveRoom,
   unhideRoomForUser,
+  unpinRoomForUser,
   unassignModelFromAgent,
   unwireAgentFromWebchatRoom,
   updateWebchatModel,
@@ -579,6 +581,27 @@ async function handleHttp(
       hideRoomForUser(userId, roomId);
     } else {
       unhideRoomForUser(userId, roomId);
+    }
+    broadcastRooms();
+    return json(res, 200, { ok: true });
+  }
+
+  // ── Per-user pin (sidebar preference, no auth beyond room access) ──
+  // Pins lift a room into the sticky group at the top of THIS user's sidebar.
+  // Per-user; broadcastRooms re-sends each user their own annotated list, so the
+  // pin syncs live across the user's other devices.
+  const roomPinMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/(pin|unpin)$/);
+  if (roomPinMatch && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') {
+      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    }
+    const roomId = decodeURIComponent(roomPinMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    if (roomPinMatch[2] === 'pin') {
+      pinRoomForUser(userId, roomId);
+    } else {
+      unpinRoomForUser(userId, roomId);
     }
     broadcastRooms();
     return json(res, 200, { ok: true });
