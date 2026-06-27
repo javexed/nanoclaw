@@ -49,6 +49,7 @@ NEW_PATHS=(
   src/modules/byok
   src/db/migrations/020-byok-credentials.ts
   src/db/migrations/021-byok-oauth.ts
+  setup/get-oauth-token.sh
 )
 echo "→ Copying BYOK-owned files …"
 git checkout "$BR" -- "${NEW_PATHS[@]}"
@@ -123,5 +124,23 @@ Each member's turn runs in its own container under their identity — no shared
 per-turn token, nothing to replay. The agent still sees the full transcript.
 No npm deps, no agent-runner change → no container rebuild.
 
+Need a key to connect? Mint one straight into the OneCLI vault without
+installing any provider CLI on the host:
+    ./setup/get-oauth-token.sh claude    # Claude subscription token
+    ./setup/get-oauth-token.sh codex     # ChatGPT subscription (Codex)
+It spins up a throwaway agent container, runs the sign-in there, and stores
+the result in the vault.
+
 To uninstall: bash uninstall-byok.sh
 DONE
+
+# Offer to mint a key right now — only when interactive, the helper is present,
+# and OneCLI is installed. Skipped silently in non-interactive/CI installs.
+if [ -t 0 ] && [ -t 1 ] && [ -f setup/get-oauth-token.sh ] && command -v onecli >/dev/null 2>&1; then
+  printf '\nMint a Claude subscription token now with the container helper? [y/N] '
+  read -r reply </dev/tty || reply=""
+  case "$reply" in
+    [yY] | [yY][eE][sS]) bash setup/get-oauth-token.sh claude || true ;;
+    *) echo "Skipped — run ./setup/get-oauth-token.sh claude (or codex) anytime." ;;
+  esac
+fi
