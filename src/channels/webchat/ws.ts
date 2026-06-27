@@ -41,6 +41,9 @@ import {
   suggestAgentThread,
   getAgentsForWebchatRoom,
   getRoomAutoThread,
+  markThreadRead,
+  ensureThread,
+  ensureAgentThread,
 } from './db.js';
 import { canAccessRoom } from './access.js';
 import { redactSensitiveData } from './redact.js';
@@ -228,13 +231,19 @@ export function setupWebSocket(
           return;
         }
         client.room_id = room.id;
-        // Opening a room reads it: advance the marker and clear any stale dot
-        // on this user's other devices.
+        // Thread being opened (default 'main'). History is filtered to it; live
+        // messages still arrive room-wide and the client routes them by thread.
+        const joinThread = typeof msg.thread_id === 'string' && msg.thread_id ? msg.thread_id : MAIN_THREAD;
+        client.thread_id = joinThread;
+        // Opening reads it: advance the room marker (clears the room dot + syncs
+        // devices) and the per-thread marker.
         markRoomReadForUser(client.userId, room.id, Date.now(), clientId);
+        markThreadRead(client.userId, room.id, joinThread);
         send({
           type: 'history',
           room_id: room.id,
-          messages: getWebchatMessages(room.id, 50).map((m) => ({
+          thread_id: joinThread,
+          messages: getWebchatMessages(room.id, 50, joinThread).map((m) => ({
             ...m,
             content: redactSensitiveData(m.content),
           })),
@@ -275,6 +284,9 @@ export function setupWebSocket(
         const room = getWebchatRoom(roomId);
         if (!room || !canAccessRoom(client.userId, room.id)) return;
         markRoomReadForUser(client.userId, room.id, Date.now(), clientId);
+        // Per-thread marker (default 'main') so thread badges clear too.
+        const readThread = typeof msg.thread_id === 'string' && msg.thread_id ? msg.thread_id : MAIN_THREAD;
+        markThreadRead(client.userId, room.id, readThread);
         return;
       }
 
@@ -291,6 +303,20 @@ export function setupWebSocket(
         // thread). The session key maps 'main' → null so a thread-less room
         // keeps its existing session (see threadToSessionKey).
         const storeThread = typeof msg.thread_id === 'string' && msg.thread_id ? msg.thread_id : MAIN_THREAD;
+
+        // Lazily register a non-main thread so it shows in the thread list. An
+        // 'agent:<folder>' lane (auto-spawn) gets the agent's name; an unknown
+        // thread falls back to a generic title (topic threads already have rows
+        // via POST /threads, so ensure is a no-op for them).
+        if (storeThread !== MAIN_THREAD) {
+          if (storeThread.startsWith('agent:')) {
+            const folder = storeThread.slice('agent:'.length);
+            const agent = getAgentsForWebchatRoom(client.room_id).find((a) => a.folder === folder);
+            ensureAgentThread(client.room_id, folder, agent?.name ?? folder);
+          } else {
+            ensureThread(client.room_id, storeThread, 'Thread', 'topic');
+          }
+        }
 
         const stored = storeWebchatMessage(client.room_id, client.identity, client.identity_type, text, storeThread);
         // The sender has by definition read their own message — advance their
