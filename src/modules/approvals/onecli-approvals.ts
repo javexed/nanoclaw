@@ -36,6 +36,25 @@ export const ONECLI_ACTION = 'onecli_credential';
 
 type Decision = 'approve' | 'deny';
 
+/**
+ * Fallback to recover an agent group id from a OneCLI external identifier that
+ * is NOT itself an agent group id (e.g. a BYOK per-member identity). Registered
+ * by the byok module; default returns null (normal identifiers resolve directly
+ * via getAgentGroup).
+ */
+type ApprovalAgentGroupFallback = (externalId: string) => string | null;
+let approvalAgentGroupFallback: ApprovalAgentGroupFallback | null = null;
+export function registerApprovalAgentGroupFallback(fn: ApprovalAgentGroupFallback): void {
+  approvalAgentGroupFallback = fn;
+}
+function resolveApprovalAgentGroupFallback(externalId: string): string | null {
+  try {
+    return approvalAgentGroupFallback ? approvalAgentGroupFallback(externalId) : null;
+  } catch {
+    return null;
+  }
+}
+
 const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
 
 interface PendingState {
@@ -116,8 +135,15 @@ async function handleRequest(request: ApprovalRequest): Promise<Decision> {
   // Originating agent group is carried on the request via OneCLI's agent
   // identifier (set by container-runner.ts to agentGroup.id). Use it as
   // the scope for approver selection: admin @ group → global admin → owner.
-  const originGroup = request.agent.externalId ? getAgentGroup(request.agent.externalId) : undefined;
-  const agentGroupId = originGroup?.id ?? null;
+  // A per-member BYOK container uses a derived identity (byok-…) that isn't an
+  // agent group id; a registered fallback (byok module) reverses it to the
+  // owning group so approvals still route correctly.
+  const externalId = request.agent.externalId;
+  let agentGroupId = externalId ? (getAgentGroup(externalId)?.id ?? null) : null;
+  if (!agentGroupId && externalId) {
+    agentGroupId = resolveApprovalAgentGroupFallback(externalId);
+  }
+  const originGroup = agentGroupId ? getAgentGroup(agentGroupId) : undefined;
   const approvers = pickApprover(agentGroupId);
   if (approvers.length === 0) {
     log.warn('OneCLI approval auto-denied: no eligible approver', {
