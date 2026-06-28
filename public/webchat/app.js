@@ -2174,7 +2174,6 @@ async function updateByokBanner(roomId) {
 
     // Not connected → show the actionable banner, hide the chip.
     if (chip) chip.hidden = true;
-    const text = $('#byok-banner-text');
     const connectBtn = $('#byok-connect-btn');
     const oauthBtn = $('#byok-oauth-btn');
     const input = $('#byok-key-input');
@@ -2184,10 +2183,6 @@ async function updateByokBanner(roomId) {
     input.value = '';
     input.placeholder = keyPlaceholder;
     if (oauthForm) oauthForm.hidden = true;
-    // Short, type-agnostic prompt — the buttons name the methods.
-    if (text)
-      text.textContent =
-        mode === 'required' ? 'This room requires your own account:' : 'Use your own account in this room:';
     // Primary action: connect via subscription sign-in. Secondary: paste a key.
     if (oauthBtn) {
       oauthBtn.hidden = !oauthAllowed;
