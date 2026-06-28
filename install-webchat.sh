@@ -230,6 +230,10 @@ HOOK_FILES=(
   src/container-runtime.ts
   src/modules/index.ts
   src/modules/approvals/onecli-approvals.ts
+  container/Dockerfile
+  container/agent-runner/src/integration.test.ts
+  container/agent-runner/src/poll-loop.test.ts
+  container/agent-runner/src/mcp-tools/cli.instructions.md
 )
 CONFLICTS=()
 echo "→ Applying webchat core-file hooks …"
