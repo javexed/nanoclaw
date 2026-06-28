@@ -17,7 +17,14 @@
  *   GET  /api/rooms/:id/engage-mode              read room's engage default ('mention-only' | 'broadcast')
  *   PUT  /api/rooms/:id/engage-mode              set { mode } for the room  [owner]
  *   PUT  /api/rooms/:id/name                     rename the room (set { name })  [owner]
- *   GET  /api/rooms/:id/messages                 history (?after_id= catch-up, ?before_id= scroll-back)
+ *   GET  /api/rooms/:id/threads                  list threads (+ per-thread unread)
+ *   POST /api/rooms/:id/threads                  create a topic thread ({ title })  [member]
+ *   PATCH /api/rooms/:id/threads/:tid            rename a thread ({ title })  [member]
+ *   DELETE /api/rooms/:id/threads/:tid           delete a thread + its session  [owner]
+ *   PUT  /api/rooms/:id/threads/:tid/read        mark a thread read  [member]
+ *   GET  /api/rooms/:id/auto-thread              read auto-spawn setting
+ *   PUT  /api/rooms/:id/auto-thread              set { enabled } auto-spawn  [owner]
+ *   GET  /api/rooms/:id/messages                 history (?after_id= catch-up, ?before_id= scroll-back, ?thread_id=)
  *   POST /api/rooms/:id/archive                  mark room archived (owner + admin) — global
  *   POST /api/rooms/:id/unarchive                clear global archive (owner + admin)
  *   POST /api/rooms/:id/hide                     hide room from this user's sidebar — per-user
@@ -74,6 +81,7 @@ import {
   deleteSessionDbState,
   findSessionsByAgentGroup,
   findSessionsByMessagingGroup,
+  findSessionsByMessagingGroupThread,
   teardownSessionResources,
   type TeardownTarget,
 } from '../../session-teardown.js';
@@ -151,6 +159,17 @@ import {
   getWebchatMessagesAfterId,
   getWebchatMessagesBeforeId,
   searchWebchatMessages,
+  ensureMainThread,
+  listWebchatThreads,
+  createWebchatThread,
+  getWebchatThread,
+  renameWebchatThread,
+  deleteWebchatThread,
+  getUnreadThreadIdsForRoom,
+  markThreadRead,
+  sanitizeThreadTitle,
+  getRoomAutoThread,
+  setRoomAutoThread,
   getWebchatTopology,
   getWebchatModel,
   getWebchatPendingApprovalsForUser,
@@ -259,7 +278,8 @@ const STATIC_MIME: Record<string, string> = {
 };
 
 export interface WebchatServerHooks {
-  onInbound: (roomId: string, message: InboundMessage) => void;
+  /** `threadId` is the session key (null = the room's main/default thread). */
+  onInbound: (roomId: string, message: InboundMessage, threadId: string | null) => void;
   onAction: (questionId: string, selectedOption: string, userId: string) => void;
 }
 
@@ -1027,6 +1047,112 @@ async function handleHttp(
     return json(res, 200, { ok: true, name });
   }
 
+  // Auto-thread setting (confirm-first per-agent lanes). Read = member; write =
+  // owner. null → effective default (on for multi-agent rooms).
+  const roomAutoThreadMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/auto-thread$/);
+  if (roomAutoThreadMatch && method === 'GET') {
+    const roomId = decodeURIComponent(roomAutoThreadMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    return json(res, 200, { auto_thread: getRoomAutoThread(roomId) });
+  }
+  if (roomAutoThreadMatch && method === 'PUT') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const roomId = decodeURIComponent(roomAutoThreadMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { enabled?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    if (typeof body.enabled !== 'boolean') return json(res, 400, { error: 'enabled (boolean) required' });
+    setRoomAutoThread(roomId, body.enabled);
+    return json(res, 200, { ok: true, enabled: body.enabled });
+  }
+
+  // ── Threads (per-room) ────────────────────────────────────────────────
+  // A thread maps to an agent session; see docs/design/webchat-threads.md.
+  // List/read/create/rename are member-gated; delete (destroys history + tears
+  // down the thread's session) is owner-only.
+  const roomThreadReadMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads\/([^/]+)\/read$/);
+  if (roomThreadReadMatch && method === 'PUT') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const roomId = decodeURIComponent(roomThreadReadMatch[1]);
+    const threadId = decodeURIComponent(roomThreadReadMatch[2]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    markThreadRead(userId, roomId, threadId);
+    return json(res, 200, { ok: true });
+  }
+
+  const roomThreadsMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads$/);
+  if (roomThreadsMatch && method === 'GET') {
+    const roomId = decodeURIComponent(roomThreadsMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    ensureMainThread(roomId); // every room has a main thread once listed
+    const unread = getUnreadThreadIdsForRoom(userId, roomId);
+    return json(
+      res,
+      200,
+      listWebchatThreads(roomId).map((t) => ({ ...t, unread: unread.has(t.thread_id) })),
+    );
+  }
+  if (roomThreadsMatch && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const roomId = decodeURIComponent(roomThreadsMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { title?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    const title = sanitizeThreadTitle(body.title);
+    if (title === null) return json(res, 400, { error: 'title must be 1–80 characters' });
+    const thread = createWebchatThread(roomId, title);
+    return json(res, 200, thread);
+  }
+
+  const roomThreadMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads\/([^/]+)$/);
+  if (roomThreadMatch && method === 'PATCH') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const roomId = decodeURIComponent(roomThreadMatch[1]);
+    const threadId = decodeURIComponent(roomThreadMatch[2]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    if (!getWebchatThread(roomId, threadId)) return json(res, 404, { error: 'Thread not found' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { title?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    const title = sanitizeThreadTitle(body.title);
+    if (title === null) return json(res, 400, { error: 'title must be 1–80 characters' });
+    renameWebchatThread(roomId, threadId, title);
+    return json(res, 200, { ok: true, title });
+  }
+  if (roomThreadMatch && method === 'DELETE') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const roomId = decodeURIComponent(roomThreadMatch[1]);
+    const threadId = decodeURIComponent(roomThreadMatch[2]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (threadId === 'main') return json(res, 400, { error: 'The main thread cannot be deleted' });
+    if (!getWebchatThread(roomId, threadId)) return json(res, 404, { error: 'Thread not found' });
+    return deleteThreadHandler(res, roomId, threadId);
+  }
+
   // Room → agent → model topology for the explore view, scoped to the caller's
   // accessible rooms (and only the agents/models reachable from them).
   if (url.pathname === '/api/topology' && method === 'GET') {
@@ -1069,11 +1195,13 @@ async function handleHttp(
     if (!canAccessRoom(userId, room.id)) return json(res, 403, { error: 'Access denied' });
     const afterId = url.searchParams.get('after_id');
     const beforeId = url.searchParams.get('before_id');
+    // Optional thread filter — absent = the whole room (back-compat).
+    const threadId = url.searchParams.get('thread_id') || undefined;
     const msgs = afterId
-      ? getWebchatMessagesAfterId(room.id, afterId, 200)
+      ? getWebchatMessagesAfterId(room.id, afterId, 200, threadId)
       : beforeId
-        ? getWebchatMessagesBeforeId(room.id, beforeId, 50)
-        : getWebchatMessages(room.id, 100);
+        ? getWebchatMessagesBeforeId(room.id, beforeId, 50, threadId)
+        : getWebchatMessages(room.id, 100, threadId);
     return json(
       res,
       200,
@@ -1101,7 +1229,15 @@ async function handleHttp(
     });
     if (!csrfOk) return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     if (!accessOk) return json(res, 403, { error: 'Access denied' });
-    return handleMultipartUpload(req, res, roomId, senderIdentity, userId, hooks);
+    return handleMultipartUpload(
+      req,
+      res,
+      roomId,
+      senderIdentity,
+      userId,
+      hooks,
+      url.searchParams.get('thread_id') || undefined,
+    );
   }
   const chunkMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/upload\/chunk$/);
   if (chunkMatch && method === 'POST') {
@@ -1118,7 +1254,15 @@ async function handleHttp(
     });
     if (!csrfOk) return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     if (!accessOk) return json(res, 403, { error: 'Access denied' });
-    return handleChunkedUpload(req, res, roomId, senderIdentity, userId, hooks);
+    return handleChunkedUpload(
+      req,
+      res,
+      roomId,
+      senderIdentity,
+      userId,
+      hooks,
+      url.searchParams.get('thread_id') || undefined,
+    );
   }
   const fileMatch = url.pathname.match(/^\/api\/files\/([^/]+)\/([^/]+)$/);
   if (fileMatch && method === 'GET') {
@@ -2657,6 +2801,27 @@ function deleteRoomHandler(res: ServerResponse, roomId: string): void {
   }
 
   broadcastRooms();
+  return json(res, 200, { ok: true });
+}
+
+/** Delete a thread: drop its registry row + messages + read markers, and tear
+ * down its per-thread session (DB state in the txn; container/dir after commit).
+ * The room and other threads are untouched. */
+function deleteThreadHandler(res: ServerResponse, roomId: string, threadId: string): void {
+  const mg = getMessagingGroupByPlatform('webchat', roomId);
+  // The session for a named thread is keyed by thread_id = threadId.
+  const sessions: TeardownTarget[] = mg ? findSessionsByMessagingGroupThread(mg.id, threadId) : [];
+  try {
+    getDb().transaction(() => {
+      for (const s of sessions) deleteSessionDbState(s.sessionId);
+      deleteWebchatThread(roomId, threadId);
+    })();
+  } catch (err) {
+    log.error('Webchat: deleteThreadHandler failed', { roomId, threadId, err });
+    return json(res, 500, { error: 'Failed to delete thread' });
+  }
+  // Side-effects after commit (can't roll back): kill containers + remove dirs.
+  void teardownSessionResources(sessions, 'webchat thread deleted');
   return json(res, 200, { ok: true });
 }
 

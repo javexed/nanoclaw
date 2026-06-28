@@ -36,6 +36,14 @@ import {
   getWebchatMessages,
   getWebchatRoom,
   storeWebchatMessage,
+  MAIN_THREAD,
+  threadToSessionKey,
+  suggestAgentThread,
+  getAgentsForWebchatRoom,
+  getRoomAutoThread,
+  markThreadRead,
+  getWebchatThread,
+  ensureAgentThread,
 } from './db.js';
 import { canAccessRoom } from './access.js';
 import { redactSensitiveData } from './redact.js';
@@ -87,8 +95,9 @@ interface AuthedUpgradeRequest extends http.IncomingMessage {
 }
 
 export interface WSHooks {
-  /** Inbound chat from a connected client → router. */
-  onInbound: (roomId: string, message: InboundMessage) => void;
+  /** Inbound chat from a connected client → router. `threadId` is the session
+   * key (null = the room's main/default thread). */
+  onInbound: (roomId: string, message: InboundMessage, threadId: string | null) => void;
 }
 
 export interface AuthForUpgrade {
@@ -245,13 +254,19 @@ export function setupWebSocket(
           return;
         }
         client.room_id = room.id;
-        // Opening a room reads it: advance the marker and clear any stale dot
-        // on this user's other devices.
+        // Thread being opened (default 'main'). History is filtered to it; live
+        // messages still arrive room-wide and the client routes them by thread.
+        const joinThread = typeof msg.thread_id === 'string' && msg.thread_id ? msg.thread_id : MAIN_THREAD;
+        client.thread_id = joinThread;
+        // Opening reads it: advance the room marker (clears the room dot + syncs
+        // devices) and the per-thread marker.
         markRoomReadForUser(client.userId, room.id, Date.now(), clientId);
+        markThreadRead(client.userId, room.id, joinThread);
         send({
           type: 'history',
           room_id: room.id,
-          messages: getWebchatMessages(room.id, 50).map((m) => ({
+          thread_id: joinThread,
+          messages: getWebchatMessages(room.id, 50, joinThread).map((m) => ({
             ...m,
             content: redactSensitiveData(m.content),
           })),
@@ -292,6 +307,9 @@ export function setupWebSocket(
         const room = getWebchatRoom(roomId);
         if (!room || !canAccessRoom(client.userId, room.id)) return;
         markRoomReadForUser(client.userId, room.id, Date.now(), clientId);
+        // Per-thread marker (default 'main') so thread badges clear too.
+        const readThread = typeof msg.thread_id === 'string' && msg.thread_id ? msg.thread_id : MAIN_THREAD;
+        markThreadRead(client.userId, room.id, readThread);
         return;
       }
 
@@ -317,7 +335,32 @@ export function setupWebSocket(
           return;
         }
 
-        const stored = storeWebchatMessage(client.room_id, client.identity, client.identity_type, text);
+        // Resolve the thread this message belongs to, BOUNDED so an arbitrary
+        // client-supplied thread_id can't lazily spawn unbounded threads/sessions
+        // (each named thread keys its own per-thread session → container). Only
+        // three sources are honored; anything else falls back to 'main':
+        //   • 'main' / absent — the room's default thread (session key → null).
+        //   • 'agent:<folder>' — an auto-spawn lane for a WIRED agent only
+        //     (bounded by the room's agent count); created on first use.
+        //   • an already-existing topic thread (created via POST /threads).
+        // An unknown topic id is NOT lazily created here — that was the spawn-
+        // amplification vector; topic threads must exist before they route.
+        const requested = typeof msg.thread_id === 'string' && msg.thread_id ? msg.thread_id : MAIN_THREAD;
+        let storeThread = MAIN_THREAD;
+        if (requested !== MAIN_THREAD) {
+          if (requested.startsWith('agent:')) {
+            const folder = requested.slice('agent:'.length);
+            const agent = getAgentsForWebchatRoom(client.room_id).find((a) => a.folder === folder);
+            if (agent) {
+              ensureAgentThread(client.room_id, folder, agent.name ?? folder);
+              storeThread = requested;
+            } // unknown agent folder → stay in main (don't spawn)
+          } else if (getWebchatThread(client.room_id, requested)) {
+            storeThread = requested; // existing topic thread
+          } // unknown topic id → stay in main (no lazy create)
+        }
+
+        const stored = storeWebchatMessage(client.room_id, client.identity, client.identity_type, text, storeThread);
         // The sender has by definition read their own message — advance their
         // marker (and sync their other devices) so it never self-unreads.
         markRoomReadForUser(client.userId, client.room_id, stored.created_at, clientId);
@@ -327,20 +370,39 @@ export function setupWebSocket(
 
         // Pipe the inbound to the router so the agent sees it. content carries
         // senderId (namespaced for the v2 permissions module's senderResolver).
-        hooks.onInbound(client.room_id, {
-          id: stored.id,
-          kind: 'chat',
-          timestamp: new Date(stored.created_at).toISOString(),
-          isGroup: true,
-          content: {
-            text,
-            sender: client.identity,
-            senderId: client.userId,
-            senderName: client.identity,
+        // threadId is the SESSION key (null for main) so per-thread routing keys
+        // the right session.
+        hooks.onInbound(
+          client.room_id,
+          {
+            id: stored.id,
+            kind: 'chat',
+            timestamp: new Date(stored.created_at).toISOString(),
+            isGroup: true,
+            content: {
+              text,
+              sender: client.identity,
+              senderId: client.userId,
+              senderName: client.identity,
+            },
           },
-        });
+          threadToSessionKey(storeThread),
+        );
 
         send({ ...outgoing, content: redactSensitiveData(stored.content) });
+
+        // Confirm-first auto-spawn: if this was a single-mention message in
+        // `main` of a multi-agent room (and the setting allows), OFFER to move
+        // it into that agent's lane. We never move it — the client decides.
+        const suggestion = suggestAgentThread({
+          text,
+          agents: getAgentsForWebchatRoom(client.room_id),
+          currentThread: storeThread,
+          autoThread: getRoomAutoThread(client.room_id),
+        });
+        if (suggestion) {
+          send({ type: 'thread_suggestion', room_id: client.room_id, message_id: stored.id, suggestion });
+        }
         return;
       }
 

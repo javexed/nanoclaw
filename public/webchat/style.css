@@ -5115,4 +5115,122 @@ a.lightbox-btn {
    but still clickable, so a click explains how to enable it. */
 .setting-option.is-unavailable {
   opacity: 0.5;
+/* ── Threads (sidebar tree + suggestion banner) ─────────────────────────── */
+.thread-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 2px 0 4px 0.6rem;
+  padding-left: 0.5rem;
+  border-left: 1px solid var(--border);
+}
+.thread-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.4rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  position: relative;
+}
+.thread-row:hover {
+  background: var(--surface2);
+  color: var(--text);
+}
+.thread-row.active {
+  background: var(--surface2);
+  color: var(--text);
+  font-weight: 600;
+}
+.thread-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.thread-unread {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  flex: 0 0 auto;
+}
+.thread-kebab {
+  flex: 0 0 auto;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0 2px;
+  opacity: 0;
+  transition: opacity var(--transition);
+}
+.thread-row:hover .thread-kebab {
+  opacity: 1;
+}
+.thread-kebab .icon {
+  width: 14px;
+  height: 14px;
+}
+.thread-add {
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  text-align: left;
+  padding: 0.2rem 0.4rem;
+  font-size: var(--fs-xs);
+  border-radius: var(--radius-sm);
+}
+.thread-add:hover {
+  background: var(--surface2);
+  color: var(--accent);
+}
+.thread-menu {
+  position: absolute;
+  right: 0.4rem;
+  top: 100%;
+  z-index: 20;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+  min-width: 6rem;
+}
+.thread-menu button {
+  border: none;
+  background: none;
+  color: var(--text);
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  cursor: pointer;
+  font-size: var(--fs-sm);
+}
+.thread-menu button:hover {
+  background: var(--surface2);
+}
+.thread-menu button.danger {
+  color: var(--danger);
+}
+.thread-suggestion {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0 0.5rem 0.4rem;
+  padding: 0.4rem 0.6rem;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+.thread-suggestion-actions {
+  display: flex;
+  gap: 0.4rem;
+  flex: 0 0 auto;
 }

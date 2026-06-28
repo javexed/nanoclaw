@@ -23,7 +23,7 @@ import Busboy from 'busboy';
 import { DATA_DIR } from '../../config.js';
 import { log } from '../../log.js';
 import type { InboundMessage } from '../adapter.js';
-import { storeWebchatFileMessage, getWebchatRoom, type FileMeta } from './db.js';
+import { storeWebchatFileMessage, getWebchatRoom, MAIN_THREAD, threadToSessionKey, type FileMeta } from './db.js';
 import { broadcast } from './state.js';
 
 const MAX_UPLOAD_SIZE = 1024 * 1024 * 1024; // 1GB
@@ -94,8 +94,9 @@ async function withUploadLock<T>(uploadId: string, fn: () => Promise<T>): Promis
 }
 
 export interface FileHooks {
-  /** Inbound chat from a connected client → router. */
-  onInbound: (roomId: string, message: InboundMessage) => void;
+  /** Inbound chat from a connected client → router. `threadId` is the session
+   * key (null = the room's main/default thread). */
+  onInbound: (roomId: string, message: InboundMessage, threadId: string | null) => void;
 }
 
 export function uploadsDir(roomId: string): string {
@@ -259,6 +260,7 @@ export function handleMultipartUpload(
   senderIdentity: string,
   senderUserId: string,
   hooks: FileHooks,
+  threadId: string = MAIN_THREAD,
 ): void {
   if (!getWebchatRoom(roomId)) {
     log.warn('Webchat upload rejected: room not found', { roomId });
@@ -358,7 +360,7 @@ export function handleMultipartUpload(
           mime: finishedFileInfo.mime,
           size: finishedFileInfo.size,
         };
-        const stored = storeWebchatFileMessage(roomId, senderIdentity, 'user', caption, fileMeta);
+        const stored = storeWebchatFileMessage(roomId, senderIdentity, 'user', caption, fileMeta, threadId);
         broadcast(roomId, { type: 'message', ...stored });
         hooks.onInbound(
           roomId,
@@ -371,6 +373,7 @@ export function handleMultipartUpload(
             senderUserId,
             finishedFileInfo.localPath,
           ),
+          threadToSessionKey(threadId),
         );
         const { localPath: _localPath, ...publicFileInfo } = finishedFileInfo;
         json(res, 200, { ...publicFileInfo, caption });
@@ -395,6 +398,7 @@ export async function handleChunkedUpload(
   senderIdentity: string,
   senderUserId: string,
   hooks: FileHooks,
+  threadId: string = MAIN_THREAD,
 ): Promise<void> {
   let body: string;
   try {
@@ -581,11 +585,12 @@ export async function handleChunkedUpload(
     size: totalSize,
   };
   const caption = parsed.caption || '';
-  const stored = storeWebchatFileMessage(roomId, upload.sender, 'user', caption, fileMeta);
+  const stored = storeWebchatFileMessage(roomId, upload.sender, 'user', caption, fileMeta, threadId);
   broadcast(roomId, { type: 'message', ...stored });
   hooks.onInbound(
     roomId,
     inboundForFile(roomId, stored.id, fileMeta, caption, upload.sender, upload.senderUserId, finalPath),
+    threadToSessionKey(threadId),
   );
 
   return json(res, 200, { ...fileMeta, caption });

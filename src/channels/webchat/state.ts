@@ -49,6 +49,8 @@ export interface WSClient {
    */
   userId: string;
   room_id?: string;
+  /** Thread currently open for this client (default 'main'); set on join. */
+  thread_id?: string;
   isAlive: boolean;
 }
 

@@ -1124,6 +1124,17 @@ function connect() {
           roomActivity.set(msg.room_id, Math.max(roomActivity.get(msg.room_id) || 0, msg.created_at));
           if (lastRoomsList.length) renderRooms(lastRoomsList);
         }
+        // Thread routing: a message for another thread of the open room doesn't
+        // belong in this view — flag that thread unread and stop. (Messages for
+        // other rooms never reach this client; the server scopes broadcasts.)
+        const msgThread = msg.thread_id || 'main';
+        if ((msg.room_id || currentRoom) === currentRoom && msgThread !== currentThread) {
+          if (msg.sender !== myIdentity) {
+            threadUnread.add(msgThread);
+            renderThreadList();
+          }
+          break;
+        }
         // Snapshot the scroll position BEFORE appending. If we check after,
         // the newly-inserted message has already pushed the bottom past our
         // 80px threshold and `isNearBottom()` lies about the user's intent.
@@ -1167,7 +1178,7 @@ function connect() {
           // badge stays cleared across this user's other devices too. Skip when
           // backgrounded — a hidden tab hasn't actually been seen.
           if (!document.hidden && ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'read', room_id: currentRoom }));
+            ws.send(JSON.stringify({ type: 'read', room_id: currentRoom, thread_id: currentThread }));
           }
         }
         const shouldScroll = wasNearBottom || (forceScrollCount > 0 && !userScrolledAway);
@@ -1219,6 +1230,11 @@ function connect() {
           unreadRooms.add(msg.room_id);
           updateUnreadDots();
         }
+        break;
+      case 'thread_suggestion':
+        // Confirm-first auto-spawn (slice 3): you single-mentioned an agent in
+        // `main` — offer to continue in its own thread. Never moves anything.
+        if (msg.room_id === currentRoom && msg.suggestion) showThreadSuggestion(msg.suggestion);
         break;
       case 'read_cleared': {
         // Another of this user's devices read the room — drop the stale badges.
@@ -1283,7 +1299,7 @@ document.addEventListener('visibilitychange', () => {
     // Returning to a focused tab with a room open means its messages are now
     // seen — advance the server marker (and sync other devices). The reconnect
     // path already re-joins (which reads) when the socket was actually down.
-    if (currentRoom) ws.send(JSON.stringify({ type: 'read', room_id: currentRoom }));
+    if (currentRoom) ws.send(JSON.stringify({ type: 'read', room_id: currentRoom, thread_id: currentThread }));
   }
 });
 
@@ -1464,7 +1480,16 @@ function renderRooms(rooms) {
       }
     });
     list.appendChild(li);
+
+    // Nest the active room's thread tree directly under its row.
+    if (room.id === currentRoom) {
+      const threadHost = document.createElement('div');
+      threadHost.className = 'thread-list';
+      li.appendChild(threadHost);
+    }
   }
+  // Populate the active room's thread tree (no-op if no room open).
+  if (currentRoom) renderThreadList();
 }
 
 let lastRoomsList = [];
@@ -1532,6 +1557,218 @@ async function toggleRoomHide(roomId, hide) {
   }
 }
 
+// ── Threads ─────────────────────────────────────────────────────────────────
+// A webchat thread maps to an isolated agent session. The sidebar nests a
+// room's threads under it; switching a thread re-joins the room scoped to that
+// thread (server filters history). See docs/design/webchat-threads.md.
+let currentThread = 'main';
+let roomThreads = []; // threads of the open room (from GET /threads)
+const threadUnread = new Set(); // thread_ids with unread activity in the open room
+
+async function loadThreadList(roomId) {
+  try {
+    const r = await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/threads`);
+    if (!r.ok) {
+      roomThreads = [];
+      renderThreadList();
+      return;
+    }
+    const threads = await r.json();
+    if (roomId !== currentRoom) return; // raced past a room switch
+    roomThreads = Array.isArray(threads) ? threads : [];
+    for (const t of roomThreads) if (t.unread && t.thread_id !== currentThread) threadUnread.add(t.thread_id);
+    renderThreadList();
+  } catch {
+    roomThreads = [];
+    renderThreadList();
+  }
+}
+
+function threadGlyph(kind) {
+  return kind === 'agent' ? '@' : '#';
+}
+
+// Render the thread tree under the active room's sidebar row. Called from
+// renderRooms (so it survives room-list re-renders) and on thread changes.
+function renderThreadList() {
+  const host = document.querySelector(`#room-list li[data-room-id="${cssEscape(currentRoom)}"] .thread-list`);
+  if (!host) return;
+  host.innerHTML = '';
+  for (const t of roomThreads) {
+    const row = document.createElement('div');
+    row.className = 'thread-row' + (t.thread_id === currentThread ? ' active' : '');
+    row.dataset.threadId = t.thread_id;
+
+    const label = document.createElement('span');
+    label.className = 'thread-label';
+    label.textContent = `${threadGlyph(t.kind)} ${t.title}`;
+    row.appendChild(label);
+
+    if (t.thread_id !== currentThread && threadUnread.has(t.thread_id)) {
+      const dot = document.createElement('span');
+      dot.className = 'thread-unread';
+      row.appendChild(dot);
+    }
+
+    // Rename/delete for non-main threads (delete owner-only; server re-checks).
+    if (t.kind !== 'main') {
+      const menu = document.createElement('button');
+      menu.className = 'thread-kebab';
+      menu.type = 'button';
+      menu.innerHTML = lucide('ellipsis');
+      menu.setAttribute('aria-label', 'Thread actions');
+      menu.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openThreadMenu(t, menu);
+      });
+      row.appendChild(menu);
+    }
+
+    row.addEventListener('click', (e) => {
+      e.stopPropagation(); // don't bubble to the room <li> (which re-joins)
+      openThread(t.thread_id);
+    });
+    host.appendChild(row);
+  }
+
+  const add = document.createElement('button');
+  add.className = 'thread-add';
+  add.type = 'button';
+  add.textContent = '+ thread';
+  add.addEventListener('click', (e) => {
+    e.stopPropagation();
+    createThreadPrompt();
+  });
+  host.appendChild(add);
+}
+
+function openThread(threadId) {
+  if (!currentRoom || threadId === currentThread) return;
+  currentThread = threadId;
+  sessionStorage.setItem('lastThread:' + currentRoom, threadId);
+  threadUnread.delete(threadId);
+  $('#messages').innerHTML = '<div class="empty-state">Loading…</div>';
+  // Re-join the room scoped to this thread; the server returns thread history.
+  ws.send(JSON.stringify({ type: 'join', room_id: currentRoom, thread_id: threadId }));
+  renderThreadList();
+}
+
+async function createThreadPrompt() {
+  const title = prompt('New thread name');
+  if (!title || !title.trim()) return;
+  try {
+    const r = await authFetch(`/api/rooms/${encodeURIComponent(currentRoom)}/threads`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: title.trim() }),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    const thread = await r.json();
+    await loadThreadList(currentRoom);
+    openThread(thread.thread_id);
+  } catch (err) {
+    showToast('Could not create thread: ' + (err.message || err), { kind: 'error' });
+  }
+}
+
+function openThreadMenu(thread, anchor) {
+  closeThreadMenus();
+  const menu = document.createElement('div');
+  menu.className = 'thread-menu';
+  const rename = document.createElement('button');
+  rename.textContent = 'Rename';
+  rename.addEventListener('click', () => {
+    closeThreadMenus();
+    renameThreadPrompt(thread);
+  });
+  menu.appendChild(rename);
+  if (isOwnerView) {
+    const del = document.createElement('button');
+    del.className = 'danger';
+    del.textContent = 'Delete';
+    del.addEventListener('click', () => {
+      closeThreadMenus();
+      deleteThreadConfirm(thread);
+    });
+    menu.appendChild(del);
+  }
+  anchor.parentElement.appendChild(menu);
+  setTimeout(() => document.addEventListener('click', closeThreadMenus, { once: true }), 0);
+}
+
+function closeThreadMenus() {
+  document.querySelectorAll('.thread-menu').forEach((m) => m.remove());
+}
+
+async function renameThreadPrompt(thread) {
+  const title = prompt('Rename thread', thread.title);
+  if (!title || !title.trim()) return;
+  try {
+    const r = await authFetch(`/api/rooms/${encodeURIComponent(currentRoom)}/threads/${encodeURIComponent(thread.thread_id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: title.trim() }),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    await loadThreadList(currentRoom);
+  } catch (err) {
+    showToast('Rename failed: ' + (err.message || err), { kind: 'error' });
+  }
+}
+
+async function deleteThreadConfirm(thread) {
+  if (!confirm(`Delete thread "${thread.title}"? Its messages and the agent's context for it are removed.`)) return;
+  try {
+    const r = await authFetch(`/api/rooms/${encodeURIComponent(currentRoom)}/threads/${encodeURIComponent(thread.thread_id)}`, {
+      method: 'DELETE',
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    if (currentThread === thread.thread_id) openThread('main');
+    await loadThreadList(currentRoom);
+    showToast('Thread deleted', { kind: 'success' });
+  } catch (err) {
+    showToast('Delete failed: ' + (err.message || err), { kind: 'error' });
+  }
+}
+
+$('#thread-suggestion-open')?.addEventListener('click', acceptThreadSuggestion);
+$('#thread-suggestion-dismiss')?.addEventListener('click', dismissThreadSuggestion);
+
+function showThreadSuggestion(suggestion) {
+  const banner = $('#thread-suggestion');
+  if (!banner) return;
+  banner.querySelector('.thread-suggestion-text').textContent = `Continue with @${suggestion.title} in its own thread?`;
+  banner.dataset.threadId = suggestion.threadId;
+  banner.dataset.title = suggestion.title;
+  banner.hidden = false;
+}
+
+function dismissThreadSuggestion() {
+  const banner = $('#thread-suggestion');
+  if (banner) banner.hidden = true;
+}
+
+function acceptThreadSuggestion() {
+  const banner = $('#thread-suggestion');
+  if (!banner) return;
+  const threadId = banner.dataset.threadId;
+  const title = banner.dataset.title;
+  dismissThreadSuggestion();
+  if (!threadId) return;
+  // Optimistically surface the lane so it's in the tree before its first
+  // message lands (the server registers the row on that message).
+  if (!roomThreads.some((t) => t.thread_id === threadId)) {
+    roomThreads.push({ thread_id: threadId, title, kind: 'agent', unread: false });
+  }
+  openThread(threadId);
+}
+
+// CSS.escape shim for older webviews.
+function cssEscape(s) {
+  if (window.CSS && CSS.escape) return CSS.escape(String(s));
+  return String(s).replace(/["\\\]]/g, '\\$&');
+}
+
 let pendingJumpMessageId = null;
 function joinRoom(roomId, roomName, jumpMessageId) {
   // When set (e.g. from a search-result click), the `history` handler lands on
@@ -1565,15 +1802,21 @@ function joinRoom(roomId, roomName, jumpMessageId) {
   $('#members-overlay').classList.remove('visible');
   renderMembers([]);
   $('#messages').innerHTML = '<div class="empty-state">Loading…</div>';
-  ws.send(JSON.stringify({ type: 'join', room_id: roomId }));
+  // Thread state: restore the last-open thread for this room (default 'main').
+  currentThread = sessionStorage.getItem('lastThread:' + roomId) || 'main';
+  threadUnread.clear();
+  roomThreads = [];
+  ws.send(JSON.stringify({ type: 'join', room_id: roomId, thread_id: currentThread }));
+  loadThreadList(roomId);
   sessionStorage.setItem('lastRoom', roomId);
   $('#room-name').textContent = `#${roomId}`;
   $('#message-input').disabled = false;
   $('#message-form button[type=submit]').disabled = false;
   showRoomSettingsToggle(true);
-  document.querySelectorAll('#room-list li').forEach((li) => {
-    li.classList.toggle('active', li.dataset.roomId === roomId);
-  });
+  // Re-render the room list so the now-active room gets its nested thread
+  // tree container (renderRooms adds .thread-list for the active room, then
+  // loadThreadList populates it when its fetch resolves).
+  if (lastRoomsList.length) renderRooms(lastRoomsList);
   // Prime the mention-autocomplete caches so the first '@' the user types
   // doesn't have to wait on a fetch.
   refreshWiredAgentsForCurrentRoom();
@@ -2979,7 +3222,7 @@ function sendCurrentMessage() {
     return;
   }
   const clientId = `local-${++clientMsgSeq}-${Date.now()}`;
-  ws.send(JSON.stringify({ type: 'message', content: text, client_id: clientId }));
+  ws.send(JSON.stringify({ type: 'message', content: text, client_id: clientId, thread_id: currentThread }));
   const el = appendMessage({ sender: myIdentity, sender_type: 'user', content: text }, '✓');
   pendingMessages.set(clientId, el);
   userScrolledAway = false;

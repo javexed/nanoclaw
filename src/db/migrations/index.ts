@@ -40,6 +40,7 @@ import {
   moduleWebchatRoomCredentialMode,
   moduleWebchatRoomOauthAllowed,
   moduleWebchatCredentialsConfig,
+  moduleWebchatThreads,
 } from '../../channels/webchat/migration.js';
 
 export interface Migration {
@@ -95,6 +96,7 @@ export const migrations: Migration[] = [
   migration021,
   migration022,
   migration023,
+  moduleWebchatThreads,
 ];
 
 /** Row shape of PRAGMA foreign_key_check. Child rowids are stable across a
