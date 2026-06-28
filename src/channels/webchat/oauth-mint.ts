@@ -111,6 +111,28 @@ function findTokenSince(buffer: string, rawOffset: number): string | null {
   return ms ? ms[ms.length - 1] : null;
 }
 
+/**
+ * Redacted summary of a capture for diagnosing a failed mint — masks any sk-ant
+ * token (length only, never the value) but keeps surrounding text like "Invalid
+ * code" so we can tell a rejected code from a token printed in an unexpected
+ * shape. Temporary diagnostic.
+ */
+function diagnoseCapture(rawSince: string): Record<string, unknown> {
+  const normalized = normalizeForToken(rawSince);
+  const oat = normalized.match(/sk-ant-oat[A-Za-z0-9_-]+/); // loose: token present at all?
+  const tail = stripEscapes(rawSince)
+    .replace(/\s+/g, ' ')
+    .replace(/sk-ant-[A-Za-z0-9_-]+/g, (m) => `sk-ant-…[${m.length}ch]`)
+    .slice(-500);
+  return {
+    rawLen: rawSince.length,
+    hasOatPrefix: !!oat,
+    looseOatLen: oat ? oat[0].length : 0,
+    strictRegexMatched: !!normalized.match(CLAUDE_TOKEN_RE),
+    tail,
+  };
+}
+
 // Reap abandoned sessions (browser closed mid-flow, etc.).
 setInterval(() => {
   const now = Date.now();
@@ -215,7 +237,10 @@ export async function mintClaudeToken(userId: string, sessionId: string, code: s
       };
       const deadline = setTimeout(() => {
         finish();
-        log.warn('OAuth mint: timed out waiting for token', { sessionId });
+        log.warn('OAuth mint: timed out waiting for token', {
+          sessionId,
+          ...diagnoseCapture(session.buffer.slice(rawLenBefore)),
+        });
         reject(new Error('Timed out waiting for the token. The code may be wrong or expired.'));
       }, TOKEN_TIMEOUT_MS);
 
@@ -233,7 +258,10 @@ export async function mintClaudeToken(userId: string, sessionId: string, code: s
         if (t) {
           resolve(t);
         } else {
-          log.warn('OAuth mint: process exited without a token', { sessionId });
+          log.warn('OAuth mint: process exited without a token', {
+            sessionId,
+            ...diagnoseCapture(session.buffer.slice(rawLenBefore)),
+          });
           reject(new Error('Sign-in finished without producing a token. The code may be wrong or expired.'));
         }
       });
