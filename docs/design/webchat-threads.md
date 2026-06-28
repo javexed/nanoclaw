@@ -1,8 +1,12 @@
 # Per-room threads (webchat)
 
-Status: **design / plan** — not built. Lives on `channels-webchat`, delivered by
+Status: **built** — shipped on `channels-webchat`, delivered by
 `install-webchat.sh` like the rest of the webchat skill. Decisions taken:
-**sidebar-nested** thread UI, **auto-spawn** per-agent threads.
+**sidebar-nested** thread UI, and per-agent lanes via **confirm-first
+suggestion** (NOT silent auto-spawn — see §5). The sections below are the
+design; where the implementation differs it is noted inline (notably §5, and
+inbound thread_id is bounded — only 'main', a wired-agent lane, or an existing
+topic thread routes; an unknown id falls back to main rather than spawning).
 
 ## 1. Goal & model
 
@@ -123,6 +127,14 @@ session S2 with zero knowledge of S1 — the agent works both in parallel, each
 reply routed to its own thread.
 
 ## 5. Auto-spawn (per-agent lanes)
+
+> **Shipped as confirm-first, not silent auto-spawn.** Rather than redirecting a
+> single-mention `main` message into a lane automatically (the surprise risk
+> noted in §11), the server emits a `thread_suggestion` and the member opts in
+> ("Continue with @X in its own thread?"). The trigger rule below (exactly one
+> mention, from main, multi-agent room, `auto_thread` on) governs *when the
+> suggestion appears*; the redirect only happens on confirm. Everything else
+> below still holds.
 
 **Decision: auto-spawn on.** Multi-agent rooms self-organize into per-agent
 threads so several agents never get dumped into one shared context.

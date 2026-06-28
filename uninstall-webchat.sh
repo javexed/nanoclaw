@@ -138,7 +138,9 @@ rm -rf \
   src/db/migrations/023-byok-user-credentials.ts \
   setup/get-oauth-token.sh \
   docs/design/byok.md \
-  docs/design/byok-oauth.md
+  docs/design/byok-oauth.md \
+  docs/design/webchat-threads.md \
+  docs/design/webchat-threads-qa.md
 
 # ── 4. Unwire the channels barrel ────────────────────────────────────────
 if grep -qF "'./webchat/index.js'" src/channels/index.ts; then

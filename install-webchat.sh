@@ -183,6 +183,8 @@ NEW_PATHS=(
   setup/get-oauth-token.sh
   docs/design/byok.md
   docs/design/byok-oauth.md
+  docs/design/webchat-threads.md
+  docs/design/webchat-threads-qa.md
 )
 echo "→ Copying webchat-owned files …"
 git checkout "$BR" -- "${NEW_PATHS[@]}"
