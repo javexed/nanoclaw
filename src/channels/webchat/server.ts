@@ -192,6 +192,7 @@ import { canAccessRoom, canArchiveRoom, filterRoomsForUser } from './access.js';
 import {
   getRoomOauthAllowed,
   setRoomOauthAllowed,
+  getEffectiveRoomOauthAllowed,
   getEffectiveRoomMode,
   getRoomModeOverride,
   setRoomModeOverride,
@@ -674,7 +675,7 @@ async function handleHttp(
         credType,
         provider,
         mode: getEffectiveRoomMode(roomId),
-        oauthAllowed: provider === 'codex' ? cfg.allowCodexOauth : cfg.allowClaudeOauth,
+        oauthAllowed: getEffectiveRoomOauthAllowed(roomId, provider),
         apiKeyAllowed: provider === 'codex' ? cfg.allowOpenaiKey : cfg.allowAnthropicKey,
       });
     }
@@ -700,10 +701,11 @@ async function handleHttp(
       return json(res, 429, { error: 'Too many attempts — wait a moment and try again.' });
     try {
       if (method === 'POST' && credType === 'oauth_token') {
-        // Gate 1: the workspace must accept this provider's subscriptions (Credentials page).
-        if (!(provider === 'codex' ? cfg.allowCodexOauth : cfg.allowClaudeOauth))
+        // Gate 1: BOTH the workspace must accept this provider's subscriptions
+        // (Credentials page) AND the room must have opted into OAuth.
+        if (!getEffectiveRoomOauthAllowed(roomId, provider))
           return json(res, 403, {
-            error: `This workspace does not accept ${provider === 'codex' ? 'Codex (ChatGPT)' : 'Claude'} subscription (OAuth) connections.`,
+            error: `${provider === 'codex' ? 'Codex (ChatGPT)' : 'Claude'} subscription (OAuth) connections aren't enabled for this room.`,
           });
         const token = typeof body.token === 'string' ? body.token.trim() : '';
         if (provider === 'codex') {
@@ -790,8 +792,8 @@ async function handleHttp(
     const roomId = typeof body.roomId === 'string' ? body.roomId : '';
     if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
     if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
-    if (!getCredentialsConfig().allowClaudeOauth)
-      return json(res, 403, { error: 'This workspace does not accept Claude subscription (OAuth) connections.' });
+    if (!getEffectiveRoomOauthAllowed(roomId, 'claude'))
+      return json(res, 403, { error: "Claude subscription (OAuth) connections aren't enabled for this room." });
     const groups = getAgentsForWebchatRoom(roomId);
     if (groups.length === 0) return json(res, 400, { error: 'Room has no wired agent' });
     try {
@@ -839,9 +841,9 @@ async function handleHttp(
     const roomId = typeof body.roomId === 'string' ? body.roomId : '';
     if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
     if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
-    if (!getCredentialsConfig().allowCodexOauth)
+    if (!getEffectiveRoomOauthAllowed(roomId, 'codex'))
       return json(res, 403, {
-        error: 'This workspace does not accept Codex (ChatGPT) subscription (OAuth) connections.',
+        error: "Codex (ChatGPT) subscription (OAuth) connections aren't enabled for this room.",
       });
     const groups = getAgentsForWebchatRoom(roomId);
     if (groups.length === 0) return json(res, 400, { error: 'Room has no wired agent' });
