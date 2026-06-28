@@ -346,12 +346,13 @@ async function renderCredentialsSettings() {
   const claudeEl = $('#cred-allow-claude');
   if (claudeEl) claudeEl.checked = !!(cfg.allowAnthropicKey || cfg.allowClaudeOauth);
   const codexEl = $('#cred-allow-codex');
-  if (codexEl) codexEl.checked = !!(cfg.allowOpenaiKey || cfg.allowCodexOauth);
-  // Codex only appears once its provider is installed; otherwise a one-line hint.
+  if (codexEl) {
+    codexEl.checked = !!(cfg.allowOpenaiKey || cfg.allowCodexOauth);
+    codexEl.disabled = !cfg.codexAvailable; // inert until /add-codex
+  }
+  // Codex stays visible but greyed until its provider is installed.
   const codexRow = $('#cred-codex-row');
-  if (codexRow) codexRow.hidden = !cfg.codexAvailable;
-  const codexHint = $('#cred-codex-hint');
-  if (codexHint) codexHint.hidden = !!cfg.codexAvailable;
+  if (codexRow) codexRow.classList.toggle('is-disabled', !cfg.codexAvailable);
 
   if (credConfigWired) return;
   credConfigWired = true;

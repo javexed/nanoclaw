@@ -5089,10 +5089,8 @@ a.lightbox-btn {
   letter-spacing: 0;
   font-size: var(--fs-xs);
 }
-/* A credential group that's unavailable (e.g. Codex before /add-codex). */
-.setting-group.is-disabled {
+/* A credential row that's unavailable (e.g. Codex before /add-codex) — greyed. */
+.cred-type-row.is-disabled {
   opacity: 0.5;
-}
-.setting-group.is-disabled .cred-type-row {
   cursor: not-allowed;
 }
