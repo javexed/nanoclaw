@@ -2291,6 +2291,64 @@ a.lightbox-btn {
   gap: 8px;
   margin-top: 4px;
 }
+/* BYOK enablement section in the room-settings panel. */
+.room-cred-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+}
+.room-cred-section[hidden] {
+  display: none;
+}
+.room-cred-title {
+  margin: 0;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+/* Mode as inline radios (all three on one row). */
+.room-cred-modes {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 18px;
+  font-size: var(--fs-sm);
+}
+.room-cred-opt {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.room-cred-opt input {
+  flex: none;
+  margin: 0;
+}
+/* OAuth allowances as label-left / control-right toggle rows. */
+.room-cred-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-sm);
+}
+.room-cred-toggle {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+}
+.room-cred-toggle input {
+  flex: none;
+  margin: 0;
+}
 /* ── Buttons — role-based set: .btn base + four role modifiers. See DESIGN.md §2.
    Icon buttons (.lightbox-btn, .settings-btn, .file-picker-btn) and the
    .agent-status-btn segmented control are deliberately NOT part of this set. */
@@ -5006,4 +5064,35 @@ a.lightbox-btn {
   20% {
     box-shadow: 0 0 0 2px var(--accent);
   }
+}
+
+/* Settings → Member credentials (workspace policy, owner only). */
+.settings-credentials .settings-section-title {
+  margin-top: 8px;
+}
+.cred-type-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.cred-type-row input {
+  flex: none;
+  margin: 0;
+}
+.cred-hint {
+  color: var(--text-dim);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: var(--fs-xs);
+}
+/* A credential group that's unavailable (e.g. Codex before /add-codex). */
+.setting-group.is-disabled {
+  opacity: 0.5;
+}
+.setting-group.is-disabled .cred-type-row {
+  cursor: not-allowed;
 }

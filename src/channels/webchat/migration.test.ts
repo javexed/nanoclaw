@@ -47,6 +47,7 @@ describe('moduleWebchat migration', () => {
       'webchat_room_primes',
       'webchat_room_reads',
       'webchat_room_settings',
+      'webchat_settings',
       'webchat_user_handles',
       'webchat_user_room_hides',
     ]);
@@ -80,6 +81,7 @@ describe('moduleWebchat migration', () => {
       'webchat-approvals-index',
       'webchat-approvals-index-fanout',
       'webchat-archive-split',
+      'webchat-credentials-config',
       'webchat-drop-rooms',
       'webchat-initial',
       'webchat-message-fts',

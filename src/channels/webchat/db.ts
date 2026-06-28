@@ -558,6 +558,104 @@ export function setRoomOauthAllowed(roomId: string, allowed: boolean): void {
     .run(roomId, allowed ? 1 : 0, Date.now());
 }
 
+// ── BYOK: workspace-wide credentials policy (singleton webchat_settings) ──
+// Which member-credential TYPES the workspace accepts + the default room mode.
+// Types live here (configured once) rather than per room.
+export interface CredentialsConfig {
+  defaultMode: CredentialMode;
+  allowAnthropicKey: boolean;
+  allowClaudeOauth: boolean;
+  allowOpenaiKey: boolean;
+  allowCodexOauth: boolean;
+}
+
+const DEFAULT_CREDENTIALS_CONFIG: CredentialsConfig = {
+  defaultMode: 'disabled',
+  allowAnthropicKey: true,
+  allowClaudeOauth: false,
+  allowOpenaiKey: false,
+  allowCodexOauth: false,
+};
+
+/** Secure defaults if the singleton row is somehow missing or the table is absent. */
+export function getCredentialsConfig(): CredentialsConfig {
+  try {
+    const row = getDb().prepare(`SELECT * FROM webchat_settings WHERE id = 1`).get() as
+      | {
+          default_credential_mode: CredentialMode;
+          allow_anthropic_key: number;
+          allow_claude_oauth: number;
+          allow_openai_key: number;
+          allow_codex_oauth: number;
+        }
+      | undefined;
+    if (!row) return { ...DEFAULT_CREDENTIALS_CONFIG };
+    return {
+      defaultMode: row.default_credential_mode ?? 'disabled',
+      allowAnthropicKey: row.allow_anthropic_key === 1,
+      allowClaudeOauth: row.allow_claude_oauth === 1,
+      allowOpenaiKey: row.allow_openai_key === 1,
+      allowCodexOauth: row.allow_codex_oauth === 1,
+    };
+  } catch {
+    return { ...DEFAULT_CREDENTIALS_CONFIG };
+  }
+}
+
+export function setCredentialsConfig(patch: Partial<CredentialsConfig>): void {
+  const next = { ...getCredentialsConfig(), ...patch };
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_settings
+         (id, default_credential_mode, allow_anthropic_key, allow_claude_oauth, allow_openai_key, allow_codex_oauth, updated_at)
+       VALUES (1, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         default_credential_mode = excluded.default_credential_mode,
+         allow_anthropic_key     = excluded.allow_anthropic_key,
+         allow_claude_oauth      = excluded.allow_claude_oauth,
+         allow_openai_key        = excluded.allow_openai_key,
+         allow_codex_oauth       = excluded.allow_codex_oauth,
+         updated_at              = excluded.updated_at`,
+    )
+    .run(
+      next.defaultMode,
+      next.allowAnthropicKey ? 1 : 0,
+      next.allowClaudeOauth ? 1 : 0,
+      next.allowOpenaiKey ? 1 : 0,
+      next.allowCodexOauth ? 1 : 0,
+      Date.now(),
+    );
+}
+
+// Per-room mode override: NULL = inherit the global default.
+export type RoomModeOverride = CredentialMode | null;
+
+export function getRoomModeOverride(roomId: string): RoomModeOverride {
+  try {
+    const row = getDb()
+      .prepare(`SELECT credential_mode_override FROM webchat_room_settings WHERE room_id = ?`)
+      .get(roomId) as { credential_mode_override: CredentialMode | null } | undefined;
+    return row?.credential_mode_override ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function setRoomModeOverride(roomId: string, mode: RoomModeOverride): void {
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_room_settings (room_id, engage_default, credential_mode_override, updated_at)
+       VALUES (?, 'broadcast', ?, ?)
+       ON CONFLICT(room_id) DO UPDATE SET credential_mode_override = excluded.credential_mode_override, updated_at = excluded.updated_at`,
+    )
+    .run(roomId, mode, Date.now());
+}
+
+/** The room's effective credential mode: its own override, else the global default. */
+export function getEffectiveRoomMode(roomId: string): CredentialMode {
+  return getRoomModeOverride(roomId) ?? getCredentialsConfig().defaultMode;
+}
+
 // ── Messages ──
 
 function rowToMessage(row: WebchatMessageRow): WebchatMessage {

@@ -9,7 +9,7 @@ import { initTestDb, closeDb, getDb } from '../../db/connection.js';
 import { runMigrations } from '../../db/migrations/index.js';
 import { resolveSessionKeyOverride } from '../../session-manager.js';
 import { resolveAgentIdentity } from '../../container-runtime.js';
-import { setRoomCredentialMode, setRoomOauthAllowed } from '../../channels/webchat/db.js';
+import { setRoomModeOverride, setCredentialsConfig } from '../../channels/webchat/db.js';
 import { upsertByokCredential, setByokStatus } from './db.js';
 import { byokAgentIdentifier } from './identity.js';
 import './index.js'; // registers the resolvers
@@ -29,7 +29,7 @@ afterEach(() => closeDb());
 
 describe('byok session-key resolver', () => {
   it('member with a key in a BYOK room → per-member session keyed by userId', () => {
-    setRoomCredentialMode('room-1', 'required');
+    setRoomModeOverride('room-1', 'required');
     upsertByokCredential('webchat:alice', 'ag-1', 'byok-alice', 'sec-1');
     expect(resolveSessionKeyOverride(webchatMg('room-1'), 'ag-1', 'webchat:alice')).toEqual({
       sessionMode: 'per-thread',
@@ -38,12 +38,12 @@ describe('byok session-key resolver', () => {
   });
 
   it('optional + no key → no override (falls back to the shared session)', () => {
-    setRoomCredentialMode('room-1', 'optional');
+    setRoomModeOverride('room-1', 'optional');
     expect(resolveSessionKeyOverride(webchatMg('room-1'), 'ag-1', 'webchat:bob')).toBeNull();
   });
 
   it('required + no key → BLOCK with guidance (never bills the shared key)', () => {
-    setRoomCredentialMode('room-1', 'required');
+    setRoomModeOverride('room-1', 'required');
     const r = resolveSessionKeyOverride(webchatMg('room-1'), 'ag-1', 'webchat:bob');
     expect(r && 'block' in r).toBe(true);
     expect((r as { block: string }).block).toMatch(/your own Anthropic key/i);
@@ -56,7 +56,7 @@ describe('byok session-key resolver', () => {
 
   it('OAuth-only room (mode disabled, oauth_allowed) + member with OAuth key → per-member session', () => {
     // The load-bearing case: oauth_allowed must route even though credential_mode is 'disabled'.
-    setRoomOauthAllowed('room-1', true); // credential_mode stays 'disabled'
+    setCredentialsConfig({ allowClaudeOauth: true }); // workspace accepts OAuth; room mode stays 'disabled'
     upsertByokCredential('webchat:alice', 'ag-1', 'byok-alice', 'sec-oat', 'oauth_token');
     expect(resolveSessionKeyOverride(webchatMg('room-1'), 'ag-1', 'webchat:alice')).toEqual({
       sessionMode: 'per-thread',
@@ -67,21 +67,21 @@ describe('byok session-key resolver', () => {
   });
 
   it('revoked key → no override', () => {
-    setRoomCredentialMode('room-1', 'optional');
+    setRoomModeOverride('room-1', 'optional');
     upsertByokCredential('webchat:alice', 'ag-1', 'byok-alice', 'sec-1');
     setByokStatus('webchat:alice', 'ag-1', 'revoked');
     expect(resolveSessionKeyOverride(webchatMg('room-1'), 'ag-1', 'webchat:alice')).toBeNull();
   });
 
   it('non-webchat channel → no override', () => {
-    setRoomCredentialMode('room-1', 'required');
+    setRoomModeOverride('room-1', 'required');
     upsertByokCredential('webchat:alice', 'ag-1', 'byok-alice', 'sec-1');
     const telegramMg = { id: 'mg-2', channel_type: 'telegram', platform_id: 'room-1', is_group: 1 };
     expect(resolveSessionKeyOverride(telegramMg, 'ag-1', 'webchat:alice')).toBeNull();
   });
 
   it('null userId → no override', () => {
-    setRoomCredentialMode('room-1', 'required');
+    setRoomModeOverride('room-1', 'required');
     expect(resolveSessionKeyOverride(webchatMg('room-1'), 'ag-1', null)).toBeNull();
   });
 });

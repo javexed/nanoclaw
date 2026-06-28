@@ -241,8 +241,8 @@
               id="byok-chip"
               class="byok-chip"
               hidden
-              aria-label="Your personal credential — click to disconnect"
-              title="Your personal credential"
+              aria-label="Your member credential — click to disconnect"
+              title="Your member credential"
             >
               🔑
             </button>
@@ -297,7 +297,7 @@
         </div>
         <div id="connection-banner" class="connection-banner">Connection lost. Reconnecting…</div>
         <div id="byok-banner" class="byok-banner" hidden>
-          <span id="byok-banner-text">This room uses personal Anthropic keys.</span>
+          <span id="byok-banner-text">Connect your member credentials to use this room.</span>
           <input
             id="byok-key-input"
             type="password"
@@ -306,8 +306,8 @@
             spellcheck="false"
             hidden
           />
-          <button id="byok-connect-btn" type="button">Connect your key</button>
-          <button id="byok-oauth-btn" type="button" hidden>Use my Claude subscription</button>
+          <button id="byok-oauth-btn" type="button" hidden>Connect with my Claude subscription</button>
+          <button id="byok-connect-btn" type="button">Use an API key</button>
           <div id="byok-oauth-form" class="byok-oauth-form" hidden>
             <p id="byok-oauth-help" class="byok-oauth-help">
               Sign in to <strong>your</strong> subscription — no terminal needed. It bills
@@ -529,6 +529,36 @@
                     <button type="button" id="room-rename-save" class="btn btn-secondary">Save</button>
                   </span>
                 </label>
+                <!-- BYOK enablement (owner/admin only; shown by openRoomDetail when room.canArchive). -->
+                <div id="room-credential-mode-section" class="room-cred-section" hidden>
+                  <h4 class="room-cred-title">Member credentials</h4>
+                  <div
+                    id="room-credential-modes"
+                    class="room-cred-modes"
+                    role="radiogroup"
+                    aria-label="Member credential mode"
+                  >
+                    <label class="room-cred-opt">
+                      <input type="radio" name="room-credential-mode" value="inherit" />
+                      <span>Default <span id="room-cred-default-hint" class="cred-hint"></span></span>
+                    </label>
+                    <label class="room-cred-opt">
+                      <input type="radio" name="room-credential-mode" value="disabled" />
+                      <span>Off</span>
+                    </label>
+                    <label class="room-cred-opt">
+                      <input type="radio" name="room-credential-mode" value="optional" />
+                      <span>Optional</span>
+                    </label>
+                    <label class="room-cred-opt">
+                      <input type="radio" name="room-credential-mode" value="required" />
+                      <span>Required</span>
+                    </label>
+                  </div>
+                  <p class="setting-help">
+                    Credential types are set workspace-wide in <strong>Settings → Member credentials</strong>.
+                  </p>
+                </div>
                 <div>
                   <span class="form-label">Wired agents</span>
                   <ul id="room-wired-agents" class="room-wired-agents"></ul>
@@ -1032,6 +1062,42 @@
                 <span>Desktop notifications</span>
                 <input id="notif-toggle" type="checkbox" />
               </label>
+            </div>
+            <!-- Workspace credentials policy — owner only (shown when canEdit). -->
+            <div id="settings-credentials" class="settings-credentials" hidden>
+              <h3 class="settings-section-title">Member credentials</h3>
+              <p class="setting-help">
+                Which credential types members may connect, and the default for new rooms. Each room can override the
+                mode.
+              </p>
+              <div class="setting-group">
+                <span class="setting-label">Default for new rooms</span>
+                <div class="setting-options" id="cred-default-mode">
+                  <button class="setting-option" data-value="disabled">Off</button>
+                  <button class="setting-option" data-value="optional">Optional</button>
+                  <button class="setting-option" data-value="required">Required</button>
+                </div>
+              </div>
+              <div class="setting-group">
+                <span class="setting-label">Claude</span>
+                <label class="cred-type-row"
+                  ><span>API key</span><input type="checkbox" id="cred-allow-anthropic-key"
+                /></label>
+                <label class="cred-type-row"
+                  ><span>Subscription (OAuth)</span><input type="checkbox" id="cred-allow-claude-oauth"
+                /></label>
+              </div>
+              <div class="setting-group" id="cred-codex-group">
+                <span class="setting-label"
+                  >Codex <span id="cred-codex-hint" class="cred-hint" hidden>— needs /add-codex</span></span
+                >
+                <label class="cred-type-row"
+                  ><span>OpenAI API key</span><input type="checkbox" id="cred-allow-openai-key"
+                /></label>
+                <label class="cred-type-row"
+                  ><span>ChatGPT subscription (OAuth)</span><input type="checkbox" id="cred-allow-codex-oauth"
+                /></label>
+              </div>
             </div>
           </div>
         </div>
