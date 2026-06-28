@@ -317,6 +317,97 @@ function renderSettingsModal() {
   $('#notif-toggle').checked = settings.notifications;
 }
 
+// ── Workspace credentials policy (Settings → Member credentials, owner-only) ──
+let credConfigWired = false;
+async function renderCredentialsSettings() {
+  const section = $('#settings-credentials');
+  if (!section) return;
+  let cfg;
+  try {
+    const r = await authFetch('/api/webchat/credentials-config');
+    if (!r.ok) {
+      section.hidden = true;
+      return;
+    }
+    cfg = await r.json();
+  } catch {
+    section.hidden = true;
+    return;
+  }
+  if (!cfg.canEdit) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+  document.querySelectorAll('#cred-default-mode .setting-option').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.value === cfg.defaultMode);
+  });
+  // Allowed providers — pill toggles (multi-select). "on" = accept BOTH a key
+  // and a subscription for that provider.
+  const providerOn = {
+    claude: !!(cfg.allowAnthropicKey || cfg.allowClaudeOauth),
+    codex: !!(cfg.allowOpenaiKey || cfg.allowCodexOauth),
+  };
+  // Greyed-but-clickable when unavailable, so a click can explain why (rather
+  // than a native `disabled` button that swallows the click). Claude is always
+  // available; Codex needs its provider installed.
+  const providerAvailable = { claude: true, codex: !!cfg.codexAvailable };
+  document.querySelectorAll('#cred-providers .setting-option').forEach((btn) => {
+    const p = btn.dataset.provider;
+    btn.classList.toggle('active', !!providerOn[p]);
+    btn.classList.toggle('is-unavailable', !providerAvailable[p]);
+  });
+
+  if (credConfigWired) return;
+  credConfigWired = true;
+  const putConfig = async (patch) => {
+    const r = await authFetch('/api/webchat/credentials-config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+      body: JSON.stringify(patch),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      showToast('Failed to save: ' + (err.error || r.statusText), { kind: 'error' });
+      renderCredentialsSettings(); // resync to server truth
+      return false;
+    }
+    return true;
+  };
+  document.querySelectorAll('#cred-default-mode .setting-option').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      if (await putConfig({ defaultMode: btn.dataset.value })) {
+        document
+          .querySelectorAll('#cred-default-mode .setting-option')
+          .forEach((b) => b.classList.toggle('active', b === btn));
+      }
+    });
+  });
+  // Each provider pill toggles its key + subscription flags together. An
+  // unavailable pill explains how to enable it instead of toggling.
+  const PROVIDER_FLAGS = {
+    claude: ['allowAnthropicKey', 'allowClaudeOauth'],
+    codex: ['allowOpenaiKey', 'allowCodexOauth'],
+  };
+  const PROVIDER_UNAVAILABLE = {
+    codex: 'Codex isn’t installed yet — add it with /add-codex, then you can enable it here.',
+    claude: 'Claude isn’t available in this workspace.',
+  };
+  document.querySelectorAll('#cred-providers .setting-option').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const p = btn.dataset.provider;
+      if (btn.classList.contains('is-unavailable')) {
+        showToast(PROVIDER_UNAVAILABLE[p] || 'This provider isn’t available yet.', { kind: 'info', timeout: 9000 });
+        return;
+      }
+      const [keyFlag, oauthFlag] = PROVIDER_FLAGS[p] || [];
+      if (!keyFlag) return;
+      const on = !btn.classList.contains('active'); // flipping to this state
+      if (await putConfig({ [keyFlag]: on, [oauthFlag]: on })) btn.classList.toggle('active', on);
+    });
+  });
+}
+
 // Persist the @handle from the Settings field. Inline feedback (per DESIGN.md):
 // success/taken/invalid all surface on the #handle-status line, not a toast.
 async function saveHandle() {
@@ -370,8 +461,14 @@ async function saveHandle() {
 function renderHandleChip() {
   const chip = $('#handle-chip');
   if (!chip) return;
-  chip.textContent = myHandle ? `@${myHandle}` : '+ set @handle';
+  const label = myHandle ? `@${myHandle}` : '+ set @handle';
+  // When the member has connected their own credential, the handle chip doubles
+  // as the credential indicator (a 🔑 prefix) — there's no separate key chip.
+  // The connect/disconnect controls live in the chip's popover (#handle-creds).
+  chip.textContent = byokConnected ? `🔑 ${label}` : label;
   chip.classList.toggle('is-unset', !myHandle);
+  chip.classList.toggle('has-cred', byokConnected);
+  chip.title = byokConnected ? 'Billing your own account — click to manage' : 'Edit your handle';
 }
 
 function openHandlePopover() {
@@ -385,6 +482,7 @@ function openHandlePopover() {
     status.textContent = '';
     status.classList.remove('ok', 'err');
   }
+  updateHandleCreds();
   pop.hidden = false;
   $('#handle-chip')?.setAttribute('aria-expanded', 'true');
   if (input) input.focus();
@@ -421,6 +519,7 @@ applySettings();
 // Settings modal open/close
 function openSettings() {
   renderSettingsModal();
+  renderCredentialsSettings();
   $('#settings-overlay').hidden = false;
   // Focus trap
   const modal = $('#settings-overlay .modal');
@@ -1243,12 +1342,7 @@ function renderRooms(rooms) {
   // Divider sentinel between the pinned group and the rest — only when both
   // groups are non-empty.
   const showDivider = pinned.length > 0 && unpinned.length > 0;
-  const toRender = [
-    ...pinned,
-    ...(showDivider ? [ROOM_DIVIDER] : []),
-    ...unpinned,
-    ...(showArchived ? archived : []),
-  ];
+  const toRender = [...pinned, ...(showDivider ? [ROOM_DIVIDER] : []), ...unpinned, ...(showArchived ? archived : [])];
 
   for (let i = 0; i < toRender.length; i++) {
     const room = toRender[i];
@@ -2028,13 +2122,29 @@ async function jumpToMessage(messageId) {
 // Shown in a room whose credential_mode is optional/required when the current
 // user hasn't connected their own Anthropic key. Connecting onboards the key
 // into the OneCLI vault (host-side) so the member's turns bill their account.
+// The room's model provider decides the connect vocabulary + which mint runs.
+let byokProvider = 'claude';
+// Latest banner state, so the @handle popover credentials shortcut can mirror it.
+let byokState = null;
+// Whether the member has a connected credential for the open room — drives the
+// 🔑 indicator on the @handle chip (the standalone key chip was merged into it).
+let byokConnected = false;
+
+function byokWords(provider) {
+  return provider === 'codex'
+    ? { name: 'Codex', subWord: 'ChatGPT subscription', keyWord: 'OpenAI key', keyPlaceholder: 'sk-…' }
+    : { name: 'Claude', subWord: 'Claude subscription', keyWord: 'Anthropic key', keyPlaceholder: 'sk-ant-…' };
+}
+
 async function updateByokBanner(roomId) {
   const banner = $('#byok-banner');
-  const chip = $('#byok-chip');
   if (!banner || !roomId) return;
   const hideAll = () => {
     banner.hidden = true;
-    if (chip) chip.hidden = true;
+    byokState = null;
+    byokConnected = false;
+    updateHandleCreds();
+    renderHandleChip();
   };
   try {
     const r = await authFetch(`/api/byok/credential?roomId=${encodeURIComponent(roomId)}`);
@@ -2042,49 +2152,98 @@ async function updateByokBanner(roomId) {
       hideAll();
       return;
     }
-    const { connected, mode, oauthAllowed } = await r.json();
-    // BYOK is surfaced when the room takes personal keys OR allows subscriptions.
-    if (mode === 'disabled' && !oauthAllowed) {
+    const { connected, mode, credType, oauthAllowed, apiKeyAllowed = true, provider = 'claude' } = await r.json();
+    byokProvider = provider;
+    const { name, subWord, keyWord, keyPlaceholder } = byokWords(provider);
+    // API keys are offered only when the room is on AND the workspace accepts them
+    // (for this room's provider). OAuth allowance is also workspace-wide.
+    const apiOffered = mode !== 'disabled' && apiKeyAllowed;
+    // BYOK is surfaced when API keys are offered OR the workspace allows OAuth.
+    if (!apiOffered && !oauthAllowed) {
       hideAll();
       return;
     }
 
-    // Connected → collapse to a small key chip in the header; the full banner
-    // is only the actionable "connect" prompt, which is done once connected.
+    byokState = { offered: true, connected, provider, oauthAllowed, apiOffered, subWord, keyWord };
+    byokConnected = connected;
+    updateHandleCreds();
+    renderHandleChip();
+
+    // Connected → the @handle chip shows the 🔑 indicator (see renderHandleChip);
+    // the full banner is only the actionable "connect" prompt, done once connected.
     if (connected) {
       banner.hidden = true;
-      if (chip) {
-        chip.hidden = false;
-        chip.title = 'Your member credential · click to disconnect';
-      }
       return;
     }
 
-    // Not connected → show the actionable banner, hide the chip.
-    if (chip) chip.hidden = true;
-    const text = $('#byok-banner-text');
+    // Not connected → show the actionable banner.
     const connectBtn = $('#byok-connect-btn');
     const oauthBtn = $('#byok-oauth-btn');
     const input = $('#byok-key-input');
-    const oauthForm = $('#byok-oauth-form');
     banner.hidden = false;
     input.hidden = true;
     input.value = '';
-    if (oauthForm) oauthForm.hidden = true;
-    // Generic "member credentials" wording; the buttons below say HOW (the
-    // Claude-subscription helper, or an API key).
-    const apiOffered = mode !== 'disabled';
-    if (text)
-      text.textContent =
-        mode === 'required'
-          ? 'This room requires your member credentials.'
-          : 'Connect your member credentials to bill this room to your own account.';
+    input.placeholder = keyPlaceholder;
+    // Primary action: connect via subscription sign-in. Secondary: paste a key.
+    if (oauthBtn) {
+      oauthBtn.hidden = !oauthAllowed;
+      oauthBtn.textContent = `Connect to ${name}`;
+    }
     connectBtn.hidden = !apiOffered;
-    if (oauthBtn) oauthBtn.hidden = !oauthAllowed;
+    if (connectBtn) connectBtn.textContent = 'API key';
   } catch {
     hideAll();
   }
 }
+
+// The @handle popover mirrors the in-room banner state as a credentials shortcut
+// (discoverability). Shown only when the open room offers BYOK; acts on that room.
+function updateHandleCreds() {
+  const wrap = $('#handle-creds');
+  if (!wrap) return;
+  if (!byokState || !byokState.offered) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+  const statusEl = $('#handle-creds-status');
+  const actionBtn = $('#handle-creds-action');
+  // Minimalist integrations-row style: a status dot + the provider name carry
+  // the connected/not state; the action button does the rest.
+  const { name } = byokWords(byokState.provider);
+  if (statusEl) {
+    statusEl.textContent = name;
+    statusEl.classList.toggle('is-connected', byokState.connected);
+  }
+  if (actionBtn) actionBtn.textContent = byokState.connected ? 'Disconnect' : 'Connect';
+}
+
+$('#handle-creds-action')?.addEventListener('click', async () => {
+  if (!byokState) return;
+  closeHandlePopover();
+  if (byokState.connected) {
+    const confirmed = await showConfirmModal({
+      title: `Disconnect ${byokWords(byokState.provider).name}?`,
+      confirmLabel: 'Disconnect',
+      destructive: true,
+    });
+    if (confirmed) await disconnectByok();
+  } else if (byokState.oauthAllowed) {
+    // Subscriptions allowed → open the sign-in helper directly (what users expect
+    // from a "Connect" action), rather than just surfacing the banner.
+    $('#byok-oauth-btn')?.click();
+  } else {
+    // API-key-only room → reveal the banner and its key input.
+    const banner = $('#byok-banner');
+    if (banner) {
+      banner.hidden = false;
+      banner.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      banner.classList.add('byok-banner-flash');
+      setTimeout(() => banner.classList.remove('byok-banner-flash'), 1200);
+    }
+    $('#byok-connect-btn')?.click(); // reveal the key input
+  }
+});
 
 $('#byok-connect-btn')?.addEventListener('click', async () => {
   const input = $('#byok-key-input');
@@ -2102,7 +2261,7 @@ $('#byok-connect-btn')?.addEventListener('click', async () => {
     body: JSON.stringify({ roomId: currentRoom, apiKey }),
   });
   if (r.ok) {
-    showToast('Connected your Anthropic key.', { kind: 'success' });
+    showToast(`Connected your ${byokWords(byokProvider).keyWord}.`, { kind: 'success' });
     await updateByokBanner(currentRoom);
   } else {
     const err = await r.json().catch(() => ({}));
@@ -2121,7 +2280,7 @@ async function disconnectByok() {
     body: JSON.stringify({ roomId: currentRoom }),
   });
   if (r.ok) {
-    showToast('Disconnected your key from this room.', { kind: 'success' });
+    showToast('Disconnected your account.', { kind: 'success' });
     await updateByokBanner(currentRoom);
   } else {
     const err = await r.json().catch(() => ({}));
@@ -2131,16 +2290,6 @@ async function disconnectByok() {
 
 // The connected state lives as a compact key chip in the header; clicking it
 // disconnects (after a confirm), so the full banner no longer sits over the chat.
-$('#byok-chip')?.addEventListener('click', async () => {
-  const confirmed = await showConfirmModal({
-    title: 'Disconnect your credential?',
-    body: 'Your turns in this room will stop billing your own account and fall back to the shared key (or be declined if the room requires your own).',
-    confirmLabel: 'Disconnect',
-    destructive: true,
-  });
-  if (confirmed) await disconnectByok();
-});
-
 // ── BYOK OAuth: connect a Claude subscription token ────────────────────────
 // Browser-mint OAuth: no terminal. Opening the form starts a server-side mint
 // (a throwaway container runs `claude setup-token`), surfaces the sign-in URL,
@@ -2160,18 +2309,22 @@ function byokOauthStatus(msg, kind) {
 }
 
 $('#byok-oauth-btn')?.addEventListener('click', async () => {
-  const form = $('#byok-oauth-form');
-  if (!form) return;
-  form.hidden = false;
+  const modal = $('#byok-oauth-modal');
+  if (!modal) return;
+  const isCodex = byokProvider === 'codex';
+  const title = $('#byok-oauth-title');
+  if (title) title.textContent = `Connect to ${byokWords(byokProvider).name}`;
   $('#byok-oauth-step2').hidden = true;
   $('#byok-oauth-submit').hidden = true;
+  $('#byok-oauth-spinner').hidden = false; // spinner while the mint warms up
   const code = $('#byok-oauth-code');
   if (code) code.value = '';
-  const ack = $('#byok-oauth-ack');
-  if (ack) ack.checked = false;
+  const codexCode = $('#byok-oauth-codex-code');
+  modal.hidden = false;
   byokOauthStatus('Preparing sign-in…', '');
   try {
-    const r = await authFetch('/api/byok/oauth/start', {
+    const startUrl = isCodex ? '/api/byok/codex/start' : '/api/byok/oauth/start';
+    const r = await authFetch(startUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
       body: JSON.stringify({ roomId: currentRoom }),
@@ -2179,53 +2332,93 @@ $('#byok-oauth-btn')?.addEventListener('click', async () => {
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.statusText);
     byokOauthSessionId = data.sessionId;
-    $('#byok-oauth-link').href = data.url;
+    const link = $('#byok-oauth-link');
+    if (link) {
+      link.href = data.url;
+      link.textContent = `Open ${byokWords(byokProvider).name} sign-in ↗`;
+    }
+    // Claude: paste a code back. Codex: enter a pairing code at the site, then approve.
+    if (code) code.hidden = isCodex;
+    const codeLabel = $('#byok-oauth-code-label');
+    if (codeLabel) codeLabel.hidden = isCodex;
+    if (codexCode) {
+      codexCode.hidden = !isCodex;
+      codexCode.textContent = isCodex
+        ? data.userCode
+          ? `Pairing code: ${data.userCode}`
+          : 'Open the link, then approve the sign-in.'
+        : '';
+    }
+    const submit = $('#byok-oauth-submit');
+    if (submit) submit.textContent = isCodex ? 'I’ve approved — connect' : 'Connect';
+    $('#byok-oauth-spinner').hidden = true;
     $('#byok-oauth-step2').hidden = false;
     $('#byok-oauth-submit').hidden = false;
-    byokOauthStatus('', '');
+    byokOauthStatus(isCodex ? 'Open the link, enter the code, and approve — then click connect.' : '', '');
     $('#byok-oauth-link').focus();
   } catch (err) {
+    $('#byok-oauth-spinner').hidden = true;
     byokOauthStatus(err.message || 'Could not start sign-in.', 'error');
   }
 });
 
-$('#byok-oauth-cancel')?.addEventListener('click', () => {
+function closeByokOauthModal() {
   if (byokOauthSessionId) {
-    authFetch('/api/byok/oauth/cancel', {
+    const cancelUrl = byokProvider === 'codex' ? '/api/byok/codex/cancel' : '/api/byok/oauth/cancel';
+    authFetch(cancelUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
       body: JSON.stringify({ sessionId: byokOauthSessionId }),
     }).catch(() => {});
     byokOauthSessionId = null;
   }
-  const form = $('#byok-oauth-form');
-  if (form) form.hidden = true;
+  const modal = $('#byok-oauth-modal');
+  if (modal) modal.hidden = true;
+}
+$('#byok-oauth-cancel')?.addEventListener('click', closeByokOauthModal);
+$('#byok-oauth-close')?.addEventListener('click', closeByokOauthModal);
+// Click the backdrop (outside the modal card) to close.
+$('#byok-oauth-modal')?.addEventListener('click', (e) => {
+  if (e.target === $('#byok-oauth-modal')) closeByokOauthModal();
+});
+// Auto-submit once a code is pasted (Claude path) — no separate Connect click.
+$('#byok-oauth-code')?.addEventListener('paste', () => {
+  setTimeout(() => {
+    const submit = $('#byok-oauth-submit');
+    if (submit && !submit.hidden && ($('#byok-oauth-code')?.value || '').trim()) submit.click();
+  }, 0);
 });
 
 $('#byok-oauth-submit')?.addEventListener('click', async () => {
+  const isCodex = byokProvider === 'codex';
   const code = ($('#byok-oauth-code')?.value || '').trim();
-  const acknowledged = !!$('#byok-oauth-ack')?.checked;
-  if (!code || !byokOauthSessionId) return;
-  if (!acknowledged) {
-    showToast('Please tick the acknowledgment to continue.', { kind: 'error' });
-    return;
-  }
+  if (!byokOauthSessionId) return;
+  if (!isCodex && !code) return; // Claude needs the pasted code; Codex needs none.
   const btn = $('#byok-oauth-submit');
   btn.disabled = true;
-  byokOauthStatus('Saving your subscription… (this can take a few seconds)', '');
+  $('#byok-oauth-step2').hidden = true;
+  $('#byok-oauth-spinner').hidden = false; // spinner while connecting
+  const { subWord } = byokWords(byokProvider);
+  byokOauthStatus('Connecting…', '');
   try {
-    const r = await authFetch('/api/byok/oauth/code', {
+    const finishUrl = isCodex ? '/api/byok/codex/finish' : '/api/byok/oauth/code';
+    const body = isCodex
+      ? { roomId: currentRoom, sessionId: byokOauthSessionId }
+      : { roomId: currentRoom, sessionId: byokOauthSessionId, code };
+    const r = await authFetch(finishUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
-      body: JSON.stringify({ roomId: currentRoom, sessionId: byokOauthSessionId, code, acknowledged }),
+      body: JSON.stringify(body),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.statusText);
     byokOauthSessionId = null;
-    showToast('Connected your Claude subscription.', { kind: 'success' });
-    $('#byok-oauth-form').hidden = true;
+    showToast(`Connected your ${subWord}.`, { kind: 'success' });
+    $('#byok-oauth-modal').hidden = true;
     await updateByokBanner(currentRoom);
   } catch (err) {
+    $('#byok-oauth-spinner').hidden = true;
+    $('#byok-oauth-step2').hidden = false; // restore so they can retry
     byokOauthStatus(err.message || 'Could not connect.', 'error');
   } finally {
     btn.disabled = false;
@@ -2264,7 +2457,7 @@ function showConfirmModal({ title, body, confirmLabel = 'Confirm', cancelLabel =
     overlay.className = 'modal-overlay confirm-overlay';
 
     const modal = document.createElement('div');
-    modal.className = 'modal confirm-modal';
+    modal.className = 'modal confirm-modal' + (body ? '' : ' confirm-modal--titleonly');
 
     const header = document.createElement('div');
     header.className = 'modal-header';
@@ -2272,13 +2465,18 @@ function showConfirmModal({ title, body, confirmLabel = 'Confirm', cancelLabel =
     titleSpan.textContent = title || 'Confirm';
     header.appendChild(titleSpan);
 
-    const bodyEl = document.createElement('div');
-    bodyEl.className = 'modal-body';
-    const message = document.createElement('div');
-    message.className = 'confirm-message';
-    if (body instanceof HTMLElement) message.appendChild(body);
-    else message.textContent = body || '';
-    bodyEl.appendChild(message);
+    // Body is optional: a title-only confirm (no dead space) for reversible
+    // actions whose title says it all. Only render the body when there's content.
+    let bodyEl = null;
+    if (body) {
+      bodyEl = document.createElement('div');
+      bodyEl.className = 'modal-body';
+      const message = document.createElement('div');
+      message.className = 'confirm-message';
+      if (body instanceof HTMLElement) message.appendChild(body);
+      else message.textContent = body;
+      bodyEl.appendChild(message);
+    }
 
     const footer = document.createElement('div');
     footer.className = 'confirm-actions';
@@ -2292,7 +2490,7 @@ function showConfirmModal({ title, body, confirmLabel = 'Confirm', cancelLabel =
     confirmBtn.textContent = confirmLabel;
     footer.append(cancelBtn, confirmBtn);
 
-    modal.append(header, bodyEl, footer);
+    modal.append(header, ...(bodyEl ? [bodyEl] : []), footer);
     overlay.appendChild(modal);
     document.body.appendChild(overlay);
 
@@ -2938,9 +3136,7 @@ function tryActivateMention(input) {
   }
   mentionStart = i;
   const token = value.slice(i + 1, cursor).toLowerCase();
-  mentionMatches = mentionPool
-    .filter((a) => a.folder.toLowerCase().startsWith(token))
-    .slice(0, 8);
+  mentionMatches = mentionPool.filter((a) => a.folder.toLowerCase().startsWith(token)).slice(0, 8);
   mentionSelectedIndex = 0;
   if (mentionMatches.length === 0) {
     dismissMentionPopover();
@@ -3124,9 +3320,7 @@ $('#members-overlay').addEventListener('click', toggleMembersPanel);
 (function () {
   const overlay = $('#detail-overlay');
   if (!overlay) return; // index.html older than this build — graceful no-op
-  const panels = ['#agent-detail', '#room-detail', '#model-detail']
-    .map((s) => $(s))
-    .filter(Boolean);
+  const panels = ['#agent-detail', '#room-detail', '#model-detail'].map((s) => $(s)).filter(Boolean);
   const app = $('#app');
   let detailViewSynced = false;
   const closeAllDetailPanels = () => {
@@ -3262,12 +3456,13 @@ function renderApprovalCard(a, options) {
 
   const actions = document.createElement('div');
   actions.className = 'approval-actions';
-  const optionList = Array.isArray(a.options) && a.options.length
-    ? a.options
-    : [
-        { label: 'Approve', value: 'approve' },
-        { label: 'Reject', value: 'reject' },
-      ];
+  const optionList =
+    Array.isArray(a.options) && a.options.length
+      ? a.options
+      : [
+          { label: 'Approve', value: 'approve' },
+          { label: 'Reject', value: 'reject' },
+        ];
   optionList.forEach((opt) => {
     const btn = document.createElement('button');
     btn.textContent = opt.label || opt.value;
@@ -3352,8 +3547,15 @@ function handleApprovalEvent(msg) {
   showApprovalToast(msg);
   fetchApprovals();
   // Desktop notification when settings allow + tab not focused.
-  if (settings.notifications && document.hidden && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-    try { new Notification(msg.title || 'Approval requested', { body: msg.question || '' }); } catch {}
+  if (
+    settings.notifications &&
+    document.hidden &&
+    typeof Notification !== 'undefined' &&
+    Notification.permission === 'granted'
+  ) {
+    try {
+      new Notification(msg.title || 'Approval requested', { body: msg.question || '' });
+    } catch {}
   }
 }
 
@@ -3903,13 +4105,15 @@ function renderPermsUserList() {
   const list = $('#perms-user-list');
   list.innerHTML = '';
   if (permsUsers.length === 0) {
-    list.innerHTML = '<li class="perms-empty" style="padding:16px;">No users yet — anyone who authenticates will appear here.</li>';
+    list.innerHTML =
+      '<li class="perms-empty" style="padding:16px;">No users yet — anyone who authenticates will appear here.</li>';
     return;
   }
   // Sort: you first, then owners, then admins, then everyone else, alphabetical
   // within each tier. Cheap stable enough for personal-scale.
   const sorted = [...permsUsers].sort((a, b) => {
-    const tier = (u) => (u.id === myUserId ? 0 : userIsOwner(u) ? 1 : userIsGlobalAdmin(u) || userScopedAdminCount(u) ? 2 : 3);
+    const tier = (u) =>
+      u.id === myUserId ? 0 : userIsOwner(u) ? 1 : userIsGlobalAdmin(u) || userScopedAdminCount(u) ? 2 : 3;
     const ta = tier(a);
     const tb = tier(b);
     if (ta !== tb) return ta - tb;
@@ -4008,8 +4212,16 @@ function renderPermsDetail(userId) {
   // ── GLOBAL section: Owner + Global admin toggles ──
   const globalEl = $('#perms-global-toggles');
   globalEl.innerHTML = '';
-  globalEl.appendChild(buildToggleRow(u, 'Owner', '👑 ', findRole(u, 'owner', null), () => togglePerm(u.id, 'owner', null, !findRole(u, 'owner', null))));
-  globalEl.appendChild(buildToggleRow(u, 'Global admin', '', findRole(u, 'admin', null), () => togglePerm(u.id, 'admin', null, !findRole(u, 'admin', null))));
+  globalEl.appendChild(
+    buildToggleRow(u, 'Owner', '👑 ', findRole(u, 'owner', null), () =>
+      togglePerm(u.id, 'owner', null, !findRole(u, 'owner', null)),
+    ),
+  );
+  globalEl.appendChild(
+    buildToggleRow(u, 'Global admin', '', findRole(u, 'admin', null), () =>
+      togglePerm(u.id, 'admin', null, !findRole(u, 'admin', null)),
+    ),
+  );
 
   // ── PER-AGENT-GROUP matrix ──
   const matrix = $('#perms-matrix');
@@ -4068,9 +4280,7 @@ function renderPermsDetail(userId) {
     deleteZone.hidden = isSelf;
     if (deleteBtn) {
       deleteBtn.disabled = hasRolesOrMemberships;
-      deleteBtn.title = hasRolesOrMemberships
-        ? 'Revoke all roles and memberships before deleting'
-        : '';
+      deleteBtn.title = hasRolesOrMemberships ? 'Revoke all roles and memberships before deleting' : '';
     }
   }
 }
@@ -4211,9 +4421,11 @@ function applyCreateAuthDefault() {
   if (m.tailscale) {
     hint.textContent = 'This install signs people in via Tailscale — they appear as webchat:tailscale:<email>.';
   } else if (m.proxy) {
-    hint.textContent = 'This install signs people in via SSO / reverse proxy (e.g. Entra ID) — they appear as webchat:<email>.';
+    hint.textContent =
+      'This install signs people in via SSO / reverse proxy (e.g. Entra ID) — they appear as webchat:<email>.';
   } else if (m.bearer) {
-    hint.textContent = 'This install uses a shared bearer token — per-user ids only differ when a proxy or Tailscale also fronts it.';
+    hint.textContent =
+      'This install uses a shared bearer token — per-user ids only differ when a proxy or Tailscale also fronts it.';
   } else {
     hint.textContent = '';
   }
@@ -4329,9 +4541,7 @@ function permsRefreshCreateUI() {
   $('#perms-create-handle-label').hidden = isRaw;
   $('#perms-create-raw-label').hidden = !isRaw;
   const composed = permsCreateComposedId();
-  $('#perms-create-preview').textContent = composed
-    ? `Resolved id: ${composed}`
-    : 'Resolved id will appear here.';
+  $('#perms-create-preview').textContent = composed ? `Resolved id: ${composed}` : 'Resolved id will appear here.';
   // Show/hide the agent-group selector based on initial-role choice.
   const kind = $('#perms-create-kind').value;
   const wantsGroup = kind === 'admin' || kind === 'member';
@@ -4575,7 +4785,10 @@ async function showMessagesDetail() {
         .catch(() => []),
     ),
   );
-  const all = perRoom.flat().sort((a, b) => b.created_at - a.created_at).slice(0, 50);
+  const all = perRoom
+    .flat()
+    .sort((a, b) => b.created_at - a.created_at)
+    .slice(0, 50);
   if (all.length === 0) {
     showDetail('Messages (24h)', '<div class="metric-sub">No messages in the last 24 hours</div>');
     return;
@@ -5028,8 +5241,7 @@ $('#agent-detail-form').addEventListener('submit', async (e) => {
     });
     // Update model assignment (empty string in the select = unassign).
     const selectedModel = $('#agent-model').value || null;
-    const currentModel =
-      allAgents.find((b) => b.id === selectedAgentId)?.assigned_model_id || null;
+    const currentModel = allAgents.find((b) => b.id === selectedAgentId)?.assigned_model_id || null;
     if (selectedModel !== currentModel) {
       await authFetch(`/api/agents/${encodeURIComponent(selectedAgentId)}/model`, {
         method: 'PUT',
@@ -5250,14 +5462,13 @@ async function openRoomDetail(roomId) {
       authFetch(`/api/rooms/${encodeURIComponent(roomId)}/credential-mode`)
         .then((r) => (r.ok ? r.json() : null))
         .then((d) => {
-          if (d) $('#room-credential-mode').value = d.mode;
-        })
-        .catch(() => {});
-      authFetch(`/api/rooms/${encodeURIComponent(roomId)}/oauth-allowed`)
-        .then((r) => (r.ok ? r.json() : null))
-        .then((d) => {
-          const cb = $('#room-oauth-allowed');
-          if (d && cb) cb.checked = !!d.allowed;
+          if (!d) return;
+          // d.mode is the per-room override ('inherit' when unset); d.defaultMode
+          // is the workspace default shown on the Default option.
+          const radio = document.querySelector(`input[name="room-credential-mode"][value="${d.mode}"]`);
+          if (radio) radio.checked = true;
+          const hint = $('#room-cred-default-hint');
+          if (hint) hint.textContent = d.defaultMode ? `(${d.defaultMode})` : '';
         })
         .catch(() => {});
     } else {
@@ -5611,8 +5822,8 @@ $('#room-name').addEventListener('keydown', (e) => {
 });
 $('#room-detail-close').addEventListener('click', closeRoomDetail);
 $('#room-delete').addEventListener('click', deleteCurrentRoom);
-$('#room-credential-mode')?.addEventListener('change', async (e) => {
-  if (!selectedRoomId) return;
+$('#room-credential-modes')?.addEventListener('change', async (e) => {
+  if (!selectedRoomId || e.target.name !== 'room-credential-mode') return;
   const mode = e.target.value;
   const r = await authFetch(`/api/rooms/${encodeURIComponent(selectedRoomId)}/credential-mode`, {
     method: 'PUT',
@@ -5620,30 +5831,15 @@ $('#room-credential-mode')?.addEventListener('change', async (e) => {
     body: JSON.stringify({ mode }),
   });
   if (r.ok) {
-    showToast(`Personal-key mode set to "${mode}".`, { kind: 'success' });
+    showToast(`Member credentials set to "${mode}".`, { kind: 'success' });
     if (selectedRoomId === currentRoom) updateByokBanner(currentRoom);
   } else {
     const err = await r.json().catch(() => ({}));
     showToast('Failed to set mode: ' + (err.error || r.statusText), { kind: 'error' });
   }
 });
-$('#room-oauth-allowed')?.addEventListener('change', async (e) => {
-  if (!selectedRoomId) return;
-  const allowed = !!e.target.checked;
-  const r = await authFetch(`/api/rooms/${encodeURIComponent(selectedRoomId)}/oauth-allowed`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
-    body: JSON.stringify({ allowed }),
-  });
-  if (r.ok) {
-    showToast(`Subscription (OAuth) connections ${allowed ? 'allowed' : 'disallowed'}.`, { kind: 'success' });
-    if (selectedRoomId === currentRoom) updateByokBanner(currentRoom);
-  } else {
-    e.target.checked = !allowed; // revert on failure
-    const err = await r.json().catch(() => ({}));
-    showToast('Failed to update: ' + (err.error || r.statusText), { kind: 'error' });
-  }
-});
+// Per-room credential TYPES moved to Settings → Member credentials (global); the
+// room only sets the mode override above.
 $('#room-rename-save')?.addEventListener('click', saveRoomName);
 $('#room-rename-input')?.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
@@ -5703,9 +5899,7 @@ function renderRoomCreateAgentChecklist() {
     list.appendChild(li);
     return;
   }
-  const sorted = [...allAgents]
-    .filter((a) => a.status !== 'archived')
-    .sort((a, b) => a.name.localeCompare(b.name));
+  const sorted = [...allAgents].filter((a) => a.status !== 'archived').sort((a, b) => a.name.localeCompare(b.name));
   for (const agent of sorted) {
     const li = document.createElement('li');
     const cb = document.createElement('input');
@@ -6084,8 +6278,7 @@ function updateThinkingBubble(name, label, detail) {
   const target = bubble.querySelector('.thinking-target');
   if (target) {
     if (detail) {
-      const trimmed =
-        detail.length > THINKING_DETAIL_MAX ? `${detail.slice(0, THINKING_DETAIL_MAX - 1)}…` : detail;
+      const trimmed = detail.length > THINKING_DETAIL_MAX ? `${detail.slice(0, THINKING_DETAIL_MAX - 1)}…` : detail;
       target.textContent = trimmed;
       target.hidden = false;
     } else {
@@ -6793,10 +6986,7 @@ $('#model-delete').addEventListener('click', async () => {
         destructive: true,
       });
       if (!confirmed) return;
-      const force = await authFetch(
-        `/api/models/${encodeURIComponent(selectedModelId)}?force=1`,
-        { method: 'DELETE' },
-      );
+      const force = await authFetch(`/api/models/${encodeURIComponent(selectedModelId)}?force=1`, { method: 'DELETE' });
       if (!force.ok) {
         const err = await force.json().catch(() => ({}));
         showToast(`Failed to delete: ${err.error || force.statusText}`, { kind: 'error' });

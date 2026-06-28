@@ -189,15 +189,28 @@ import { redactSensitiveData } from './redact.js';
 import { hasAdminPrivilege, isAnyAdmin, isGlobalAdmin, isOwner, warnIfNoPermissionsModule } from './roles.js';
 import { canAccessRoom, canArchiveRoom, filterRoomsForUser } from './access.js';
 import {
-  getRoomCredentialMode,
-  setRoomCredentialMode,
   getRoomOauthAllowed,
   setRoomOauthAllowed,
+  getEffectiveRoomMode,
+  getRoomModeOverride,
+  setRoomModeOverride,
+  getCredentialsConfig,
+  setCredentialsConfig,
+  type CredentialsConfig,
+  type CredentialMode,
 } from './db.js';
-import { onboardByokCredential, onboardByokOauth, revokeByokCredential } from '../../modules/byok/onboard.js';
-import { startClaudeMint, mintClaudeToken, cancelMint } from './oauth-mint.js';
+import { listProviderContainerConfigNames } from '../../providers/provider-container-registry.js';
+
+/** Auto-detect: the Codex provider is installed when it's registered a container config. */
+function codexAvailable(): boolean {
+  return listProviderContainerConfigNames().includes('codex');
+}
+
+import { storeUserCredential, revokeUserCredential } from '../../modules/byok/onboard.js';
+import { startClaudeMint, mintClaudeToken, startCodexMint, finishCodexMint, cancelMint } from './oauth-mint.js';
 import { realOnecliAdmin } from '../../modules/byok/onecli-admin.js';
-import { userHasActiveKey, getByokCredential } from '../../modules/byok/db.js';
+import { userHasConnectedCredential, getUserCredential } from '../../modules/byok/db.js';
+import { getContainerConfig } from '../../db/container-configs.js';
 import { broadcast, broadcastRooms } from './state.js';
 import { setupWebSocket } from './ws.js';
 
@@ -523,7 +536,13 @@ async function handleHttp(
     const roomId = decodeURIComponent(roomCredModeMatch[1]);
     if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
     if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
-    return json(res, 200, { mode: getRoomCredentialMode(roomId) });
+    // The per-room OVERRIDE ('inherit' when unset); the effective mode is what the
+    // room actually runs (override, else the global default).
+    return json(res, 200, {
+      mode: getRoomModeOverride(roomId) ?? 'inherit',
+      effectiveMode: getEffectiveRoomMode(roomId),
+      defaultMode: getCredentialsConfig().defaultMode,
+    });
   }
   if (roomCredModeMatch && method === 'PUT') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
@@ -540,10 +559,11 @@ async function handleHttp(
     } catch {
       return json(res, 400, { error: 'Invalid JSON' });
     }
-    if (body.mode !== 'disabled' && body.mode !== 'optional' && body.mode !== 'required') {
-      return json(res, 400, { error: "mode must be 'disabled', 'optional', or 'required'" });
+    if (body.mode !== 'inherit' && body.mode !== 'disabled' && body.mode !== 'optional' && body.mode !== 'required') {
+      return json(res, 400, { error: "mode must be 'inherit', 'disabled', 'optional', or 'required'" });
     }
-    setRoomCredentialMode(roomId, body.mode);
+    // 'inherit' clears the override so the room follows the global default.
+    setRoomModeOverride(roomId, body.mode === 'inherit' ? null : body.mode);
     return json(res, 200, { ok: true, mode: body.mode });
   }
 
@@ -574,33 +594,71 @@ async function handleHttp(
     return json(res, 200, { ok: true, allowed: body.allowed });
   }
 
+  // ── BYOK: workspace credentials policy — accepted TYPES + default room mode ──
+  // Read by anyone (the room UIs need it); only the owner can change it.
+  if (url.pathname === '/api/webchat/credentials-config' && (method === 'GET' || method === 'PUT')) {
+    if (method === 'GET') {
+      return json(res, 200, { ...getCredentialsConfig(), codexAvailable: codexAvailable(), canEdit: isOwner(userId) });
+    }
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: Record<string, unknown>;
+    try {
+      body = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    const patch: Partial<CredentialsConfig> = {};
+    if (body.defaultMode !== undefined) {
+      if (body.defaultMode !== 'disabled' && body.defaultMode !== 'optional' && body.defaultMode !== 'required')
+        return json(res, 400, { error: "defaultMode must be 'disabled', 'optional', or 'required'" });
+      patch.defaultMode = body.defaultMode as CredentialMode;
+    }
+    for (const k of ['allowAnthropicKey', 'allowClaudeOauth', 'allowOpenaiKey', 'allowCodexOauth'] as const) {
+      if (body[k] === undefined) continue;
+      if (typeof body[k] !== 'boolean') return json(res, 400, { error: `${k} must be a boolean` });
+      patch[k] = body[k] as boolean;
+    }
+    // Codex types are inert until the provider is installed — refuse to enable them.
+    if ((patch.allowCodexOauth || patch.allowOpenaiKey) && !codexAvailable())
+      return json(res, 400, { error: 'Codex support isn’t installed yet — add it with /add-codex first.' });
+    setCredentialsConfig(patch);
+    return json(res, 200, { ...getCredentialsConfig(), codexAvailable: codexAvailable() });
+  }
+
   // ── BYOK: a member connects / disconnects THEIR own Anthropic key ──────────
   // userId is the server-resolved caller — a user can only manage their own key.
   if (url.pathname === '/api/byok/credential' && (method === 'POST' || method === 'DELETE' || method === 'GET')) {
-    const reqRoomId =
-      method === 'GET'
-        ? (url.searchParams.get('roomId') ?? '')
-        : undefined; // POST/DELETE read roomId from the body below
+    const reqRoomId = method === 'GET' ? (url.searchParams.get('roomId') ?? '') : undefined; // POST/DELETE read roomId from the body below
     if (method === 'GET') {
       const roomId = decodeURIComponent(reqRoomId ?? '');
       if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
       if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
       const groups = getAgentsForWebchatRoom(roomId);
-      const connected = groups.length > 0 && groups.every((g) => userHasActiveKey(userId, g.id));
+      // Effective mode (room override → global default). Credential TYPES are
+      // workspace-wide (Credentials admin page); which ones apply here depends on
+      // the room's provider (Claude vs Codex).
+      const cfg = getCredentialsConfig();
+      const provider = groups[0] && getContainerConfig(groups[0].id)?.provider === 'codex' ? 'codex' : 'claude';
+      // Connection is now user-level (connect once → all same-provider rooms).
+      const connected = userHasConnectedCredential(userId, provider);
       // Report the connected credential type so the UI shows the right banner.
-      const credType =
-        connected && groups[0] ? (getByokCredential(userId, groups[0].id)?.cred_type ?? null) : null;
+      const credType = connected ? (getUserCredential(userId, provider)?.cred_type ?? null) : null;
       return json(res, 200, {
         connected,
         credType,
-        mode: getRoomCredentialMode(roomId),
-        oauthAllowed: getRoomOauthAllowed(roomId),
+        provider,
+        mode: getEffectiveRoomMode(roomId),
+        oauthAllowed: provider === 'codex' ? cfg.allowCodexOauth : cfg.allowClaudeOauth,
+        apiKeyAllowed: provider === 'codex' ? cfg.allowOpenaiKey : cfg.allowAnthropicKey,
       });
     }
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     const raw = await readJsonBody(req, res);
     if (raw === null) return;
-    let body: { roomId?: unknown; apiKey?: unknown; type?: unknown; token?: unknown; acknowledged?: unknown };
+    let body: { roomId?: unknown; apiKey?: unknown; type?: unknown; token?: unknown };
     try {
       body = JSON.parse(raw) as typeof body;
     } catch {
@@ -611,25 +669,53 @@ async function handleHttp(
     if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
     const groups = getAgentsForWebchatRoom(roomId);
     if (groups.length === 0) return json(res, 400, { error: 'Room has no wired agent' });
+    const provider = groups[0] && getContainerConfig(groups[0].id)?.provider === 'codex' ? 'codex' : 'claude';
     const credType = body.type === 'oauth_token' ? 'oauth_token' : 'api_key';
+    const cfg = getCredentialsConfig();
     try {
       if (method === 'POST' && credType === 'oauth_token') {
-        // Gate 1: the room must allow OAuth (owner/admin opt-in).
-        if (!getRoomOauthAllowed(roomId))
-          return json(res, 403, { error: 'This room does not allow subscription (OAuth) connections.' });
-        // Gate 2: explicit own-use acknowledgment.
-        if (body.acknowledged !== true)
-          return json(res, 400, { error: 'You must acknowledge this connects your own subscription for your own use.' });
+        // Gate 1: the workspace must accept this provider's subscriptions (Credentials page).
+        if (!(provider === 'codex' ? cfg.allowCodexOauth : cfg.allowClaudeOauth))
+          return json(res, 403, {
+            error: `This workspace does not accept ${provider === 'codex' ? 'Codex (ChatGPT)' : 'Claude'} subscription (OAuth) connections.`,
+          });
         const token = typeof body.token === 'string' ? body.token.trim() : '';
-        if (!/^sk-ant-oat/.test(token))
-          return json(res, 400, { error: 'Expected a Claude subscription token from `claude setup-token` (sk-ant-oat…)' });
-        for (const g of groups) await onboardByokOauth(realOnecliAdmin, userId, g.id, userId, token);
+        if (provider === 'codex') {
+          // Codex subscription = a whole auth.json (normally produced by the
+          // browser mint; pasting it is a fallback). Require valid credential JSON.
+          let ok = false;
+          try {
+            const parsed = JSON.parse(token) as Record<string, unknown>;
+            ok = Boolean(parsed.tokens || parsed.OPENAI_API_KEY);
+          } catch {
+            ok = false;
+          }
+          if (!ok)
+            return json(res, 400, {
+              error: 'Expected a Codex auth.json — use “Connect with my ChatGPT subscription” instead of pasting.',
+            });
+        } else if (!/^sk-ant-oat/.test(token)) {
+          return json(res, 400, {
+            error: 'Expected a Claude subscription token from `claude setup-token` (sk-ant-oat…)',
+          });
+        }
+        await storeUserCredential(realOnecliAdmin, userId, provider, token, 'oauth_token');
       } else if (method === 'POST') {
+        if (!(provider === 'codex' ? cfg.allowOpenaiKey : cfg.allowAnthropicKey))
+          return json(res, 403, {
+            error: `This workspace does not accept ${provider === 'codex' ? 'OpenAI' : 'Anthropic'} API keys.`,
+          });
         const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
-        if (!/^sk-ant-/.test(apiKey)) return json(res, 400, { error: 'Expected an Anthropic API key (sk-ant-…)' });
-        for (const g of groups) await onboardByokCredential(realOnecliAdmin, userId, g.id, userId, apiKey);
+        // Codex: an OpenAI key (sk-…). Claude: an Anthropic key (sk-ant-…).
+        if (provider === 'codex') {
+          if (!/^sk-/.test(apiKey)) return json(res, 400, { error: 'Expected an OpenAI API key (sk-…)' });
+        } else if (!/^sk-ant-/.test(apiKey)) {
+          return json(res, 400, { error: 'Expected an Anthropic API key (sk-ant-…)' });
+        }
+        await storeUserCredential(realOnecliAdmin, userId, provider, apiKey, 'api_key');
       } else {
-        for (const g of groups) await revokeByokCredential(realOnecliAdmin, userId, g.id);
+        // Disconnect: revoke the user-level credential + un-enroll every group.
+        await revokeUserCredential(realOnecliAdmin, userId, provider);
       }
     } catch (err) {
       log.error('BYOK onboard/revoke failed', { userId, roomId, err: err instanceof Error ? err.message : err });
@@ -641,16 +727,15 @@ async function handleHttp(
   // ── BYOK OAuth browser-mint: get a setup-token without a terminal ──────────
   // A member signs in to their Claude subscription entirely in the browser; the
   // server runs `claude setup-token` in a throwaway container, scrapes the URL,
-  // takes the pasted code, captures the token, and onboards it per-member via
-  // onboardByokOauth — the same storage the paste path uses, minus the terminal.
-  // Same gates as the OAuth paste path: room access + the room's OAuth opt-in
-  // (+ own-use acknowledgment on the final step).
+  // takes the pasted code, captures the token, and stores it as the member's
+  // user-level credential — the same storage the paste path uses, minus the
+  // terminal. Same gates as the OAuth paste path: room access + OAuth opt-in.
   const byokMintMatch = url.pathname.match(/^\/api\/byok\/oauth\/(start|code|cancel)$/);
   if (byokMintMatch && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     const raw = await readJsonBody(req, res);
     if (raw === null) return;
-    let body: { roomId?: unknown; sessionId?: unknown; code?: unknown; acknowledged?: unknown };
+    let body: { roomId?: unknown; sessionId?: unknown; code?: unknown };
     try {
       body = JSON.parse(raw) as typeof body;
     } catch {
@@ -664,8 +749,8 @@ async function handleHttp(
     const roomId = typeof body.roomId === 'string' ? body.roomId : '';
     if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
     if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
-    if (!getRoomOauthAllowed(roomId))
-      return json(res, 403, { error: 'This room does not allow subscription (OAuth) connections.' });
+    if (!getCredentialsConfig().allowClaudeOauth)
+      return json(res, 403, { error: 'This workspace does not accept Claude subscription (OAuth) connections.' });
     const groups = getAgentsForWebchatRoom(roomId);
     if (groups.length === 0) return json(res, 400, { error: 'Room has no wired agent' });
     try {
@@ -673,13 +758,57 @@ async function handleHttp(
         const { sessionId, url: signinUrl } = await startClaudeMint(userId);
         return json(res, 200, { sessionId, url: signinUrl });
       }
-      // step === 'code': require the own-use acknowledgment, mint, then onboard.
-      if (body.acknowledged !== true)
-        return json(res, 400, { error: 'You must acknowledge this connects your own subscription for your own use.' });
+      // step === 'code': mint, then onboard.
       if (typeof body.sessionId !== 'string' || typeof body.code !== 'string')
         return json(res, 400, { error: 'sessionId and code required' });
       const token = await mintClaudeToken(userId, body.sessionId, body.code);
-      for (const g of groups) await onboardByokOauth(realOnecliAdmin, userId, g.id, userId, token);
+      await storeUserCredential(realOnecliAdmin, userId, 'claude', token, 'oauth_token');
+      return json(res, 200, { ok: true });
+    } catch (err) {
+      return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  // ── BYOK Codex browser-mint: connect a ChatGPT subscription without a terminal
+  // `codex login --device-auth` runs in a throwaway container; the user enters
+  // the pairing code at OpenAI's site (no code pasted back here). 'start' returns
+  // the URL + code; 'finish' waits for the written auth.json and stores it as the
+  // member's user-level Codex credential (→ an `openai` auth.json secret). Same
+  // gates as the Claude mint: room access + the room's OAuth opt-in.
+  const codexMintMatch = url.pathname.match(/^\/api\/byok\/codex\/(start|finish|cancel)$/);
+  if (codexMintMatch && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { roomId?: unknown; sessionId?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    const step = codexMintMatch[1];
+    if (step === 'cancel') {
+      if (typeof body.sessionId === 'string') cancelMint(userId, body.sessionId);
+      return json(res, 200, { ok: true });
+    }
+    const roomId = typeof body.roomId === 'string' ? body.roomId : '';
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    if (!getCredentialsConfig().allowCodexOauth)
+      return json(res, 403, {
+        error: 'This workspace does not accept Codex (ChatGPT) subscription (OAuth) connections.',
+      });
+    const groups = getAgentsForWebchatRoom(roomId);
+    if (groups.length === 0) return json(res, 400, { error: 'Room has no wired agent' });
+    try {
+      if (step === 'start') {
+        const { sessionId, url: signinUrl, userCode } = await startCodexMint(userId);
+        return json(res, 200, { sessionId, url: signinUrl, userCode });
+      }
+      // step === 'finish': wait for auth.json, then onboard.
+      if (typeof body.sessionId !== 'string') return json(res, 400, { error: 'sessionId required' });
+      const authJson = await finishCodexMint(userId, body.sessionId);
+      await storeUserCredential(realOnecliAdmin, userId, 'codex', authJson, 'oauth_token');
       return json(res, 200, { ok: true });
     } catch (err) {
       return json(res, 502, { error: err instanceof Error ? err.message : String(err) });

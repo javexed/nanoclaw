@@ -52,6 +52,30 @@ export function resolveContainerEnv(agentGroupId: string, threadId: string | nul
   }
 }
 
+/**
+ * Async pre-spawn hooks contributed by an installed module, run once just before
+ * a session's container is spawned. BYOK uses this for lazy / just-in-time
+ * enrollment: the first time a connected member uses a room, the hook creates
+ * the per-(member, group) OneCLI agent and assigns secrets, so identity/env
+ * resolution below sees a ready agent. Must complete before identity resolution.
+ * Hook failures are logged and swallowed — they must never break spawning.
+ * Core ships with no hooks → no-op.
+ */
+type SessionPrepareHook = (agentGroupId: string, threadId: string | null) => Promise<void>;
+const sessionPrepareHooks: SessionPrepareHook[] = [];
+export function registerSessionPrepareHook(fn: SessionPrepareHook): void {
+  sessionPrepareHooks.push(fn);
+}
+export async function runSessionPrepareHooks(agentGroupId: string, threadId: string | null): Promise<void> {
+  for (const fn of sessionPrepareHooks) {
+    try {
+      await fn(agentGroupId, threadId);
+    } catch (err) {
+      log.warn('session prepare hook failed', { agentGroupId, threadId, err: String(err) });
+    }
+  }
+}
+
 /** CLI args needed for the container to resolve the host gateway. */
 export function hostGatewayArgs(): string[] {
   // On Linux, host.docker.internal isn't built-in — add it explicitly

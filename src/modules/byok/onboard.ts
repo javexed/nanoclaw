@@ -1,117 +1,164 @@
 /**
- * BYOK onboarding orchestration: connect/revoke a member's Anthropic credential.
+ * BYOK onboarding orchestration — lazy / just-in-time.
  *
- * The member's credential — an API key OR a Claude subscription/OAuth token —
- * lives in the OneCLI vault. Their per-(group,user) OneCLI agent is assigned:
- * their Anthropic secret PLUS the group's non-anthropic tool secrets (mirrored
- * at onboard time) — so a per-member container authenticates Anthropic with the
- * member's own credential (swapped in by OneCLI on the wire) and the group's
- * tools for everything else. The host never holds the credential.
+ * Two phases, so a member connects ONCE and it applies to every room:
  *
- * Idempotent: re-onboarding updates the secret value and re-merges assignments.
- * The OneCLI calls go through an injectable OnecliAdmin (real CLI in prod, fake
- * in tests).
+ *  1. storeUserCredential (at connect) — stash the member's credential as a
+ *     single OneCLI vault secret + a user-level `byok_user_credentials` row.
+ *     No per-room work. The host never holds the credential.
+ *
+ *  2. ensureGroupEnrollment (lazy, at first session spawn in a given room) —
+ *     create the per-(user,group) OneCLI agent and assign the member's secret
+ *     PLUS that group's other tool secrets, so the per-member container
+ *     authenticates the model with the member's own credential (swapped in by
+ *     OneCLI on the wire) and keeps the group's tools. Idempotent + skipped once
+ *     enrolled, so it's a no-op on every spawn after the first.
+ *
+ * revokeUserCredential (at disconnect) tears both down everywhere.
+ *
+ * Provider-specific vault type: Claude → `anthropic` secret (sk-ant-api… or
+ * sk-ant-oat…); Codex → `openai` secret (the whole ChatGPT/Codex auth.json for
+ * OAuth, host chatgpt.com; or an OpenAI key, host api.openai.com).
+ *
+ * OneCLI calls go through an injectable OnecliAdmin (real CLI in prod, fake in tests).
  */
 import { log } from '../../log.js';
+import { getContainerConfig } from '../../db/container-configs.js';
 import { byokAgentIdentifier, userSlug } from './identity.js';
-import { getByokCredential, getUserSecretId, setByokStatus, upsertByokCredential, type ByokCredType } from './db.js';
+import {
+  getByokCredential,
+  getUserCredential,
+  setByokStatus,
+  setUserCredentialStatus,
+  upsertByokCredential,
+  upsertUserCredential,
+  listEnrolledGroups,
+  type ByokCredType,
+  type ByokProvider,
+} from './db.js';
 import type { OnecliAdmin } from './onecli-admin.js';
 
+/** The agent group's provider, mapped to the two BYOK-supported families. */
+function groupProvider(agentGroupId: string): ByokProvider {
+  return getContainerConfig(agentGroupId)?.provider === 'codex' ? 'codex' : 'claude';
+}
+
+/** The vault secret type that holds a member's credential for a provider. */
+function secretTypeFor(provider: ByokProvider): 'anthropic' | 'openai' {
+  return provider === 'codex' ? 'openai' : 'anthropic';
+}
+
 /**
- * The group's non-anthropic tool secret ids, to mirror onto a per-member agent
- * so its container keeps working tools (Gmail, GitHub, …) while its Anthropic
- * credential comes from the member.
+ * The group's tool secret ids EXCLUDING the member-supplied credential type, to
+ * mirror onto a per-member agent so its container keeps working tools (Gmail,
+ * GitHub, …) while its model credential (Anthropic for Claude, OpenAI for Codex)
+ * comes from the member.
  */
-async function groupToolSecretIds(admin: OnecliAdmin, agentGroupId: string): Promise<string[]> {
+async function groupToolSecretIds(admin: OnecliAdmin, agentGroupId: string, credSecretType: string): Promise<string[]> {
   const groupAgentUuid = await admin.findAgentId(agentGroupId);
   if (!groupAgentUuid) return [];
   const groupIds = await admin.listAgentSecretIds(groupAgentUuid);
   const typeById = new Map((await admin.listAllSecrets()).map((s) => [s.id, s.type]));
-  return groupIds.filter((id) => typeById.get(id) !== 'anthropic');
+  return groupIds.filter((id) => typeById.get(id) !== credSecretType);
 }
 
 /**
- * Shared onboarding for both credential kinds. The only difference between an
- * API key and an OAuth/subscription token is `credType` (recorded for display +
- * OAuth-mode spawn) — both are stored as the member's Anthropic vault secret and
- * swapped in by OneCLI on the wire. OneCLI's `anthropic` secret type accepts
- * both `sk-ant-api…` and `sk-ant-oat…` values (the operator subscription flow
- * in setup/register-claude-token.sh uses the same `--type anthropic`).
+ * Create the member's vault secret. Claude credentials — API key OR subscription
+ * (OAuth) token — are stored as a single `anthropic`-type secret: OneCLI
+ * auto-detects the auth mode from the value (an `sk-ant-oat…` token → `oauth`,
+ * injected as `Authorization: Bearer …`; an `sk-ant-api…` key → `api-key`,
+ * injected as `x-api-key`) and, either way, treats it as the api.anthropic.com
+ * provider credential so the per-member agent passes the gateway's access gate.
+ * (A `generic` secret on api.anthropic.com does NOT — the provider gate shadows
+ * it.) Codex → an `openai` secret (auth.json via --file for OAuth, key via --value).
  */
-async function onboardSecret(
+async function createCredentialSecret(
   admin: OnecliAdmin,
   userId: string,
-  agentGroupId: string,
-  displayName: string,
+  provider: ByokProvider,
+  credType: ByokCredType,
+  credential: string,
+): Promise<string> {
+  const name = provider === 'codex' ? `BYOK ${userSlug(userId)} (codex)` : `BYOK ${userSlug(userId)}`;
+  if (provider === 'codex') return admin.createOpenAISecret(name, credential, credType);
+  return admin.createAnthropicSecret(name, credential);
+}
+
+/**
+ * Un-assign the member's secret from every per-group agent it was lazily
+ * enrolled on (for this provider) and mark those enrollments revoked. They
+ * rebuild lazily on next use. Shared by disconnect and re-connect.
+ */
+async function unenrollGroups(admin: OnecliAdmin, userId: string, provider: ByokProvider): Promise<void> {
+  for (const row of listEnrolledGroups(userId, provider)) {
+    const agentUuid = await admin.findAgentId(row.onecli_agent_id);
+    if (agentUuid && row.secret_id) {
+      const remaining = (await admin.listAgentSecretIds(agentUuid)).filter((id) => id !== row.secret_id);
+      // `set-secrets` can't take an empty list; the revoke below stops the
+      // per-member session resolving regardless of a lingering assignment.
+      if (remaining.length > 0) await admin.setSecrets(agentUuid, remaining);
+    }
+    setByokStatus(userId, row.agent_group_id, 'revoked');
+  }
+}
+
+/**
+ * Phase 1 (connect): stash the member's credential as a single vault secret +
+ * the user-level row. No per-room work beyond tearing down any prior secret.
+ * `provider` is the connecting room's provider; `credType` (api_key |
+ * oauth_token) is recorded for display + spawn mode.
+ *
+ * The secret's wire injection (x-api-key vs Authorization: Bearer) is baked in
+ * at create time and OneCLI can't change it in place, so a re-connect deletes
+ * the old secret and creates a fresh one. Any lazy per-room enrollments are
+ * torn down first and rebuild on next use with the new secret id.
+ */
+export async function storeUserCredential(
+  admin: OnecliAdmin,
+  userId: string,
+  provider: ByokProvider,
   credential: string,
   credType: ByokCredType,
 ): Promise<void> {
-  // 1. The member's Anthropic secret — reuse across their groups; update on re-onboard.
-  let secretId = getUserSecretId(userId);
-  if (secretId) {
-    await admin.updateSecretValue(secretId, credential);
-  } else {
-    secretId = await admin.createAnthropicSecret(`BYOK ${userSlug(userId)}`, credential);
+  const prior = getUserCredential(userId, provider);
+  if (prior?.secret_id) {
+    await unenrollGroups(admin, userId, provider);
+    await admin.deleteSecret(prior.secret_id).catch(() => {}); // best-effort; orphan is harmless
   }
-
-  // 2. The per-member OneCLI agent (the identity the container spawns under).
-  const identifier = byokAgentIdentifier(agentGroupId, userId);
-  const agentUuid = await admin.ensureAgent(`${displayName} (BYOK)`, identifier);
-  await admin.setSecretMode(agentUuid, 'selective');
-
-  // 3. Mirror the group's non-anthropic tool secrets + the member's Anthropic secret.
-  const toolSecretIds = await groupToolSecretIds(admin, agentGroupId);
-  const merged = Array.from(new Set([secretId, ...toolSecretIds]));
-  await admin.setSecrets(agentUuid, merged);
-
-  // 4. Persist the mapping (identifier = the container's externalId for approval routing).
-  upsertByokCredential(userId, agentGroupId, identifier, secretId, credType);
-  log.info('BYOK credential onboarded', { userId, agentGroupId, credType, toolSecrets: toolSecretIds.length });
-}
-
-export function onboardByokCredential(
-  admin: OnecliAdmin,
-  userId: string,
-  agentGroupId: string,
-  displayName: string,
-  apiKey: string,
-): Promise<void> {
-  return onboardSecret(admin, userId, agentGroupId, displayName, apiKey, 'api_key');
+  const secretId = await createCredentialSecret(admin, userId, provider, credType, credential);
+  upsertUserCredential(userId, provider, secretId, credType);
+  log.info('BYOK credential stored', { userId, provider, credType });
 }
 
 /**
- * OAuth (subscription) onboarding: connect a member's Claude `setup-token`.
- *
- * Identical to the API-key path — the token lives in the OneCLI vault and is
- * swapped in on the wire — except cred_type='oauth_token', which puts the
- * per-member container in OAuth mode at spawn (sentinel CLAUDE_CODE_OAUTH_TOKEN,
- * routed through OneCLI; see src/modules/byok/index.ts).
+ * Phase 2 (lazy, at first session spawn in a room): create the per-(user,group)
+ * OneCLI agent and assign the member's secret + that group's tool secrets.
+ * Idempotent — returns immediately if already enrolled, or if the member hasn't
+ * connected a credential for this group's provider.
  */
-export function onboardByokOauth(
-  admin: OnecliAdmin,
-  userId: string,
-  agentGroupId: string,
-  displayName: string,
-  oauthToken: string,
-): Promise<void> {
-  return onboardSecret(admin, userId, agentGroupId, displayName, oauthToken, 'oauth_token');
+export async function ensureGroupEnrollment(admin: OnecliAdmin, userId: string, agentGroupId: string): Promise<void> {
+  if (getByokCredential(userId, agentGroupId)?.status === 'active') return; // already enrolled
+  const provider = groupProvider(agentGroupId);
+  const userCred = getUserCredential(userId, provider);
+  if (userCred?.status !== 'active' || !userCred.secret_id) return; // not connected — nothing to enroll
+  const secretId = userCred.secret_id;
+
+  const identifier = byokAgentIdentifier(agentGroupId, userId);
+  const agentUuid = await admin.ensureAgent(`${userSlug(userId)} (BYOK)`, identifier);
+  await admin.setSecretMode(agentUuid, 'selective');
+  const toolSecretIds = await groupToolSecretIds(admin, agentGroupId, secretTypeFor(provider));
+  const merged = Array.from(new Set([secretId, ...toolSecretIds]));
+  await admin.setSecrets(agentUuid, merged);
+  upsertByokCredential(userId, agentGroupId, identifier, secretId, userCred.cred_type, provider);
+  log.info('BYOK group enrolled (lazy)', { userId, agentGroupId, provider, toolSecrets: toolSecretIds.length });
 }
 
-export async function revokeByokCredential(admin: OnecliAdmin, userId: string, agentGroupId: string): Promise<void> {
-  const row = getByokCredential(userId, agentGroupId);
-  if (!row) return;
-  // Remove the member's credential from their per-member agent so it stops
-  // resolving immediately (the agent itself can linger unused). Tool secrets
-  // are left. Applies to both API-key and OAuth rows — both are vault secrets.
-  const agentUuid = await admin.findAgentId(row.onecli_agent_id);
-  if (agentUuid && row.secret_id) {
-    const remaining = (await admin.listAgentSecretIds(agentUuid)).filter((id) => id !== row.secret_id);
-    // `set-secrets` can't take an empty list; if the member's secret was the
-    // only one, mark the credential revoked in our DB anyway — the per-member
-    // session no longer resolves, so the credential stops being used regardless
-    // of the lingering OneCLI assignment.
-    if (remaining.length > 0) await admin.setSecrets(agentUuid, remaining);
-  }
-  setByokStatus(userId, agentGroupId, 'revoked');
-  log.info('BYOK credential revoked', { userId, agentGroupId, credType: row.cred_type });
+/**
+ * Disconnect: revoke the user-level credential AND un-assign the member secret
+ * from every per-group agent it was lazily enrolled on (for this provider).
+ */
+export async function revokeUserCredential(admin: OnecliAdmin, userId: string, provider: ByokProvider): Promise<void> {
+  await unenrollGroups(admin, userId, provider);
+  setUserCredentialStatus(userId, provider, 'revoked');
+  log.info('BYOK credential revoked', { userId, provider });
 }

@@ -28,6 +28,7 @@ import {
   readonlyMountArgs,
   resolveAgentIdentity,
   resolveContainerEnv,
+  runSessionPrepareHooks,
   stopContainer,
 } from './container-runtime.js';
 import { EGRESS_NETWORK, egressNetworkArgs, ensureEgressNetwork } from './egress-lockdown.js';
@@ -200,6 +201,10 @@ async function spawnContainer(session: Session): Promise<void> {
 
   const mounts = buildMounts(agentGroup, session, containerConfig, provider, contribution);
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
+  // Run any module pre-spawn hooks BEFORE resolving identity/env. BYOK uses this
+  // for lazy enrollment: a connected member's first use of a room creates the
+  // per-member OneCLI agent here, so resolveAgentIdentity below finds it ready.
+  await runSessionPrepareHooks(agentGroup.id, session.thread_id);
   // OneCLI agent identifier defaults to the agent group id (stable, reversible
   // via getAgentGroup() for approval routing). An installed module (BYOK) may
   // override it for a per-member session so the container spawns under the

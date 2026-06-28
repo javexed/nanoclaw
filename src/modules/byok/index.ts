@@ -10,13 +10,25 @@
  * Imported for side effects by src/modules/index.js (added by the installer).
  */
 import { registerSessionKeyResolver, registerPerMemberInboundWriter } from '../../session-manager.js';
-import { registerAgentIdentityResolver, registerContainerEnvResolver } from '../../container-runtime.js';
+import {
+  registerAgentIdentityResolver,
+  registerContainerEnvResolver,
+  registerSessionPrepareHook,
+} from '../../container-runtime.js';
 import { writeMemberTranscript } from './fanout.js';
 import { getDb, hasTable } from '../../db/connection.js';
+import { getContainerConfig } from '../../db/container-configs.js';
 import { registerApprovalAgentGroupFallback } from '../approvals/onecli-approvals.js';
-import { getRoomCredentialMode, getRoomOauthAllowed } from '../../channels/webchat/db.js';
-import { userHasActiveKey, userHasActiveOauth, agentGroupForByokAgent } from './db.js';
+import { getEffectiveRoomMode, getCredentialsConfig } from '../../channels/webchat/db.js';
+import { userHasConnectedCredential, getUserCredential, agentGroupForByokAgent, type ByokProvider } from './db.js';
+import { ensureGroupEnrollment } from './onboard.js';
+import { realOnecliAdmin } from './onecli-admin.js';
 import { byokAgentIdentifier } from './identity.js';
+
+/** The agent group's provider, mapped to the two BYOK-supported families. */
+function groupProvider(agentGroupId: string): ByokProvider {
+  return getContainerConfig(agentGroupId)?.provider === 'codex' ? 'codex' : 'claude';
+}
 
 // Sentinel bearer for a per-member OAuth container. Its value is irrelevant
 // beyond being non-empty: it flips Claude Code into OAuth mode (so it sends
@@ -29,14 +41,18 @@ registerSessionKeyResolver((mg, agentGroupId, userId) => {
   // BYOK is webchat-only and opt-in per room. Fail safe to no override.
   if (mg.channel_type !== 'webchat' || !userId) return null;
   if (!hasTable(getDb(), 'webchat_room_settings')) return null;
-  const mode = getRoomCredentialMode(mg.platform_id);
-  const oauthAllowed = getRoomOauthAllowed(mg.platform_id);
+  // Effective mode = the room's override, else the global default. OAuth/key
+  // allowances are workspace-wide (set on the Credentials admin page).
+  const mode = getEffectiveRoomMode(mg.platform_id);
+  const oauthAllowed = getCredentialsConfig().allowClaudeOauth;
   // BYOK entirely off for this room (no API-key mode AND no OAuth) → no override.
   if (mode === 'disabled' && !oauthAllowed) return null;
-  // A member with their own credential — API key OR OAuth subscription — gets
-  // their own per-member session keyed by userId. (An OAuth-only room has
-  // mode='disabled' but oauthAllowed=true, so this must not gate on mode.)
-  if (userHasActiveKey(userId, agentGroupId)) {
+  // A member who has connected their own credential for THIS room's provider —
+  // API key OR OAuth subscription — gets their own per-member session keyed by
+  // userId. The per-(user,group) OneCLI agent is created lazily at spawn (see the
+  // session prepare hook below). (An OAuth-only room has mode='disabled' but
+  // oauthAllowed=true, so this must not gate on mode.)
+  if (userHasConnectedCredential(userId, groupProvider(agentGroupId))) {
     return { sessionMode: 'per-thread', threadId: userId };
   }
   // No key: API-key 'required' rooms decline with guidance; otherwise (optional,
@@ -47,23 +63,47 @@ registerSessionKeyResolver((mg, agentGroupId, userId) => {
   return null;
 });
 
-// A per-member session (thread_id = userId) whose member has an active key
-// spawns under the member's own OneCLI identity → gateway injects THEIR key.
+// A per-member session (thread_id = userId) whose member has connected a
+// credential for this room's provider spawns under the member's own OneCLI
+// identity → gateway injects THEIR credential. The agent itself is created by
+// the prepare hook below (which runs first), so this just names it.
 registerAgentIdentityResolver((agentGroupId, threadId) => {
-  if (threadId && userHasActiveKey(threadId, agentGroupId)) {
+  if (threadId && userHasConnectedCredential(threadId, groupProvider(agentGroupId))) {
     return byokAgentIdentifier(agentGroupId, threadId);
   }
   return null;
 });
 
-// OAuth members: put their per-member container in subscription/OAuth mode with
-// a SENTINEL token and route Anthropic THROUGH OneCLI (no NO_PROXY) — OneCLI
-// swaps the sentinel for the member's real token, stored in their vault. The
-// real token never enters the container. API-key members get {} here (their key
-// is injected as x-api-key by OneCLI, no OAuth mode needed).
+// Lazy / just-in-time enrollment: the first time a connected member's session is
+// spawned in a room, create their per-(user,group) OneCLI agent and assign their
+// secret + the group's tool secrets. Runs before identity resolution. Idempotent
+// + a fast no-op once enrolled, so it costs nothing on subsequent spawns.
+registerSessionPrepareHook(async (agentGroupId, threadId) => {
+  if (!threadId || !userHasConnectedCredential(threadId, groupProvider(agentGroupId))) return;
+  await ensureGroupEnrollment(realOnecliAdmin, threadId, agentGroupId);
+});
+
+// Claude OAuth members: put their per-member container in subscription/OAuth mode
+// with a SENTINEL token and route Anthropic THROUGH OneCLI — OneCLI swaps the
+// sentinel for the member's real token (a `generic` vault secret injected as
+// `Authorization: Bearer …`). The real token never enters the container.
+//
+// Crucially we also BLANK `ANTHROPIC_API_KEY`: the OneCLI gateway sets it to
+// `placeholder` on every agent so api-key agents send `x-api-key` for the
+// gateway to overwrite. But an OAuth member's secret rewrites `Authorization`,
+// not `x-api-key`, so a lingering `x-api-key: placeholder` would reach Anthropic
+// and be rejected ("invalid API key"). Blanking it makes Claude Code use pure
+// OAuth mode — `Authorization: Bearer` + the oauth beta header, no x-api-key.
+// extraEnv is applied AFTER the gateway env, so this override wins.
+//
+// API-key members get {} (their key rides x-api-key, which the gateway swaps).
+// Codex members get {}: gated on the Claude provider; Codex auth rides OneCLI's
+// gateway auth.json stub (keyed by the per-member identity) — no env var.
 registerContainerEnvResolver((agentGroupId, threadId): Record<string, string> => {
-  if (!threadId || !userHasActiveOauth(threadId, agentGroupId)) return {};
-  return { CLAUDE_CODE_OAUTH_TOKEN: OAUTH_SENTINEL };
+  if (!threadId || groupProvider(agentGroupId) !== 'claude') return {};
+  const cred = getUserCredential(threadId, 'claude');
+  if (cred?.status !== 'active' || cred.cred_type !== 'oauth_token') return {};
+  return { CLAUDE_CODE_OAUTH_TOKEN: OAUTH_SENTINEL, ANTHROPIC_API_KEY: '' };
 });
 
 // Approval routing: reverse a BYOK per-member identity back to its agent group
