@@ -2899,6 +2899,28 @@ a.lightbox-btn {
 /* Settings IA: identity ("Profile") first, then app prefs ("Preferences").
    Sentence case + full-strength text so it reads above the uppercase muted
    per-group .setting-label. A divider separates sections, but not the first. */
+/* Settings opens as a right-side drawer (consistent with the detail panels),
+   not a centered dialog. Scoped to #settings-overlay so other modals keep their
+   centered layout; the shared backdrop + Esc/click-outside still apply. */
+#settings-overlay {
+  justify-content: flex-end;
+  align-items: stretch;
+}
+#settings-overlay .modal {
+  width: 360px;
+  max-height: 100%;
+  border-radius: 0;
+  border: none;
+  border-left: 1px solid var(--border);
+  box-shadow: -4px 0 12px rgba(0, 0, 0, 0.3);
+}
+@media (max-width: 600px) {
+  #settings-overlay .modal {
+    width: 100%;
+    max-width: 100%;
+  }
+}
+
 .settings-section-title {
   margin: 0;
   font-size: var(--fs-base);
@@ -5071,6 +5093,14 @@ a.lightbox-btn {
 }
 
 /* Settings → Member credentials (workspace policy, owner only). */
+/* Same column layout + gap as .modal-body so its items are spaced consistently
+   with the Preferences section above (the wrapper otherwise had no gap, leaving
+   its items cramped). */
+.settings-credentials {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
 .settings-credentials .settings-section-title {
   margin-top: 8px;
 }
