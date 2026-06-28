@@ -2332,9 +2332,15 @@ $('#byok-oauth-btn')?.addEventListener('click', async () => {
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.statusText);
     byokOauthSessionId = data.sessionId;
-    $('#byok-oauth-link').href = data.url;
+    const link = $('#byok-oauth-link');
+    if (link) {
+      link.href = data.url;
+      link.textContent = `Open ${byokWords(byokProvider).name} sign-in ↗`;
+    }
     // Claude: paste a code back. Codex: enter a pairing code at the site, then approve.
     if (code) code.hidden = isCodex;
+    const codeLabel = $('#byok-oauth-code-label');
+    if (codeLabel) codeLabel.hidden = isCodex;
     if (codexCode) {
       codexCode.hidden = !isCodex;
       codexCode.textContent = isCodex

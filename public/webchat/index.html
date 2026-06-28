@@ -1097,10 +1097,20 @@
             <div id="byok-oauth-spinner" class="spinner" hidden aria-hidden="true"></div>
             <!-- Revealed once the sign-in URL is ready (server mints the credential). -->
             <div id="byok-oauth-step2" hidden>
-              <a id="byok-oauth-link" href="#" target="_blank" rel="noopener noreferrer" class="byok-oauth-link"
-                >Open sign-in ↗</a
+              <a
+                id="byok-oauth-link"
+                href="#"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="btn btn-primary byok-oauth-open"
+                >Open Claude sign-in ↗</a
               >
+              <!-- Codex: enter this pairing code on the sign-in page, then approve. -->
+              <p id="byok-oauth-codex-code" class="byok-oauth-codex-code" hidden></p>
               <!-- Claude: paste the code shown on the sign-in page. -->
+              <label id="byok-oauth-code-label" class="byok-oauth-code-label" for="byok-oauth-code"
+                >Then paste the code here</label
+              >
               <input
                 id="byok-oauth-code"
                 type="text"
@@ -1108,8 +1118,6 @@
                 autocomplete="off"
                 spellcheck="false"
               />
-              <!-- Codex: enter this pairing code on the sign-in page, then approve. -->
-              <p id="byok-oauth-codex-code" class="byok-oauth-codex-code" hidden></p>
             </div>
             <div id="byok-oauth-status" class="byok-oauth-status" hidden></div>
             <div class="byok-oauth-actions">

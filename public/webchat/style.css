@@ -1190,15 +1190,15 @@ button:focus-visible {
 #byok-oauth-step2[hidden] {
   display: none;
 }
-.byok-oauth-link {
-  align-self: flex-start;
-  color: var(--accent);
-  font-size: 12px;
-  font-weight: 600;
+.byok-oauth-open {
   text-decoration: none;
 }
-.byok-oauth-link:hover {
-  text-decoration: underline;
+.byok-oauth-code-label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.byok-oauth-code-label[hidden] {
+  display: none;
 }
 #byok-oauth-code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
