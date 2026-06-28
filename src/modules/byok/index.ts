@@ -19,7 +19,7 @@ import { writeMemberTranscript } from './fanout.js';
 import { getDb, hasTable } from '../../db/connection.js';
 import { getContainerConfig } from '../../db/container-configs.js';
 import { registerApprovalAgentGroupFallback } from '../approvals/onecli-approvals.js';
-import { getEffectiveRoomMode, getCredentialsConfig, getEffectiveRoomOauthAllowed } from '../../channels/webchat/db.js';
+import { getEffectiveRoomMode, getCredentialsConfig } from '../../channels/webchat/db.js';
 import { userHasConnectedCredential, getUserCredential, agentGroupForByokAgent, type ByokProvider } from './db.js';
 import { ensureGroupEnrollment } from './onboard.js';
 import { realOnecliAdmin } from './onecli-admin.js';
@@ -41,18 +41,17 @@ registerSessionKeyResolver((mg, agentGroupId, userId) => {
   // BYOK is webchat-only and opt-in per room. Fail safe to no override.
   if (mg.channel_type !== 'webchat' || !userId) return null;
   if (!hasTable(getDb(), 'webchat_room_settings')) return null;
-  // Effective mode = the room's override, else the global default. The API-key
-  // allowance is workspace-wide (Credentials admin page); the OAuth allowance is
-  // BOTH workspace-wide AND a per-room opt-in (gate 1) — see
-  // getEffectiveRoomOauthAllowed. All provider-scoped (Claude vs Codex).
+  // Effective mode = the room's override, else the global default. OAuth/key
+  // allowances are workspace-wide (set on the Credentials admin page) and
+  // provider-scoped (Claude vs Codex).
   const provider = groupProvider(agentGroupId);
   const cfg = getCredentialsConfig();
   const mode = getEffectiveRoomMode(mg.platform_id);
-  const oauthAllowed = getEffectiveRoomOauthAllowed(mg.platform_id, provider);
+  const oauthAllowed = provider === 'codex' ? cfg.allowCodexOauth : cfg.allowClaudeOauth;
   const apiKeyAllowed = provider === 'codex' ? cfg.allowOpenaiKey : cfg.allowAnthropicKey;
   // API keys apply only when the room is on AND the workspace accepts them;
-  // OAuth subscriptions apply in an OAuth-only room (mode='disabled') ONLY when
-  // that room has opted into OAuth (oauthAllowed already encodes the room gate).
+  // OAuth subscriptions are workspace-wide and apply even in an OAuth-only room
+  // (mode='disabled' but oauthAllowed=true).
   const apiOffered = mode !== 'disabled' && apiKeyAllowed;
   if (!apiOffered && !oauthAllowed) return null; // BYOK entirely off here.
 

@@ -5521,8 +5521,8 @@ async function openRoomDetail(roomId) {
       // Clear any prior room's selection FIRST so a failed/mismatched fetch can't
       // leave the previous room's mode showing as this room's policy.
       document
-        .querySelectorAll('input[name="room-credential-mode"]')
-        .forEach((el) => ((el).checked = false));
+        .querySelectorAll('#room-credential-modes .setting-option')
+        .forEach((b) => b.classList.remove('active'));
       const hintEl = $('#room-cred-default-hint');
       if (hintEl) hintEl.textContent = '';
       authFetch(`/api/rooms/${encodeURIComponent(roomId)}/credential-mode`)
@@ -5532,11 +5532,15 @@ async function openRoomDetail(roomId) {
             if (hintEl) hintEl.textContent = '(couldn’t load — try reopening)';
             return;
           }
-          // d.mode is the per-room override ('inherit' when unset); d.defaultMode
-          // is the workspace default shown on the Default option.
-          const radio = document.querySelector(`input[name="room-credential-mode"][value="${d.mode}"]`);
-          if (radio) radio.checked = true;
-          if (hintEl) hintEl.textContent = d.defaultMode ? `(${d.defaultMode})` : '';
+          // No explicit override → the room follows the workspace default: highlight
+          // that value and note the inheritance. An explicit pick highlights itself.
+          const effective = d.mode === 'inherit' ? d.defaultMode : d.mode;
+          document
+            .querySelectorAll('#room-credential-modes .setting-option')
+            .forEach((b) => b.classList.toggle('active', b.dataset.value === effective));
+          if (hintEl)
+            hintEl.textContent =
+              d.mode === 'inherit' ? `Following the workspace default (${d.defaultMode ?? 'off'}).` : '';
         })
         .catch(() => {
           if (hintEl) hintEl.textContent = '(couldn’t load — try reopening)';
@@ -5892,17 +5896,23 @@ $('#room-name').addEventListener('keydown', (e) => {
 });
 $('#room-detail-close').addEventListener('click', closeRoomDetail);
 $('#room-delete').addEventListener('click', deleteCurrentRoom);
-$('#room-credential-modes')?.addEventListener('change', async (e) => {
-  if (!selectedRoomId || e.target.name !== 'room-credential-mode') return;
-  const mode = e.target.value;
+$('#room-credential-modes')?.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.setting-option');
+  if (!btn || !selectedRoomId) return;
+  const mode = btn.dataset.value; // disabled | optional | required (explicit override)
   const r = await authFetch(`/api/rooms/${encodeURIComponent(selectedRoomId)}/credential-mode`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
     body: JSON.stringify({ mode }),
   });
   if (r.ok) {
-    const label =
-      { inherit: 'workspace default', disabled: 'off', optional: 'optional', required: 'required' }[mode] ?? mode;
+    document
+      .querySelectorAll('#room-credential-modes .setting-option')
+      .forEach((b) => b.classList.toggle('active', b === btn));
+    // Picking a pill sets an explicit override, so it's no longer inheriting.
+    const hintEl = $('#room-cred-default-hint');
+    if (hintEl) hintEl.textContent = '';
+    const label = { disabled: 'off', optional: 'optional', required: 'required' }[mode] ?? mode;
     showToast(`Member credentials: ${label}.`, { kind: 'success' });
     if (selectedRoomId === currentRoom) updateByokBanner(currentRoom);
   } else {
