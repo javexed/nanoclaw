@@ -1444,6 +1444,11 @@ function joinRoom(roomId, roomName, jumpMessageId) {
   closeAgentDetail();
   closeRoomDetail();
   closeModelDetail();
+  // Opening a room exits any full view (Agents/Models/Topology/Wiring/
+  // Permissions/Dashboard) and restores the chat pane as the backdrop —
+  // otherwise the room "opens" behind a still-visible full view.
+  hideOtherFullViews();
+  $('#chat').hidden = false;
   // Reset any in-progress turn state from the previous room so its bubbles /
   // elapsed timer / reasoning traces can't leak into the new room.
   endAllAgentTurns();
@@ -2972,6 +2977,11 @@ function openManage(tab = 'agents') {
   closeAgentDetail();
   closeRoomDetail();
   closeModelDetail();
+  // Close any other full view first; manage overlays the chat pane, so restore
+  // chat as its backdrop (a prior full view had hidden it + set in-dashboard).
+  hideOtherFullViews('manage');
+  $('#chat').hidden = false;
+  $('#app').classList.remove('in-dashboard');
   manageActive = true;
   $('#manage').hidden = false;
   $('#overflow-btn')?.classList.add('active');
@@ -3202,6 +3212,14 @@ let dashboardActive = false;
 // pane. Each opener hides its peers synchronously (the router stack still
 // unwinds normally on back).
 function hideOtherFullViews(keep) {
+  // `manage` (the Agents/Models pane) is a full surface like the rest — it must
+  // close when another view opens, or it lingers on top with the new view
+  // underneath. (Pass no `keep` to close them all, e.g. when opening a room.)
+  if (keep !== 'manage' && manageActive) {
+    manageActive = false;
+    $('#manage').hidden = true;
+    $('#overflow-btn')?.classList.remove('active');
+  }
   if (keep !== 'dashboard' && dashboardActive) {
     dashboardActive = false;
     $('#dashboard').hidden = true;
