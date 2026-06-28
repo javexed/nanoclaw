@@ -2530,6 +2530,13 @@ function sendCurrentMessage() {
   }
 
   if (!text) return;
+  // Don't send into a non-open socket — like the read/typing/interrupt sends.
+  // ws.send on a CONNECTING/CLOSING socket throws or silently drops; bail and
+  // keep the input so the user can resend once reconnected.
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    showToast('Not connected — try again in a moment.', { kind: 'error' });
+    return;
+  }
   const clientId = `local-${++clientMsgSeq}-${Date.now()}`;
   ws.send(JSON.stringify({ type: 'message', content: text, client_id: clientId }));
   const el = appendMessage({ sender: myIdentity, sender_type: 'user', content: text }, '✓');
