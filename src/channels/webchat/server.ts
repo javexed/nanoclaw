@@ -656,7 +656,7 @@ async function handleHttp(
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     const raw = await readJsonBody(req, res);
     if (raw === null) return;
-    let body: { roomId?: unknown; apiKey?: unknown; type?: unknown; token?: unknown; acknowledged?: unknown };
+    let body: { roomId?: unknown; apiKey?: unknown; type?: unknown; token?: unknown };
     try {
       body = JSON.parse(raw) as typeof body;
     } catch {
@@ -676,11 +676,6 @@ async function handleHttp(
         if (!(provider === 'codex' ? cfg.allowCodexOauth : cfg.allowClaudeOauth))
           return json(res, 403, {
             error: `This workspace does not accept ${provider === 'codex' ? 'Codex (ChatGPT)' : 'Claude'} subscription (OAuth) connections.`,
-          });
-        // Gate 2: explicit own-use acknowledgment.
-        if (body.acknowledged !== true)
-          return json(res, 400, {
-            error: 'You must acknowledge this connects your own subscription for your own use.',
           });
         const token = typeof body.token === 'string' ? body.token.trim() : '';
         if (provider === 'codex') {
@@ -738,7 +733,7 @@ async function handleHttp(
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     const raw = await readJsonBody(req, res);
     if (raw === null) return;
-    let body: { roomId?: unknown; sessionId?: unknown; code?: unknown; acknowledged?: unknown };
+    let body: { roomId?: unknown; sessionId?: unknown; code?: unknown };
     try {
       body = JSON.parse(raw) as typeof body;
     } catch {
@@ -761,9 +756,7 @@ async function handleHttp(
         const { sessionId, url: signinUrl } = await startClaudeMint(userId);
         return json(res, 200, { sessionId, url: signinUrl });
       }
-      // step === 'code': require the own-use acknowledgment, mint, then onboard.
-      if (body.acknowledged !== true)
-        return json(res, 400, { error: 'You must acknowledge this connects your own subscription for your own use.' });
+      // step === 'code': mint, then onboard.
       if (typeof body.sessionId !== 'string' || typeof body.code !== 'string')
         return json(res, 400, { error: 'sessionId and code required' });
       const token = await mintClaudeToken(userId, body.sessionId, body.code);
@@ -785,7 +778,7 @@ async function handleHttp(
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     const raw = await readJsonBody(req, res);
     if (raw === null) return;
-    let body: { roomId?: unknown; sessionId?: unknown; acknowledged?: unknown };
+    let body: { roomId?: unknown; sessionId?: unknown };
     try {
       body = JSON.parse(raw) as typeof body;
     } catch {
@@ -810,9 +803,7 @@ async function handleHttp(
         const { sessionId, url: signinUrl, userCode } = await startCodexMint(userId);
         return json(res, 200, { sessionId, url: signinUrl, userCode });
       }
-      // step === 'finish': require the own-use acknowledgment, wait for auth.json, onboard.
-      if (body.acknowledged !== true)
-        return json(res, 400, { error: 'You must acknowledge this connects your own subscription for your own use.' });
+      // step === 'finish': wait for auth.json, then onboard.
       if (typeof body.sessionId !== 'string') return json(res, 400, { error: 'sessionId required' });
       const authJson = await finishCodexMint(userId, body.sessionId);
       for (const g of groups) await onboardByokOauth(realOnecliAdmin, userId, g.id, userId, authJson);

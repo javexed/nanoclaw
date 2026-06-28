@@ -1190,17 +1190,6 @@ button:focus-visible {
   padding: 1px 4px;
   font-size: 11px;
 }
-.byok-oauth-ack {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  font-size: 12px;
-  line-height: 1.4;
-}
-.byok-oauth-ack input {
-  flex: none;
-  margin-top: 2px;
-}
 .byok-oauth-actions {
   display: flex;
   gap: 8px;

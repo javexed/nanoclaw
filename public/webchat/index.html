@@ -309,10 +309,7 @@
           <button id="byok-oauth-btn" type="button" hidden>Connect with my Claude subscription</button>
           <button id="byok-connect-btn" type="button">Use an API key</button>
           <div id="byok-oauth-form" class="byok-oauth-form" hidden>
-            <p id="byok-oauth-help" class="byok-oauth-help">
-              Sign in to <strong>your</strong> subscription — no terminal needed. It bills
-              <strong>your</strong> account.
-            </p>
+            <p id="byok-oauth-help" class="byok-oauth-help">Sign in to your subscription — billed to you.</p>
             <!-- Revealed once the sign-in URL is ready (server mints the credential). -->
             <div id="byok-oauth-step2" hidden>
               <a id="byok-oauth-link" href="#" target="_blank" rel="noopener noreferrer" class="byok-oauth-link"
@@ -322,16 +319,12 @@
               <input
                 id="byok-oauth-code"
                 type="text"
-                placeholder="Paste the code from that page"
+                placeholder="Paste the code"
                 autocomplete="off"
                 spellcheck="false"
               />
               <!-- Codex: enter this pairing code on the sign-in page, then approve. -->
               <p id="byok-oauth-codex-code" class="byok-oauth-codex-code" hidden></p>
-              <label class="byok-oauth-ack">
-                <input id="byok-oauth-ack" type="checkbox" />
-                I'm connecting <strong>my own</strong> subscription for <strong>my own</strong> use.
-              </label>
             </div>
             <div id="byok-oauth-status" class="byok-oauth-status" hidden></div>
             <div class="byok-oauth-actions">

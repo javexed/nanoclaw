@@ -2330,13 +2330,10 @@ $('#byok-oauth-btn')?.addEventListener('click', async () => {
   const code = $('#byok-oauth-code');
   if (code) code.value = '';
   const codexCode = $('#byok-oauth-codex-code');
-  const ack = $('#byok-oauth-ack');
-  if (ack) ack.checked = false;
   const isCodex = byokProvider === 'codex';
   const { subWord } = byokWords(byokProvider);
   const help = $('#byok-oauth-help');
-  if (help)
-    help.innerHTML = `Sign in to <strong>your</strong> ${subWord} — no terminal needed. It bills <strong>your</strong> account.`;
+  if (help) help.textContent = `Sign in to your ${subWord} — billed to you.`;
   byokOauthStatus('Preparing sign-in…', '');
   try {
     const startUrl = isCodex ? '/api/byok/codex/start' : '/api/byok/oauth/start';
@@ -2360,7 +2357,7 @@ $('#byok-oauth-btn')?.addEventListener('click', async () => {
         : '';
     }
     const submit = $('#byok-oauth-submit');
-    if (submit) submit.textContent = isCodex ? 'I’ve approved — connect' : 'Connect subscription';
+    if (submit) submit.textContent = isCodex ? 'I’ve approved — connect' : 'Connect';
     $('#byok-oauth-step2').hidden = false;
     $('#byok-oauth-submit').hidden = false;
     byokOauthStatus(isCodex ? 'Open the link, enter the code, and approve — then click connect.' : '', '');
@@ -2387,27 +2384,17 @@ $('#byok-oauth-cancel')?.addEventListener('click', () => {
 $('#byok-oauth-submit')?.addEventListener('click', async () => {
   const isCodex = byokProvider === 'codex';
   const code = ($('#byok-oauth-code')?.value || '').trim();
-  const acknowledged = !!$('#byok-oauth-ack')?.checked;
   if (!byokOauthSessionId) return;
   if (!isCodex && !code) return; // Claude needs the pasted code; Codex needs none.
-  if (!acknowledged) {
-    showToast('Please tick the acknowledgment to continue.', { kind: 'error' });
-    return;
-  }
   const btn = $('#byok-oauth-submit');
   btn.disabled = true;
   const { subWord } = byokWords(byokProvider);
-  byokOauthStatus(
-    isCodex
-      ? 'Waiting for approval… (finish in the other tab — this can take a moment)'
-      : 'Saving your subscription… (this can take a few seconds)',
-    '',
-  );
+  byokOauthStatus(isCodex ? 'Waiting for approval…' : 'Saving your subscription…', '');
   try {
     const finishUrl = isCodex ? '/api/byok/codex/finish' : '/api/byok/oauth/code';
     const body = isCodex
-      ? { roomId: currentRoom, sessionId: byokOauthSessionId, acknowledged }
-      : { roomId: currentRoom, sessionId: byokOauthSessionId, code, acknowledged };
+      ? { roomId: currentRoom, sessionId: byokOauthSessionId }
+      : { roomId: currentRoom, sessionId: byokOauthSessionId, code };
     const r = await authFetch(finishUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
