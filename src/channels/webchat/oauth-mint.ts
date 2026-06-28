@@ -249,6 +249,17 @@ export async function mintClaudeToken(userId: string, sessionId: string, code: s
         if (t) {
           finish();
           resolve(t);
+          return;
+        }
+        // `claude setup-token` keeps the prompt open after a bad code, so fail
+        // fast on its error screen instead of waiting out the full timeout.
+        // ANSI cursor-moves splice the words, so match against the escape-stripped
+        // text (which keeps literal spaces like "OAuth error").
+        const since = stripEscapes(session.buffer.slice(rawLenBefore));
+        if (/OAuth error|Invalid|expired/i.test(since)) {
+          finish();
+          log.warn('OAuth mint: code rejected', { sessionId, ...diagnoseCapture(session.buffer.slice(rawLenBefore)) });
+          reject(new Error('That code was rejected — copy the full code from the sign-in page and try again.'));
         }
       }, 250);
 
