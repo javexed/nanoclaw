@@ -7,9 +7,12 @@ import {
   userHasActiveKey,
   userHasActiveOauth,
   getUserSecretId,
+  userHasConnectedCredential,
   agentGroupForByokAgent,
   activeMembersForGroup,
   upsertByokCredential,
+  upsertUserCredential,
+  setUserCredentialStatus,
   setByokStatus,
 } from './db.js';
 import {
@@ -37,11 +40,18 @@ describe('byok_credentials', () => {
     expect(userHasActiveKey('webchat:bob', 'ag-1')).toBe(false);
   });
 
-  it('reuses a user secret id across agent groups', () => {
-    upsertByokCredential('webchat:alice', 'ag-1', 'byok-alice-aaa', 'sec-1');
+  it('getUserSecretId is sourced from the user-level credential (one secret, all rooms)', () => {
+    expect(getUserSecretId('webchat:alice')).toBeNull(); // not connected yet
+    upsertUserCredential('webchat:alice', 'claude', 'sec-1', 'api_key');
+    expect(userHasConnectedCredential('webchat:alice', 'claude')).toBe(true);
     expect(getUserSecretId('webchat:alice')).toBe('sec-1');
-    upsertByokCredential('webchat:alice', 'ag-2', 'byok-alice-bbb', 'sec-1');
-    expect(getUserSecretId('webchat:alice')).toBe('sec-1');
+    // Provider-scoped: a Codex credential is a separate secret.
+    upsertUserCredential('webchat:alice', 'codex', 'sec-cdx', 'api_key');
+    expect(getUserSecretId('webchat:alice', 'codex')).toBe('sec-cdx');
+    expect(getUserSecretId('webchat:alice', 'claude')).toBe('sec-1');
+    // Revoking clears it.
+    setUserCredentialStatus('webchat:alice', 'claude', 'revoked');
+    expect(getUserSecretId('webchat:alice')).toBeNull();
   });
 
   it('recovers the agent group from a BYOK agent id (approval routing)', () => {

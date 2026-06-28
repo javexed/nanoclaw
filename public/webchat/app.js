@@ -461,8 +461,14 @@ async function saveHandle() {
 function renderHandleChip() {
   const chip = $('#handle-chip');
   if (!chip) return;
-  chip.textContent = myHandle ? `@${myHandle}` : '+ set @handle';
+  const label = myHandle ? `@${myHandle}` : '+ set @handle';
+  // When the member has connected their own credential, the handle chip doubles
+  // as the credential indicator (a 🔑 prefix) — there's no separate key chip.
+  // The connect/disconnect controls live in the chip's popover (#handle-creds).
+  chip.textContent = byokConnected ? `🔑 ${label}` : label;
   chip.classList.toggle('is-unset', !myHandle);
+  chip.classList.toggle('has-cred', byokConnected);
+  chip.title = byokConnected ? 'Billing your own account — click to manage' : 'Edit your handle';
 }
 
 function openHandlePopover() {
@@ -2120,6 +2126,9 @@ async function jumpToMessage(messageId) {
 let byokProvider = 'claude';
 // Latest banner state, so the @handle popover credentials shortcut can mirror it.
 let byokState = null;
+// Whether the member has a connected credential for the open room — drives the
+// 🔑 indicator on the @handle chip (the standalone key chip was merged into it).
+let byokConnected = false;
 
 function byokWords(provider) {
   return provider === 'codex'
@@ -2129,13 +2138,13 @@ function byokWords(provider) {
 
 async function updateByokBanner(roomId) {
   const banner = $('#byok-banner');
-  const chip = $('#byok-chip');
   if (!banner || !roomId) return;
   const hideAll = () => {
     banner.hidden = true;
-    if (chip) chip.hidden = true;
     byokState = null;
+    byokConnected = false;
     updateHandleCreds();
+    renderHandleChip();
   };
   try {
     const r = await authFetch(`/api/byok/credential?roomId=${encodeURIComponent(roomId)}`);
@@ -2156,24 +2165,18 @@ async function updateByokBanner(roomId) {
     }
 
     byokState = { offered: true, connected, provider, oauthAllowed, apiOffered, subWord, keyWord };
+    byokConnected = connected;
     updateHandleCreds();
+    renderHandleChip();
 
-    // Connected → collapse to a small key chip in the header; the full banner
-    // is only the actionable "connect" prompt, which is done once connected.
+    // Connected → the @handle chip shows the 🔑 indicator (see renderHandleChip);
+    // the full banner is only the actionable "connect" prompt, done once connected.
     if (connected) {
       banner.hidden = true;
-      if (chip) {
-        chip.hidden = false;
-        chip.title =
-          credType === 'oauth_token'
-            ? `Billing your ${subWord} · click to disconnect`
-            : `Billing your ${keyWord} · click to disconnect`;
-      }
       return;
     }
 
-    // Not connected → show the actionable banner, hide the chip.
-    if (chip) chip.hidden = true;
+    // Not connected → show the actionable banner.
     const connectBtn = $('#byok-connect-btn');
     const oauthBtn = $('#byok-oauth-btn');
     const input = $('#byok-key-input');
@@ -2205,10 +2208,13 @@ function updateHandleCreds() {
   wrap.hidden = false;
   const statusEl = $('#handle-creds-status');
   const actionBtn = $('#handle-creds-action');
-  if (statusEl)
-    statusEl.textContent = byokState.connected
-      ? 'Member credentials — connected'
-      : 'Member credentials — not connected';
+  // Minimalist integrations-row style: a status dot + the provider name carry
+  // the connected/not state; the action button does the rest.
+  const { name } = byokWords(byokState.provider);
+  if (statusEl) {
+    statusEl.textContent = name;
+    statusEl.classList.toggle('is-connected', byokState.connected);
+  }
   if (actionBtn) actionBtn.textContent = byokState.connected ? 'Disconnect' : 'Connect';
 }
 
@@ -2217,14 +2223,17 @@ $('#handle-creds-action')?.addEventListener('click', async () => {
   closeHandlePopover();
   if (byokState.connected) {
     const confirmed = await showConfirmModal({
-      title: 'Disconnect your credential?',
-      body: 'Your turns in this room will stop billing your own account and fall back to the shared key (or be declined if the room requires your own).',
+      title: `Disconnect ${byokWords(byokState.provider).name}?`,
       confirmLabel: 'Disconnect',
       destructive: true,
     });
     if (confirmed) await disconnectByok();
+  } else if (byokState.oauthAllowed) {
+    // Subscriptions allowed → open the sign-in helper directly (what users expect
+    // from a "Connect" action), rather than just surfacing the banner.
+    $('#byok-oauth-btn')?.click();
   } else {
-    // Reveal the in-room banner and draw attention to it (the connect controls live there).
+    // API-key-only room → reveal the banner and its key input.
     const banner = $('#byok-banner');
     if (banner) {
       banner.hidden = false;
@@ -2232,6 +2241,7 @@ $('#handle-creds-action')?.addEventListener('click', async () => {
       banner.classList.add('byok-banner-flash');
       setTimeout(() => banner.classList.remove('byok-banner-flash'), 1200);
     }
+    $('#byok-connect-btn')?.click(); // reveal the key input
   }
 });
 
@@ -2270,7 +2280,7 @@ async function disconnectByok() {
     body: JSON.stringify({ roomId: currentRoom }),
   });
   if (r.ok) {
-    showToast('Disconnected your key from this room.', { kind: 'success' });
+    showToast('Disconnected your account.', { kind: 'success' });
     await updateByokBanner(currentRoom);
   } else {
     const err = await r.json().catch(() => ({}));
@@ -2280,16 +2290,6 @@ async function disconnectByok() {
 
 // The connected state lives as a compact key chip in the header; clicking it
 // disconnects (after a confirm), so the full banner no longer sits over the chat.
-$('#byok-chip')?.addEventListener('click', async () => {
-  const confirmed = await showConfirmModal({
-    title: 'Disconnect your credential?',
-    body: 'Your turns in this room will stop billing your own account and fall back to the shared key (or be declined if the room requires your own).',
-    confirmLabel: 'Disconnect',
-    destructive: true,
-  });
-  if (confirmed) await disconnectByok();
-});
-
 // ── BYOK OAuth: connect a Claude subscription token ────────────────────────
 // Browser-mint OAuth: no terminal. Opening the form starts a server-side mint
 // (a throwaway container runs `claude setup-token`), surfaces the sign-in URL,
@@ -2457,7 +2457,7 @@ function showConfirmModal({ title, body, confirmLabel = 'Confirm', cancelLabel =
     overlay.className = 'modal-overlay confirm-overlay';
 
     const modal = document.createElement('div');
-    modal.className = 'modal confirm-modal';
+    modal.className = 'modal confirm-modal' + (body ? '' : ' confirm-modal--titleonly');
 
     const header = document.createElement('div');
     header.className = 'modal-header';
@@ -2465,13 +2465,18 @@ function showConfirmModal({ title, body, confirmLabel = 'Confirm', cancelLabel =
     titleSpan.textContent = title || 'Confirm';
     header.appendChild(titleSpan);
 
-    const bodyEl = document.createElement('div');
-    bodyEl.className = 'modal-body';
-    const message = document.createElement('div');
-    message.className = 'confirm-message';
-    if (body instanceof HTMLElement) message.appendChild(body);
-    else message.textContent = body || '';
-    bodyEl.appendChild(message);
+    // Body is optional: a title-only confirm (no dead space) for reversible
+    // actions whose title says it all. Only render the body when there's content.
+    let bodyEl = null;
+    if (body) {
+      bodyEl = document.createElement('div');
+      bodyEl.className = 'modal-body';
+      const message = document.createElement('div');
+      message.className = 'confirm-message';
+      if (body instanceof HTMLElement) message.appendChild(body);
+      else message.textContent = body;
+      bodyEl.appendChild(message);
+    }
 
     const footer = document.createElement('div');
     footer.className = 'confirm-actions';
@@ -2485,7 +2490,7 @@ function showConfirmModal({ title, body, confirmLabel = 'Confirm', cancelLabel =
     confirmBtn.textContent = confirmLabel;
     footer.append(cancelBtn, confirmBtn);
 
-    modal.append(header, bodyEl, footer);
+    modal.append(header, ...(bodyEl ? [bodyEl] : []), footer);
     overlay.appendChild(modal);
     document.body.appendChild(overlay);
 

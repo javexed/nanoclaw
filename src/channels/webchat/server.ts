@@ -206,26 +206,10 @@ function codexAvailable(): boolean {
   return listProviderContainerConfigNames().includes('codex');
 }
 
-/**
- * Every agent group the user can reach (across all their webchat rooms) whose
- * provider matches `provider`. Enrolling a connected credential on all of these
- * — not just the current room's agent — makes "connect once" apply to all of a
- * member's same-provider rooms. (New rooms added later would need a reconnect.)
- */
-function agentGroupsToEnroll(userId: string, provider: 'claude' | 'codex'): { id: string }[] {
-  const byId = new Map<string, { id: string }>();
-  for (const room of filterRoomsForUser(userId, getAllWebchatRooms())) {
-    for (const a of getAgentsForWebchatRoom(room.id)) {
-      const p = getContainerConfig(a.id)?.provider === 'codex' ? 'codex' : 'claude';
-      if (p === provider) byId.set(a.id, { id: a.id });
-    }
-  }
-  return [...byId.values()];
-}
-import { onboardByokCredential, onboardByokOauth, revokeByokCredential } from '../../modules/byok/onboard.js';
+import { storeUserCredential, revokeUserCredential } from '../../modules/byok/onboard.js';
 import { startClaudeMint, mintClaudeToken, startCodexMint, finishCodexMint, cancelMint } from './oauth-mint.js';
 import { realOnecliAdmin } from '../../modules/byok/onecli-admin.js';
-import { userHasActiveKey, getByokCredential } from '../../modules/byok/db.js';
+import { userHasConnectedCredential, getUserCredential } from '../../modules/byok/db.js';
 import { getContainerConfig } from '../../db/container-configs.js';
 import { broadcast, broadcastRooms } from './state.js';
 import { setupWebSocket } from './ws.js';
@@ -653,14 +637,15 @@ async function handleHttp(
       if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
       if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
       const groups = getAgentsForWebchatRoom(roomId);
-      const connected = groups.length > 0 && groups.every((g) => userHasActiveKey(userId, g.id));
-      // Report the connected credential type so the UI shows the right banner.
-      const credType = connected && groups[0] ? (getByokCredential(userId, groups[0].id)?.cred_type ?? null) : null;
       // Effective mode (room override → global default). Credential TYPES are
       // workspace-wide (Credentials admin page); which ones apply here depends on
       // the room's provider (Claude vs Codex).
       const cfg = getCredentialsConfig();
       const provider = groups[0] && getContainerConfig(groups[0].id)?.provider === 'codex' ? 'codex' : 'claude';
+      // Connection is now user-level (connect once → all same-provider rooms).
+      const connected = userHasConnectedCredential(userId, provider);
+      // Report the connected credential type so the UI shows the right banner.
+      const credType = connected ? (getUserCredential(userId, provider)?.cred_type ?? null) : null;
       return json(res, 200, {
         connected,
         credType,
@@ -714,8 +699,7 @@ async function handleHttp(
             error: 'Expected a Claude subscription token from `claude setup-token` (sk-ant-oat…)',
           });
         }
-        for (const g of agentGroupsToEnroll(userId, provider))
-          await onboardByokOauth(realOnecliAdmin, userId, g.id, userId, token);
+        await storeUserCredential(realOnecliAdmin, userId, provider, token, 'oauth_token');
       } else if (method === 'POST') {
         if (!(provider === 'codex' ? cfg.allowOpenaiKey : cfg.allowAnthropicKey))
           return json(res, 403, {
@@ -728,12 +712,10 @@ async function handleHttp(
         } else if (!/^sk-ant-/.test(apiKey)) {
           return json(res, 400, { error: 'Expected an Anthropic API key (sk-ant-…)' });
         }
-        for (const g of agentGroupsToEnroll(userId, provider))
-          await onboardByokCredential(realOnecliAdmin, userId, g.id, userId, apiKey);
+        await storeUserCredential(realOnecliAdmin, userId, provider, apiKey, 'api_key');
       } else {
-        // Disconnect everywhere: revoke across all the user's same-provider agents.
-        for (const g of agentGroupsToEnroll(userId, provider))
-          await revokeByokCredential(realOnecliAdmin, userId, g.id);
+        // Disconnect: revoke the user-level credential + un-enroll every group.
+        await revokeUserCredential(realOnecliAdmin, userId, provider);
       }
     } catch (err) {
       log.error('BYOK onboard/revoke failed', { userId, roomId, err: err instanceof Error ? err.message : err });
@@ -745,10 +727,9 @@ async function handleHttp(
   // ── BYOK OAuth browser-mint: get a setup-token without a terminal ──────────
   // A member signs in to their Claude subscription entirely in the browser; the
   // server runs `claude setup-token` in a throwaway container, scrapes the URL,
-  // takes the pasted code, captures the token, and onboards it per-member via
-  // onboardByokOauth — the same storage the paste path uses, minus the terminal.
-  // Same gates as the OAuth paste path: room access + the room's OAuth opt-in
-  // (+ own-use acknowledgment on the final step).
+  // takes the pasted code, captures the token, and stores it as the member's
+  // user-level credential — the same storage the paste path uses, minus the
+  // terminal. Same gates as the OAuth paste path: room access + OAuth opt-in.
   const byokMintMatch = url.pathname.match(/^\/api\/byok\/oauth\/(start|code|cancel)$/);
   if (byokMintMatch && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
@@ -781,8 +762,7 @@ async function handleHttp(
       if (typeof body.sessionId !== 'string' || typeof body.code !== 'string')
         return json(res, 400, { error: 'sessionId and code required' });
       const token = await mintClaudeToken(userId, body.sessionId, body.code);
-      for (const g of agentGroupsToEnroll(userId, 'claude'))
-        await onboardByokOauth(realOnecliAdmin, userId, g.id, userId, token);
+      await storeUserCredential(realOnecliAdmin, userId, 'claude', token, 'oauth_token');
       return json(res, 200, { ok: true });
     } catch (err) {
       return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
@@ -792,9 +772,9 @@ async function handleHttp(
   // ── BYOK Codex browser-mint: connect a ChatGPT subscription without a terminal
   // `codex login --device-auth` runs in a throwaway container; the user enters
   // the pairing code at OpenAI's site (no code pasted back here). 'start' returns
-  // the URL + code; 'finish' waits for the written auth.json and onboards it
-  // per-member via onboardByokOauth (→ an `openai` auth.json secret for the Codex
-  // room). Same gates as the Claude mint: room access + the room's OAuth opt-in.
+  // the URL + code; 'finish' waits for the written auth.json and stores it as the
+  // member's user-level Codex credential (→ an `openai` auth.json secret). Same
+  // gates as the Claude mint: room access + the room's OAuth opt-in.
   const codexMintMatch = url.pathname.match(/^\/api\/byok\/codex\/(start|finish|cancel)$/);
   if (codexMintMatch && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
@@ -828,8 +808,7 @@ async function handleHttp(
       // step === 'finish': wait for auth.json, then onboard.
       if (typeof body.sessionId !== 'string') return json(res, 400, { error: 'sessionId required' });
       const authJson = await finishCodexMint(userId, body.sessionId);
-      for (const g of agentGroupsToEnroll(userId, 'codex'))
-        await onboardByokOauth(realOnecliAdmin, userId, g.id, userId, authJson);
+      await storeUserCredential(realOnecliAdmin, userId, 'codex', authJson, 'oauth_token');
       return json(res, 200, { ok: true });
     } catch (err) {
       return json(res, 502, { error: err instanceof Error ? err.message : String(err) });

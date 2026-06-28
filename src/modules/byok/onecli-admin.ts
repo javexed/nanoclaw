@@ -80,6 +80,12 @@ export interface OnecliAdmin {
   findAgentId(identifier: string): Promise<string | null>;
   /** Idempotently ensure an agent exists for the identifier; returns its uuid. */
   ensureAgent(name: string, identifier: string): Promise<string>;
+  /**
+   * Create an `anthropic`-type vault secret. Holds either an API key
+   * (`sk-ant-api…`) or a subscription/OAuth token (`sk-ant-oat…`); OneCLI
+   * auto-detects the auth mode from the value (x-api-key vs Authorization:
+   * Bearer) and serves it as the api.anthropic.com provider credential.
+   */
   createAnthropicSecret(name: string, value: string): Promise<string>;
   /**
    * Create the member's OpenAI/Codex vault secret. `oauth_token` stores the whole

@@ -1111,25 +1111,16 @@ button:focus-visible {
 }
 
 /* BYOK per-member key banner + room credential-mode selector */
-/* Connected-state indicator: a compact key chip in the chat header, replacing
-   the full-width banner once a personal credential is connected. */
-.byok-chip {
+/* Connected-state indicator: the @handle chip is accent-tinted and prefixed with
+   a 🔑 (see .handle-chip.has-cred) once a personal credential is connected — there
+   is no separate key chip. */
+.handle-chip.has-cred {
   background: color-mix(in srgb, var(--accent) 18%, var(--surface2));
-  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
   color: var(--text);
-  min-height: 32px;
-  padding: 4px 9px;
-  border-radius: 12px;
-  font-size: 13px;
-  line-height: 1;
-  cursor: pointer;
-  transition: background 0.15s;
 }
-.byok-chip:hover {
+.handle-chip.has-cred:hover {
   background: color-mix(in srgb, var(--accent) 30%, var(--surface2));
-}
-.byok-chip[hidden] {
-  display: none;
 }
 
 .byok-banner {
@@ -4400,6 +4391,14 @@ a.lightbox-btn {
 .confirm-modal {
   width: 420px;
 }
+/* Title-only confirm (no body): drop the header divider and give the actions
+   breathing room so the buttons aren't flush against the title. */
+.confirm-modal--titleonly .modal-header {
+  border-bottom: none;
+}
+.confirm-modal--titleonly .confirm-actions {
+  padding-top: 14px;
+}
 .confirm-message {
   font-size: 0.933rem;
   line-height: 1.5;
@@ -5041,6 +5040,20 @@ a.lightbox-btn {
 .handle-creds-status {
   font-size: var(--fs-sm);
   color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+/* Leading status dot: muted = not connected, --success = connected. */
+.handle-creds-status::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border);
+}
+.handle-creds-status.is-connected::before {
+  background: var(--success);
 }
 
 /* Brief highlight when the banner is summoned from the @handle popover. */

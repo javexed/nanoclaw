@@ -53,20 +53,69 @@ export function userHasActiveOauth(userId: string, agentGroupId: string): boolea
   return row?.status === 'active' && row.cred_type === 'oauth_token' && row.provider === 'claude';
 }
 
-/**
- * The user's existing vault secret id for a given provider (reused across their
- * same-provider agent-group rows), if any. Scoped by provider so a member in
- * both a Claude room and a Codex room keeps two distinct secrets — their
- * `anthropic` key and their `openai` credential never collide.
- */
+// ── User-level credential (connect-time source of truth) ──
+// One row per (user, provider): the single vault secret the member connected.
+// Per-group enrollment (above) is created lazily from this on first use.
+export interface ByokUserCredentialRow {
+  user_id: string;
+  provider: ByokProvider;
+  secret_id: string | null;
+  cred_type: ByokCredType;
+  status: ByokStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export function getUserCredential(userId: string, provider: ByokProvider): ByokUserCredentialRow | null {
+  return (
+    (getDb().prepare(`SELECT * FROM byok_user_credentials WHERE user_id = ? AND provider = ?`).get(userId, provider) as
+      | ByokUserCredentialRow
+      | undefined) ?? null
+  );
+}
+
+/** True when the user has connected a credential for this provider (the gate for per-member routing). */
+export function userHasConnectedCredential(userId: string, provider: ByokProvider): boolean {
+  return getUserCredential(userId, provider)?.status === 'active';
+}
+
+/** The user's vault secret id for a provider — now sourced from the user-level credential. */
 export function getUserSecretId(userId: string, provider: ByokProvider = 'claude'): string | null {
-  const row = getDb()
+  const row = getUserCredential(userId, provider);
+  return row && row.status === 'active' ? (row.secret_id ?? null) : null;
+}
+
+export function upsertUserCredential(
+  userId: string,
+  provider: ByokProvider,
+  secretId: string | null,
+  credType: ByokCredType,
+): void {
+  const now = new Date().toISOString();
+  getDb()
     .prepare(
-      `SELECT secret_id FROM byok_credentials
-         WHERE user_id = ? AND provider = ? AND secret_id IS NOT NULL LIMIT 1`,
+      `INSERT INTO byok_user_credentials (user_id, provider, secret_id, cred_type, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'active', ?, ?)
+       ON CONFLICT (user_id, provider) DO UPDATE SET
+         secret_id  = excluded.secret_id,
+         cred_type  = excluded.cred_type,
+         status     = 'active',
+         updated_at = excluded.updated_at`,
     )
-    .get(userId, provider) as { secret_id: string } | undefined;
-  return row?.secret_id ?? null;
+    .run(userId, provider, secretId, credType, now, now);
+}
+
+export function setUserCredentialStatus(userId: string, provider: ByokProvider, status: ByokStatus): void {
+  getDb()
+    .prepare(`UPDATE byok_user_credentials SET status = ?, updated_at = ? WHERE user_id = ? AND provider = ?`)
+    .run(status, new Date().toISOString(), userId, provider);
+}
+
+/** Per-group enrollment rows for a user+provider — used to revoke everywhere on disconnect. */
+export function listEnrolledGroups(userId: string, provider: ByokProvider): ByokCredentialRow[] {
+  return getDb()
+    .prepare(`SELECT * FROM byok_credentials WHERE user_id = ? AND provider = ? AND status = 'active'`)
+    .all(userId, provider) as ByokCredentialRow[];
 }
 
 /** Recover the owning agent group from a BYOK container's OneCLI identity (approval routing). */

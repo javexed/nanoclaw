@@ -41,26 +41,137 @@ import { getDefaultContainerImage } from '../../install-slug.js';
 // ESC[12G that the CLI sprays mid-line and would otherwise split a URL/token.
 const CSI = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 const OSC = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
-// Everything <= space (control bytes, CR/LF, tabs, wrap-padding spaces) + DEL.
-const CONTROL_AND_SPACE = /[\x00-\x20\x7f]/g;
 /* eslint-enable no-control-regex */
 
 // URL: drop escape sequences but KEEP whitespace, so the match stops at the
-// space/newline after the URL instead of swallowing trailing text.
+// space/newline after the URL instead of swallowing trailing text. (The token
+// is recovered separately via full terminal emulation — see renderTerminal.)
 function stripEscapes(raw: string): string {
   return raw.replace(CSI, '').replace(OSC, '');
 }
-// Token: also drop ALL whitespace/control, so a token the PTY wrapped or padded
-// mid-string becomes contiguous again. Mirrors setup/lib/captured-token.ts.
-function normalizeForToken(raw: string): string {
-  return stripEscapes(raw).replace(CONTROL_AND_SPACE, '');
+
+/**
+ * Reconstruct the on-screen text from raw PTY output by EMULATING the terminal.
+ *
+ * `claude setup-token` renders via Ink, which frame-diffs: it rewrites only the
+ * columns that changed between frames and uses cursor-positioning escapes
+ * (CHA `ESC[<n>G`, CUF `ESC[<n>C`, …) to jump over columns it left untouched.
+ * So the token does NOT appear linearly in the byte stream — naive escape
+ * stripping concatenates the written runs and silently drops the skipped
+ * columns (e.g. the `o` in `sk-ant-oat01-…`). The only faithful recovery is to
+ * apply the moves to a grid, exactly as the user's terminal does, then read the
+ * resulting lines. Handles the horizontal/vertical moves + erases Ink emits;
+ * other CSI/OSC (color, etc.) are no-ops for layout and skipped.
+ */
+function renderTerminal(raw: string): string {
+  const grid: string[][] = [];
+  let row = 0;
+  let col = 0;
+  const ensure = (r: number, c: number): void => {
+    while (grid.length <= r) grid.push([]);
+    const line = grid[r];
+    while (line.length <= c) line.push(' ');
+  };
+  const num = (s: string, def = 1): number => {
+    const n = parseInt(s, 10);
+    return Number.isNaN(n) ? def : n;
+  };
+  let i = 0;
+  while (i < raw.length) {
+    const ch = raw[i];
+    if (ch === '\x1b' && raw[i + 1] === '[') {
+      // CSI: ESC [ params intermediates final
+      let j = i + 2;
+      let params = '';
+      while (j < raw.length && /[0-9;?]/.test(raw[j])) params += raw[j++];
+      while (j < raw.length && raw[j] >= ' ' && raw[j] <= '/') j++; // intermediates
+      const final = raw[j];
+      const p0 = params.split(';')[0] ?? '';
+      switch (final) {
+        case 'A':
+          row = Math.max(0, row - num(p0));
+          break;
+        case 'B':
+          row += num(p0);
+          break;
+        case 'C':
+          col += num(p0);
+          break;
+        case 'D':
+          col = Math.max(0, col - num(p0));
+          break;
+        case 'G':
+          col = num(p0) - 1;
+          break;
+        case 'H':
+        case 'f': {
+          const parts = params.split(';');
+          row = num(parts[0] ?? '') - 1;
+          col = num(parts[1] ?? '') - 1;
+          break;
+        }
+        case 'K': {
+          ensure(row, col);
+          const mode = num(p0, 0);
+          if (mode === 0) grid[row].length = col;
+          else if (mode === 1) for (let c = 0; c <= col; c++) grid[row][c] = ' ';
+          else grid[row] = [];
+          break;
+        }
+        case 'J':
+          if (num(p0, 0) === 2) {
+            grid.length = 0;
+            row = 0;
+            col = 0;
+          }
+          break;
+        // color (m), private modes (h/l), etc. — no layout effect.
+      }
+      i = j + 1;
+      continue;
+    }
+    if (ch === '\x1b' && raw[i + 1] === ']') {
+      // OSC: skip to BEL or ST.
+      let j = i + 2;
+      while (j < raw.length && raw[j] !== '\x07' && !(raw[j] === '\x1b' && raw[j + 1] === '\\')) j++;
+      i = raw[j] === '\x07' ? j + 1 : j + 2;
+      continue;
+    }
+    if (ch === '\x1b') {
+      i += 2; // other two-byte escape (ESC M, ESC =, …)
+      continue;
+    }
+    if (ch === '\r') {
+      col = 0;
+      i++;
+      continue;
+    }
+    if (ch === '\n') {
+      row++;
+      i++;
+      continue;
+    }
+    if (ch === '\b') {
+      col = Math.max(0, col - 1);
+      i++;
+      continue;
+    }
+    if (ch < ' ' || ch === '\x7f') {
+      i++; // other control byte — no layout effect
+      continue;
+    }
+    ensure(row, col);
+    grid[row][col] = ch;
+    col++;
+    i++;
+  }
+  return grid.map((line) => line.join('').replace(/\s+$/, '')).join('\n');
 }
 
-// Claude subscription OAuth token: sk-ant-<base64url>, ~100+ chars. (The older
-// sk-ant-oat…AA shape is just a subset of this — Claude has shipped tokens that
-// neither start with `oat` nor end in `AA`, so anchor only on the sk-ant- prefix
-// + a generous length.) stty cols 4000 keeps it on one line (unwrapped), so the
-// escape-stripped output leaves it contiguous and delimited from trailing prose.
+// Claude subscription OAuth token: `sk-ant-oat01-<base64url>…AA`, ~108 chars.
+// Anchored loosely on the `sk-ant-` prefix + a generous length so a future
+// format tweak still matches; the token is read off the terminal-emulated
+// screen (renderTerminal), not the raw byte stream, so it arrives contiguous.
 const CLAUDE_TOKEN_RE = /sk-ant-[A-Za-z0-9_-]{40,}/g;
 const URL_RE = /https?:\/\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+/;
 // Codex device-auth pairing code, e.g. "ABCD-EFGH". Best-effort: completion is
@@ -109,36 +220,16 @@ function findUrl(buffer: string): string | null {
   return m ? m[0] : null;
 }
 
-function findTokenSince(buffer: string, rawOffset: number): string | null {
-  // Match on the escape-stripped output (whitespace KEPT) rather than the
-  // whitespace-collapsed form: the token prints unwrapped (stty cols 4000), so
-  // whitespace stays as a clean delimiter and the match stops before the
-  // "Store this token…" prose that follows. LAST match — setup-token can echo
-  // intermediate output before the final token.
-  const ms = stripEscapes(buffer.slice(rawOffset)).match(CLAUDE_TOKEN_RE);
+function findTokenSince(buffer: string, _rawOffset: number): string | null {
+  // Match on the RECONSTRUCTED screen (terminal-emulated). Ink frame-diffs with
+  // cursor jumps, so the token isn't linear in the stream — and it skips columns
+  // it thinks are unchanged from a PRIOR frame. So we must emulate the WHOLE
+  // buffer (not just since code-submission) to carry that prior screen state
+  // forward; otherwise a skipped column (e.g. the `o` in oat01…) reads as a gap.
+  // The token prints unwrapped (stty cols 4000) → one grid line. LAST match —
+  // setup-token echoes intermediate output before the final token.
+  const ms = renderTerminal(buffer).match(CLAUDE_TOKEN_RE);
   return ms ? ms[ms.length - 1] : null;
-}
-
-/**
- * Redacted summary of a capture for diagnosing a failed mint — masks any sk-ant
- * token (length only, never the value) but keeps surrounding text like "Invalid
- * code" so we can tell a rejected code from a token printed in an unexpected
- * shape. Temporary diagnostic.
- */
-function diagnoseCapture(rawSince: string): Record<string, unknown> {
-  const normalized = normalizeForToken(rawSince);
-  const oat = normalized.match(/sk-ant-oat[A-Za-z0-9_-]+/); // loose: token present at all?
-  const tail = stripEscapes(rawSince)
-    .replace(/\s+/g, ' ')
-    .replace(/sk-ant-[A-Za-z0-9_-]+/g, (m) => `sk-ant-…[${m.length}ch]`)
-    .slice(-500);
-  return {
-    rawLen: rawSince.length,
-    hasOatPrefix: !!oat,
-    looseOatLen: oat ? oat[0].length : 0,
-    strictRegexMatched: !!normalized.match(CLAUDE_TOKEN_RE),
-    tail,
-  };
 }
 
 // Reap abandoned sessions (browser closed mid-flow, etc.).
@@ -254,10 +345,7 @@ export async function mintClaudeToken(userId: string, sessionId: string, code: s
       };
       const deadline = setTimeout(() => {
         finish();
-        log.warn('OAuth mint: timed out waiting for token', {
-          sessionId,
-          ...diagnoseCapture(session.buffer.slice(rawLenBefore)),
-        });
+        log.warn('OAuth mint: timed out waiting for token', { sessionId });
         reject(new Error('Timed out waiting for the token. The code may be wrong or expired.'));
       }, TOKEN_TIMEOUT_MS);
 
@@ -275,7 +363,7 @@ export async function mintClaudeToken(userId: string, sessionId: string, code: s
         const since = stripEscapes(session.buffer.slice(rawLenBefore));
         if (/OAuth error|Invalid|expired/i.test(since)) {
           finish();
-          log.warn('OAuth mint: code rejected', { sessionId, ...diagnoseCapture(session.buffer.slice(rawLenBefore)) });
+          log.warn('OAuth mint: code rejected', { sessionId });
           reject(new Error('That code was rejected — copy the full code from the sign-in page and try again.'));
         }
       }, 250);
@@ -286,10 +374,7 @@ export async function mintClaudeToken(userId: string, sessionId: string, code: s
         if (t) {
           resolve(t);
         } else {
-          log.warn('OAuth mint: process exited without a token', {
-            sessionId,
-            ...diagnoseCapture(session.buffer.slice(rawLenBefore)),
-          });
+          log.warn('OAuth mint: process exited without a token', { sessionId });
           reject(new Error('Sign-in finished without producing a token. The code may be wrong or expired.'));
         }
       });
