@@ -307,29 +307,6 @@
           />
           <button id="byok-oauth-btn" type="button" hidden>Connect to Claude</button>
           <button id="byok-connect-btn" type="button" class="secondary">API key</button>
-          <div id="byok-oauth-form" class="byok-oauth-form" hidden>
-            <!-- Revealed once the sign-in URL is ready (server mints the credential). -->
-            <div id="byok-oauth-step2" hidden>
-              <a id="byok-oauth-link" href="#" target="_blank" rel="noopener noreferrer" class="byok-oauth-link"
-                >Open sign-in ↗</a
-              >
-              <!-- Claude: paste the code shown on the sign-in page. -->
-              <input
-                id="byok-oauth-code"
-                type="text"
-                placeholder="Paste the code"
-                autocomplete="off"
-                spellcheck="false"
-              />
-              <!-- Codex: enter this pairing code on the sign-in page, then approve. -->
-              <p id="byok-oauth-codex-code" class="byok-oauth-codex-code" hidden></p>
-            </div>
-            <div id="byok-oauth-status" class="byok-oauth-status" hidden></div>
-            <div class="byok-oauth-actions">
-              <button id="byok-oauth-submit" type="button" hidden>Connect subscription</button>
-              <button id="byok-oauth-cancel" type="button" class="secondary">Cancel</button>
-            </div>
-          </div>
         </div>
         <div id="chat-body">
           <div id="chat-content">
@@ -1103,6 +1080,43 @@
         </div>
         <div class="model-picker-footer">
           <button type="button" id="model-picker-add-new" class="btn btn-secondary">+ Add new model</button>
+        </div>
+      </div>
+    </div>
+    <!-- Member-credential sign-in (subscription OAuth browser-mint) — modal popup. -->
+    <div id="byok-oauth-modal" class="modal-overlay" hidden>
+      <div class="modal">
+        <div class="modal-header">
+          <span id="byok-oauth-title">Connect to Claude</span>
+          <button id="byok-oauth-close" class="members-close" type="button" aria-label="Close">
+            <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <div class="byok-oauth-form">
+            <div id="byok-oauth-spinner" class="spinner" hidden aria-hidden="true"></div>
+            <!-- Revealed once the sign-in URL is ready (server mints the credential). -->
+            <div id="byok-oauth-step2" hidden>
+              <a id="byok-oauth-link" href="#" target="_blank" rel="noopener noreferrer" class="byok-oauth-link"
+                >Open sign-in ↗</a
+              >
+              <!-- Claude: paste the code shown on the sign-in page. -->
+              <input
+                id="byok-oauth-code"
+                type="text"
+                placeholder="Paste the code"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <!-- Codex: enter this pairing code on the sign-in page, then approve. -->
+              <p id="byok-oauth-codex-code" class="byok-oauth-codex-code" hidden></p>
+            </div>
+            <div id="byok-oauth-status" class="byok-oauth-status" hidden></div>
+            <div class="byok-oauth-actions">
+              <button id="byok-oauth-submit" type="button" hidden>Connect</button>
+              <button id="byok-oauth-cancel" type="button" class="secondary">Cancel</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>

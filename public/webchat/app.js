@@ -2177,12 +2177,12 @@ async function updateByokBanner(roomId) {
     const connectBtn = $('#byok-connect-btn');
     const oauthBtn = $('#byok-oauth-btn');
     const input = $('#byok-key-input');
-    const oauthForm = $('#byok-oauth-form');
+    const oauthModal = $('#byok-oauth-modal');
     banner.hidden = false;
     input.hidden = true;
     input.value = '';
     input.placeholder = keyPlaceholder;
-    if (oauthForm) oauthForm.hidden = true;
+    if (oauthModal) oauthModal.hidden = true;
     // Primary action: connect via subscription sign-in. Secondary: paste a key.
     if (oauthBtn) {
       oauthBtn.hidden = !oauthAllowed;
@@ -2311,15 +2311,18 @@ function byokOauthStatus(msg, kind) {
 }
 
 $('#byok-oauth-btn')?.addEventListener('click', async () => {
-  const form = $('#byok-oauth-form');
-  if (!form) return;
-  form.hidden = false;
+  const modal = $('#byok-oauth-modal');
+  if (!modal) return;
+  const isCodex = byokProvider === 'codex';
+  const title = $('#byok-oauth-title');
+  if (title) title.textContent = `Connect to ${byokWords(byokProvider).name}`;
   $('#byok-oauth-step2').hidden = true;
   $('#byok-oauth-submit').hidden = true;
+  $('#byok-oauth-spinner').hidden = false; // spinner while the mint warms up
   const code = $('#byok-oauth-code');
   if (code) code.value = '';
   const codexCode = $('#byok-oauth-codex-code');
-  const isCodex = byokProvider === 'codex';
+  modal.hidden = false;
   byokOauthStatus('Preparing sign-in…', '');
   try {
     const startUrl = isCodex ? '/api/byok/codex/start' : '/api/byok/oauth/start';
@@ -2344,16 +2347,18 @@ $('#byok-oauth-btn')?.addEventListener('click', async () => {
     }
     const submit = $('#byok-oauth-submit');
     if (submit) submit.textContent = isCodex ? 'I’ve approved — connect' : 'Connect';
+    $('#byok-oauth-spinner').hidden = true;
     $('#byok-oauth-step2').hidden = false;
     $('#byok-oauth-submit').hidden = false;
     byokOauthStatus(isCodex ? 'Open the link, enter the code, and approve — then click connect.' : '', '');
     $('#byok-oauth-link').focus();
   } catch (err) {
+    $('#byok-oauth-spinner').hidden = true;
     byokOauthStatus(err.message || 'Could not start sign-in.', 'error');
   }
 });
 
-$('#byok-oauth-cancel')?.addEventListener('click', () => {
+function closeByokOauthModal() {
   if (byokOauthSessionId) {
     const cancelUrl = byokProvider === 'codex' ? '/api/byok/codex/cancel' : '/api/byok/oauth/cancel';
     authFetch(cancelUrl, {
@@ -2363,9 +2368,11 @@ $('#byok-oauth-cancel')?.addEventListener('click', () => {
     }).catch(() => {});
     byokOauthSessionId = null;
   }
-  const form = $('#byok-oauth-form');
-  if (form) form.hidden = true;
-});
+  const modal = $('#byok-oauth-modal');
+  if (modal) modal.hidden = true;
+}
+$('#byok-oauth-cancel')?.addEventListener('click', closeByokOauthModal);
+$('#byok-oauth-close')?.addEventListener('click', closeByokOauthModal);
 
 $('#byok-oauth-submit')?.addEventListener('click', async () => {
   const isCodex = byokProvider === 'codex';
@@ -2374,6 +2381,8 @@ $('#byok-oauth-submit')?.addEventListener('click', async () => {
   if (!isCodex && !code) return; // Claude needs the pasted code; Codex needs none.
   const btn = $('#byok-oauth-submit');
   btn.disabled = true;
+  $('#byok-oauth-step2').hidden = true;
+  $('#byok-oauth-spinner').hidden = false; // spinner while connecting
   const { subWord } = byokWords(byokProvider);
   byokOauthStatus(isCodex ? 'Waiting for approval…' : 'Saving your subscription…', '');
   try {
@@ -2390,9 +2399,11 @@ $('#byok-oauth-submit')?.addEventListener('click', async () => {
     if (!r.ok) throw new Error(data.error || r.statusText);
     byokOauthSessionId = null;
     showToast(`Connected your ${subWord}.`, { kind: 'success' });
-    $('#byok-oauth-form').hidden = true;
+    $('#byok-oauth-modal').hidden = true;
     await updateByokBanner(currentRoom);
   } catch (err) {
+    $('#byok-oauth-spinner').hidden = true;
+    $('#byok-oauth-step2').hidden = false; // restore so they can retry
     byokOauthStatus(err.message || 'Could not connect.', 'error');
   } finally {
     btn.disabled = false;
