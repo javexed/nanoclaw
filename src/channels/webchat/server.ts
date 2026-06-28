@@ -205,6 +205,23 @@ import { listProviderContainerConfigNames } from '../../providers/provider-conta
 function codexAvailable(): boolean {
   return listProviderContainerConfigNames().includes('codex');
 }
+
+/**
+ * Every agent group the user can reach (across all their webchat rooms) whose
+ * provider matches `provider`. Enrolling a connected credential on all of these
+ * — not just the current room's agent — makes "connect once" apply to all of a
+ * member's same-provider rooms. (New rooms added later would need a reconnect.)
+ */
+function agentGroupsToEnroll(userId: string, provider: 'claude' | 'codex'): { id: string }[] {
+  const byId = new Map<string, { id: string }>();
+  for (const room of filterRoomsForUser(userId, getAllWebchatRooms())) {
+    for (const a of getAgentsForWebchatRoom(room.id)) {
+      const p = getContainerConfig(a.id)?.provider === 'codex' ? 'codex' : 'claude';
+      if (p === provider) byId.set(a.id, { id: a.id });
+    }
+  }
+  return [...byId.values()];
+}
 import { onboardByokCredential, onboardByokOauth, revokeByokCredential } from '../../modules/byok/onboard.js';
 import { startClaudeMint, mintClaudeToken, startCodexMint, finishCodexMint, cancelMint } from './oauth-mint.js';
 import { realOnecliAdmin } from '../../modules/byok/onecli-admin.js';
@@ -697,7 +714,8 @@ async function handleHttp(
             error: 'Expected a Claude subscription token from `claude setup-token` (sk-ant-oat…)',
           });
         }
-        for (const g of groups) await onboardByokOauth(realOnecliAdmin, userId, g.id, userId, token);
+        for (const g of agentGroupsToEnroll(userId, provider))
+          await onboardByokOauth(realOnecliAdmin, userId, g.id, userId, token);
       } else if (method === 'POST') {
         if (!(provider === 'codex' ? cfg.allowOpenaiKey : cfg.allowAnthropicKey))
           return json(res, 403, {
@@ -710,9 +728,12 @@ async function handleHttp(
         } else if (!/^sk-ant-/.test(apiKey)) {
           return json(res, 400, { error: 'Expected an Anthropic API key (sk-ant-…)' });
         }
-        for (const g of groups) await onboardByokCredential(realOnecliAdmin, userId, g.id, userId, apiKey);
+        for (const g of agentGroupsToEnroll(userId, provider))
+          await onboardByokCredential(realOnecliAdmin, userId, g.id, userId, apiKey);
       } else {
-        for (const g of groups) await revokeByokCredential(realOnecliAdmin, userId, g.id);
+        // Disconnect everywhere: revoke across all the user's same-provider agents.
+        for (const g of agentGroupsToEnroll(userId, provider))
+          await revokeByokCredential(realOnecliAdmin, userId, g.id);
       }
     } catch (err) {
       log.error('BYOK onboard/revoke failed', { userId, roomId, err: err instanceof Error ? err.message : err });
@@ -760,7 +781,8 @@ async function handleHttp(
       if (typeof body.sessionId !== 'string' || typeof body.code !== 'string')
         return json(res, 400, { error: 'sessionId and code required' });
       const token = await mintClaudeToken(userId, body.sessionId, body.code);
-      for (const g of groups) await onboardByokOauth(realOnecliAdmin, userId, g.id, userId, token);
+      for (const g of agentGroupsToEnroll(userId, 'claude'))
+        await onboardByokOauth(realOnecliAdmin, userId, g.id, userId, token);
       return json(res, 200, { ok: true });
     } catch (err) {
       return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
@@ -806,7 +828,8 @@ async function handleHttp(
       // step === 'finish': wait for auth.json, then onboard.
       if (typeof body.sessionId !== 'string') return json(res, 400, { error: 'sessionId required' });
       const authJson = await finishCodexMint(userId, body.sessionId);
-      for (const g of groups) await onboardByokOauth(realOnecliAdmin, userId, g.id, userId, authJson);
+      for (const g of agentGroupsToEnroll(userId, 'codex'))
+        await onboardByokOauth(realOnecliAdmin, userId, g.id, userId, authJson);
       return json(res, 200, { ok: true });
     } catch (err) {
       return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
