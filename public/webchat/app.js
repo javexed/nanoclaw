@@ -2320,9 +2320,6 @@ $('#byok-oauth-btn')?.addEventListener('click', async () => {
   if (code) code.value = '';
   const codexCode = $('#byok-oauth-codex-code');
   const isCodex = byokProvider === 'codex';
-  const { subWord } = byokWords(byokProvider);
-  const help = $('#byok-oauth-help');
-  if (help) help.textContent = `Sign in to your ${subWord} — billed to you.`;
   byokOauthStatus('Preparing sign-in…', '');
   try {
     const startUrl = isCodex ? '/api/byok/codex/start' : '/api/byok/oauth/start';

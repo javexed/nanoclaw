@@ -1178,18 +1178,6 @@ button:focus-visible {
 .byok-oauth-form[hidden] {
   display: none;
 }
-.byok-oauth-help {
-  margin: 0;
-  font-size: 12px;
-  color: var(--muted, var(--text));
-  line-height: 1.4;
-}
-.byok-oauth-help code {
-  background: var(--surface2);
-  border-radius: 4px;
-  padding: 1px 4px;
-  font-size: 11px;
-}
 .byok-oauth-actions {
   display: flex;
   gap: 8px;
