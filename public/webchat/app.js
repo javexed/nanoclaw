@@ -2123,8 +2123,8 @@ let byokState = null;
 
 function byokWords(provider) {
   return provider === 'codex'
-    ? { subWord: 'ChatGPT subscription', keyWord: 'OpenAI key', keyPlaceholder: 'sk-…' }
-    : { subWord: 'Claude subscription', keyWord: 'Anthropic key', keyPlaceholder: 'sk-ant-…' };
+    ? { name: 'Codex', subWord: 'ChatGPT subscription', keyWord: 'OpenAI key', keyPlaceholder: 'sk-…' }
+    : { name: 'Claude', subWord: 'Claude subscription', keyWord: 'Anthropic key', keyPlaceholder: 'sk-ant-…' };
 }
 
 async function updateByokBanner(roomId) {
@@ -2145,7 +2145,7 @@ async function updateByokBanner(roomId) {
     }
     const { connected, mode, credType, oauthAllowed, apiKeyAllowed = true, provider = 'claude' } = await r.json();
     byokProvider = provider;
-    const { subWord, keyWord, keyPlaceholder } = byokWords(provider);
+    const { name, subWord, keyWord, keyPlaceholder } = byokWords(provider);
     // API keys are offered only when the room is on AND the workspace accepts them
     // (for this room's provider). OAuth allowance is also workspace-wide.
     const apiOffered = mode !== 'disabled' && apiKeyAllowed;
@@ -2184,23 +2184,17 @@ async function updateByokBanner(roomId) {
     input.value = '';
     input.placeholder = keyPlaceholder;
     if (oauthForm) oauthForm.hidden = true;
-    // Describe only what this room actually offers, so the text matches the
-    // buttons shown (API key, and/or the subscription helper for this provider).
-    const what =
-      apiOffered && oauthAllowed
-        ? `your ${keyWord} or ${subWord}`
-        : oauthAllowed
-          ? `your ${subWord}`
-          : `your ${keyWord}`;
+    // Short, type-agnostic prompt — the buttons name the methods.
     if (text)
       text.textContent =
-        mode === 'required' ? `This room requires ${what}.` : `Connect ${what} to bill this room to your own account.`;
-    connectBtn.hidden = !apiOffered;
-    if (connectBtn) connectBtn.textContent = `Connect your ${keyWord}`;
+        mode === 'required' ? 'This room requires your own account:' : 'Use your own account in this room:';
+    // Primary action: connect via subscription sign-in. Secondary: paste a key.
     if (oauthBtn) {
       oauthBtn.hidden = !oauthAllowed;
-      oauthBtn.textContent = `Use my ${subWord}`;
+      oauthBtn.textContent = `Connect to ${name}`;
     }
+    connectBtn.hidden = !apiOffered;
+    if (connectBtn) connectBtn.textContent = 'API key';
   } catch {
     hideAll();
   }
