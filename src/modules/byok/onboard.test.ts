@@ -177,6 +177,26 @@ describe('ensureGroupEnrollment (lazy, at first spawn)', () => {
     expect(agents.size).toBe(0);
   });
 
+  it('re-enrolls with the new provider when the group provider is switched after enrollment', async () => {
+    const { admin, secrets } = fakeAdmin();
+    // ag-sw starts as a default (claude) group; member enrolls as claude.
+    getDb()
+      .prepare(`INSERT INTO agent_groups (id, name, folder, created_at) VALUES (?, ?, ?, ?)`)
+      .run('ag-sw', 'ag-sw', 'ag-sw', new Date().toISOString());
+    ensureContainerConfig('ag-sw');
+    await storeUserCredential(admin, 'webchat:frank', 'claude', 'sk-ant-frank', 'api_key');
+    await ensureGroupEnrollment(admin, 'webchat:frank', 'ag-sw');
+    expect(getByokCredential('webchat:frank', 'ag-sw')!.provider).toBe('claude');
+    // Group switched to codex; member connects a codex cred. The stale active
+    // claude row must NOT short-circuit enrollment — re-enroll with the codex secret.
+    updateContainerConfigScalars('ag-sw', { provider: 'codex' });
+    await storeUserCredential(admin, 'webchat:frank', 'codex', 'sk-openai-frank', 'api_key');
+    await ensureGroupEnrollment(admin, 'webchat:frank', 'ag-sw');
+    const row = getByokCredential('webchat:frank', 'ag-sw')!;
+    expect(row.provider).toBe('codex');
+    expect(secrets.get(row.secret_id!)!.type).toBe('openai');
+  });
+
   it('marks an OAuth Claude member as oauth so the container gets the sentinel', async () => {
     const { admin } = fakeAdmin();
     await storeUserCredential(admin, 'webchat:alice', 'claude', 'sk-ant-oat-TOKEN', 'oauth_token');

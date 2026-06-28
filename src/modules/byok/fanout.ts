@@ -10,6 +10,15 @@
  * Stable ids `byok-<session>-<roomMsgId>` make this idempotent: re-syncing each
  * turn only adds genuinely new messages. Content matches the webchat inbound
  * shape ({text, sender, senderName}) so the agent-runner formats it identically.
+ *
+ * BLAST RADIUS (by design): in a SHARED BYOK room, every connected member's
+ * own container receives the full room transcript — i.e. each member's container
+ * is a read surface for all members' message *content* (never their
+ * credentials — keys never cross containers). This is the price of giving each
+ * per-member agent full conversational context in a shared room. It is NOT a
+ * fit for rooms whose members shouldn't see each other's messages; for that,
+ * use separate (non-shared) agent groups or per-member rooms. Credential
+ * isolation is unaffected — only transcript content fans out.
  */
 import { getWebchatMessages } from '../../channels/webchat/db.js';
 import { syncSessionContext, type ContextMessage, type PerMemberInboundArgs } from '../../session-manager.js';

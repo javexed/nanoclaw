@@ -87,7 +87,8 @@ import {
   updateAgentGroup,
 } from '../../db/agent-groups.js';
 import { createMessagingGroupAgent, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
-import { getPendingApproval } from '../../db/sessions.js';
+import { getPendingApproval, getSessionsByAgentGroup } from '../../db/sessions.js';
+import { killContainer } from '../../container-runner.js';
 import { initGroupFilesystem } from '../../group-init.js';
 import {
   addMember as permsAddMember,
@@ -206,10 +207,32 @@ function codexAvailable(): boolean {
   return listProviderContainerConfigNames().includes('codex');
 }
 
+// Cheap in-process guard against BYOK abuse: a per-identity min-interval on
+// credential connects + mint starts (prevents rapid reconnect / spawn churn).
+// The host is single-process, so a Map suffices; paired with a global cap on
+// concurrent mint containers (MAX_ACTIVE_MINTS) enforced at the start endpoints.
+const byokActionAt = new Map<string, number>();
+const BYOK_MIN_INTERVAL_MS = 3000;
+function byokRateLimited(userId: string, action: string): boolean {
+  const key = `${userId}:${action}`;
+  const now = Date.now();
+  if (now - (byokActionAt.get(key) ?? 0) < BYOK_MIN_INTERVAL_MS) return true;
+  byokActionAt.set(key, now);
+  return false;
+}
+
 import { storeUserCredential, revokeUserCredential } from '../../modules/byok/onboard.js';
-import { startClaudeMint, mintClaudeToken, startCodexMint, finishCodexMint, cancelMint } from './oauth-mint.js';
+import {
+  startClaudeMint,
+  mintClaudeToken,
+  startCodexMint,
+  finishCodexMint,
+  cancelMint,
+  activeMintCount,
+  MAX_ACTIVE_MINTS,
+} from './oauth-mint.js';
 import { realOnecliAdmin } from '../../modules/byok/onecli-admin.js';
-import { userHasConnectedCredential, getUserCredential } from '../../modules/byok/db.js';
+import { userHasConnectedCredential, getUserCredential, listEnrolledGroups } from '../../modules/byok/db.js';
 import { getContainerConfig } from '../../db/container-configs.js';
 import { broadcast, broadcastRooms } from './state.js';
 import { setupWebSocket } from './ws.js';
@@ -672,6 +695,9 @@ async function handleHttp(
     const provider = groups[0] && getContainerConfig(groups[0].id)?.provider === 'codex' ? 'codex' : 'claude';
     const credType = body.type === 'oauth_token' ? 'oauth_token' : 'api_key';
     const cfg = getCredentialsConfig();
+    // Rate-limit connects (each recreates a vault secret + spawns onecli procs).
+    if (method === 'POST' && byokRateLimited(userId, 'connect'))
+      return json(res, 429, { error: 'Too many attempts — wait a moment and try again.' });
     try {
       if (method === 'POST' && credType === 'oauth_token') {
         // Gate 1: the workspace must accept this provider's subscriptions (Credentials page).
@@ -705,6 +731,12 @@ async function handleHttp(
           return json(res, 403, {
             error: `This workspace does not accept ${provider === 'codex' ? 'OpenAI' : 'Anthropic'} API keys.`,
           });
+        // API keys are gated by the room's effective mode (OAuth is workspace-wide
+        // and allowed even in an OAuth-only 'disabled' room — see the spawn gate).
+        // Credentials are user-level, so connecting via a disabled room would
+        // otherwise silently enable BYOK in the member's other rooms.
+        if (getEffectiveRoomMode(roomId) === 'disabled')
+          return json(res, 403, { error: 'This room does not accept member API keys.' });
         const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
         // Codex: an OpenAI key (sk-…). Claude: an Anthropic key (sk-ant-…).
         if (provider === 'codex') {
@@ -715,7 +747,16 @@ async function handleHttp(
         await storeUserCredential(realOnecliAdmin, userId, provider, apiKey, 'api_key');
       } else {
         // Disconnect: revoke the user-level credential + un-enroll every group.
+        // Capture the enrolled groups BEFORE revoke (it clears them) so we can
+        // also stop any running per-member container immediately — otherwise it
+        // lingers (with its copy of the session) to the idle ceiling.
+        const enrolledGroupIds = listEnrolledGroups(userId, provider).map((r) => r.agent_group_id);
         await revokeUserCredential(realOnecliAdmin, userId, provider);
+        for (const gid of enrolledGroupIds) {
+          for (const s of getSessionsByAgentGroup(gid)) {
+            if (s.thread_id === userId) killContainer(s.id, 'BYOK credential disconnected');
+          }
+        }
       }
     } catch (err) {
       log.error('BYOK onboard/revoke failed', { userId, roomId, err: err instanceof Error ? err.message : err });
@@ -755,6 +796,10 @@ async function handleHttp(
     if (groups.length === 0) return json(res, 400, { error: 'Room has no wired agent' });
     try {
       if (step === 'start') {
+        if (activeMintCount() >= MAX_ACTIVE_MINTS)
+          return json(res, 429, { error: 'Too many sign-ins in progress — try again shortly.' });
+        if (byokRateLimited(userId, 'mint-start'))
+          return json(res, 429, { error: 'Too many attempts — wait a moment and try again.' });
         const { sessionId, url: signinUrl } = await startClaudeMint(userId);
         return json(res, 200, { sessionId, url: signinUrl });
       }
@@ -802,6 +847,10 @@ async function handleHttp(
     if (groups.length === 0) return json(res, 400, { error: 'Room has no wired agent' });
     try {
       if (step === 'start') {
+        if (activeMintCount() >= MAX_ACTIVE_MINTS)
+          return json(res, 429, { error: 'Too many sign-ins in progress — try again shortly.' });
+        if (byokRateLimited(userId, 'mint-start'))
+          return json(res, 429, { error: 'Too many attempts — wait a moment and try again.' });
         const { sessionId, url: signinUrl, userCode } = await startCodexMint(userId);
         return json(res, 200, { sessionId, url: signinUrl, userCode });
       }

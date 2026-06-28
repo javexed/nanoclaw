@@ -42,24 +42,33 @@ registerSessionKeyResolver((mg, agentGroupId, userId) => {
   if (mg.channel_type !== 'webchat' || !userId) return null;
   if (!hasTable(getDb(), 'webchat_room_settings')) return null;
   // Effective mode = the room's override, else the global default. OAuth/key
-  // allowances are workspace-wide (set on the Credentials admin page).
+  // allowances are workspace-wide (set on the Credentials admin page) and
+  // provider-scoped (Claude vs Codex).
+  const provider = groupProvider(agentGroupId);
+  const cfg = getCredentialsConfig();
   const mode = getEffectiveRoomMode(mg.platform_id);
-  const oauthAllowed = getCredentialsConfig().allowClaudeOauth;
-  // BYOK entirely off for this room (no API-key mode AND no OAuth) → no override.
-  if (mode === 'disabled' && !oauthAllowed) return null;
-  // A member who has connected their own credential for THIS room's provider —
-  // API key OR OAuth subscription — gets their own per-member session keyed by
-  // userId. The per-(user,group) OneCLI agent is created lazily at spawn (see the
-  // session prepare hook below). (An OAuth-only room has mode='disabled' but
-  // oauthAllowed=true, so this must not gate on mode.)
-  if (userHasConnectedCredential(userId, groupProvider(agentGroupId))) {
-    return { sessionMode: 'per-thread', threadId: userId };
+  const oauthAllowed = provider === 'codex' ? cfg.allowCodexOauth : cfg.allowClaudeOauth;
+  const apiKeyAllowed = provider === 'codex' ? cfg.allowOpenaiKey : cfg.allowAnthropicKey;
+  // API keys apply only when the room is on AND the workspace accepts them;
+  // OAuth subscriptions are workspace-wide and apply even in an OAuth-only room
+  // (mode='disabled' but oauthAllowed=true).
+  const apiOffered = mode !== 'disabled' && apiKeyAllowed;
+  if (!apiOffered && !oauthAllowed) return null; // BYOK entirely off here.
+
+  // A member gets their own per-member session ONLY if their connected credential
+  // is still PERMITTED by current policy — so flipping an allowance off (or a
+  // room to disabled) stops already-connected members routing, not just new ones.
+  // The per-(user,group) OneCLI agent is created lazily at spawn (prepare hook).
+  const cred = getUserCredential(userId, provider);
+  if (cred?.status === 'active') {
+    const permitted = cred.cred_type === 'oauth_token' ? oauthAllowed : apiOffered;
+    if (permitted) return { sessionMode: 'per-thread', threadId: userId };
   }
-  // No key: API-key 'required' rooms decline with guidance; otherwise (optional,
-  // or OAuth-only) fall back to the shared session (no override).
+  // No permitted credential: API-key 'required' rooms decline with guidance;
+  // otherwise (optional, or OAuth-only) fall back to the shared session.
   if (mode === 'required') {
-    const cred = groupProvider(agentGroupId) === 'codex' ? 'Codex credential' : 'Anthropic key';
-    return { block: `This room requires your own ${cred} — connect it in the banner above the chat.` };
+    const credName = provider === 'codex' ? 'Codex credential' : 'Anthropic key';
+    return { block: `This room requires your own ${credName} — connect it in the banner above the chat.` };
   }
   return null;
 });

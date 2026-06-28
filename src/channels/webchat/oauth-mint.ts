@@ -159,6 +159,7 @@ function renderTerminal(raw: string): string {
     }
     if (ch === '\n') {
       row++;
+      clamp();
       i++;
       continue;
     }
@@ -169,6 +170,11 @@ function renderTerminal(raw: string): string {
     }
     if (ch < ' ' || ch === '\x7f') {
       i++; // other control byte — no layout effect
+      continue;
+    }
+    // Drop writes past the bounds rather than allocating an enormous grid.
+    if (col > MAX_COL || row > MAX_ROW) {
+      i++;
       continue;
     }
     ensure(row, col);
@@ -197,12 +203,36 @@ interface MintSession {
   buffer: string; // accumulated RAW output (normalized at match time)
   createdAt: number;
   home?: string; // Codex only: host temp dir mounted as CODEX_HOME (holds auth.json)
+  exited?: number; // epoch-ms the container process exited (for prompt CODEX_HOME shredding)
 }
 
 const sessions = new Map<string, MintSession>();
 const URL_TIMEOUT_MS = 30_000;
 const TOKEN_TIMEOUT_MS = 120_000;
 const SESSION_TTL_MS = 10 * 60 * 1000;
+// Once the mint container exits, a Codex session's CODEX_HOME still holds a real
+// auth.json. finishCodexMint shreds it on success/timeout, but if the browser
+// never calls /finish (tab closed), reap it this soon after exit instead of
+// waiting out the full TTL. Bounds how long a live credential sits on disk.
+const EXITED_GRACE_MS = 90_000;
+// Global cap on concurrent mint containers (each is a `docker run`). A new start
+// kills the same user's previous session, so this mainly bounds distinct users.
+export const MAX_ACTIVE_MINTS = 8;
+// Hard cap on captured output. The happy path is a few KB; this only bounds a
+// hostile/flooding container (and keeps the per-poll terminal emulation cheap).
+const MAX_BUFFER_BYTES = 1_000_000;
+// An OAuth setup-token code is short; reject an oversized paste (DoS / abuse).
+const MAX_CODE_LEN = 512;
+
+/** Active mint container count — the host gate for the global concurrency cap. */
+export function activeMintCount(): number {
+  return sessions.size;
+}
+
+/** Append container output, bounded so a flooding container can't grow memory. */
+function appendBuffer(session: MintSession, chunk: Buffer): void {
+  if (session.buffer.length < MAX_BUFFER_BYTES) session.buffer += chunk.toString();
+}
 
 function killSession(id: string): void {
   const s = sessions.get(id);
@@ -243,16 +273,19 @@ function findTokenSince(buffer: string, _rawOffset: number): string | null {
   return ms ? ms[ms.length - 1] : null;
 }
 
-// Reap abandoned sessions (browser closed mid-flow, etc.).
+// Reap abandoned sessions (browser closed mid-flow, etc.). A session whose
+// container has already exited is reaped quickly (EXITED_GRACE_MS) so a written
+// Codex auth.json doesn't linger; otherwise the full TTL applies.
 setInterval(() => {
   const now = Date.now();
   for (const [id, s] of sessions) {
-    if (now - s.createdAt > SESSION_TTL_MS) {
+    const exitedLongEnough = s.exited !== undefined && now - s.exited > EXITED_GRACE_MS;
+    if (exitedLongEnough || now - s.createdAt > SESSION_TTL_MS) {
       log.warn('Reaping stale OAuth-mint session', { id });
       killSession(id);
     }
   }
-}, 60_000).unref();
+}, 30_000).unref();
 
 /**
  * Start a mint: spawn the container, return the sign-in URL once it appears.
@@ -288,9 +321,7 @@ export async function startClaudeMint(userId: string): Promise<{ sessionId: stri
   sessions.set(id, session);
   log.info('OAuth mint: started', { sessionId: id });
 
-  const onData = (chunk: Buffer): void => {
-    session.buffer += chunk.toString();
-  };
+  const onData = (chunk: Buffer): void => appendBuffer(session, chunk);
   child.stdout.on('data', onData);
   child.stderr.on('data', onData);
   child.on('error', (err) => log.warn('OAuth mint: spawn error', { sessionId: id, err: err.message }));
@@ -331,6 +362,7 @@ export async function startClaudeMint(userId: string): Promise<{ sessionId: stri
 export async function mintClaudeToken(userId: string, sessionId: string, code: string): Promise<string> {
   const session = sessions.get(sessionId);
   if (!session || session.userId !== userId) throw new Error('No active sign-in session.');
+  if (code.length > MAX_CODE_LEN) throw new Error('That code is too long — paste only the code from the sign-in page.');
 
   const rawLenBefore = session.buffer.length;
   // `claude setup-token` is a raw-mode TUI (Ink). Writing `code + '\r'` in one
@@ -461,9 +493,7 @@ export async function startCodexMint(
   sessions.set(id, session);
   log.info('Codex mint: started', { sessionId: id });
 
-  const onData = (chunk: Buffer): void => {
-    session.buffer += chunk.toString();
-  };
+  const onData = (chunk: Buffer): void => appendBuffer(session, chunk);
   child.stdout.on('data', onData);
   child.stderr.on('data', onData);
   child.on('error', (err) => log.warn('Codex mint: spawn error', { sessionId: id, err: err.message }));
@@ -489,6 +519,9 @@ export async function startCodexMint(
     child.on('exit', () => {
       clearInterval(poll);
       clearTimeout(deadline);
+      // Mark exit so the reaper shreds CODEX_HOME promptly if /finish never comes
+      // (browser closed after approval). finishCodexMint shreds on its own paths.
+      session.exited = Date.now();
       if (!findUrl(session.buffer)) {
         log.warn('Codex mint: process exited before a URL appeared', { sessionId: id });
         killSession(id);

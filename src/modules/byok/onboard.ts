@@ -137,8 +137,12 @@ export async function storeUserCredential(
  * connected a credential for this group's provider.
  */
 export async function ensureGroupEnrollment(admin: OnecliAdmin, userId: string, agentGroupId: string): Promise<void> {
-  if (getByokCredential(userId, agentGroupId)?.status === 'active') return; // already enrolled
   const provider = groupProvider(agentGroupId);
+  // Already enrolled — but only skip when the enrollment is for THIS group's
+  // CURRENT provider. If the group's provider was switched after enrollment, the
+  // stale row would otherwise pin the wrong secret; fall through to re-enroll.
+  const existing = getByokCredential(userId, agentGroupId);
+  if (existing?.status === 'active' && existing.provider === provider) return;
   const userCred = getUserCredential(userId, provider);
   if (userCred?.status !== 'active' || !userCred.secret_id) return; // not connected — nothing to enroll
   const secretId = userCred.secret_id;

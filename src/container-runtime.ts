@@ -33,11 +33,13 @@ export function resolveAgentIdentity(agentGroupId: string, threadId: string | nu
 
 /**
  * Extra container env vars contributed by an installed module for a specific
- * (agent group, session) — e.g. BYOK injects CLAUDE_CODE_OAUTH_TOKEN +
- * NO_PROXY for an OAuth member so the SDK authenticates directly on the
- * member's subscription, bypassing OneCLI for the Anthropic leg only. These are
- * applied AFTER the OneCLI gateway env so they take precedence (last `-e` wins).
- * Core ships with no resolver → {}.
+ * (agent group, session) — e.g. for a Claude-OAuth BYOK member, BYOK sets a
+ * sentinel CLAUDE_CODE_OAUTH_TOKEN (flips Claude Code into OAuth mode) and
+ * BLANKS ANTHROPIC_API_KEY (so no stale x-api-key is sent). Anthropic traffic
+ * still routes THROUGH the OneCLI gateway, which swaps the sentinel bearer for
+ * the member's real vault token on the wire — the real token never enters the
+ * container. These are applied AFTER the OneCLI gateway env so they take
+ * precedence (last `-e` wins). Core ships with no resolver → {}.
  */
 type ContainerEnvResolver = (agentGroupId: string, threadId: string | null) => Record<string, string>;
 let containerEnvResolver: ContainerEnvResolver | null = null;

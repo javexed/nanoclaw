@@ -469,6 +469,8 @@ function renderHandleChip() {
   chip.classList.toggle('is-unset', !myHandle);
   chip.classList.toggle('has-cred', byokConnected);
   chip.title = byokConnected ? 'Billing your own account — click to manage' : 'Edit your handle';
+  // Accessible name tracks the connected state (the 🔑/title are visual-only).
+  chip.setAttribute('aria-label', byokConnected ? 'Billing your own account — manage credentials' : 'Edit your handle');
 }
 
 function openHandlePopover() {
@@ -2212,7 +2214,9 @@ function updateHandleCreds() {
   // the connected/not state; the action button does the rest.
   const { name } = byokWords(byokState.provider);
   if (statusEl) {
-    statusEl.textContent = name;
+    // Text carries the connected/not state too (not just the dot colour) — for
+    // screen readers and colour-blind users.
+    statusEl.textContent = `${name} — ${byokState.connected ? 'connected' : 'not connected'}`;
     statusEl.classList.toggle('is-connected', byokState.connected);
   }
   if (actionBtn) actionBtn.textContent = byokState.connected ? 'Disconnect' : 'Connect';
@@ -2295,6 +2299,7 @@ async function disconnectByok() {
 // (a throwaway container runs `claude setup-token`), surfaces the sign-in URL,
 // takes the pasted code, and onboards the resulting token per-member.
 let byokOauthSessionId = null;
+let byokOauthReturnFocus = null; // element to restore focus to when the modal closes
 
 function byokOauthStatus(msg, kind) {
   const el = $('#byok-oauth-status');
@@ -2320,7 +2325,9 @@ $('#byok-oauth-btn')?.addEventListener('click', async () => {
   const code = $('#byok-oauth-code');
   if (code) code.value = '';
   const codexCode = $('#byok-oauth-codex-code');
+  byokOauthReturnFocus = document.activeElement; // restore focus here on close
   modal.hidden = false;
+  $('#byok-oauth-close')?.focus(); // move focus into the dialog
   byokOauthStatus('Preparing sign-in…', '');
   try {
     const startUrl = isCodex ? '/api/byok/codex/start' : '/api/byok/oauth/start';
@@ -2374,12 +2381,39 @@ function closeByokOauthModal() {
   }
   const modal = $('#byok-oauth-modal');
   if (modal) modal.hidden = true;
+  // Return focus to whatever opened the dialog (a11y dismissal contract).
+  if (byokOauthReturnFocus && typeof byokOauthReturnFocus.focus === 'function') byokOauthReturnFocus.focus();
+  byokOauthReturnFocus = null;
 }
 $('#byok-oauth-cancel')?.addEventListener('click', closeByokOauthModal);
 $('#byok-oauth-close')?.addEventListener('click', closeByokOauthModal);
 // Click the backdrop (outside the modal card) to close.
 $('#byok-oauth-modal')?.addEventListener('click', (e) => {
   if (e.target === $('#byok-oauth-modal')) closeByokOauthModal();
+});
+// Escape closes; Tab is trapped within the dialog (a11y, matches other modals).
+document.addEventListener('keydown', (e) => {
+  const modal = $('#byok-oauth-modal');
+  if (!modal || modal.hidden) return;
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    closeByokOauthModal();
+    return;
+  }
+  if (e.key !== 'Tab') return;
+  const focusable = Array.from(
+    modal.querySelectorAll('button:not([hidden]), a[href], input:not([hidden])'),
+  ).filter((el) => el.offsetParent !== null && !el.disabled);
+  if (focusable.length === 0) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
 });
 // Auto-submit once a code is pasted (Claude path) — no separate Connect click.
 $('#byok-oauth-code')?.addEventListener('paste', () => {
@@ -5459,18 +5493,29 @@ async function openRoomDetail(roomId) {
   if (credSection) {
     if (room && room.canArchive) {
       credSection.hidden = false;
+      // Clear any prior room's selection FIRST so a failed/mismatched fetch can't
+      // leave the previous room's mode showing as this room's policy.
+      document
+        .querySelectorAll('input[name="room-credential-mode"]')
+        .forEach((el) => ((el).checked = false));
+      const hintEl = $('#room-cred-default-hint');
+      if (hintEl) hintEl.textContent = '';
       authFetch(`/api/rooms/${encodeURIComponent(roomId)}/credential-mode`)
         .then((r) => (r.ok ? r.json() : null))
         .then((d) => {
-          if (!d) return;
+          if (!d) {
+            if (hintEl) hintEl.textContent = '(couldn’t load — try reopening)';
+            return;
+          }
           // d.mode is the per-room override ('inherit' when unset); d.defaultMode
           // is the workspace default shown on the Default option.
           const radio = document.querySelector(`input[name="room-credential-mode"][value="${d.mode}"]`);
           if (radio) radio.checked = true;
-          const hint = $('#room-cred-default-hint');
-          if (hint) hint.textContent = d.defaultMode ? `(${d.defaultMode})` : '';
+          if (hintEl) hintEl.textContent = d.defaultMode ? `(${d.defaultMode})` : '';
         })
-        .catch(() => {});
+        .catch(() => {
+          if (hintEl) hintEl.textContent = '(couldn’t load — try reopening)';
+        });
     } else {
       credSection.hidden = true;
     }
@@ -5831,7 +5876,9 @@ $('#room-credential-modes')?.addEventListener('change', async (e) => {
     body: JSON.stringify({ mode }),
   });
   if (r.ok) {
-    showToast(`Member credentials set to "${mode}".`, { kind: 'success' });
+    const label =
+      { inherit: 'workspace default', disabled: 'off', optional: 'optional', required: 'required' }[mode] ?? mode;
+    showToast(`Member credentials: ${label}.`, { kind: 'success' });
     if (selectedRoomId === currentRoom) updateByokBanner(currentRoom);
   } else {
     const err = await r.json().catch(() => ({}));

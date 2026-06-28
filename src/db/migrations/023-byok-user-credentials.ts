@@ -32,8 +32,17 @@ export const migration023: Migration = {
       INSERT OR IGNORE INTO byok_user_credentials (user_id, provider, secret_id, cred_type, status, created_at, updated_at)
         SELECT user_id, provider, secret_id, cred_type, 'active',
                strftime('%Y-%m-%dT%H:%M:%SZ','now'), strftime('%Y-%m-%dT%H:%M:%SZ','now')
-          FROM byok_credentials
+          FROM byok_credentials b
          WHERE status = 'active' AND secret_id IS NOT NULL
+           -- In the eager-enrollment era a user could have different cred_type
+           -- across groups for the same provider; prefer the most recently
+           -- updated row so the seeded cred_type matches the live credential
+           -- (not an arbitrary one).
+           AND updated_at = (
+             SELECT MAX(b2.updated_at) FROM byok_credentials b2
+              WHERE b2.user_id = b.user_id AND b2.provider = b.provider
+                AND b2.status = 'active' AND b2.secret_id IS NOT NULL
+           )
          GROUP BY user_id, provider;
     `);
   },

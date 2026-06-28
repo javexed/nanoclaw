@@ -74,6 +74,19 @@ describe('byok session-key resolver', () => {
     expect(resolveSessionKeyOverride(webchatMg('room-1'), 'ag-1', 'webchat:alice')).toBeNull();
   });
 
+  it('connected OAuth member stops routing when the workspace disables OAuth', () => {
+    setRoomModeOverride('room-1', 'optional');
+    upsertUserCredential('webchat:alice', 'claude', 'sec-oat', 'oauth_token');
+    setCredentialsConfig({ allowClaudeOauth: true });
+    expect(resolveSessionKeyOverride(webchatMg('room-1'), 'ag-1', 'webchat:alice')).toEqual({
+      sessionMode: 'per-thread',
+      threadId: 'webchat:alice',
+    });
+    // Admin flips OAuth off → the already-connected member must fall back to shared.
+    setCredentialsConfig({ allowClaudeOauth: false });
+    expect(resolveSessionKeyOverride(webchatMg('room-1'), 'ag-1', 'webchat:alice')).toBeNull();
+  });
+
   it('non-webchat channel → no override', () => {
     setRoomModeOverride('room-1', 'required');
     upsertUserCredential('webchat:alice', 'claude', 'sec-1', 'api_key');
