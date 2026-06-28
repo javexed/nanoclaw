@@ -558,6 +558,20 @@ export function setRoomOauthAllowed(roomId: string, allowed: boolean): void {
     .run(roomId, allowed ? 1 : 0, Date.now());
 }
 
+/**
+ * Effective OAuth allowance for a room — BOTH gates of the byok OAuth design must
+ * hold: the workspace must accept this provider's subscription connections
+ * (Credentials admin page) AND the room must have opted in (`oauth_allowed`,
+ * default 0). The single source of truth shared by the in-room banner, the
+ * session resolver, and the connect endpoints, so they can never diverge (the
+ * room gate was previously checked in none of them).
+ */
+export function getEffectiveRoomOauthAllowed(roomId: string, provider: 'claude' | 'codex'): boolean {
+  const cfg = getCredentialsConfig();
+  const workspaceAccepts = provider === 'codex' ? cfg.allowCodexOauth : cfg.allowClaudeOauth;
+  return workspaceAccepts && getRoomOauthAllowed(roomId);
+}
+
 // ── BYOK: workspace-wide credentials policy (singleton webchat_settings) ──
 // Which member-credential TYPES the workspace accepts + the default room mode.
 // Types live here (configured once) rather than per room.
