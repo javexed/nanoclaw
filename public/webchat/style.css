@@ -5077,8 +5077,8 @@ a.lightbox-btn {
   letter-spacing: 0;
   font-size: var(--fs-xs);
 }
-/* A provider pill that's unavailable (e.g. Codex before /add-codex) — greyed. */
-.setting-option:disabled {
+/* A provider pill that's unavailable (e.g. Codex before /add-codex) — greyed
+   but still clickable, so a click explains how to enable it. */
+.setting-option.is-unavailable {
   opacity: 0.5;
-  cursor: not-allowed;
 }

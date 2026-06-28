@@ -348,9 +348,14 @@ async function renderCredentialsSettings() {
     claude: !!(cfg.allowAnthropicKey || cfg.allowClaudeOauth),
     codex: !!(cfg.allowOpenaiKey || cfg.allowCodexOauth),
   };
+  // Greyed-but-clickable when unavailable, so a click can explain why (rather
+  // than a native `disabled` button that swallows the click). Claude is always
+  // available; Codex needs its provider installed.
+  const providerAvailable = { claude: true, codex: !!cfg.codexAvailable };
   document.querySelectorAll('#cred-providers .setting-option').forEach((btn) => {
-    btn.classList.toggle('active', !!providerOn[btn.dataset.provider]);
-    if (btn.dataset.provider === 'codex') btn.disabled = !cfg.codexAvailable; // greyed until /add-codex
+    const p = btn.dataset.provider;
+    btn.classList.toggle('active', !!providerOn[p]);
+    btn.classList.toggle('is-unavailable', !providerAvailable[p]);
   });
 
   if (credConfigWired) return;
@@ -378,15 +383,24 @@ async function renderCredentialsSettings() {
       }
     });
   });
-  // Each provider pill toggles its key + subscription flags together.
+  // Each provider pill toggles its key + subscription flags together. An
+  // unavailable pill explains how to enable it instead of toggling.
   const PROVIDER_FLAGS = {
     claude: ['allowAnthropicKey', 'allowClaudeOauth'],
     codex: ['allowOpenaiKey', 'allowCodexOauth'],
   };
+  const PROVIDER_UNAVAILABLE = {
+    codex: 'Codex isn’t installed yet — add it with /add-codex, then you can enable it here.',
+    claude: 'Claude isn’t available in this workspace.',
+  };
   document.querySelectorAll('#cred-providers .setting-option').forEach((btn) => {
     btn.addEventListener('click', async () => {
-      if (btn.disabled) return;
-      const [keyFlag, oauthFlag] = PROVIDER_FLAGS[btn.dataset.provider] || [];
+      const p = btn.dataset.provider;
+      if (btn.classList.contains('is-unavailable')) {
+        showToast(PROVIDER_UNAVAILABLE[p] || 'This provider isn’t available yet.', { kind: 'info', timeout: 9000 });
+        return;
+      }
+      const [keyFlag, oauthFlag] = PROVIDER_FLAGS[p] || [];
       if (!keyFlag) return;
       const on = !btn.classList.contains('active'); // flipping to this state
       if (await putConfig({ [keyFlag]: on, [oauthFlag]: on })) btn.classList.toggle('active', on);
