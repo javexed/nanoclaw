@@ -175,6 +175,14 @@ NEW_PATHS=(
   container/agent-runner/src/providers/summarize-thinking.test.ts
   src/onecli-preflight.ts
   src/onecli-preflight.test.ts
+  src/modules/byok
+  src/db/migrations/020-byok-credentials.ts
+  src/db/migrations/021-byok-oauth.ts
+  src/db/migrations/022-byok-provider.ts
+  src/db/migrations/023-byok-user-credentials.ts
+  setup/get-oauth-token.sh
+  docs/design/byok.md
+  docs/design/byok-oauth.md
 )
 echo "→ Copying webchat-owned files …"
 git checkout "$BR" -- "${NEW_PATHS[@]}"
@@ -219,6 +227,9 @@ HOOK_FILES=(
   src/modules/agent-to-agent/agent-route.test.ts
   src/modules/agent-to-agent/message-gate.test.ts
   .gitignore
+  src/container-runtime.ts
+  src/modules/index.ts
+  src/modules/approvals/onecli-approvals.ts
 )
 CONFLICTS=()
 echo "→ Applying webchat core-file hooks …"
