@@ -2162,16 +2162,18 @@ async function updateByokBanner(roomId) {
     const { connected, mode, credType, oauthAllowed, apiKeyAllowed = true, provider = 'claude' } = await r.json();
     byokProvider = provider;
     const { name, subWord, keyWord, keyPlaceholder } = byokWords(provider);
-    // API keys are offered only when the room is on AND the workspace accepts them
-    // (for this room's provider). OAuth allowance is also workspace-wide.
+    // The room's mode is the master switch: 'disabled' (Member credentials: Off)
+    // means no BYOK at all — neither API keys NOR OAuth — regardless of what the
+    // workspace accepts. When the room is on, each method is offered if the
+    // workspace accepts it (credential types are workspace-wide).
     const apiOffered = mode !== 'disabled' && apiKeyAllowed;
-    // BYOK is surfaced when API keys are offered OR the workspace allows OAuth.
-    if (!apiOffered && !oauthAllowed) {
+    const oauthOffered = mode !== 'disabled' && oauthAllowed;
+    if (!apiOffered && !oauthOffered) {
       hideAll();
       return;
     }
 
-    byokState = { offered: true, connected, provider, oauthAllowed, apiOffered, subWord, keyWord };
+    byokState = { offered: true, connected, provider, oauthAllowed: oauthOffered, apiOffered, subWord, keyWord };
     byokConnected = connected;
     updateHandleCreds();
     renderHandleChip();
@@ -2193,7 +2195,7 @@ async function updateByokBanner(roomId) {
     input.placeholder = keyPlaceholder;
     // Primary action: connect via subscription sign-in. Secondary: paste a key.
     if (oauthBtn) {
-      oauthBtn.hidden = !oauthAllowed;
+      oauthBtn.hidden = !oauthOffered;
       oauthBtn.textContent = `Connect to ${name}`;
     }
     connectBtn.hidden = !apiOffered;
@@ -5521,8 +5523,8 @@ async function openRoomDetail(roomId) {
       // Clear any prior room's selection FIRST so a failed/mismatched fetch can't
       // leave the previous room's mode showing as this room's policy.
       document
-        .querySelectorAll('input[name="room-credential-mode"]')
-        .forEach((el) => ((el).checked = false));
+        .querySelectorAll('#room-credential-modes .setting-option')
+        .forEach((b) => b.classList.remove('active'));
       const hintEl = $('#room-cred-default-hint');
       if (hintEl) hintEl.textContent = '';
       authFetch(`/api/rooms/${encodeURIComponent(roomId)}/credential-mode`)
@@ -5532,11 +5534,15 @@ async function openRoomDetail(roomId) {
             if (hintEl) hintEl.textContent = '(couldn’t load — try reopening)';
             return;
           }
-          // d.mode is the per-room override ('inherit' when unset); d.defaultMode
-          // is the workspace default shown on the Default option.
-          const radio = document.querySelector(`input[name="room-credential-mode"][value="${d.mode}"]`);
-          if (radio) radio.checked = true;
-          if (hintEl) hintEl.textContent = d.defaultMode ? `(${d.defaultMode})` : '';
+          // No explicit override → the room follows the workspace default: highlight
+          // that value and note the inheritance. An explicit pick highlights itself.
+          const effective = d.mode === 'inherit' ? d.defaultMode : d.mode;
+          document
+            .querySelectorAll('#room-credential-modes .setting-option')
+            .forEach((b) => b.classList.toggle('active', b.dataset.value === effective));
+          if (hintEl)
+            hintEl.textContent =
+              d.mode === 'inherit' ? `Following the workspace default (${d.defaultMode ?? 'off'}).` : '';
         })
         .catch(() => {
           if (hintEl) hintEl.textContent = '(couldn’t load — try reopening)';
@@ -5892,17 +5898,23 @@ $('#room-name').addEventListener('keydown', (e) => {
 });
 $('#room-detail-close').addEventListener('click', closeRoomDetail);
 $('#room-delete').addEventListener('click', deleteCurrentRoom);
-$('#room-credential-modes')?.addEventListener('change', async (e) => {
-  if (!selectedRoomId || e.target.name !== 'room-credential-mode') return;
-  const mode = e.target.value;
+$('#room-credential-modes')?.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.setting-option');
+  if (!btn || !selectedRoomId) return;
+  const mode = btn.dataset.value; // disabled | optional | required (explicit override)
   const r = await authFetch(`/api/rooms/${encodeURIComponent(selectedRoomId)}/credential-mode`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
     body: JSON.stringify({ mode }),
   });
   if (r.ok) {
-    const label =
-      { inherit: 'workspace default', disabled: 'off', optional: 'optional', required: 'required' }[mode] ?? mode;
+    document
+      .querySelectorAll('#room-credential-modes .setting-option')
+      .forEach((b) => b.classList.toggle('active', b === btn));
+    // Picking a pill sets an explicit override, so it's no longer inheriting.
+    const hintEl = $('#room-cred-default-hint');
+    if (hintEl) hintEl.textContent = '';
+    const label = { disabled: 'off', optional: 'optional', required: 'required' }[mode] ?? mode;
     showToast(`Member credentials: ${label}.`, { kind: 'success' });
     if (selectedRoomId === currentRoom) updateByokBanner(currentRoom);
   } else {

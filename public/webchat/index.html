@@ -487,35 +487,25 @@
                     <button type="button" id="room-rename-save" class="btn btn-secondary">Save</button>
                   </span>
                 </label>
-                <!-- BYOK enablement (owner/admin only; shown by openRoomDetail when room.canArchive). -->
+                <!-- In-room member credentials (owner/admin only; shown by openRoomDetail when
+                     room.canArchive). Mirrors Settings → Member credentials, but only the mode
+                     (Off/Optional/Required). Credential TYPES (Claude/Codex, key vs OAuth) are
+                     workspace-admin-only in Settings and inherited by every room. -->
                 <div id="room-credential-mode-section" class="room-cred-section" hidden>
-                  <h4 class="room-cred-title">Member credentials</h4>
-                  <div
-                    id="room-credential-modes"
-                    class="room-cred-modes"
-                    role="radiogroup"
-                    aria-label="Member credential mode"
-                  >
-                    <label class="room-cred-opt">
-                      <input type="radio" name="room-credential-mode" value="inherit" />
-                      <span>Default <span id="room-cred-default-hint" class="cred-hint"></span></span>
-                    </label>
-                    <label class="room-cred-opt">
-                      <input type="radio" name="room-credential-mode" value="disabled" />
-                      <span>Off</span>
-                    </label>
-                    <label class="room-cred-opt">
-                      <input type="radio" name="room-credential-mode" value="optional" />
-                      <span>Optional</span>
-                    </label>
-                    <label class="room-cred-opt">
-                      <input type="radio" name="room-credential-mode" value="required" />
-                      <span>Required</span>
-                    </label>
+                  <div class="setting-group">
+                    <span class="setting-label">Member credentials</span>
+                    <div
+                      id="room-credential-modes"
+                      class="setting-options"
+                      role="group"
+                      aria-label="Member credential mode"
+                    >
+                      <button class="setting-option" type="button" data-value="disabled">Off</button>
+                      <button class="setting-option" type="button" data-value="optional">Optional</button>
+                      <button class="setting-option" type="button" data-value="required">Required</button>
+                    </div>
+                    <p class="setting-help" id="room-cred-default-hint"></p>
                   </div>
-                  <p class="setting-help">
-                    Credential types are set workspace-wide in <strong>Settings → Member credentials</strong>.
-                  </p>
                 </div>
                 <div>
                   <span class="form-label">Wired agents</span>
