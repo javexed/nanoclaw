@@ -10,9 +10,11 @@
  *   agents secrets --id → { data: [{ id, type, hostPattern, ... }] }
  *   secrets create / agents create → the created row (id) under data
  *
- * NOTE: `secrets create --value <key>` passes the key in argv (briefly visible
- * in the host process list). onecli has no stdin value input as of 1.2.x; the
- * host is single-user so the exposure window is small — documented residual.
+ * NOTE: `secrets create --value <secret>` passes the value in argv (briefly
+ * visible in the host process list) — this covers API keys AND Claude OAuth
+ * subscription tokens (both go via --value; only Codex auth.json uses --file).
+ * onecli has no stdin value input as of 1.2.x; the host is single-user so the
+ * exposure window is small — documented residual.
  */
 import { execFile } from 'child_process';
 import { promisify } from 'util';

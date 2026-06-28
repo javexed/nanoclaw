@@ -58,7 +58,8 @@ registerSessionKeyResolver((mg, agentGroupId, userId) => {
   // No key: API-key 'required' rooms decline with guidance; otherwise (optional,
   // or OAuth-only) fall back to the shared session (no override).
   if (mode === 'required') {
-    return { block: 'This room requires your own Anthropic key — connect it in the banner above the chat.' };
+    const cred = groupProvider(agentGroupId) === 'codex' ? 'Codex credential' : 'Anthropic key';
+    return { block: `This room requires your own ${cred} — connect it in the banner above the chat.` };
   }
   return null;
 });

@@ -225,8 +225,8 @@ describe('Codex provider (per-member ChatGPT/Codex credential)', () => {
 });
 
 describe('revokeUserCredential (disconnect once → un-enroll everywhere)', () => {
-  it('removes the user key from every enrolled per-member agent and marks revoked', async () => {
-    const { admin, seedGroupAgent, agents } = fakeAdmin();
+  it('removes the user key from every enrolled per-member agent, deletes the vault secret, marks revoked', async () => {
+    const { admin, seedGroupAgent, agents, secrets } = fakeAdmin();
     seedGroupAgent('ag-1', [{ id: 'grp-gmail', type: 'generic' }]);
     seedGroupAgent('ag-2', [{ id: 'grp-slack', type: 'generic' }]);
     await storeUserCredential(admin, 'webchat:alice', 'claude', 'sk-ant-1', 'api_key');
@@ -238,12 +238,24 @@ describe('revokeUserCredential (disconnect once → un-enroll everywhere)', () =
     expect(userHasConnectedCredential('webchat:alice', 'claude')).toBe(false);
     expect(userHasActiveKey('webchat:alice', 'ag-1')).toBe(false);
     expect(userHasActiveKey('webchat:alice', 'ag-2')).toBe(false);
+    expect(secrets.has(userSecret)).toBe(false); // real credential purged from the vault, not just revoked
     const ident1 = byokAgentIdentifier('ag-1', 'webchat:alice');
     const ident2 = byokAgentIdentifier('ag-2', 'webchat:alice');
     expect(agents.get(ident1)!.secretIds).not.toContain(userSecret); // member secret removed
     expect(agents.get(ident1)!.secretIds).toContain('grp-gmail'); // tools left
     expect(agents.get(ident2)!.secretIds).not.toContain(userSecret);
     expect(agents.get(ident2)!.secretIds).toContain('grp-slack');
+  });
+
+  it('purges the vault secret even when the per-member agent had no other secrets', async () => {
+    // The empty-set-secrets gap: with nothing left to assign, the secret stays on
+    // the agent — deleting it from the vault is what actually neutralizes it.
+    const { admin, secrets } = fakeAdmin();
+    await storeUserCredential(admin, 'webchat:bob', 'claude', 'sk-ant-bob', 'api_key');
+    await ensureGroupEnrollment(admin, 'webchat:bob', 'ag-1'); // no group tools → agent holds only the user key
+    const userSecret = getUserSecretId('webchat:bob')!;
+    await revokeUserCredential(admin, 'webchat:bob', 'claude');
+    expect(secrets.has(userSecret)).toBe(false);
   });
 
   it('only revokes the named provider, leaving the other connected', async () => {

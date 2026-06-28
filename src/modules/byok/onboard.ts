@@ -154,11 +154,16 @@ export async function ensureGroupEnrollment(admin: OnecliAdmin, userId: string, 
 }
 
 /**
- * Disconnect: revoke the user-level credential AND un-assign the member secret
- * from every per-group agent it was lazily enrolled on (for this provider).
+ * Disconnect: un-assign the member secret from every per-group agent it was
+ * lazily enrolled on, DELETE the user-level vault secret (so the member's real
+ * credential actually leaves the vault — not just marked revoked — which also
+ * neutralizes any lingering assignment OneCLI couldn't clear via an empty
+ * set-secrets), then mark the rows revoked.
  */
 export async function revokeUserCredential(admin: OnecliAdmin, userId: string, provider: ByokProvider): Promise<void> {
   await unenrollGroups(admin, userId, provider);
+  const secretId = getUserCredential(userId, provider)?.secret_id ?? null;
+  if (secretId) await admin.deleteSecret(secretId).catch(() => {}); // best-effort; row revoke below is the gate
   setUserCredentialStatus(userId, provider, 'revoked');
   log.info('BYOK credential revoked', { userId, provider });
 }

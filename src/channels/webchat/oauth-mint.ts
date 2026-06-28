@@ -20,7 +20,7 @@
  *
  * This module only *produces* the credential (captured server-side, never round-
  * tripped through the browser). The BYOK onboard path decides what to do with it
- * (onboardByokOauth → an `anthropic` secret for Claude, an `openai` auth.json
+ * (storeUserCredential → an `anthropic` secret for Claude, an `openai` auth.json
  * secret for Codex). Keeping mint and storage separate is deliberate: the same
  * mint can later feed an operator shared-key path, and BYOK owns the per-member
  * identity wiring.
@@ -64,6 +64,10 @@ function stripEscapes(raw: string): string {
  * other CSI/OSC (color, etc.) are no-ops for layout and skipped.
  */
 function renderTerminal(raw: string): string {
+  // Bounds so a malformed/hostile cursor move (e.g. ESC[9999999G) can't allocate
+  // an enormous grid. Generous vs the real layout (stty cols 4000, a few rows).
+  const MAX_COL = 8192;
+  const MAX_ROW = 4096;
   const grid: string[][] = [];
   let row = 0;
   let col = 0;
@@ -75,6 +79,12 @@ function renderTerminal(raw: string): string {
   const num = (s: string, def = 1): number => {
     const n = parseInt(s, 10);
     return Number.isNaN(n) ? def : n;
+  };
+  const clamp = (): void => {
+    if (col < 0) col = 0;
+    else if (col > MAX_COL) col = MAX_COL;
+    if (row < 0) row = 0;
+    else if (row > MAX_ROW) row = MAX_ROW;
   };
   let i = 0;
   while (i < raw.length) {
@@ -127,6 +137,7 @@ function renderTerminal(raw: string): string {
           break;
         // color (m), private modes (h/l), etc. — no layout effect.
       }
+      clamp();
       i = j + 1;
       continue;
     }
