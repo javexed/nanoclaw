@@ -2290,6 +2290,43 @@ a.lightbox-btn {
   gap: 8px;
   margin-top: 4px;
 }
+/* BYOK enablement section in the room-settings panel. */
+.room-cred-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+}
+.room-cred-section[hidden] {
+  display: none;
+}
+.room-cred-title {
+  margin: 0;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+.room-cred-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--fs-sm);
+}
+.room-cred-row select {
+  padding: 7px 8px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text);
+}
+.room-cred-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.room-cred-check input {
+  flex: none;
+}
 /* ── Buttons — role-based set: .btn base + four role modifiers. See DESIGN.md §2.
    Icon buttons (.lightbox-btn, .settings-btn, .file-picker-btn) and the
    .agent-status-btn segmented control are deliberately NOT part of this set. */

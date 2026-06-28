@@ -117,7 +117,7 @@
           <button id="mobile-back" class="mobile-back" aria-label="Back to rooms"><svg class="icon" aria-hidden="true"><use href="#i-chevron-left"></use></svg></button>
           <span id="room-name" role="button" tabindex="0" title="Room settings">Select a room</span>
           <div class="header-controls">
-            <button id="byok-chip" class="byok-chip" hidden aria-label="Your personal credential — click to disconnect" title="Your personal credential">🔑</button>
+            <button id="byok-chip" class="byok-chip" hidden aria-label="Your member credential — click to disconnect" title="Your member credential">🔑</button>
             <button id="members-toggle" class="members-toggle" hidden aria-label="Show room members">0</button>
             <button id="handle-chip" class="handle-chip" type="button" aria-label="Edit your handle" aria-haspopup="dialog" aria-expanded="false">+ set @handle</button>
           </div>
@@ -148,10 +148,10 @@
         </div>
         <div id="connection-banner" class="connection-banner">Connection lost. Reconnecting…</div>
         <div id="byok-banner" class="byok-banner" hidden>
-          <span id="byok-banner-text">This room uses personal Anthropic keys.</span>
+          <span id="byok-banner-text">Connect your member credentials to use this room.</span>
           <input id="byok-key-input" type="password" placeholder="sk-ant-…" autocomplete="off" spellcheck="false" hidden />
-          <button id="byok-connect-btn" type="button">Connect your key</button>
-          <button id="byok-oauth-btn" type="button" hidden>Use my Claude subscription</button>
+          <button id="byok-oauth-btn" type="button" hidden>Connect with my Claude subscription</button>
+          <button id="byok-connect-btn" type="button">Use an API key</button>
           <div id="byok-oauth-form" class="byok-oauth-form" hidden>
             <p class="byok-oauth-help">
               Sign in to <strong>your</strong> Claude subscription — no terminal needed.
@@ -317,6 +317,23 @@
                     <button type="button" id="room-rename-save" class="btn btn-secondary">Save</button>
                   </span>
                 </label>
+                <!-- BYOK enablement (owner/admin only; shown by openRoomDetail when room.canArchive). -->
+                <div id="room-credential-mode-section" class="room-cred-section" hidden>
+                  <h4 class="room-cred-title">Member credentials</h4>
+                  <label class="room-cred-row">
+                    <span>Mode</span>
+                    <select id="room-credential-mode">
+                      <option value="disabled">Disabled — one shared agent (default)</option>
+                      <option value="optional">Optional — members may connect their own key</option>
+                      <option value="required">Required — every member must connect their own key</option>
+                    </select>
+                  </label>
+                  <label class="room-cred-row room-cred-check">
+                    <input type="checkbox" id="room-oauth-allowed" />
+                    <span>Allow Claude subscription (OAuth) connections</span>
+                  </label>
+                  <p class="setting-help">Members connect from the in-room banner; their turns then run on their own account.</p>
+                </div>
                 <div>
                   <span class="form-label">Wired agents</span>
                   <ul id="room-wired-agents" class="room-wired-agents"></ul>
