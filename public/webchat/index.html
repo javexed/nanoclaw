@@ -1075,10 +1075,11 @@
                 </div>
               </div>
               <div class="setting-group">
-                <label class="cred-type-row"><span>Claude</span><input type="checkbox" id="cred-allow-claude" /></label>
-                <label class="cred-type-row" id="cred-codex-row"
-                  ><span>Codex</span><input type="checkbox" id="cred-allow-codex"
-                /></label>
+                <span class="setting-label">Allowed providers</span>
+                <div class="setting-options" id="cred-providers">
+                  <button class="setting-option" data-provider="claude">Claude</button>
+                  <button class="setting-option" data-provider="codex">Codex</button>
+                </div>
               </div>
             </div>
           </div>

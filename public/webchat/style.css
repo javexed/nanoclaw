@@ -5070,18 +5070,6 @@ a.lightbox-btn {
 .settings-credentials .settings-section-title {
   margin-top: 8px;
 }
-.cred-type-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  font-size: var(--fs-sm);
-  cursor: pointer;
-}
-.cred-type-row input {
-  flex: none;
-  margin: 0;
-}
 .cred-hint {
   color: var(--text-dim);
   font-weight: 400;
@@ -5089,8 +5077,8 @@ a.lightbox-btn {
   letter-spacing: 0;
   font-size: var(--fs-xs);
 }
-/* A credential row that's unavailable (e.g. Codex before /add-codex) — greyed. */
-.cred-type-row.is-disabled {
+/* A provider pill that's unavailable (e.g. Codex before /add-codex) — greyed. */
+.setting-option:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
