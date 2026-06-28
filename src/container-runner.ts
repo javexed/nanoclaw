@@ -21,8 +21,16 @@ import {
 } from './config.js';
 import { materializeContainerJson } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
-import { updateContainerConfigScalars } from './db/container-configs.js';
-import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
+import { updateContainerConfigScalars, updateContainerConfigJson } from './db/container-configs.js';
+import {
+  CONTAINER_RUNTIME_BIN,
+  hostGatewayArgs,
+  readonlyMountArgs,
+  resolveAgentIdentity,
+  resolveContainerEnv,
+  runSessionPrepareHooks,
+  stopContainer,
+} from './container-runtime.js';
 import { EGRESS_NETWORK, egressNetworkArgs, ensureEgressNetwork } from './egress-lockdown.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
@@ -193,9 +201,20 @@ async function spawnContainer(session: Session): Promise<void> {
 
   const mounts = buildMounts(agentGroup, session, containerConfig, provider, contribution);
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
-  // OneCLI agent identifier is always the agent group id — stable across
-  // sessions and reversible via getAgentGroup() for approval routing.
-  const agentIdentifier = agentGroup.id;
+  // Run any module pre-spawn hooks BEFORE resolving identity/env. BYOK uses this
+  // for lazy enrollment: a connected member's first use of a room creates the
+  // per-member OneCLI agent here, so resolveAgentIdentity below finds it ready.
+  await runSessionPrepareHooks(agentGroup.id, session.thread_id);
+  // OneCLI agent identifier defaults to the agent group id (stable, reversible
+  // via getAgentGroup() for approval routing). An installed module (BYOK) may
+  // override it for a per-member session so the container spawns under the
+  // member's own OneCLI agent (their key); approval routing then reverses it
+  // via the byok_credentials map.
+  const agentIdentifier = resolveAgentIdentity(agentGroup.id, session.thread_id) ?? agentGroup.id;
+  // Module-contributed env for this session (BYOK OAuth injects a sentinel
+  // CLAUDE_CODE_OAUTH_TOKEN to flip Claude Code into OAuth mode; OneCLI swaps the
+  // real token on the wire). Empty for normal sessions.
+  const extraEnv = resolveContainerEnv(agentGroup.id, session.thread_id);
   const args = await buildContainerArgs(
     mounts,
     containerName,
@@ -204,6 +223,7 @@ async function spawnContainer(session: Session): Promise<void> {
     provider,
     contribution,
     agentIdentifier,
+    extraEnv,
   );
 
   log.info('Spawning container', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
@@ -486,6 +506,7 @@ async function buildContainerArgs(
   _provider: string,
   providerContribution: ProviderContainerContribution,
   agentIdentifier?: string,
+  extraEnv?: Record<string, string>,
 ): Promise<string[]> {
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
 
@@ -543,6 +564,16 @@ async function buildContainerArgs(
     throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
   }
   log.info('OneCLI gateway applied', { containerName });
+
+  // Module-contributed env (BYOK OAuth: a sentinel CLAUDE_CODE_OAUTH_TOKEN).
+  // Applied AFTER the OneCLI gateway so it wins on key collisions (last `-e`
+  // wins). Anthropic still routes through OneCLI, which swaps the sentinel bearer
+  // for the member's real vault token on the wire.
+  if (extraEnv) {
+    for (const [key, value] of Object.entries(extraEnv)) {
+      args.push('-e', `${key}=${value}`);
+    }
+  }
 
   // Override entrypoint: run v2 entry point directly via Bun (no tsc, no stdin).
   args.push('--entrypoint', 'bash');
