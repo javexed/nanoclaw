@@ -45,13 +45,22 @@ if [ "$BASE" != "$(git rev-parse "$BYOK_REMOTE/channels-webchat")" ]; then
 fi
 
 # ── 4. BYOK-owned NEW files: copy in wholesale ────────────────────────────
-NEW_PATHS=(
-  src/modules/byok
-  src/db/migrations/020-byok-credentials.ts
-  src/db/migrations/021-byok-oauth.ts
-  setup/get-oauth-token.sh
+# Derived from the byok diff rather than hand-listed: a hardcoded list silently
+# drifts as byok grows (e.g. oauth-mint.ts and the 022/023 migrations were added
+# but never listed, so the hooks that import them broke the build mid-install).
+# Scoped to the established byok-owned runtime roots. install-byok.sh,
+# uninstall-byok.sh, the SKILL.md and docs are fetched separately per the skill
+# instructions, so they are intentionally NOT copied here.
+mapfile -t NEW_PATHS < <(
+  git diff --name-only --diff-filter=A "$BASE" "$BR" -- \
+    src/modules/byok \
+    src/channels/webchat/oauth-mint.ts \
+    'src/db/migrations/*-byok-*.ts' \
+    setup/get-oauth-token.sh
 )
-echo "→ Copying BYOK-owned files …"
+[ "${#NEW_PATHS[@]}" -gt 0 ] \
+  || { echo "install-byok: found no byok-owned files in $BR (unexpected)" >&2; exit 1; }
+echo "→ Copying ${#NEW_PATHS[@]} BYOK-owned file(s) …"
 git checkout "$BR" -- "${NEW_PATHS[@]}"
 
 # ── 5. Core/webchat hooks: guarded, reversible 3-way patch ────────────────
