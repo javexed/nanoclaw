@@ -2177,12 +2177,10 @@ async function updateByokBanner(roomId) {
     const connectBtn = $('#byok-connect-btn');
     const oauthBtn = $('#byok-oauth-btn');
     const input = $('#byok-key-input');
-    const oauthModal = $('#byok-oauth-modal');
     banner.hidden = false;
     input.hidden = true;
     input.value = '';
     input.placeholder = keyPlaceholder;
-    if (oauthModal) oauthModal.hidden = true;
     // Primary action: connect via subscription sign-in. Secondary: paste a key.
     if (oauthBtn) {
       oauthBtn.hidden = !oauthAllowed;
@@ -2324,6 +2322,10 @@ $('#byok-oauth-btn')?.addEventListener('click', async () => {
   const codexCode = $('#byok-oauth-codex-code');
   modal.hidden = false;
   byokOauthStatus('Preparing sign-in…', '');
+  // Open a blank tab now (inside the click gesture, so it isn't popup-blocked);
+  // we point it at the sign-in URL once the mint returns it. The visible link
+  // stays as a fallback if the browser blocks it.
+  const signinTab = window.open('', '_blank');
   try {
     const startUrl = isCodex ? '/api/byok/codex/start' : '/api/byok/oauth/start';
     const r = await authFetch(startUrl, {
@@ -2335,6 +2337,7 @@ $('#byok-oauth-btn')?.addEventListener('click', async () => {
     if (!r.ok) throw new Error(data.error || r.statusText);
     byokOauthSessionId = data.sessionId;
     $('#byok-oauth-link').href = data.url;
+    if (signinTab) signinTab.location.href = data.url; // auto-open the current session's URL
     // Claude: paste a code back. Codex: enter a pairing code at the site, then approve.
     if (code) code.hidden = isCodex;
     if (codexCode) {
@@ -2353,6 +2356,7 @@ $('#byok-oauth-btn')?.addEventListener('click', async () => {
     byokOauthStatus(isCodex ? 'Open the link, enter the code, and approve — then click connect.' : '', '');
     $('#byok-oauth-link').focus();
   } catch (err) {
+    if (signinTab) signinTab.close(); // no URL to show — don't leave a blank tab
     $('#byok-oauth-spinner').hidden = true;
     byokOauthStatus(err.message || 'Could not start sign-in.', 'error');
   }
@@ -2373,6 +2377,17 @@ function closeByokOauthModal() {
 }
 $('#byok-oauth-cancel')?.addEventListener('click', closeByokOauthModal);
 $('#byok-oauth-close')?.addEventListener('click', closeByokOauthModal);
+// Click the backdrop (outside the modal card) to close.
+$('#byok-oauth-modal')?.addEventListener('click', (e) => {
+  if (e.target === $('#byok-oauth-modal')) closeByokOauthModal();
+});
+// Auto-submit once a code is pasted (Claude path) — no separate Connect click.
+$('#byok-oauth-code')?.addEventListener('paste', () => {
+  setTimeout(() => {
+    const submit = $('#byok-oauth-submit');
+    if (submit && !submit.hidden && ($('#byok-oauth-code')?.value || '').trim()) submit.click();
+  }, 0);
+});
 
 $('#byok-oauth-submit')?.addEventListener('click', async () => {
   const isCodex = byokProvider === 'codex';
@@ -2384,7 +2399,7 @@ $('#byok-oauth-submit')?.addEventListener('click', async () => {
   $('#byok-oauth-step2').hidden = true;
   $('#byok-oauth-spinner').hidden = false; // spinner while connecting
   const { subWord } = byokWords(byokProvider);
-  byokOauthStatus(isCodex ? 'Waiting for approval…' : 'Saving your subscription…', '');
+  byokOauthStatus('Connecting…', '');
   try {
     const finishUrl = isCodex ? '/api/byok/codex/finish' : '/api/byok/oauth/code';
     const body = isCodex
