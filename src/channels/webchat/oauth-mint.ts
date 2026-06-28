@@ -56,8 +56,12 @@ function normalizeForToken(raw: string): string {
   return stripEscapes(raw).replace(CONTROL_AND_SPACE, '');
 }
 
-// Claude subscription OAuth token: sk-ant-oat<base64url>AA.
-const CLAUDE_TOKEN_RE = /sk-ant-oat[A-Za-z0-9_-]{80,500}AA/g;
+// Claude subscription OAuth token: sk-ant-<base64url>, ~100+ chars. (The older
+// sk-ant-oat…AA shape is just a subset of this — Claude has shipped tokens that
+// neither start with `oat` nor end in `AA`, so anchor only on the sk-ant- prefix
+// + a generous length.) stty cols 4000 keeps it on one line (unwrapped), so the
+// escape-stripped output leaves it contiguous and delimited from trailing prose.
+const CLAUDE_TOKEN_RE = /sk-ant-[A-Za-z0-9_-]{40,}/g;
 const URL_RE = /https?:\/\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+/;
 // Codex device-auth pairing code, e.g. "ABCD-EFGH". Best-effort: completion is
 // detected by auth.json appearing, not by this match, so a format drift here only
@@ -106,8 +110,12 @@ function findUrl(buffer: string): string | null {
 }
 
 function findTokenSince(buffer: string, rawOffset: number): string | null {
-  const ms = normalizeForToken(buffer.slice(rawOffset)).match(CLAUDE_TOKEN_RE);
-  // LAST match — setup-token can echo intermediate output before the final token.
+  // Match on the escape-stripped output (whitespace KEPT) rather than the
+  // whitespace-collapsed form: the token prints unwrapped (stty cols 4000), so
+  // whitespace stays as a clean delimiter and the match stops before the
+  // "Store this token…" prose that follows. LAST match — setup-token can echo
+  // intermediate output before the final token.
+  const ms = stripEscapes(buffer.slice(rawOffset)).match(CLAUDE_TOKEN_RE);
   return ms ? ms[ms.length - 1] : null;
 }
 
