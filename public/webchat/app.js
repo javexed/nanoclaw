@@ -2322,10 +2322,6 @@ $('#byok-oauth-btn')?.addEventListener('click', async () => {
   const codexCode = $('#byok-oauth-codex-code');
   modal.hidden = false;
   byokOauthStatus('Preparing sign-in…', '');
-  // Open a blank tab now (inside the click gesture, so it isn't popup-blocked);
-  // we point it at the sign-in URL once the mint returns it. The visible link
-  // stays as a fallback if the browser blocks it.
-  const signinTab = window.open('', '_blank');
   try {
     const startUrl = isCodex ? '/api/byok/codex/start' : '/api/byok/oauth/start';
     const r = await authFetch(startUrl, {
@@ -2337,7 +2333,6 @@ $('#byok-oauth-btn')?.addEventListener('click', async () => {
     if (!r.ok) throw new Error(data.error || r.statusText);
     byokOauthSessionId = data.sessionId;
     $('#byok-oauth-link').href = data.url;
-    if (signinTab) signinTab.location.href = data.url; // auto-open the current session's URL
     // Claude: paste a code back. Codex: enter a pairing code at the site, then approve.
     if (code) code.hidden = isCodex;
     if (codexCode) {
@@ -2356,7 +2351,6 @@ $('#byok-oauth-btn')?.addEventListener('click', async () => {
     byokOauthStatus(isCodex ? 'Open the link, enter the code, and approve — then click connect.' : '', '');
     $('#byok-oauth-link').focus();
   } catch (err) {
-    if (signinTab) signinTab.close(); // no URL to show — don't leave a blank tab
     $('#byok-oauth-spinner').hidden = true;
     byokOauthStatus(err.message || 'Could not start sign-in.', 'error');
   }
