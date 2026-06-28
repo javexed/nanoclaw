@@ -342,23 +342,16 @@ async function renderCredentialsSettings() {
   document.querySelectorAll('#cred-default-mode .setting-option').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.value === cfg.defaultMode);
   });
-  const setChecked = (id, v) => {
-    const el = $(id);
-    if (el) el.checked = !!v;
-  };
-  setChecked('#cred-allow-anthropic-key', cfg.allowAnthropicKey);
-  setChecked('#cred-allow-claude-oauth', cfg.allowClaudeOauth);
-  setChecked('#cred-allow-openai-key', cfg.allowOpenaiKey);
-  setChecked('#cred-allow-codex-oauth', cfg.allowCodexOauth);
-  // Codex types are inert until the provider is installed — grey + disable them.
-  const codexGroup = $('#cred-codex-group');
-  if (codexGroup) codexGroup.classList.toggle('is-disabled', !cfg.codexAvailable);
+  // One toggle per provider: "allow" = accept BOTH a key and a subscription.
+  const claudeEl = $('#cred-allow-claude');
+  if (claudeEl) claudeEl.checked = !!(cfg.allowAnthropicKey || cfg.allowClaudeOauth);
+  const codexEl = $('#cred-allow-codex');
+  if (codexEl) codexEl.checked = !!(cfg.allowOpenaiKey || cfg.allowCodexOauth);
+  // Codex only appears once its provider is installed; otherwise a one-line hint.
+  const codexRow = $('#cred-codex-row');
+  if (codexRow) codexRow.hidden = !cfg.codexAvailable;
   const codexHint = $('#cred-codex-hint');
   if (codexHint) codexHint.hidden = !!cfg.codexAvailable;
-  ['#cred-allow-openai-key', '#cred-allow-codex-oauth'].forEach((s) => {
-    const el = $(s);
-    if (el) el.disabled = !cfg.codexAvailable;
-  });
 
   if (credConfigWired) return;
   credConfigWired = true;
@@ -385,17 +378,17 @@ async function renderCredentialsSettings() {
       }
     });
   });
-  const wireCheck = (id, key) => {
+  // Each provider toggle drives its key + subscription flags together.
+  const wireProvider = (id, keyFlag, oauthFlag) => {
     const el = $(id);
     if (!el) return;
     el.addEventListener('change', async () => {
-      if (!(await putConfig({ [key]: el.checked }))) el.checked = !el.checked;
+      const on = el.checked;
+      if (!(await putConfig({ [keyFlag]: on, [oauthFlag]: on }))) el.checked = !on;
     });
   };
-  wireCheck('#cred-allow-anthropic-key', 'allowAnthropicKey');
-  wireCheck('#cred-allow-claude-oauth', 'allowClaudeOauth');
-  wireCheck('#cred-allow-openai-key', 'allowOpenaiKey');
-  wireCheck('#cred-allow-codex-oauth', 'allowCodexOauth');
+  wireProvider('#cred-allow-claude', 'allowAnthropicKey', 'allowClaudeOauth');
+  wireProvider('#cred-allow-codex', 'allowOpenaiKey', 'allowCodexOauth');
 }
 
 // Persist the @handle from the Settings field. Inline feedback (per DESIGN.md):

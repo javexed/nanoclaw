@@ -1066,10 +1066,6 @@
             <!-- Workspace credentials policy — owner only (shown when canEdit). -->
             <div id="settings-credentials" class="settings-credentials" hidden>
               <h3 class="settings-section-title">Member credentials</h3>
-              <p class="setting-help">
-                Which credential types members may connect, and the default for new rooms. Each room can override the
-                mode.
-              </p>
               <div class="setting-group">
                 <span class="setting-label">Default for new rooms</span>
                 <div class="setting-options" id="cred-default-mode">
@@ -1079,24 +1075,12 @@
                 </div>
               </div>
               <div class="setting-group">
-                <span class="setting-label">Claude</span>
-                <label class="cred-type-row"
-                  ><span>API key</span><input type="checkbox" id="cred-allow-anthropic-key"
+                <span class="setting-label">Members may use their own</span>
+                <label class="cred-type-row"><span>Claude</span><input type="checkbox" id="cred-allow-claude" /></label>
+                <label class="cred-type-row" id="cred-codex-row" hidden
+                  ><span>Codex</span><input type="checkbox" id="cred-allow-codex"
                 /></label>
-                <label class="cred-type-row"
-                  ><span>Subscription (OAuth)</span><input type="checkbox" id="cred-allow-claude-oauth"
-                /></label>
-              </div>
-              <div class="setting-group" id="cred-codex-group">
-                <span class="setting-label"
-                  >Codex <span id="cred-codex-hint" class="cred-hint" hidden>— needs /add-codex</span></span
-                >
-                <label class="cred-type-row"
-                  ><span>OpenAI API key</span><input type="checkbox" id="cred-allow-openai-key"
-                /></label>
-                <label class="cred-type-row"
-                  ><span>ChatGPT subscription (OAuth)</span><input type="checkbox" id="cred-allow-codex-oauth"
-                /></label>
+                <p id="cred-codex-hint" class="cred-hint" hidden>Add Codex (/add-codex) to offer it here.</p>
               </div>
             </div>
           </div>
