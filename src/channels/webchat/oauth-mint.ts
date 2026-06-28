@@ -223,10 +223,19 @@ export async function mintClaudeToken(userId: string, sessionId: string, code: s
   if (!session || session.userId !== userId) throw new Error('No active sign-in session.');
 
   const rawLenBefore = session.buffer.length;
-  // `claude setup-token` is a raw-mode TUI (Ink) — it registers Enter as a
-  // carriage return, not a newline. '\n' leaves the code in the field
-  // unsubmitted; '\r' actually submits it.
-  session.child.stdin.write(code.trim() + '\r');
+  // `claude setup-token` is a raw-mode TUI (Ink). Writing `code + '\r'` in one
+  // chunk reads as a bulk PASTE — Ink inserts the CR into the field instead of
+  // submitting, so the code just sits there masked as asterisks and the prompt
+  // waits forever (confirmed via capture diagnostics). Send the code first, then
+  // Enter as a SEPARATE keystroke a beat later so the field's onSubmit fires.
+  session.child.stdin.write(code.trim());
+  setTimeout(() => {
+    try {
+      session.child.stdin.write('\r');
+    } catch {
+      /* process already gone */
+    }
+  }, 150);
   log.info('OAuth mint: code submitted', { sessionId });
 
   try {
