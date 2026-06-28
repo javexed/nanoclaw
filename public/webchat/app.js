@@ -2162,16 +2162,18 @@ async function updateByokBanner(roomId) {
     const { connected, mode, credType, oauthAllowed, apiKeyAllowed = true, provider = 'claude' } = await r.json();
     byokProvider = provider;
     const { name, subWord, keyWord, keyPlaceholder } = byokWords(provider);
-    // API keys are offered only when the room is on AND the workspace accepts them
-    // (for this room's provider). OAuth allowance is also workspace-wide.
+    // The room's mode is the master switch: 'disabled' (Member credentials: Off)
+    // means no BYOK at all — neither API keys NOR OAuth — regardless of what the
+    // workspace accepts. When the room is on, each method is offered if the
+    // workspace accepts it (credential types are workspace-wide).
     const apiOffered = mode !== 'disabled' && apiKeyAllowed;
-    // BYOK is surfaced when API keys are offered OR the workspace allows OAuth.
-    if (!apiOffered && !oauthAllowed) {
+    const oauthOffered = mode !== 'disabled' && oauthAllowed;
+    if (!apiOffered && !oauthOffered) {
       hideAll();
       return;
     }
 
-    byokState = { offered: true, connected, provider, oauthAllowed, apiOffered, subWord, keyWord };
+    byokState = { offered: true, connected, provider, oauthAllowed: oauthOffered, apiOffered, subWord, keyWord };
     byokConnected = connected;
     updateHandleCreds();
     renderHandleChip();
@@ -2193,7 +2195,7 @@ async function updateByokBanner(roomId) {
     input.placeholder = keyPlaceholder;
     // Primary action: connect via subscription sign-in. Secondary: paste a key.
     if (oauthBtn) {
-      oauthBtn.hidden = !oauthAllowed;
+      oauthBtn.hidden = !oauthOffered;
       oauthBtn.textContent = `Connect to ${name}`;
     }
     connectBtn.hidden = !apiOffered;

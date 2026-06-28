@@ -41,19 +41,18 @@ registerSessionKeyResolver((mg, agentGroupId, userId) => {
   // BYOK is webchat-only and opt-in per room. Fail safe to no override.
   if (mg.channel_type !== 'webchat' || !userId) return null;
   if (!hasTable(getDb(), 'webchat_room_settings')) return null;
-  // Effective mode = the room's override, else the global default. OAuth/key
-  // allowances are workspace-wide (set on the Credentials admin page) and
-  // provider-scoped (Claude vs Codex).
+  // Effective mode = the room's override, else the global default. Which
+  // credential TYPES the workspace accepts (key / OAuth, per provider) is set on
+  // the Credentials admin page; the room's mode is the master switch over both.
   const provider = groupProvider(agentGroupId);
   const cfg = getCredentialsConfig();
   const mode = getEffectiveRoomMode(mg.platform_id);
-  const oauthAllowed = provider === 'codex' ? cfg.allowCodexOauth : cfg.allowClaudeOauth;
-  const apiKeyAllowed = provider === 'codex' ? cfg.allowOpenaiKey : cfg.allowAnthropicKey;
-  // API keys apply only when the room is on AND the workspace accepts them;
-  // OAuth subscriptions are workspace-wide and apply even in an OAuth-only room
-  // (mode='disabled' but oauthAllowed=true).
-  const apiOffered = mode !== 'disabled' && apiKeyAllowed;
-  if (!apiOffered && !oauthAllowed) return null; // BYOK entirely off here.
+  // 'disabled' (Member credentials: Off) means no BYOK at all — neither key nor
+  // OAuth — regardless of what the workspace accepts. Otherwise each method
+  // applies if the workspace accepts it for this provider.
+  const apiOffered = mode !== 'disabled' && (provider === 'codex' ? cfg.allowOpenaiKey : cfg.allowAnthropicKey);
+  const oauthOffered = mode !== 'disabled' && (provider === 'codex' ? cfg.allowCodexOauth : cfg.allowClaudeOauth);
+  if (!apiOffered && !oauthOffered) return null; // BYOK entirely off here.
 
   // A member gets their own per-member session ONLY if their connected credential
   // is still PERMITTED by current policy — so flipping an allowance off (or a
@@ -61,7 +60,7 @@ registerSessionKeyResolver((mg, agentGroupId, userId) => {
   // The per-(user,group) OneCLI agent is created lazily at spawn (prepare hook).
   const cred = getUserCredential(userId, provider);
   if (cred?.status === 'active') {
-    const permitted = cred.cred_type === 'oauth_token' ? oauthAllowed : apiOffered;
+    const permitted = cred.cred_type === 'oauth_token' ? oauthOffered : apiOffered;
     if (permitted) return { sessionMode: 'per-thread', threadId: userId };
   }
   // No permitted credential: API-key 'required' rooms decline with guidance;
