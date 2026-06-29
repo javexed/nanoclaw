@@ -168,6 +168,7 @@ import {
   unarchiveRoom,
   unhideRoomForUser,
   unpinRoomForUser,
+  setPinnedOrderForUser,
   unassignModelFromAgent,
   unwireAgentFromWebchatRoom,
   updateWebchatModel,
@@ -960,6 +961,31 @@ async function handleHttp(
     } else {
       unpinRoomForUser(userId, roomId);
     }
+    broadcastRooms();
+    return json(res, 200, { ok: true });
+  }
+
+  // Reorder the caller's pinned rooms. Body: { order: string[] } — the desired
+  // top-to-bottom room-id order. Per-user (setPinnedOrderForUser only touches
+  // this user's pins; unknown/unpinned ids are ignored), so no per-room access
+  // check is needed beyond the authenticated user. broadcastRooms re-syncs the
+  // new order to the user's other devices.
+  if (url.pathname === '/api/rooms/pins/order' && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') {
+      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    }
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { order?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    if (!Array.isArray(body.order) || body.order.some((x) => typeof x !== 'string')) {
+      return json(res, 400, { error: 'order must be an array of room id strings' });
+    }
+    setPinnedOrderForUser(userId, body.order as string[]);
     broadcastRooms();
     return json(res, 200, { ok: true });
   }

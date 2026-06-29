@@ -40,6 +40,7 @@ import {
   moduleWebchatRoomCredentialMode,
   moduleWebchatRoomOauthAllowed,
   moduleWebchatCredentialsConfig,
+  moduleWebchatRoomPinOrder,
 } from '../../channels/webchat/migration.js';
 
 export interface Migration {
@@ -91,6 +92,7 @@ export const migrations: Migration[] = [
   moduleWebchatRoomCredentialMode,
   moduleWebchatRoomOauthAllowed,
   moduleWebchatCredentialsConfig,
+  moduleWebchatRoomPinOrder,
   migration020,
   migration021,
   migration022,

@@ -629,3 +629,28 @@ export const moduleWebchatCredentialsConfig: Migration = {
     `);
   },
 };
+
+/**
+ * Manual ordering for pinned rooms. Adds a per-user `position` to
+ * webchat_room_pins so the operator can drag pinned rooms into a fixed order
+ * (previously the pinned group auto-sorted by recent activity). Existing pins
+ * are backfilled 0-indexed by pinned_at (oldest pin at the top), a stable
+ * starting order; the room_id tiebreaker keeps it deterministic.
+ */
+export const moduleWebchatRoomPinOrder: Migration = {
+  version: 116,
+  name: 'webchat-room-pin-order',
+  up(db: Database.Database) {
+    db.exec(`
+      ALTER TABLE webchat_room_pins ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+      UPDATE webchat_room_pins
+         SET position = (
+           SELECT COUNT(*) FROM webchat_room_pins p2
+            WHERE p2.user_id = webchat_room_pins.user_id
+              AND (p2.pinned_at < webchat_room_pins.pinned_at
+                   OR (p2.pinned_at = webchat_room_pins.pinned_at
+                       AND p2.room_id < webchat_room_pins.room_id))
+         );
+    `);
+  },
+};
