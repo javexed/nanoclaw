@@ -23,6 +23,8 @@ import {
   stopContainer,
   ensureContainerRuntimeRunning,
   cleanupOrphans,
+  registerContainerConfigAugmentor,
+  resolveContainerConfigAugmentation,
 } from './container-runtime.js';
 import { CONTAINER_INSTALL_LABEL } from './config.js';
 import { log } from './log.js';
@@ -37,6 +39,28 @@ describe('readonlyMountArgs', () => {
   it('returns -v flag with :ro suffix', () => {
     const args = readonlyMountArgs('/host/path', '/container/path');
     expect(args).toEqual(['-v', '/host/path:/container/path:ro']);
+  });
+});
+
+describe('container config augmentors', () => {
+  it('returns {} when no augmentor is registered (core default)', () => {
+    // Note: other suites may register augmentors; assert our key specifically.
+    expect(resolveContainerConfigAugmentation('g-none').lenientOutput).toBeUndefined();
+  });
+
+  it('merges a registered augmentor keyed by agent group', () => {
+    registerContainerConfigAugmentor((id) => (id === 'g-ollama' ? { lenientOutput: true } : {}));
+    expect(resolveContainerConfigAugmentation('g-ollama')).toMatchObject({ lenientOutput: true });
+    expect(resolveContainerConfigAugmentation('g-other').lenientOutput).toBeUndefined();
+  });
+
+  it('isolates a throwing augmentor — never breaks spawning', () => {
+    registerContainerConfigAugmentor(() => {
+      throw new Error('augmentor bug');
+    });
+    registerContainerConfigAugmentor((id) => (id === 'g-ok' ? { lenientOutput: true } : {}));
+    // The throwing augmentor is swallowed; the healthy one still contributes.
+    expect(resolveContainerConfigAugmentation('g-ok')).toMatchObject({ lenientOutput: true });
   });
 });
 

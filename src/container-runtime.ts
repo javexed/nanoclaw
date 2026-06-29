@@ -55,6 +55,32 @@ export function resolveContainerEnv(agentGroupId: string, threadId: string | nul
 }
 
 /**
+ * Extra `container.json` fields contributed by installed modules for an agent
+ * group, merged into the materialized config at spawn (e.g. webchat sets
+ * `lenientOutput: true` when the group is wired to an ollama model). Following
+ * the architecture rule that all NanoClaw-specific config travels in
+ * container.json (read by the runner) rather than as `-e` env vars. Augmentors
+ * are composed (later registrations merge over earlier ones); core ships with
+ * none, so the result is `{}` and container.json is unchanged.
+ */
+type ContainerConfigAugmentor = (agentGroupId: string) => Record<string, unknown>;
+const containerConfigAugmentors: ContainerConfigAugmentor[] = [];
+export function registerContainerConfigAugmentor(fn: ContainerConfigAugmentor): void {
+  containerConfigAugmentors.push(fn);
+}
+export function resolveContainerConfigAugmentation(agentGroupId: string): Record<string, unknown> {
+  const merged: Record<string, unknown> = {};
+  for (const fn of containerConfigAugmentors) {
+    try {
+      Object.assign(merged, fn(agentGroupId));
+    } catch {
+      // An augmentor bug must never break spawning — skip its contribution.
+    }
+  }
+  return merged;
+}
+
+/**
  * Async pre-spawn hooks contributed by an installed module, run once just before
  * a session's container is spawned. BYOK uses this for lazy / just-in-time
  * enrollment: the first time a connected member uses a room, the hook creates
