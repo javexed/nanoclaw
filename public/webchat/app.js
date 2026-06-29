@@ -2024,10 +2024,18 @@ function appendMessage(msg, statusText, beforeNode) {
       bubble.appendChild(caption);
     }
   } else if (isMine) {
-    // User's own messages are rendered as plain text — preserves whitespace,
-    // tabs, and code indentation exactly as typed. Only agent replies need
-    // Markdown interpretation.
-    bubble.textContent = msg.content;
+    // Your own messages render as full Markdown too (bold/lists/links/code
+    // blocks + agent-tinted @mentions), same pipeline as agent replies. Markdown
+    // re-flows whitespace, so fenced ``` blocks keep code exact; falls back to
+    // plain text if marked/DOMPurify throws (escaped by the DOM, no XSS risk).
+    try {
+      bubble.innerHTML = DOMPurify.sanitize(marked.parse(msg.content));
+      decorateCodeBlocks(bubble);
+      decorateMentions(bubble);
+    } catch (err) {
+      console.error('Message render failed; falling back to plain text', err);
+      bubble.textContent = msg.content;
+    }
   } else {
     // Markdown render is best-effort: a malformed message must not crash the
     // whole render loop and leave #messages half-populated. Fall back to
@@ -3373,6 +3381,13 @@ function acceptMention(input) {
  * styling tells the user "this looks like a mention." Server-side matching
  * is what actually decides routing.
  */
+// Map a mention handle (folder/slug) to its wired agent's colour, matching the
+// per-name tint used on a2a labels. Humans / unknown handles → null (default chip).
+function mentionAgentColor(handle) {
+  const a = (wiredAgentsForCurrentRoom || []).find((x) => (x.folder || '').toLowerCase() === handle);
+  return a && a.name ? agentColor(a.name) : null;
+}
+
 function decorateMentions(bubble) {
   const walker = document.createTreeWalker(bubble, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
@@ -3403,7 +3418,16 @@ function decorateMentions(bubble) {
       if (fullStart > last) frag.appendChild(document.createTextNode(txt.slice(last, fullStart)));
       const span = document.createElement('span');
       span.className = 'mention';
-      if (myHandle && m[2].toLowerCase() === myHandle) span.classList.add('mention-me');
+      const handle = m[2].toLowerCase();
+      if (myHandle && handle === myHandle) {
+        // A mention of me keeps the distinct self-highlight (warning tint).
+        span.classList.add('mention-me');
+      } else {
+        // A mention of a wired agent is tinted in that agent's colour (the same
+        // hash palette as a2a labels), so @code-reviewer reads in its colour.
+        const color = mentionAgentColor(handle);
+        if (color) span.style.background = color;
+      }
       span.textContent = `@${m[2]}`;
       frag.appendChild(span);
       last = fullStart + 1 + m[2].length;
@@ -3992,6 +4016,19 @@ function renderTopology(data) {
   const drawNode = (x, yMap, item, kind, degree, stroke) => {
     const y = yPx(yMap, item.id);
     const g = svgEl('g', { class: `topo-node topo-${kind}${degree === 0 ? ' topo-orphan' : ''}` });
+    // Click a node to open that item's settings drawer (overlays the graph;
+    // closing it returns here). Keyboard-accessible too.
+    g.style.cursor = 'pointer';
+    g.setAttribute('role', 'button');
+    g.setAttribute('tabindex', '0');
+    g.setAttribute('aria-label', `Open ${kind} settings: ${item.name}`);
+    g.addEventListener('click', () => openTopologyItem(kind, item.id));
+    g.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        openTopologyItem(kind, item.id);
+      }
+    });
     const c = svgEl('circle', { cx: x, cy: y, r: NODE_X });
     // Match the room node to its edge color (skip orphans — they keep the
     // red-dashed "unused" treatment).
@@ -4007,6 +4044,26 @@ function renderTopology(data) {
   for (const m of models) drawNode(cols.model, modelY, m, 'model', (modelAgents.get(m.id) || []).length);
 
   canvas.appendChild(svg);
+}
+
+// Open the settings drawer for a clicked topology node. The detail drawers are
+// fixed overlays (z-index 110), so they layer over the graph and closing one
+// returns here. fetchAgents/fetchModels are lazy so the lookup data exists even
+// when the user jumped straight to the topology view.
+async function openTopologyItem(kind, id) {
+  try {
+    if (kind === 'room') {
+      await openRoomDetail(id);
+    } else if (kind === 'agent') {
+      if (!allAgents.length) await fetchAgents();
+      await openAgentDetail(id);
+    } else if (kind === 'model') {
+      if (!allModels.length) await fetchModels();
+      await openModelDetail(id);
+    }
+  } catch (err) {
+    showToast('Couldn’t open settings: ' + (err?.message || err), { kind: 'error' });
+  }
 }
 
 // ── Wiring matrix (rooms × agents management console) ──────────────────────

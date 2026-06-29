@@ -3170,6 +3170,22 @@ a.lightbox-btn {
   fill: var(--text-dim);
   font-style: italic;
 }
+/* Clickable: nodes open the item's settings. Affordance on hover/focus. */
+.topo-node {
+  transition: var(--transition);
+}
+.topo-node:hover circle,
+.topo-node:focus-visible circle {
+  fill: var(--surface3, var(--surface2));
+  stroke-width: 3;
+}
+.topo-node:hover .topo-label,
+.topo-node:focus-visible .topo-label {
+  font-weight: 600;
+}
+.topo-node:focus-visible {
+  outline: none;
+}
 
 /* Wiring matrix — rooms × agents grid; sticky headers, tap-to-toggle cells.
    Plain table so it scrolls/taps on mobile. */
