@@ -34,6 +34,7 @@ import {
   upsertSessionRouting,
   insertMessage,
   migrateMessagesInTable,
+  nextEvenSeq,
 } from './db/session-db.js';
 import { log } from './log.js';
 import type { Session } from './types.js';
@@ -78,6 +79,46 @@ export function sessionDbPath(agentGroupId: string, sessionId: string): string {
 
 function generateId(): string {
   return `sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export type SessionMode = 'shared' | 'per-thread' | 'agent-shared';
+
+/**
+ * Optional per-message session-key override, registered by an installed module
+ * (e.g. BYOK). Given the messaging group + agent + resolved sender, it can
+ * redirect the turn to a different session (mode + threadId) — e.g. a
+ * per-member session keyed by userId. Core ships with no resolver (returns
+ * null → unchanged behavior); the module self-registers at import time.
+ */
+export interface SessionKeyOverride {
+  sessionMode: SessionMode;
+  threadId: string | null;
+}
+/** A resolver may BLOCK a turn (e.g. a 'required' BYOK room where the member
+ * has no key) — the router then declines to wake and shows the message. */
+export interface BlockedTurn {
+  block: string;
+}
+type SessionKeyResolver = (
+  mg: { id: string; channel_type: string; platform_id: string; is_group?: number },
+  agentGroupId: string,
+  userId: string | null,
+) => SessionKeyOverride | BlockedTurn | null;
+
+let sessionKeyResolver: SessionKeyResolver | null = null;
+export function registerSessionKeyResolver(fn: SessionKeyResolver): void {
+  sessionKeyResolver = fn;
+}
+export function resolveSessionKeyOverride(
+  mg: { id: string; channel_type: string; platform_id: string; is_group?: number },
+  agentGroupId: string,
+  userId: string | null,
+): SessionKeyOverride | BlockedTurn | null {
+  try {
+    return sessionKeyResolver ? sessionKeyResolver(mg, agentGroupId, userId) : null;
+  } catch {
+    return null; // a resolver bug must never break routing
+  }
 }
 
 /**
@@ -247,6 +288,69 @@ export function writeSessionMessage(
   }
 
   updateSession(sessionId, { last_active: new Date().toISOString() });
+}
+
+export interface ContextMessage {
+  id: string;
+  kind: string;
+  timestamp: string;
+  platformId: string | null;
+  channelType: string | null;
+  threadId: string | null;
+  content: string;
+  trigger: 0 | 1;
+}
+
+/**
+ * Idempotently write a batch of inbound rows into a session (BYOK shared-context
+ * fan-out). Opens inbound.db once, skips ids already present, and inserts the
+ * rest — so re-syncing the room transcript each turn only adds genuinely new
+ * messages. Caller supplies stable ids (e.g. `byok-<session>-<roomMsgId>`).
+ */
+export function syncSessionContext(agentGroupId: string, sessionId: string, messages: ContextMessage[]): void {
+  if (messages.length === 0) return;
+  const db = openInboundDb(agentGroupId, sessionId);
+  try {
+    const existing = new Set((db.prepare('SELECT id FROM messages_in').all() as { id: string }[]).map((r) => r.id));
+    const insert = db.prepare(
+      `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content, process_after, recurrence, series_id, trigger, source_session_id, on_wake)
+       VALUES (@id, @seq, @kind, @timestamp, 'pending', @platformId, @channelType, @threadId, @content, NULL, NULL, @id, @trigger, NULL, 0)`,
+    );
+    for (const m of messages) {
+      if (existing.has(m.id)) continue;
+      insert.run({ ...m, seq: nextEvenSeq(db) });
+    }
+  } finally {
+    db.close();
+  }
+  updateSession(sessionId, { last_active: new Date().toISOString() });
+}
+
+/**
+ * Optional per-member inbound writer (BYOK). For a per-member session's wake
+ * turn, the module writes the full shared room transcript (current message →
+ * trigger=1, the rest → trigger=0 context) so the responding agent has the
+ * whole conversation. Returns true if it handled the write; the router then
+ * skips its normal single-message write. Core ships with no writer.
+ */
+export interface PerMemberInboundArgs {
+  agentGroupId: string;
+  session: Session;
+  roomId: string;
+  currentMessageId: string;
+  deliveryAddr: { platformId: string | null; channelType: string | null; threadId: string | null };
+}
+type PerMemberInboundWriter = (args: PerMemberInboundArgs) => boolean;
+let perMemberInboundWriter: PerMemberInboundWriter | null = null;
+export function registerPerMemberInboundWriter(fn: PerMemberInboundWriter): void {
+  perMemberInboundWriter = fn;
+}
+export function writePerMemberInbound(args: PerMemberInboundArgs): boolean {
+  try {
+    return perMemberInboundWriter ? perMemberInboundWriter(args) : false;
+  } catch {
+    return false; // fall back to the normal single-message write
+  }
 }
 
 /**

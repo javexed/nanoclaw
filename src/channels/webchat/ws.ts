@@ -96,6 +96,29 @@ export interface AuthForUpgrade {
   displayName: string;
 }
 
+// Inbound-message idempotency. A client_id seen within this window is a duplicate
+// delivery of the same logical send (flaky-socket resend, future offline-outbox
+// replay, double-fire) and is dropped so it can't spawn a second agent turn. The
+// id is unique per send (client mints `local-<seq>-<ts>`), so global keying never
+// collides across users/rooms.
+const CLIENT_ID_DEDUP_WINDOW_MS = 10_000;
+const seenClientIds = new Map<string, number>();
+
+/**
+ * Atomically claim a client_id: returns true if it is fresh (proceed) and records
+ * it; returns false if it was already seen within the window (drop the duplicate).
+ * Opportunistically prunes expired ids to bound memory. Exported for tests.
+ */
+export function claimClientId(id: string, now: number = Date.now()): boolean {
+  const prev = seenClientIds.get(id);
+  if (prev !== undefined && now - prev < CLIENT_ID_DEDUP_WINDOW_MS) return false;
+  seenClientIds.set(id, now);
+  if (seenClientIds.size > 1000) {
+    for (const [k, t] of seenClientIds) if (now - t >= CLIENT_ID_DEDUP_WINDOW_MS) seenClientIds.delete(k);
+  }
+  return true;
+}
+
 export function setupWebSocket(
   server: http.Server,
   hooks: WSHooks,
@@ -280,6 +303,19 @@ export function setupWebSocket(
         }
         const text = typeof msg.content === 'string' ? msg.content : '';
         if (!text.trim()) return;
+
+        // Idempotency: a duplicate delivery of the same client_id (flaky-socket
+        // resend / double-fire) must NOT create a second inbound row → a second
+        // agent turn → a phantom reply. The first delivery already echoed the
+        // sender's optimistic bubble, so the repeat is dropped silently.
+        const cid = typeof msg.client_id === 'string' ? msg.client_id : null;
+        if (cid && !claimClientId(cid)) {
+          log.warn('Webchat: dropped duplicate message (client_id already seen)', {
+            clientId: cid,
+            identity: client.identity,
+          });
+          return;
+        }
 
         const stored = storeWebchatMessage(client.room_id, client.identity, client.identity_type, text);
         // The sender has by definition read their own message — advance their

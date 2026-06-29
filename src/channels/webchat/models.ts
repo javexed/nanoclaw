@@ -204,12 +204,15 @@ export function envForModel(model: WebchatModel | null): Record<string, string> 
   }
   if (model.kind === 'ollama') {
     if (!model.endpoint) return {};
-    // Ollama exposes the Anthropic-compatible API at /v1 — the SDK joins
-    // /messages onto whatever ANTHROPIC_BASE_URL is, so we point it at the
-    // root /v1 and let it land at /v1/messages.
+    // ANTHROPIC_BASE_URL must be the bare Ollama root: the Anthropic SDK appends
+    // the FULL `/v1/messages` path itself, and Ollama serves the Anthropic API
+    // there. Appending `/v1` here is a bug — it makes the SDK hit
+    // `<endpoint>/v1/v1/messages` → 404, surfaced to the agent as
+    // "issue with the selected model … may not exist". Verified against Ollama
+    // 0.17 (qwen3-coder, llama3.2): bare → 200, `/v1` → 404.
     const base = model.endpoint.replace(/\/+$/, '');
     return {
-      ANTHROPIC_BASE_URL: `${base}/v1`,
+      ANTHROPIC_BASE_URL: base,
       ANTHROPIC_MODEL: model.model_id,
     };
   }

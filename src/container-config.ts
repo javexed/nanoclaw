@@ -12,6 +12,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { GROUPS_DIR } from './config.js';
+import { resolveContainerConfigAugmentation } from './container-runtime.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import type { AgentGroup, ContainerConfigRow } from './types.js';
@@ -43,6 +44,13 @@ export interface ContainerConfig {
   maxMessagesPerPrompt?: number;
   model?: string;
   effort?: string;
+  /**
+   * Deliver unwrapped agent prose to the originating room instead of dropping
+   * it as scratchpad. Contributed by an installed module (webchat sets it for
+   * ollama-backed groups, whose small models rarely emit the <message> envelope)
+   * via resolveContainerConfigAugmentation. Read by the agent-runner.
+   */
+  lenientOutput?: boolean;
 }
 
 /** Build a `ContainerConfig` from a DB row + agent group identity. */
@@ -78,7 +86,10 @@ export function materializeContainerJson(agentGroupId: string): ContainerConfig 
   const row = getContainerConfig(agentGroupId);
   if (!row) throw new Error(`Container config not found for agent group: ${agentGroupId}`);
 
-  const config = configFromDb(row, group);
+  // Merge module-contributed fields (e.g. webchat's lenientOutput for ollama
+  // groups). Augmentors only add keys not owned by the DB row, so a stray key
+  // can't clobber core config; spread last so an explicit contribution wins.
+  const config = { ...configFromDb(row, group), ...resolveContainerConfigAugmentation(agentGroupId) };
 
   const p = path.join(GROUPS_DIR, group.folder, 'container.json');
   const dir = path.dirname(p);

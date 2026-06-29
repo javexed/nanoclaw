@@ -317,6 +317,97 @@ function renderSettingsModal() {
   $('#notif-toggle').checked = settings.notifications;
 }
 
+// ── Workspace credentials policy (Settings → Member credentials, owner-only) ──
+let credConfigWired = false;
+async function renderCredentialsSettings() {
+  const section = $('#settings-credentials');
+  if (!section) return;
+  let cfg;
+  try {
+    const r = await authFetch('/api/webchat/credentials-config');
+    if (!r.ok) {
+      section.hidden = true;
+      return;
+    }
+    cfg = await r.json();
+  } catch {
+    section.hidden = true;
+    return;
+  }
+  if (!cfg.canEdit) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+  document.querySelectorAll('#cred-default-mode .setting-option').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.value === cfg.defaultMode);
+  });
+  // Allowed providers — pill toggles (multi-select). "on" = accept BOTH a key
+  // and a subscription for that provider.
+  const providerOn = {
+    claude: !!(cfg.allowAnthropicKey || cfg.allowClaudeOauth),
+    codex: !!(cfg.allowOpenaiKey || cfg.allowCodexOauth),
+  };
+  // Greyed-but-clickable when unavailable, so a click can explain why (rather
+  // than a native `disabled` button that swallows the click). Claude is always
+  // available; Codex needs its provider installed.
+  const providerAvailable = { claude: true, codex: !!cfg.codexAvailable };
+  document.querySelectorAll('#cred-providers .setting-option').forEach((btn) => {
+    const p = btn.dataset.provider;
+    btn.classList.toggle('active', !!providerOn[p]);
+    btn.classList.toggle('is-unavailable', !providerAvailable[p]);
+  });
+
+  if (credConfigWired) return;
+  credConfigWired = true;
+  const putConfig = async (patch) => {
+    const r = await authFetch('/api/webchat/credentials-config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+      body: JSON.stringify(patch),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      showToast('Failed to save: ' + (err.error || r.statusText), { kind: 'error' });
+      renderCredentialsSettings(); // resync to server truth
+      return false;
+    }
+    return true;
+  };
+  document.querySelectorAll('#cred-default-mode .setting-option').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      if (await putConfig({ defaultMode: btn.dataset.value })) {
+        document
+          .querySelectorAll('#cred-default-mode .setting-option')
+          .forEach((b) => b.classList.toggle('active', b === btn));
+      }
+    });
+  });
+  // Each provider pill toggles its key + subscription flags together. An
+  // unavailable pill explains how to enable it instead of toggling.
+  const PROVIDER_FLAGS = {
+    claude: ['allowAnthropicKey', 'allowClaudeOauth'],
+    codex: ['allowOpenaiKey', 'allowCodexOauth'],
+  };
+  const PROVIDER_UNAVAILABLE = {
+    codex: 'Codex isn’t installed yet — add it with /add-codex, then you can enable it here.',
+    claude: 'Claude isn’t available in this workspace.',
+  };
+  document.querySelectorAll('#cred-providers .setting-option').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const p = btn.dataset.provider;
+      if (btn.classList.contains('is-unavailable')) {
+        showToast(PROVIDER_UNAVAILABLE[p] || 'This provider isn’t available yet.', { kind: 'info', timeout: 9000 });
+        return;
+      }
+      const [keyFlag, oauthFlag] = PROVIDER_FLAGS[p] || [];
+      if (!keyFlag) return;
+      const on = !btn.classList.contains('active'); // flipping to this state
+      if (await putConfig({ [keyFlag]: on, [oauthFlag]: on })) btn.classList.toggle('active', on);
+    });
+  });
+}
+
 // Persist the @handle from the Settings field. Inline feedback (per DESIGN.md):
 // success/taken/invalid all surface on the #handle-status line, not a toast.
 async function saveHandle() {
@@ -370,8 +461,16 @@ async function saveHandle() {
 function renderHandleChip() {
   const chip = $('#handle-chip');
   if (!chip) return;
-  chip.textContent = myHandle ? `@${myHandle}` : '+ set @handle';
+  const label = myHandle ? `@${myHandle}` : '+ set @handle';
+  // When the member has connected their own credential, the handle chip doubles
+  // as the credential indicator (a 🔑 prefix) — there's no separate key chip.
+  // The connect/disconnect controls live in the chip's popover (#handle-creds).
+  chip.textContent = byokConnected ? `🔑 ${label}` : label;
   chip.classList.toggle('is-unset', !myHandle);
+  chip.classList.toggle('has-cred', byokConnected);
+  chip.title = byokConnected ? 'Billing your own account — click to manage' : 'Edit your handle';
+  // Accessible name tracks the connected state (the 🔑/title are visual-only).
+  chip.setAttribute('aria-label', byokConnected ? 'Billing your own account — manage credentials' : 'Edit your handle');
 }
 
 function openHandlePopover() {
@@ -385,6 +484,7 @@ function openHandlePopover() {
     status.textContent = '';
     status.classList.remove('ok', 'err');
   }
+  updateHandleCreds();
   pop.hidden = false;
   $('#handle-chip')?.setAttribute('aria-expanded', 'true');
   if (input) input.focus();
@@ -421,6 +521,7 @@ applySettings();
 // Settings modal open/close
 function openSettings() {
   renderSettingsModal();
+  renderCredentialsSettings();
   $('#settings-overlay').hidden = false;
   // Focus trap
   const modal = $('#settings-overlay .modal');
@@ -1017,6 +1118,12 @@ function connect() {
         }
         break;
       case 'message': {
+        // Bump the room's activity so it floats up in the Recent-sorted sidebar
+        // without waiting for a server rooms refresh.
+        if (msg.room_id && msg.created_at) {
+          roomActivity.set(msg.room_id, Math.max(roomActivity.get(msg.room_id) || 0, msg.created_at));
+          if (lastRoomsList.length) renderRooms(lastRoomsList);
+        }
         // Snapshot the scroll position BEFORE appending. If we check after,
         // the newly-inserted message has already pushed the bottom past our
         // 80px threshold and `isNearBottom()` lies about the user's intent.
@@ -1196,49 +1303,59 @@ setInterval(() => {
 
 // ── Rooms ─────────────────────────────────────────────────────────────────
 // ── Room ordering ─────────────────────────────────────────────────────────
-function getSavedRoomOrder() {
-  try {
-    return JSON.parse(localStorage.getItem('room-order') || '[]');
-  } catch {
-    return [];
-  }
-}
-function saveRoomOrder(ids) {
-  localStorage.setItem('room-order', JSON.stringify(ids));
+// Live last-activity overrides keyed by room id. The rooms payload carries a
+// server-computed `last_activity`; as messages arrive while the app is open we
+// bump this map so the active room floats to the top without a server round-trip.
+const roomActivity = new Map();
+function activityOf(room) {
+  return Math.max(room.last_activity || room.created_at || 0, roomActivity.get(room.id) || 0);
 }
 
-let dragSrcLi = null;
+// Sentinel rendered as a horizontal rule between the pinned group and the rest.
+const ROOM_DIVIDER = Symbol('room-divider');
 
 function renderRooms(rooms) {
   const list = $('#room-list');
+  // Drag-to-pin: wire the list as a drop target once (survives innerHTML reset).
+  // Dropping a dragged room anywhere on the list pins it; pinned rooms sort to
+  // the top automatically. Unpin lives in the kebab.
+  if (!list.dataset.dropWired) {
+    list.dataset.dropWired = '1';
+    list.addEventListener('dragover', (e) => {
+      if (!list.classList.contains('room-list-dragging')) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    });
+    list.addEventListener('drop', async (e) => {
+      if (!list.classList.contains('room-list-dragging')) return;
+      e.preventDefault();
+      const id = e.dataTransfer ? e.dataTransfer.getData('text/plain') : '';
+      list.classList.remove('room-list-dragging');
+      if (id) await toggleRoomPin(id, true);
+    });
+  }
   list.innerHTML = '';
 
-  // Apply saved order, falling back to created_at.
-  const savedOrder = getSavedRoomOrder();
-  const orderMap = new Map(savedOrder.map((id, i) => [id, i]));
+  // Recent-first: newest activity (last message) at the top. Pinned rooms are
+  // lifted into a sticky group above a divider; the rest follow in activity
+  // order. (Replaces the old manual drag-order, which lived only in this
+  // browser's localStorage and never synced across devices.)
+  const byActivity = (a, b) => activityOf(b) - activityOf(a);
 
-  function cmp(a, b) {
-    const aIdx = orderMap.get(a.id);
-    const bIdx = orderMap.get(b.id);
-    if (aIdx !== undefined && bIdx !== undefined) return aIdx - bIdx;
-    if (aIdx !== undefined) return -1;
-    if (bIdx !== undefined) return 1;
-    return (a.created_at || 0) - (b.created_at || 0);
-  }
-
-  const sorted = [...rooms].sort(cmp);
-
-  // Partition into three buckets:
-  //   - hidden (per-user "hide" preference) — dropped from the sidebar
-  //     entirely unless `showHidden` is on. Per-user state.
-  //   - archived (global archive flag) — visible to everyone with access
-  //     but collected in a collapsed "Archived" section at the bottom,
-  //     revealed by the toggle. Same room can be both archived AND
-  //     hidden (by some users) — hidden wins for those users.
-  //   - active — the rest. Always rendered at the top.
-  const visibleRooms = showHidden ? sorted : sorted.filter((r) => !r.hidden);
+  // Partition:
+  //   - hidden (per-user "hide") — dropped unless `showHidden` is on.
+  //   - archived (global flag) — collected in a collapsed "Archived" section at
+  //     the bottom, revealed by the toggle.
+  //   - active — split into pinned (top) and unpinned, each activity-sorted.
+  const visibleRooms = showHidden ? [...rooms] : rooms.filter((r) => !r.hidden);
   const active = visibleRooms.filter((r) => !r.archived);
-  const archived = visibleRooms.filter((r) => r.archived);
+  const archived = visibleRooms.filter((r) => r.archived).sort(byActivity);
+  // Pinned rooms hold the user's MANUAL drag order (pin_position); the rest stay
+  // activity-sorted. Fall back to activity when positions are absent/equal.
+  const pinned = active
+    .filter((r) => r.pinned)
+    .sort((a, b) => (a.pin_position ?? 0) - (b.pin_position ?? 0) || byActivity(a, b));
+  const unpinned = active.filter((r) => !r.pinned).sort(byActivity);
   const toggleBtn = $('#archived-toggle');
   if (archived.length === 0) {
     toggleBtn.hidden = true;
@@ -1246,10 +1363,20 @@ function renderRooms(rooms) {
     toggleBtn.hidden = false;
     toggleBtn.textContent = showArchived ? `Hide ${archived.length} archived` : `Show ${archived.length} archived`;
   }
-  const toRender = showArchived ? [...active, ...archived] : active;
+  // Divider sentinel between the pinned group and the rest — only when both
+  // groups are non-empty.
+  const showDivider = pinned.length > 0 && unpinned.length > 0;
+  const toRender = [...pinned, ...(showDivider ? [ROOM_DIVIDER] : []), ...unpinned, ...(showArchived ? archived : [])];
 
   for (let i = 0; i < toRender.length; i++) {
     const room = toRender[i];
+    if (room === ROOM_DIVIDER) {
+      const sep = document.createElement('li');
+      sep.className = 'room-divider';
+      sep.setAttribute('role', 'separator');
+      list.appendChild(sep);
+      continue;
+    }
     const li = document.createElement('li');
     const color = roomColor(room.id);
     li.dataset.roomId = room.id;
@@ -1276,6 +1403,71 @@ function renderRooms(rooms) {
       li.appendChild(dot);
     }
 
+    if (room.pinned) {
+      const pin = document.createElement('span');
+      pin.className = 'room-pin-indicator';
+      pin.innerHTML = lucide('pin');
+      pin.setAttribute('aria-label', 'Pinned');
+      li.appendChild(pin);
+    }
+
+    // Drag behavior (archived rooms are never draggable):
+    //   - unpinned room → drag onto the list to PIN it (list-level drop handler,
+    //     gated on the `room-list-dragging` class).
+    //   - pinned room   → drag over another pinned row to REORDER (row-level
+    //     handlers below, gated on `room-list-reordering` + draggedPinId).
+    // The two modes use different classes so the list's pin-drop never fires
+    // during a reorder and vice-versa.
+    if (!room.archived) {
+      li.draggable = true;
+      li.addEventListener('dragstart', (e) => {
+        if (e.dataTransfer) {
+          e.dataTransfer.setData('text/plain', room.id);
+          e.dataTransfer.effectAllowed = 'move';
+        }
+        if (room.pinned) {
+          draggedPinId = room.id;
+          list.classList.add('room-list-reordering');
+        } else {
+          draggedPinId = null;
+          list.classList.add('room-list-dragging');
+        }
+      });
+      li.addEventListener('dragend', () => {
+        draggedPinId = null;
+        list.classList.remove('room-list-dragging', 'room-list-reordering');
+        list.querySelectorAll('.drop-before, .drop-after').forEach((el) => el.classList.remove('drop-before', 'drop-after'));
+      });
+    }
+
+    // Reorder target: a pinned row accepts a dragged pinned room, inserting it
+    // above or below depending on which half of the row the cursor is over.
+    if (room.pinned) {
+      const clearMarkers = () => li.classList.remove('drop-before', 'drop-after');
+      li.addEventListener('dragover', (e) => {
+        if (!draggedPinId || draggedPinId === room.id) return;
+        e.preventDefault();
+        e.stopPropagation(); // don't bubble to the list-level pin-drop handler
+        const rect = li.getBoundingClientRect();
+        const after = e.clientY > rect.top + rect.height / 2;
+        li.classList.toggle('drop-after', after);
+        li.classList.toggle('drop-before', !after);
+      });
+      li.addEventListener('dragleave', clearMarkers);
+      li.addEventListener('drop', async (e) => {
+        if (!draggedPinId || draggedPinId === room.id) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const rect = li.getBoundingClientRect();
+        const after = e.clientY > rect.top + rect.height / 2;
+        const moved = draggedPinId;
+        draggedPinId = null;
+        clearMarkers();
+        list.classList.remove('room-list-reordering');
+        await reorderPinnedRoom(moved, room.id, after);
+      });
+    }
+
     // Kebab — opens a tiny menu with up to two actions:
     //   - Hide / Unhide (per-user sidebar preference) — always present
     //     for anyone with room access.
@@ -1297,6 +1489,22 @@ function renderRooms(rooms) {
       list.querySelectorAll('.room-menu').forEach((m) => m.remove());
       const menu = document.createElement('div');
       menu.className = 'room-menu';
+
+      // Pinning is now drag-and-drop; the kebab keeps Unpin for pinned rooms.
+      // On touch — where HTML5 drag is unreliable — also keep a Pin action so
+      // mobile can still pin.
+      const coarsePointer = window.matchMedia('(pointer: coarse)').matches;
+      if (room.pinned || coarsePointer) {
+        const pinBtn = document.createElement('button');
+        pinBtn.type = 'button';
+        pinBtn.textContent = room.pinned ? 'Unpin' : 'Pin';
+        pinBtn.addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          menu.remove();
+          await toggleRoomPin(room.id, !room.pinned);
+        });
+        menu.appendChild(pinBtn);
+      }
 
       const hideBtn = document.createElement('button');
       hideBtn.type = 'button';
@@ -1332,39 +1540,6 @@ function renderRooms(rooms) {
     if (room.id === currentRoom) li.classList.add('active');
     li.setAttribute('role', 'button');
     li.setAttribute('tabindex', '0');
-    li.setAttribute('draggable', 'true');
-
-    li.addEventListener('dragstart', (e) => {
-      dragSrcLi = li;
-      li.classList.add('dragging');
-      e.dataTransfer.effectAllowed = 'move';
-      e.dataTransfer.setData('text/plain', room.id);
-    });
-    li.addEventListener('dragend', () => {
-      li.classList.remove('dragging');
-      dragSrcLi = null;
-      list.querySelectorAll('.drag-over').forEach((el) => el.classList.remove('drag-over'));
-    });
-    li.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      if (dragSrcLi && dragSrcLi !== li) li.classList.add('drag-over');
-    });
-    li.addEventListener('dragleave', () => li.classList.remove('drag-over'));
-    li.addEventListener('drop', (e) => {
-      e.preventDefault();
-      li.classList.remove('drag-over');
-      if (!dragSrcLi || dragSrcLi === li) return;
-      const items = [...list.children].map((el) => el.dataset.roomId);
-      const fromId = dragSrcLi.dataset.roomId;
-      const toId = li.dataset.roomId;
-      const fromIdx = items.indexOf(fromId);
-      const toIdx = items.indexOf(toId);
-      items.splice(fromIdx, 1);
-      items.splice(toIdx, 0, fromId);
-      saveRoomOrder(items.filter(Boolean));
-      renderRooms(lastRoomsList);
-    });
 
     li.addEventListener('click', () => joinRoom(room.id, room.name));
     li.addEventListener('keydown', (e) => {
@@ -1402,6 +1577,66 @@ async function toggleRoomArchive(roomId, archive) {
   }
 }
 
+// Id of the pinned room currently being dragged for reorder (null while
+// dragging an unpinned room to pin it, or when nothing is dragging).
+let draggedPinId = null;
+
+// Move a pinned room before/after another within the pinned group and persist
+// the new order. Optimistic: reindex pin_position locally and re-render, then
+// POST; the server's broadcastRooms re-syncs authoritative order to every device.
+async function reorderPinnedRoom(movedId, targetId, after) {
+  const order = lastRoomsList
+    .filter((r) => r.pinned && !r.archived)
+    .sort((a, b) => (a.pin_position ?? 0) - (b.pin_position ?? 0))
+    .map((r) => r.id);
+  const from = order.indexOf(movedId);
+  if (from === -1) return;
+  order.splice(from, 1);
+  let to = order.indexOf(targetId);
+  if (to === -1) return;
+  if (after) to += 1;
+  order.splice(to, 0, movedId);
+
+  order.forEach((id, i) => {
+    const r = lastRoomsList.find((x) => x.id === id);
+    if (r) r.pin_position = i;
+  });
+  renderRooms(lastRoomsList);
+
+  try {
+    const res = await authFetch('/api/rooms/pins/order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+      body: JSON.stringify({ order }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    console.error('reorderPinnedRoom failed:', err);
+    // The next authoritative `rooms` broadcast (or a manual refresh) restores
+    // the server's order; no local rollback needed for a cosmetic reorder.
+  }
+}
+
+async function toggleRoomPin(roomId, pin) {
+  // PER-USER pin. Optimistic flip + re-render, same pattern as hide/archive.
+  // The server replays authoritative state via broadcastRooms (which also syncs
+  // the pin to this user's other devices).
+  const target = lastRoomsList.find((r) => r.id === roomId);
+  if (target) target.pinned = pin;
+  renderRooms(lastRoomsList);
+  try {
+    const res = await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/${pin ? 'pin' : 'unpin'}`, {
+      method: 'POST',
+      headers: { 'X-Webchat-CSRF': '1' },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    console.error('toggleRoomPin failed:', err);
+    if (target) target.pinned = !pin; // roll back
+    renderRooms(lastRoomsList);
+  }
+}
+
 async function toggleRoomHide(roomId, hide) {
   // PER-USER hide. Optimistic flip, same pattern as toggleRoomArchive.
   // Lives on a separate endpoint and table from archive so the two
@@ -1430,6 +1665,11 @@ function joinRoom(roomId, roomName, jumpMessageId) {
   closeAgentDetail();
   closeRoomDetail();
   closeModelDetail();
+  // Opening a room exits any full view (Agents/Models/Topology/Wiring/
+  // Permissions/Dashboard) and restores the chat pane as the backdrop —
+  // otherwise the room "opens" behind a still-visible full view.
+  hideOtherFullViews();
+  $('#chat').hidden = false;
   // Reset any in-progress turn state from the previous room so its bubbles /
   // elapsed timer / reasoning traces can't leak into the new room.
   endAllAgentTurns();
@@ -1437,6 +1677,7 @@ function joinRoom(roomId, roomName, jumpMessageId) {
   unreadRooms.delete(roomId);
   mentionedRooms.delete(roomId);
   updateUnreadDots();
+  updateByokBanner(roomId);
   // Set agent name for thinking bubble from the agent wired to this room.
   const roomAgent = allAgents.find((b) => b.room_id === roomId);
   if (roomAgent) agentName = roomAgent.name;
@@ -1617,8 +1858,21 @@ function agentColor(name) {
 
 function formatTime(ts) {
   if (!ts) return '';
-  const d = new Date(typeof ts === 'number' ? ts : ts);
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const d = new Date(ts);
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  // Today's messages stay time-only to avoid clutter; anything older gets a date
+  // so you can tell at a glance how old it is.
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) return time;
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (d.toDateString() === yesterday.toDateString()) return `Yesterday ${time}`;
+  // Same calendar year → "Jun 20, 14:32"; older → include the year.
+  const dateOpts =
+    d.getFullYear() === now.getFullYear()
+      ? { month: 'short', day: 'numeric' }
+      : { month: 'short', day: 'numeric', year: 'numeric' };
+  return `${d.toLocaleDateString([], dateOpts)}, ${time}`;
 }
 
 // Render an in-room approval card. Actionable (approve/deny buttons) only for
@@ -1770,10 +2024,18 @@ function appendMessage(msg, statusText, beforeNode) {
       bubble.appendChild(caption);
     }
   } else if (isMine) {
-    // User's own messages are rendered as plain text — preserves whitespace,
-    // tabs, and code indentation exactly as typed. Only agent replies need
-    // Markdown interpretation.
-    bubble.textContent = msg.content;
+    // Your own messages render as full Markdown too (bold/lists/links/code
+    // blocks + agent-tinted @mentions), same pipeline as agent replies. Markdown
+    // re-flows whitespace, so fenced ``` blocks keep code exact; falls back to
+    // plain text if marked/DOMPurify throws (escaped by the DOM, no XSS risk).
+    try {
+      bubble.innerHTML = DOMPurify.sanitize(marked.parse(msg.content));
+      decorateCodeBlocks(bubble);
+      decorateMentions(bubble);
+    } catch (err) {
+      console.error('Message render failed; falling back to plain text', err);
+      bubble.textContent = msg.content;
+    }
   } else {
     // Markdown render is best-effort: a malformed message must not crash the
     // whole render loop and leave #messages half-populated. Fall back to
@@ -1789,10 +2051,18 @@ function appendMessage(msg, statusText, beforeNode) {
     }
   }
 
-  if (isMine && msg.id) {
+  if (isMine) {
+    // Always wrap own messages in the .msg-body row — even the optimistic echo
+    // that has no server id yet. A bare bubble that's a direct flex child of
+    // .msg.mine (align-items:flex-end) shrink-collapses its block Markdown (<p>)
+    // to ~zero width and renders invisible; the row gives the bubble a proper
+    // width context (this is why a message only appeared after leaving and
+    // re-entering, where history re-renders it WITH an id and the row). The
+    // delete button is added now if we have an id, else by addDeleteButton when
+    // the server echo upgrades the pending element.
     const bodyRow = document.createElement('div');
     bodyRow.className = 'msg-body';
-    bodyRow.appendChild(createDeleteButton(msg.id));
+    if (msg.id) bodyRow.appendChild(createDeleteButton(msg.id));
     bodyRow.appendChild(bubble);
     div.appendChild(bodyRow);
   } else {
@@ -1810,6 +2080,8 @@ function appendMessage(msg, statusText, beforeNode) {
     const time = document.createElement('div');
     time.className = 'timestamp';
     time.textContent = timeStr;
+    // Full date + time on hover, for exact age regardless of the compact label.
+    if (msg.created_at) time.title = new Date(msg.created_at).toLocaleString();
     div.appendChild(time);
   }
   if (isMine && statusText) {
@@ -1994,6 +2266,347 @@ async function jumpToMessage(messageId) {
  * 'error'. Errors linger longer and must be dismissed-or-time-out; all toasts
  * are click-to-dismiss. Returns the element so callers can remove it early.
  */
+// ── BYOK: per-member key banner ───────────────────────────────────────────
+// Shown in a room whose credential_mode is optional/required when the current
+// user hasn't connected their own Anthropic key. Connecting onboards the key
+// into the OneCLI vault (host-side) so the member's turns bill their account.
+// The room's model provider decides the connect vocabulary + which mint runs.
+let byokProvider = 'claude';
+// Latest banner state, so the @handle popover credentials shortcut can mirror it.
+let byokState = null;
+// Whether the member has a connected credential for the open room — drives the
+// 🔑 indicator on the @handle chip (the standalone key chip was merged into it).
+let byokConnected = false;
+
+function byokWords(provider) {
+  return provider === 'codex'
+    ? { name: 'Codex', subWord: 'ChatGPT subscription', keyWord: 'OpenAI key', keyPlaceholder: 'sk-…' }
+    : { name: 'Claude', subWord: 'Claude subscription', keyWord: 'Anthropic key', keyPlaceholder: 'sk-ant-…' };
+}
+
+async function updateByokBanner(roomId) {
+  const banner = $('#byok-banner');
+  if (!banner || !roomId) return;
+  const hideAll = () => {
+    banner.hidden = true;
+    byokState = null;
+    byokConnected = false;
+    updateHandleCreds();
+    renderHandleChip();
+  };
+  try {
+    const r = await authFetch(`/api/byok/credential?roomId=${encodeURIComponent(roomId)}`);
+    if (!r.ok) {
+      hideAll();
+      return;
+    }
+    const { connected, mode, credType, oauthAllowed, apiKeyAllowed = true, provider = 'claude' } = await r.json();
+    byokProvider = provider;
+    const { name, subWord, keyWord, keyPlaceholder } = byokWords(provider);
+    // The room's mode is the master switch: 'disabled' (Member credentials: Off)
+    // means no BYOK at all — neither API keys NOR OAuth — regardless of what the
+    // workspace accepts. When the room is on, each method is offered if the
+    // workspace accepts it (credential types are workspace-wide).
+    const apiOffered = mode !== 'disabled' && apiKeyAllowed;
+    const oauthOffered = mode !== 'disabled' && oauthAllowed;
+    if (!apiOffered && !oauthOffered) {
+      hideAll();
+      return;
+    }
+
+    byokState = { offered: true, connected, provider, oauthAllowed: oauthOffered, apiOffered, subWord, keyWord };
+    byokConnected = connected;
+    updateHandleCreds();
+    renderHandleChip();
+
+    // Connected → the @handle chip shows the 🔑 indicator (see renderHandleChip);
+    // the full banner is only the actionable "connect" prompt, done once connected.
+    if (connected) {
+      banner.hidden = true;
+      return;
+    }
+
+    // Not connected → show the actionable banner.
+    const connectBtn = $('#byok-connect-btn');
+    const oauthBtn = $('#byok-oauth-btn');
+    const input = $('#byok-key-input');
+    banner.hidden = false;
+    input.hidden = true;
+    input.value = '';
+    input.placeholder = keyPlaceholder;
+    // Primary action: connect via subscription sign-in. Secondary: paste a key.
+    if (oauthBtn) {
+      oauthBtn.hidden = !oauthOffered;
+      oauthBtn.textContent = `Connect to ${name}`;
+    }
+    connectBtn.hidden = !apiOffered;
+    if (connectBtn) connectBtn.textContent = 'API key';
+  } catch {
+    hideAll();
+  }
+}
+
+// The @handle popover mirrors the in-room banner state as a credentials shortcut
+// (discoverability). Shown only when the open room offers BYOK; acts on that room.
+function updateHandleCreds() {
+  const wrap = $('#handle-creds');
+  if (!wrap) return;
+  if (!byokState || !byokState.offered) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+  const statusEl = $('#handle-creds-status');
+  const actionBtn = $('#handle-creds-action');
+  // Minimalist integrations-row style: a status dot + the provider name carry
+  // the connected/not state; the action button does the rest.
+  const { name } = byokWords(byokState.provider);
+  if (statusEl) {
+    // Text carries the connected/not state too (not just the dot colour) — for
+    // screen readers and colour-blind users.
+    statusEl.textContent = `${name} — ${byokState.connected ? 'connected' : 'not connected'}`;
+    statusEl.classList.toggle('is-connected', byokState.connected);
+  }
+  if (actionBtn) actionBtn.textContent = byokState.connected ? 'Disconnect' : 'Connect';
+}
+
+$('#handle-creds-action')?.addEventListener('click', async () => {
+  if (!byokState) return;
+  closeHandlePopover();
+  if (byokState.connected) {
+    const confirmed = await showConfirmModal({
+      title: `Disconnect ${byokWords(byokState.provider).name}?`,
+      confirmLabel: 'Disconnect',
+      destructive: true,
+    });
+    if (confirmed) await disconnectByok();
+  } else if (byokState.oauthAllowed) {
+    // Subscriptions allowed → open the sign-in helper directly (what users expect
+    // from a "Connect" action), rather than just surfacing the banner.
+    $('#byok-oauth-btn')?.click();
+  } else {
+    // API-key-only room → reveal the banner and its key input.
+    const banner = $('#byok-banner');
+    if (banner) {
+      banner.hidden = false;
+      banner.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      banner.classList.add('byok-banner-flash');
+      setTimeout(() => banner.classList.remove('byok-banner-flash'), 1200);
+    }
+    $('#byok-connect-btn')?.click(); // reveal the key input
+  }
+});
+
+$('#byok-connect-btn')?.addEventListener('click', async () => {
+  const input = $('#byok-key-input');
+  // First click reveals the input; second (with a value) submits.
+  if (input.hidden) {
+    input.hidden = false;
+    input.focus();
+    return;
+  }
+  const apiKey = input.value.trim();
+  if (!apiKey) return;
+  const r = await authFetch('/api/byok/credential', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+    body: JSON.stringify({ roomId: currentRoom, apiKey }),
+  });
+  if (r.ok) {
+    showToast(`Connected your ${byokWords(byokProvider).keyWord}.`, { kind: 'success' });
+    await updateByokBanner(currentRoom);
+  } else {
+    const err = await r.json().catch(() => ({}));
+    showToast('Failed to connect key: ' + (err.error || r.statusText), { kind: 'error' });
+  }
+});
+
+$('#byok-key-input')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('#byok-connect-btn').click();
+});
+
+async function disconnectByok() {
+  const r = await authFetch('/api/byok/credential', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+    body: JSON.stringify({ roomId: currentRoom }),
+  });
+  if (r.ok) {
+    showToast('Disconnected your account.', { kind: 'success' });
+    await updateByokBanner(currentRoom);
+  } else {
+    const err = await r.json().catch(() => ({}));
+    showToast('Failed to disconnect: ' + (err.error || r.statusText), { kind: 'error' });
+  }
+}
+
+// The connected state lives as a compact key chip in the header; clicking it
+// disconnects (after a confirm), so the full banner no longer sits over the chat.
+// ── BYOK OAuth: connect a Claude subscription token ────────────────────────
+// Browser-mint OAuth: no terminal. Opening the form starts a server-side mint
+// (a throwaway container runs `claude setup-token`), surfaces the sign-in URL,
+// takes the pasted code, and onboards the resulting token per-member.
+let byokOauthSessionId = null;
+let byokOauthReturnFocus = null; // element to restore focus to when the modal closes
+
+function byokOauthStatus(msg, kind) {
+  const el = $('#byok-oauth-status');
+  if (!el) return;
+  if (!msg) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  el.textContent = msg;
+  el.className = 'byok-oauth-status' + (kind ? ' ' + kind : '');
+}
+
+$('#byok-oauth-btn')?.addEventListener('click', async () => {
+  const modal = $('#byok-oauth-modal');
+  if (!modal) return;
+  const isCodex = byokProvider === 'codex';
+  const title = $('#byok-oauth-title');
+  if (title) title.textContent = `Connect to ${byokWords(byokProvider).name}`;
+  $('#byok-oauth-step2').hidden = true;
+  $('#byok-oauth-submit').hidden = true;
+  $('#byok-oauth-spinner').hidden = false; // spinner while the mint warms up
+  const code = $('#byok-oauth-code');
+  if (code) code.value = '';
+  const codexCode = $('#byok-oauth-codex-code');
+  byokOauthReturnFocus = document.activeElement; // restore focus here on close
+  modal.hidden = false;
+  $('#byok-oauth-close')?.focus(); // move focus into the dialog
+  byokOauthStatus('Preparing sign-in…', '');
+  try {
+    const startUrl = isCodex ? '/api/byok/codex/start' : '/api/byok/oauth/start';
+    const r = await authFetch(startUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+      body: JSON.stringify({ roomId: currentRoom }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.statusText);
+    byokOauthSessionId = data.sessionId;
+    const link = $('#byok-oauth-link');
+    if (link) {
+      link.href = data.url;
+      link.textContent = `Open ${byokWords(byokProvider).name} sign-in ↗`;
+    }
+    // Claude: paste a code back. Codex: enter a pairing code at the site, then approve.
+    if (code) code.hidden = isCodex;
+    const codeLabel = $('#byok-oauth-code-label');
+    if (codeLabel) codeLabel.hidden = isCodex;
+    if (codexCode) {
+      codexCode.hidden = !isCodex;
+      codexCode.textContent = isCodex
+        ? data.userCode
+          ? `Pairing code: ${data.userCode}`
+          : 'Open the link, then approve the sign-in.'
+        : '';
+    }
+    const submit = $('#byok-oauth-submit');
+    if (submit) submit.textContent = isCodex ? 'I’ve approved — connect' : 'Connect';
+    $('#byok-oauth-spinner').hidden = true;
+    $('#byok-oauth-step2').hidden = false;
+    $('#byok-oauth-submit').hidden = false;
+    byokOauthStatus(isCodex ? 'Open the link, enter the code, and approve — then click connect.' : '', '');
+    $('#byok-oauth-link').focus();
+  } catch (err) {
+    $('#byok-oauth-spinner').hidden = true;
+    byokOauthStatus(err.message || 'Could not start sign-in.', 'error');
+  }
+});
+
+function closeByokOauthModal() {
+  if (byokOauthSessionId) {
+    const cancelUrl = byokProvider === 'codex' ? '/api/byok/codex/cancel' : '/api/byok/oauth/cancel';
+    authFetch(cancelUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+      body: JSON.stringify({ sessionId: byokOauthSessionId }),
+    }).catch(() => {});
+    byokOauthSessionId = null;
+  }
+  const modal = $('#byok-oauth-modal');
+  if (modal) modal.hidden = true;
+  // Return focus to whatever opened the dialog (a11y dismissal contract).
+  if (byokOauthReturnFocus && typeof byokOauthReturnFocus.focus === 'function') byokOauthReturnFocus.focus();
+  byokOauthReturnFocus = null;
+}
+$('#byok-oauth-cancel')?.addEventListener('click', closeByokOauthModal);
+$('#byok-oauth-close')?.addEventListener('click', closeByokOauthModal);
+// Click the backdrop (outside the modal card) to close.
+$('#byok-oauth-modal')?.addEventListener('click', (e) => {
+  if (e.target === $('#byok-oauth-modal')) closeByokOauthModal();
+});
+// Escape closes; Tab is trapped within the dialog (a11y, matches other modals).
+document.addEventListener('keydown', (e) => {
+  const modal = $('#byok-oauth-modal');
+  if (!modal || modal.hidden) return;
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    closeByokOauthModal();
+    return;
+  }
+  if (e.key !== 'Tab') return;
+  const focusable = Array.from(
+    modal.querySelectorAll('button:not([hidden]), a[href], input:not([hidden])'),
+  ).filter((el) => el.offsetParent !== null && !el.disabled);
+  if (focusable.length === 0) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
+});
+// Auto-submit once a code is pasted (Claude path) — no separate Connect click.
+$('#byok-oauth-code')?.addEventListener('paste', () => {
+  setTimeout(() => {
+    const submit = $('#byok-oauth-submit');
+    if (submit && !submit.hidden && ($('#byok-oauth-code')?.value || '').trim()) submit.click();
+  }, 0);
+});
+
+$('#byok-oauth-submit')?.addEventListener('click', async () => {
+  const isCodex = byokProvider === 'codex';
+  const code = ($('#byok-oauth-code')?.value || '').trim();
+  if (!byokOauthSessionId) return;
+  if (!isCodex && !code) return; // Claude needs the pasted code; Codex needs none.
+  const btn = $('#byok-oauth-submit');
+  btn.disabled = true;
+  $('#byok-oauth-step2').hidden = true;
+  $('#byok-oauth-spinner').hidden = false; // spinner while connecting
+  const { subWord } = byokWords(byokProvider);
+  byokOauthStatus('Connecting…', '');
+  try {
+    const finishUrl = isCodex ? '/api/byok/codex/finish' : '/api/byok/oauth/code';
+    const body = isCodex
+      ? { roomId: currentRoom, sessionId: byokOauthSessionId }
+      : { roomId: currentRoom, sessionId: byokOauthSessionId, code };
+    const r = await authFetch(finishUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.statusText);
+    byokOauthSessionId = null;
+    showToast(`Connected your ${subWord}.`, { kind: 'success' });
+    $('#byok-oauth-modal').hidden = true;
+    await updateByokBanner(currentRoom);
+  } catch (err) {
+    $('#byok-oauth-spinner').hidden = true;
+    $('#byok-oauth-step2').hidden = false; // restore so they can retry
+    byokOauthStatus(err.message || 'Could not connect.', 'error');
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 function showToast(message, { kind = 'info', timeout } = {}) {
   const container = $('#toasts');
   if (!container) return null;
@@ -2026,7 +2639,7 @@ function showConfirmModal({ title, body, confirmLabel = 'Confirm', cancelLabel =
     overlay.className = 'modal-overlay confirm-overlay';
 
     const modal = document.createElement('div');
-    modal.className = 'modal confirm-modal';
+    modal.className = 'modal confirm-modal' + (body ? '' : ' confirm-modal--titleonly');
 
     const header = document.createElement('div');
     header.className = 'modal-header';
@@ -2034,13 +2647,18 @@ function showConfirmModal({ title, body, confirmLabel = 'Confirm', cancelLabel =
     titleSpan.textContent = title || 'Confirm';
     header.appendChild(titleSpan);
 
-    const bodyEl = document.createElement('div');
-    bodyEl.className = 'modal-body';
-    const message = document.createElement('div');
-    message.className = 'confirm-message';
-    if (body instanceof HTMLElement) message.appendChild(body);
-    else message.textContent = body || '';
-    bodyEl.appendChild(message);
+    // Body is optional: a title-only confirm (no dead space) for reversible
+    // actions whose title says it all. Only render the body when there's content.
+    let bodyEl = null;
+    if (body) {
+      bodyEl = document.createElement('div');
+      bodyEl.className = 'modal-body';
+      const message = document.createElement('div');
+      message.className = 'confirm-message';
+      if (body instanceof HTMLElement) message.appendChild(body);
+      else message.textContent = body;
+      bodyEl.appendChild(message);
+    }
 
     const footer = document.createElement('div');
     footer.className = 'confirm-actions';
@@ -2054,7 +2672,7 @@ function showConfirmModal({ title, body, confirmLabel = 'Confirm', cancelLabel =
     confirmBtn.textContent = confirmLabel;
     footer.append(cancelBtn, confirmBtn);
 
-    modal.append(header, bodyEl, footer);
+    modal.append(header, ...(bodyEl ? [bodyEl] : []), footer);
     overlay.appendChild(modal);
     document.body.appendChild(overlay);
 
@@ -2496,6 +3114,13 @@ function sendCurrentMessage() {
   }
 
   if (!text) return;
+  // Don't send into a non-open socket — like the read/typing/interrupt sends.
+  // ws.send on a CONNECTING/CLOSING socket throws or silently drops; bail and
+  // keep the input so the user can resend once reconnected.
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    showToast('Not connected — try again in a moment.', { kind: 'error' });
+    return;
+  }
   const clientId = `local-${++clientMsgSeq}-${Date.now()}`;
   ws.send(JSON.stringify({ type: 'message', content: text, client_id: clientId }));
   const el = appendMessage({ sender: myIdentity, sender_type: 'user', content: text }, '✓');
@@ -2700,9 +3325,7 @@ function tryActivateMention(input) {
   }
   mentionStart = i;
   const token = value.slice(i + 1, cursor).toLowerCase();
-  mentionMatches = mentionPool
-    .filter((a) => a.folder.toLowerCase().startsWith(token))
-    .slice(0, 8);
+  mentionMatches = mentionPool.filter((a) => a.folder.toLowerCase().startsWith(token)).slice(0, 8);
   mentionSelectedIndex = 0;
   if (mentionMatches.length === 0) {
     dismissMentionPopover();
@@ -2766,6 +3389,13 @@ function acceptMention(input) {
  * styling tells the user "this looks like a mention." Server-side matching
  * is what actually decides routing.
  */
+// Map a mention handle (folder/slug) to its wired agent's colour, matching the
+// per-name tint used on a2a labels. Humans / unknown handles → null (default chip).
+function mentionAgentColor(handle) {
+  const a = (wiredAgentsForCurrentRoom || []).find((x) => (x.folder || '').toLowerCase() === handle);
+  return a && a.name ? agentColor(a.name) : null;
+}
+
 function decorateMentions(bubble) {
   const walker = document.createTreeWalker(bubble, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
@@ -2796,7 +3426,16 @@ function decorateMentions(bubble) {
       if (fullStart > last) frag.appendChild(document.createTextNode(txt.slice(last, fullStart)));
       const span = document.createElement('span');
       span.className = 'mention';
-      if (myHandle && m[2].toLowerCase() === myHandle) span.classList.add('mention-me');
+      const handle = m[2].toLowerCase();
+      if (myHandle && handle === myHandle) {
+        // A mention of me keeps the distinct self-highlight (warning tint).
+        span.classList.add('mention-me');
+      } else {
+        // A mention of a wired agent is tinted in that agent's colour (the same
+        // hash palette as a2a labels), so @code-reviewer reads in its colour.
+        const color = mentionAgentColor(handle);
+        if (color) span.style.background = color;
+      }
       span.textContent = `@${m[2]}`;
       frag.appendChild(span);
       last = fullStart + 1 + m[2].length;
@@ -2811,18 +3450,32 @@ function decorateMentions(bubble) {
 // ── Members panel ─────────────────────────────────────────────────────────
 let currentMembers = [];
 
+let membersFilter = ''; // lowercased; filters the room members list
+
 function renderMembers(members) {
   currentMembers = members;
-  const list = $('#members-list');
   const toggle = $('#members-toggle');
-  toggle.textContent = members.length;
+  toggle.textContent = members.length; // full count — independent of the filter
   toggle.hidden = !currentRoom;
+  paintMembersList();
+}
 
+// Render #members-list from currentMembers, applying the search filter. Split
+// from renderMembers so the search box can re-paint without a re-fetch.
+function paintMembersList() {
+  const list = $('#members-list');
   list.innerHTML = '';
-  const sorted = [...members].sort((a, b) => {
+  let sorted = [...currentMembers].sort((a, b) => {
     if (a.identity_type !== b.identity_type) return a.identity_type === 'agent' ? -1 : 1;
     return a.identity.localeCompare(b.identity);
   });
+  if (membersFilter) {
+    sorted = sorted.filter((m) => `${m.identity} ${m.handle || ''}`.toLowerCase().includes(membersFilter));
+  }
+  if (sorted.length === 0) {
+    list.innerHTML = '<li class="member-empty">No members match.</li>';
+    return;
+  }
   for (const m of sorted) {
     const li = document.createElement('li');
     const dot = document.createElement('span');
@@ -2859,6 +3512,10 @@ function toggleMembersPanel() {
 
 $('#members-toggle').addEventListener('click', toggleMembersPanel);
 $('#members-close').addEventListener('click', toggleMembersPanel);
+$('#members-search')?.addEventListener('input', (e) => {
+  membersFilter = e.target.value.trim().toLowerCase();
+  paintMembersList();
+});
 $('#members-overlay').addEventListener('click', toggleMembersPanel);
 
 // ── Detail-panel backdrop (mobile-only via CSS) ─────────────────────────────
@@ -2868,9 +3525,7 @@ $('#members-overlay').addEventListener('click', toggleMembersPanel);
 (function () {
   const overlay = $('#detail-overlay');
   if (!overlay) return; // index.html older than this build — graceful no-op
-  const panels = ['#agent-detail', '#room-detail', '#model-detail']
-    .map((s) => $(s))
-    .filter(Boolean);
+  const panels = ['#agent-detail', '#room-detail', '#model-detail'].map((s) => $(s)).filter(Boolean);
   const app = $('#app');
   let detailViewSynced = false;
   const closeAllDetailPanels = () => {
@@ -2925,6 +3580,11 @@ function openManage(tab = 'agents') {
   closeAgentDetail();
   closeRoomDetail();
   closeModelDetail();
+  // Close any other full view first; manage overlays the chat pane, so restore
+  // chat as its backdrop (a prior full view had hidden it + set in-dashboard).
+  hideOtherFullViews('manage');
+  $('#chat').hidden = false;
+  $('#app').classList.remove('in-dashboard');
   manageActive = true;
   $('#manage').hidden = false;
   $('#overflow-btn')?.classList.add('active');
@@ -3006,12 +3666,13 @@ function renderApprovalCard(a, options) {
 
   const actions = document.createElement('div');
   actions.className = 'approval-actions';
-  const optionList = Array.isArray(a.options) && a.options.length
-    ? a.options
-    : [
-        { label: 'Approve', value: 'approve' },
-        { label: 'Reject', value: 'reject' },
-      ];
+  const optionList =
+    Array.isArray(a.options) && a.options.length
+      ? a.options
+      : [
+          { label: 'Approve', value: 'approve' },
+          { label: 'Reject', value: 'reject' },
+        ];
   optionList.forEach((opt) => {
     const btn = document.createElement('button');
     btn.textContent = opt.label || opt.value;
@@ -3096,8 +3757,15 @@ function handleApprovalEvent(msg) {
   showApprovalToast(msg);
   fetchApprovals();
   // Desktop notification when settings allow + tab not focused.
-  if (settings.notifications && document.hidden && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-    try { new Notification(msg.title || 'Approval requested', { body: msg.question || '' }); } catch {}
+  if (
+    settings.notifications &&
+    document.hidden &&
+    typeof Notification !== 'undefined' &&
+    Notification.permission === 'granted'
+  ) {
+    try {
+      new Notification(msg.title || 'Approval requested', { body: msg.question || '' });
+    } catch {}
   }
 }
 
@@ -3155,6 +3823,14 @@ let dashboardActive = false;
 // pane. Each opener hides its peers synchronously (the router stack still
 // unwinds normally on back).
 function hideOtherFullViews(keep) {
+  // `manage` (the Agents/Models pane) is a full surface like the rest — it must
+  // close when another view opens, or it lingers on top with the new view
+  // underneath. (Pass no `keep` to close them all, e.g. when opening a room.)
+  if (keep !== 'manage' && manageActive) {
+    manageActive = false;
+    $('#manage').hidden = true;
+    $('#overflow-btn')?.classList.remove('active');
+  }
   if (keep !== 'dashboard' && dashboardActive) {
     dashboardActive = false;
     $('#dashboard').hidden = true;
@@ -3348,6 +4024,19 @@ function renderTopology(data) {
   const drawNode = (x, yMap, item, kind, degree, stroke) => {
     const y = yPx(yMap, item.id);
     const g = svgEl('g', { class: `topo-node topo-${kind}${degree === 0 ? ' topo-orphan' : ''}` });
+    // Click a node to open that item's settings drawer (overlays the graph;
+    // closing it returns here). Keyboard-accessible too.
+    g.style.cursor = 'pointer';
+    g.setAttribute('role', 'button');
+    g.setAttribute('tabindex', '0');
+    g.setAttribute('aria-label', `Open ${kind} settings: ${item.name}`);
+    g.addEventListener('click', () => openTopologyItem(kind, item.id));
+    g.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        openTopologyItem(kind, item.id);
+      }
+    });
     const c = svgEl('circle', { cx: x, cy: y, r: NODE_X });
     // Match the room node to its edge color (skip orphans — they keep the
     // red-dashed "unused" treatment).
@@ -3363,6 +4052,26 @@ function renderTopology(data) {
   for (const m of models) drawNode(cols.model, modelY, m, 'model', (modelAgents.get(m.id) || []).length);
 
   canvas.appendChild(svg);
+}
+
+// Open the settings drawer for a clicked topology node. The detail drawers are
+// fixed overlays (z-index 110), so they layer over the graph and closing one
+// returns here. fetchAgents/fetchModels are lazy so the lookup data exists even
+// when the user jumped straight to the topology view.
+async function openTopologyItem(kind, id) {
+  try {
+    if (kind === 'room') {
+      await openRoomDetail(id);
+    } else if (kind === 'agent') {
+      if (!allAgents.length) await fetchAgents();
+      await openAgentDetail(id);
+    } else if (kind === 'model') {
+      if (!allModels.length) await fetchModels();
+      await openModelDetail(id);
+    }
+  } catch (err) {
+    showToast('Couldn’t open settings: ' + (err?.message || err), { kind: 'error' });
+  }
 }
 
 // ── Wiring matrix (rooms × agents management console) ──────────────────────
@@ -3641,23 +4350,36 @@ function userRoleSummary(u) {
   return parts.join(' · ') || 'no roles';
 }
 
+let permsUserFilter = ''; // lowercased; filters the user list by name + id
+
 function renderPermsUserList() {
   const list = $('#perms-user-list');
   list.innerHTML = '';
   if (permsUsers.length === 0) {
-    list.innerHTML = '<li class="perms-empty" style="padding:16px;">No users yet — anyone who authenticates will appear here.</li>';
+    list.innerHTML =
+      '<li class="perms-empty" style="padding:16px;">No users yet — anyone who authenticates will appear here.</li>';
     return;
   }
   // Sort: you first, then owners, then admins, then everyone else, alphabetical
   // within each tier. Cheap stable enough for personal-scale.
   const sorted = [...permsUsers].sort((a, b) => {
-    const tier = (u) => (u.id === myUserId ? 0 : userIsOwner(u) ? 1 : userIsGlobalAdmin(u) || userScopedAdminCount(u) ? 2 : 3);
+    const tier = (u) =>
+      u.id === myUserId ? 0 : userIsOwner(u) ? 1 : userIsGlobalAdmin(u) || userScopedAdminCount(u) ? 2 : 3;
     const ta = tier(a);
     const tb = tier(b);
     if (ta !== tb) return ta - tb;
     return userDisplayName(a).localeCompare(userDisplayName(b));
   });
-  sorted.forEach((u) => {
+  // Filter by the search box — match on display name AND the namespaced id, so
+  // you can find someone by handle/email or by channel prefix (e.g. "slack:").
+  const rows = permsUserFilter
+    ? sorted.filter((u) => `${userDisplayName(u)} ${u.id}`.toLowerCase().includes(permsUserFilter))
+    : sorted;
+  if (rows.length === 0) {
+    list.innerHTML = '<li class="perms-empty" style="padding:16px;">No users match.</li>';
+    return;
+  }
+  rows.forEach((u) => {
     const li = document.createElement('li');
     li.tabIndex = 0;
     if (u.id === permsSelectedUserId) li.classList.add('active');
@@ -3696,6 +4418,11 @@ function renderPermsUserList() {
     list.appendChild(li);
   });
 }
+
+$('#perms-user-search')?.addEventListener('input', (e) => {
+  permsUserFilter = e.target.value.trim().toLowerCase();
+  renderPermsUserList();
+});
 
 function permsSelectUser(userId) {
   permsSelectedUserId = userId;
@@ -3736,8 +4463,16 @@ function renderPermsDetail(userId) {
   // ── GLOBAL section: Owner + Global admin toggles ──
   const globalEl = $('#perms-global-toggles');
   globalEl.innerHTML = '';
-  globalEl.appendChild(buildToggleRow(u, 'Owner', '👑 ', findRole(u, 'owner', null), () => togglePerm(u.id, 'owner', null, !findRole(u, 'owner', null))));
-  globalEl.appendChild(buildToggleRow(u, 'Global admin', '', findRole(u, 'admin', null), () => togglePerm(u.id, 'admin', null, !findRole(u, 'admin', null))));
+  globalEl.appendChild(
+    buildToggleRow(u, 'Owner', '👑 ', findRole(u, 'owner', null), () =>
+      togglePerm(u.id, 'owner', null, !findRole(u, 'owner', null)),
+    ),
+  );
+  globalEl.appendChild(
+    buildToggleRow(u, 'Global admin', '', findRole(u, 'admin', null), () =>
+      togglePerm(u.id, 'admin', null, !findRole(u, 'admin', null)),
+    ),
+  );
 
   // ── PER-AGENT-GROUP matrix ──
   const matrix = $('#perms-matrix');
@@ -3796,9 +4531,7 @@ function renderPermsDetail(userId) {
     deleteZone.hidden = isSelf;
     if (deleteBtn) {
       deleteBtn.disabled = hasRolesOrMemberships;
-      deleteBtn.title = hasRolesOrMemberships
-        ? 'Revoke all roles and memberships before deleting'
-        : '';
+      deleteBtn.title = hasRolesOrMemberships ? 'Revoke all roles and memberships before deleting' : '';
     }
   }
 }
@@ -3939,9 +4672,11 @@ function applyCreateAuthDefault() {
   if (m.tailscale) {
     hint.textContent = 'This install signs people in via Tailscale — they appear as webchat:tailscale:<email>.';
   } else if (m.proxy) {
-    hint.textContent = 'This install signs people in via SSO / reverse proxy (e.g. Entra ID) — they appear as webchat:<email>.';
+    hint.textContent =
+      'This install signs people in via SSO / reverse proxy (e.g. Entra ID) — they appear as webchat:<email>.';
   } else if (m.bearer) {
-    hint.textContent = 'This install uses a shared bearer token — per-user ids only differ when a proxy or Tailscale also fronts it.';
+    hint.textContent =
+      'This install uses a shared bearer token — per-user ids only differ when a proxy or Tailscale also fronts it.';
   } else {
     hint.textContent = '';
   }
@@ -4057,9 +4792,7 @@ function permsRefreshCreateUI() {
   $('#perms-create-handle-label').hidden = isRaw;
   $('#perms-create-raw-label').hidden = !isRaw;
   const composed = permsCreateComposedId();
-  $('#perms-create-preview').textContent = composed
-    ? `Resolved id: ${composed}`
-    : 'Resolved id will appear here.';
+  $('#perms-create-preview').textContent = composed ? `Resolved id: ${composed}` : 'Resolved id will appear here.';
   // Show/hide the agent-group selector based on initial-role choice.
   const kind = $('#perms-create-kind').value;
   const wantsGroup = kind === 'admin' || kind === 'member';
@@ -4303,7 +5036,10 @@ async function showMessagesDetail() {
         .catch(() => []),
     ),
   );
-  const all = perRoom.flat().sort((a, b) => b.created_at - a.created_at).slice(0, 50);
+  const all = perRoom
+    .flat()
+    .sort((a, b) => b.created_at - a.created_at)
+    .slice(0, 50);
   if (all.length === 0) {
     showDetail('Messages (24h)', '<div class="metric-sub">No messages in the last 24 hours</div>');
     return;
@@ -4756,8 +5492,7 @@ $('#agent-detail-form').addEventListener('submit', async (e) => {
     });
     // Update model assignment (empty string in the select = unassign).
     const selectedModel = $('#agent-model').value || null;
-    const currentModel =
-      allAgents.find((b) => b.id === selectedAgentId)?.assigned_model_id || null;
+    const currentModel = allAgents.find((b) => b.id === selectedAgentId)?.assigned_model_id || null;
     if (selectedModel !== currentModel) {
       await authFetch(`/api/agents/${encodeURIComponent(selectedAgentId)}/model`, {
         method: 'PUT',
@@ -4943,6 +5678,17 @@ async function openRoomDetail(roomId) {
   const room = lastRoomsList.find((r) => r.id === roomId);
   $('#room-detail-title').textContent = room ? `${room.name} — settings` : 'Room settings';
 
+  // Rename field — owner-only (the server also enforces). Prefilled with the
+  // current name; saving PUTs /name and the server's broadcastRooms refreshes
+  // the sidebar + this panel's title.
+  const renameField = $('#room-rename-field');
+  if (isOwnerView && room) {
+    renameField.hidden = false;
+    $('#room-rename-input').value = room.name || '';
+  } else {
+    renameField.hidden = true;
+  }
+
   // Hide the add-agent form when opening
   $('#room-add-agent-form').hidden = true;
 
@@ -4959,6 +5705,43 @@ async function openRoomDetail(roomId) {
 
   await refreshRoomWiredAgents(roomId);
 
+  // BYOK credential-mode selector — admin/owner only (canArchive implies that).
+  const credSection = $('#room-credential-mode-section');
+  if (credSection) {
+    if (room && room.canArchive) {
+      credSection.hidden = false;
+      // Clear any prior room's selection FIRST so a failed/mismatched fetch can't
+      // leave the previous room's mode showing as this room's policy.
+      document
+        .querySelectorAll('#room-credential-modes .setting-option')
+        .forEach((b) => b.classList.remove('active'));
+      const hintEl = $('#room-cred-default-hint');
+      if (hintEl) hintEl.textContent = '';
+      authFetch(`/api/rooms/${encodeURIComponent(roomId)}/credential-mode`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (!d) {
+            if (hintEl) hintEl.textContent = '(couldn’t load — try reopening)';
+            return;
+          }
+          // No explicit override → the room follows the workspace default: highlight
+          // that value and note the inheritance. An explicit pick highlights itself.
+          const effective = d.mode === 'inherit' ? d.defaultMode : d.mode;
+          document
+            .querySelectorAll('#room-credential-modes .setting-option')
+            .forEach((b) => b.classList.toggle('active', b.dataset.value === effective));
+          if (hintEl)
+            hintEl.textContent =
+              d.mode === 'inherit' ? `Following the workspace default (${d.defaultMode ?? 'off'}).` : '';
+        })
+        .catch(() => {
+          if (hintEl) hintEl.textContent = '(couldn’t load — try reopening)';
+        });
+    } else {
+      credSection.hidden = true;
+    }
+  }
+
   $('#room-detail').hidden = false;
   $('#members-panel').hidden = true;
   $('#agent-detail').hidden = true;
@@ -4969,6 +5752,30 @@ function closeRoomDetail() {
   $('#room-edit-view').hidden = false;
   $('#room-create-view').hidden = true;
   selectedRoomId = null;
+}
+
+// Rename the selected room. Owner-only (the field is hidden otherwise, and the
+// server re-checks). The server's broadcastRooms() pushes the new name, so the
+// sidebar + panel title update via the 'rooms' handler — no manual refresh.
+async function saveRoomName() {
+  const id = selectedRoomId;
+  if (!id) return;
+  const name = $('#room-rename-input').value.trim();
+  if (!name) {
+    showToast('Enter a room name', { kind: 'error' });
+    return;
+  }
+  try {
+    const r = await authFetch(`/api/rooms/${encodeURIComponent(id)}/name`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    showToast('Room renamed', { kind: 'success' });
+  } catch (err) {
+    showToast('Rename failed: ' + (err.message || err), { kind: 'error' });
+  }
 }
 
 // Engage mode for the currently-loaded room. Populated alongside the agents
@@ -5281,6 +6088,39 @@ $('#room-name').addEventListener('keydown', (e) => {
 });
 $('#room-detail-close').addEventListener('click', closeRoomDetail);
 $('#room-delete').addEventListener('click', deleteCurrentRoom);
+$('#room-credential-modes')?.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.setting-option');
+  if (!btn || !selectedRoomId) return;
+  const mode = btn.dataset.value; // disabled | optional | required (explicit override)
+  const r = await authFetch(`/api/rooms/${encodeURIComponent(selectedRoomId)}/credential-mode`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+    body: JSON.stringify({ mode }),
+  });
+  if (r.ok) {
+    document
+      .querySelectorAll('#room-credential-modes .setting-option')
+      .forEach((b) => b.classList.toggle('active', b === btn));
+    // Picking a pill sets an explicit override, so it's no longer inheriting.
+    const hintEl = $('#room-cred-default-hint');
+    if (hintEl) hintEl.textContent = '';
+    const label = { disabled: 'off', optional: 'optional', required: 'required' }[mode] ?? mode;
+    showToast(`Member credentials: ${label}.`, { kind: 'success' });
+    if (selectedRoomId === currentRoom) updateByokBanner(currentRoom);
+  } else {
+    const err = await r.json().catch(() => ({}));
+    showToast('Failed to set mode: ' + (err.error || r.statusText), { kind: 'error' });
+  }
+});
+// Per-room credential TYPES moved to Settings → Member credentials (global); the
+// room only sets the mode override above.
+$('#room-rename-save')?.addEventListener('click', saveRoomName);
+$('#room-rename-input')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    saveRoomName();
+  }
+});
 $('#room-archive-toggle').addEventListener('click', async () => {
   if (!selectedRoomId) return;
   const room = lastRoomsList.find((r) => r.id === selectedRoomId);
@@ -5333,9 +6173,7 @@ function renderRoomCreateAgentChecklist() {
     list.appendChild(li);
     return;
   }
-  const sorted = [...allAgents]
-    .filter((a) => a.status !== 'archived')
-    .sort((a, b) => a.name.localeCompare(b.name));
+  const sorted = [...allAgents].filter((a) => a.status !== 'archived').sort((a, b) => a.name.localeCompare(b.name));
   for (const agent of sorted) {
     const li = document.createElement('li');
     const cb = document.createElement('input');
@@ -5714,8 +6552,7 @@ function updateThinkingBubble(name, label, detail) {
   const target = bubble.querySelector('.thinking-target');
   if (target) {
     if (detail) {
-      const trimmed =
-        detail.length > THINKING_DETAIL_MAX ? `${detail.slice(0, THINKING_DETAIL_MAX - 1)}…` : detail;
+      const trimmed = detail.length > THINKING_DETAIL_MAX ? `${detail.slice(0, THINKING_DETAIL_MAX - 1)}…` : detail;
       target.textContent = trimmed;
       target.hidden = false;
     } else {
@@ -6423,10 +7260,7 @@ $('#model-delete').addEventListener('click', async () => {
         destructive: true,
       });
       if (!confirmed) return;
-      const force = await authFetch(
-        `/api/models/${encodeURIComponent(selectedModelId)}?force=1`,
-        { method: 'DELETE' },
-      );
+      const force = await authFetch(`/api/models/${encodeURIComponent(selectedModelId)}?force=1`, { method: 'DELETE' });
       if (!force.ok) {
         const err = await force.json().catch(() => ({}));
         showToast(`Failed to delete: ${err.error || force.statusText}`, { kind: 'error' });

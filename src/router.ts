@@ -29,7 +29,13 @@ import {
 import { findSessionForAgent } from './db/sessions.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
-import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
+import {
+  resolveSession,
+  resolveSessionKeyOverride,
+  writePerMemberInbound,
+  writeSessionMessage,
+  writeOutboundDirect,
+} from './session-manager.js';
 import { wakeContainer } from './container-runner.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
@@ -470,7 +476,41 @@ async function deliverToAgent(
     effectiveSessionMode = 'per-thread';
   }
 
-  const { session, created } = resolveSession(agent.agent_group_id, mg.id, event.threadId, effectiveSessionMode);
+  // An installed module (BYOK) may redirect this turn to a per-member session
+  // keyed by the sender — so each person's turn runs in a container bearing
+  // their own credential identity. Default (no resolver) leaves keying as-is.
+  let sessionThreadId = event.threadId;
+  const keyOverride = resolveSessionKeyOverride(mg, agent.agent_group_id, userId);
+  if (keyOverride && 'block' in keyOverride) {
+    // e.g. a 'required' BYOK room where this member hasn't connected a key —
+    // decline the turn and tell them how to fix it (never bill the shared key).
+    if (wake) {
+      writeOutboundDirect(agent.agent_group_id, agent.agent_group_id, {
+        id: `byok-block-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        kind: 'chat',
+        platformId: event.replyTo?.platformId ?? event.platformId,
+        channelType: event.replyTo?.channelType ?? event.channelType,
+        threadId: event.replyTo?.threadId ?? event.threadId,
+        content: JSON.stringify({ text: keyOverride.block }),
+      });
+    }
+    recordDroppedMessage({
+      channel_type: event.channelType,
+      platform_id: event.platformId,
+      user_id: userId,
+      sender_name: null,
+      reason: 'byok-required-no-key',
+      messaging_group_id: mg.id,
+      agent_group_id: agent.agent_group_id,
+    });
+    return;
+  }
+  const perMember = keyOverride !== null;
+  if (keyOverride) {
+    effectiveSessionMode = keyOverride.sessionMode;
+    sessionThreadId = keyOverride.threadId;
+  }
+  const { session, created } = resolveSession(agent.agent_group_id, mg.id, sessionThreadId, effectiveSessionMode);
 
   // The inbound row's (channel_type, platform_id, thread_id) is the address
   // the agent's reply will be delivered to. Normally it mirrors the source
@@ -505,16 +545,33 @@ async function deliverToAgent(
     }
   }
 
-  writeSessionMessage(session.agent_group_id, session.id, {
-    id: messageIdForAgent(event.message.id, agent.agent_group_id),
-    kind: event.message.kind,
-    timestamp: event.message.timestamp,
-    platformId: deliveryAddr.platformId,
-    channelType: deliveryAddr.channelType,
-    threadId: deliveryAddr.threadId,
-    content: event.message.content,
-    trigger: wake ? 1 : 0,
-  });
+  // BYOK per-member shared-context: on a wake turn, let the module write the
+  // full room transcript into this member's session (current → trigger=1, the
+  // rest → trigger=0). If it handles the write, skip the normal single-message
+  // write below.
+  const handledByMember =
+    perMember && wake
+      ? writePerMemberInbound({
+          agentGroupId: agent.agent_group_id,
+          session,
+          roomId: mg.platform_id,
+          currentMessageId: event.message.id,
+          deliveryAddr,
+        })
+      : false;
+
+  if (!handledByMember) {
+    writeSessionMessage(session.agent_group_id, session.id, {
+      id: messageIdForAgent(event.message.id, agent.agent_group_id),
+      kind: event.message.kind,
+      timestamp: event.message.timestamp,
+      platformId: deliveryAddr.platformId,
+      channelType: deliveryAddr.channelType,
+      threadId: deliveryAddr.threadId,
+      content: event.message.content,
+      trigger: wake ? 1 : 0,
+    });
+  }
 
   log.info('Message routed', {
     sessionId: session.id,
