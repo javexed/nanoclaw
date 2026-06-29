@@ -2051,10 +2051,18 @@ function appendMessage(msg, statusText, beforeNode) {
     }
   }
 
-  if (isMine && msg.id) {
+  if (isMine) {
+    // Always wrap own messages in the .msg-body row — even the optimistic echo
+    // that has no server id yet. A bare bubble that's a direct flex child of
+    // .msg.mine (align-items:flex-end) shrink-collapses its block Markdown (<p>)
+    // to ~zero width and renders invisible; the row gives the bubble a proper
+    // width context (this is why a message only appeared after leaving and
+    // re-entering, where history re-renders it WITH an id and the row). The
+    // delete button is added now if we have an id, else by addDeleteButton when
+    // the server echo upgrades the pending element.
     const bodyRow = document.createElement('div');
     bodyRow.className = 'msg-body';
-    bodyRow.appendChild(createDeleteButton(msg.id));
+    if (msg.id) bodyRow.appendChild(createDeleteButton(msg.id));
     bodyRow.appendChild(bubble);
     div.appendChild(bodyRow);
   } else {
