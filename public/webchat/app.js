@@ -1899,13 +1899,18 @@ function appendMessage(msg, statusText, beforeNode) {
       bubble.appendChild(caption);
     }
   } else if (isMine) {
-    // User's own messages are rendered as plain text — preserves whitespace,
-    // tabs, and code indentation exactly as typed. Only agent replies need
-    // Markdown interpretation. We still chip @mentions (decorateMentions only
-    // rewrites mention tokens, leaving the rest as text), so your messages read
-    // consistently with agent replies.
-    bubble.textContent = msg.content;
-    decorateMentions(bubble);
+    // Your own messages render as full Markdown too (bold/lists/links/code
+    // blocks + agent-tinted @mentions), same pipeline as agent replies. Markdown
+    // re-flows whitespace, so fenced ``` blocks keep code exact; falls back to
+    // plain text if marked/DOMPurify throws (escaped by the DOM, no XSS risk).
+    try {
+      bubble.innerHTML = DOMPurify.sanitize(marked.parse(msg.content));
+      decorateCodeBlocks(bubble);
+      decorateMentions(bubble);
+    } catch (err) {
+      console.error('Message render failed; falling back to plain text', err);
+      bubble.textContent = msg.content;
+    }
   } else {
     // Markdown render is best-effort: a malformed message must not crash the
     // whole render loop and leave #messages half-populated. Fall back to
