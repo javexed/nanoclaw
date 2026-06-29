@@ -89,6 +89,7 @@ import {
 import { createMessagingGroupAgent, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import { getPendingApproval, getSessionsByAgentGroup } from '../../db/sessions.js';
 import { killContainer } from '../../container-runner.js';
+import { restartAgentGroupContainers } from '../../container-restart.js';
 import { initGroupFilesystem } from '../../group-init.js';
 import {
   addMember as permsAddMember,
@@ -2851,13 +2852,10 @@ async function updateModelHandler(req: IncomingMessage, res: ServerResponse, id:
   if (validationError) return json(res, 400, { error: validationError });
 
   updateWebchatModel(id, patch);
-  // Endpoint or model_id change → re-emit env for every agent that uses it.
+  // Endpoint or model_id change → re-emit env and respawn for every agent that
+  // uses it, so live containers pick up the edited endpoint/model immediately.
   for (const agentGroupId of getAgentsAssignedToModel(id)) {
-    try {
-      writeAgentSettingsForAssignedModel(agentGroupId);
-    } catch (err) {
-      log.warn('Webchat: settings.json refresh after model update failed', { agentGroupId, err });
-    }
+    reloadAgentModelEnv(agentGroupId, 'Webchat model updated');
   }
   return json(res, 200, { ok: true });
 }
@@ -2875,14 +2873,11 @@ function deleteModelHandler(res: ServerResponse, id: string, force: boolean): vo
     });
   }
   deleteWebchatModel(id);
-  // Refresh settings.json for any newly-orphaned agents so their next
-  // spawn doesn't keep using the dead env block.
+  // Refresh settings.json for any newly-orphaned agents and respawn them so a
+  // live container doesn't keep using the now-dead ollama env block (it would
+  // otherwise fail against a deleted endpoint until it idled out).
   for (const agentGroupId of assigned) {
-    try {
-      writeAgentSettingsForAssignedModel(agentGroupId);
-    } catch (err) {
-      log.warn('Webchat: settings.json refresh after model delete failed', { agentGroupId, err });
-    }
+    reloadAgentModelEnv(agentGroupId, 'Webchat model deleted');
   }
   return json(res, 200, { ok: true, unassigned_count: assigned.length });
 }
@@ -3046,13 +3041,38 @@ async function assignAgentModelHandler(req: IncomingMessage, res: ServerResponse
     if (!getWebchatModel(body.modelId.trim())) return json(res, 404, { error: 'Model not found' });
     assignModelToAgent(agentGroupId, body.modelId.trim());
   }
+  reloadAgentModelEnv(agentGroupId, 'Webchat model reassigned');
+  const current = getAssignedModelForAgent(agentGroupId);
+  return json(res, 200, { ok: true, model: current });
+}
+
+/**
+ * Re-materialize an agent group's model env into settings.json and force any
+ * running container to respawn so the change actually takes effect.
+ *
+ * The model env (ANTHROPIC_MODEL / ANTHROPIC_BASE_URL) is read only at container
+ * spawn, so without the restart a live container keeps serving the previous
+ * model until it idles out — which the operator reads as "the switch didn't
+ * take" (and surfaces as a wrong-model error). No wake message is written: we
+ * don't want a spurious agent turn, just a clean env on the next real message.
+ * restartAgentGroupContainers only respawns eagerly when there's already
+ * pending work; otherwise it kills and waits for the next inbound. Each step is
+ * isolated so a failure in one agent group doesn't abort the rest of the batch.
+ */
+function reloadAgentModelEnv(agentGroupId: string, reason: string): void {
   try {
     writeAgentSettingsForAssignedModel(agentGroupId);
   } catch (err) {
-    log.warn('Webchat: settings.json write after model assign failed', { agentGroupId, err });
+    log.warn('Webchat: settings.json write after model change failed', { agentGroupId, reason, err });
   }
-  const current = getAssignedModelForAgent(agentGroupId);
-  return json(res, 200, { ok: true, model: current });
+  try {
+    const restarted = restartAgentGroupContainers(agentGroupId, reason);
+    if (restarted > 0) {
+      log.info('Webchat: restarted containers after model change', { agentGroupId, reason, restarted });
+    }
+  } catch (err) {
+    log.warn('Webchat: container restart after model change failed', { agentGroupId, reason, err });
+  }
 }
 
 // ── Push subscriptions ──
