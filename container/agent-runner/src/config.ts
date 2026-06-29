@@ -18,6 +18,15 @@ export interface RunnerConfig {
   mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
   model?: string;
   effort?: string;
+  /**
+   * Lenient output mode for weak/local models. When true, a result turn that
+   * produces plain prose with no <message to="..."> envelope is delivered to the
+   * originating room instead of being dropped as scratchpad. Set by the host for
+   * ollama-backed agents (a 4B-class model rarely emits the envelope reliably);
+   * left false for Claude agents, whose unwrapped output is genuine private
+   * scratchpad. See dispatchResultText in poll-loop.ts.
+   */
+  lenientOutput?: boolean;
 }
 
 const DEFAULT_MAX_MESSAGES = 10;
@@ -47,6 +56,7 @@ export function loadConfig(): RunnerConfig {
     mcpServers: (raw.mcpServers as RunnerConfig['mcpServers']) || {},
     model: (raw.model as string) || undefined,
     effort: (raw.effort as string) || undefined,
+    lenientOutput: raw.lenientOutput === true,
   };
 
   return _config;

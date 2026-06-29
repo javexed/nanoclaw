@@ -181,6 +181,13 @@ WEBCHAT_HOOK_ALLOWLIST=(
   src/modules/agent-to-agent/agent-route.test.ts
   src/modules/agent-to-agent/message-gate.test.ts
   .gitignore
+  src/container-runtime.ts
+  src/modules/index.ts
+  src/modules/approvals/onecli-approvals.ts
+  container/Dockerfile
+  container/agent-runner/src/integration.test.ts
+  container/agent-runner/src/poll-loop.test.ts
+  container/agent-runner/src/mcp-tools/cli.instructions.md
 )
 DECLARED=$(git show "$CHANNEL:install-webchat.sh" 2>/dev/null \
   | awk '/^HOOK_FILES=\(/{f=1;next} f&&/^\)/{f=0} f{gsub(/^[ \t]+/,"");print}')

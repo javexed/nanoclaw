@@ -198,7 +198,39 @@ describe('poll loop integration', () => {
     // Only insert a message from discord — slack-new has never sent anything
     insertMessage('m1', { sender: 'Alice', text: 'tell slack' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'discord-thread' });
 
-    const provider = new MockProvider({}, () => '<message to="slack-new">hello slack</message>');
+    // Address the origin (discord-test) AND slack-new. A *lone* reply to a room
+    // the batch didn't come from is pinned back to origin by the origin guard;
+    // addressing both marks it a deliberate cross-room send, so slack-new is
+    // delivered — exercising its no-prior-inbound (null thread_id) path.
+    const provider = new MockProvider(
+      {},
+      () => '<message to="discord-test">on it</message><message to="slack-new">hello slack</message>',
+    );
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().length >= 2, 2000);
+    controller.abort();
+
+    const slack = getUndeliveredMessages().find((m) => m.platform_id === 'chan-new');
+    expect(slack).toBeDefined();
+    expect(slack!.thread_id).toBeNull();
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('redirects a lone reply addressed to the wrong room back to origin', async () => {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+         VALUES ('slack-test', 'Slack Test', 'channel', 'slack', 'chan-2', NULL)`,
+      )
+      .run();
+    // Message arrives from discord (chan-1); the agent answers the user but
+    // names the wrong room (slack-test). A lone reply must be pinned to origin.
+    insertMessage('m1', { sender: 'Alice', text: 'hi' }, { platformId: 'chan-1', channelType: 'discord', threadId: 't1' });
+
+    const provider = new MockProvider({}, () => '<message to="slack-test">answer for the user</message>');
     const controller = new AbortController();
     const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
 
@@ -207,8 +239,8 @@ describe('poll loop integration', () => {
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(out[0].platform_id).toBe('chan-new');
-    expect(out[0].thread_id).toBeNull();
+    expect(out[0].platform_id).toBe('chan-1'); // origin, not chan-2
+    expect(JSON.parse(out[0].content).text).toBe('answer for the user');
 
     await loopPromise.catch(() => {});
   });

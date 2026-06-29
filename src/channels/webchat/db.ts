@@ -247,6 +247,23 @@ export function getAllWebchatRooms(): WebchatRoom[] {
   return rows.map(rowToRoom);
 }
 
+/**
+ * Clean a user-supplied room name: strip control characters, collapse internal
+ * whitespace, trim, and bound the length. Returns null when the result is empty
+ * or longer than 80 chars — the caller rejects those. Keeps a room name from
+ * becoming an invisible or unwieldy string in the sidebar.
+ */
+export function sanitizeRoomName(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const name = raw
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!name || name.length > 80) return null;
+  return name;
+}
+
 export function updateWebchatRoomName(id: string, name: string): void {
   getDb()
     .prepare(`UPDATE messaging_groups SET name = ? WHERE channel_type='webchat' AND platform_id = ?`)
@@ -269,6 +286,7 @@ export function deleteWebchatRoom(id: string): void {
   db.prepare(`DELETE FROM webchat_user_room_hides WHERE room_id = ?`).run(id);
   db.prepare(`DELETE FROM webchat_room_archives WHERE room_id = ?`).run(id);
   db.prepare(`DELETE FROM webchat_room_reads WHERE room_id = ?`).run(id);
+  db.prepare(`DELETE FROM webchat_room_pins WHERE room_id = ?`).run(id);
   // Drop any agent_destinations rows pointing at this room. target_id has no
   // FK so they wouldn't block, just rot. Guarded — a2a module may not be installed.
   if (hasTable(db, 'agent_destinations')) {
@@ -491,6 +509,151 @@ export function setRoomEngageDefault(roomId: string, mode: EngageDefault): void 
        ON CONFLICT(room_id) DO UPDATE SET engage_default = excluded.engage_default, updated_at = excluded.updated_at`,
     )
     .run(roomId, mode, Date.now());
+}
+
+// ── BYOK: per-room credential mode ──
+export type CredentialMode = 'disabled' | 'optional' | 'required';
+
+/** Secure by default: rooms with no settings row read as 'disabled'. */
+export function getRoomCredentialMode(roomId: string): CredentialMode {
+  const row = getDb().prepare(`SELECT credential_mode FROM webchat_room_settings WHERE room_id = ?`).get(roomId) as
+    | { credential_mode: CredentialMode }
+    | undefined;
+  return row?.credential_mode ?? 'disabled';
+}
+
+export function setRoomCredentialMode(roomId: string, mode: CredentialMode): void {
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_room_settings (room_id, engage_default, credential_mode, updated_at)
+       VALUES (?, 'broadcast', ?, ?)
+       ON CONFLICT(room_id) DO UPDATE SET credential_mode = excluded.credential_mode, updated_at = excluded.updated_at`,
+    )
+    .run(roomId, mode, Date.now());
+}
+
+/**
+ * BYOK OAuth per-room toggle (subscription tokens). Off by default; orthogonal
+ * to credential_mode. The column is absent until its migration runs, so read
+ * defensively and treat any error/missing value as not-allowed.
+ */
+export function getRoomOauthAllowed(roomId: string): boolean {
+  try {
+    const row = getDb().prepare(`SELECT oauth_allowed FROM webchat_room_settings WHERE room_id = ?`).get(roomId) as
+      | { oauth_allowed: number }
+      | undefined;
+    return (row?.oauth_allowed ?? 0) === 1;
+  } catch {
+    return false;
+  }
+}
+
+export function setRoomOauthAllowed(roomId: string, allowed: boolean): void {
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_room_settings (room_id, engage_default, oauth_allowed, updated_at)
+       VALUES (?, 'broadcast', ?, ?)
+       ON CONFLICT(room_id) DO UPDATE SET oauth_allowed = excluded.oauth_allowed, updated_at = excluded.updated_at`,
+    )
+    .run(roomId, allowed ? 1 : 0, Date.now());
+}
+
+// ── BYOK: workspace-wide credentials policy (singleton webchat_settings) ──
+// Which member-credential TYPES the workspace accepts + the default room mode.
+// Types live here (configured once) rather than per room.
+export interface CredentialsConfig {
+  defaultMode: CredentialMode;
+  allowAnthropicKey: boolean;
+  allowClaudeOauth: boolean;
+  allowOpenaiKey: boolean;
+  allowCodexOauth: boolean;
+}
+
+const DEFAULT_CREDENTIALS_CONFIG: CredentialsConfig = {
+  defaultMode: 'disabled',
+  allowAnthropicKey: true,
+  allowClaudeOauth: false,
+  allowOpenaiKey: false,
+  allowCodexOauth: false,
+};
+
+/** Secure defaults if the singleton row is somehow missing or the table is absent. */
+export function getCredentialsConfig(): CredentialsConfig {
+  try {
+    const row = getDb().prepare(`SELECT * FROM webchat_settings WHERE id = 1`).get() as
+      | {
+          default_credential_mode: CredentialMode;
+          allow_anthropic_key: number;
+          allow_claude_oauth: number;
+          allow_openai_key: number;
+          allow_codex_oauth: number;
+        }
+      | undefined;
+    if (!row) return { ...DEFAULT_CREDENTIALS_CONFIG };
+    return {
+      defaultMode: row.default_credential_mode ?? 'disabled',
+      allowAnthropicKey: row.allow_anthropic_key === 1,
+      allowClaudeOauth: row.allow_claude_oauth === 1,
+      allowOpenaiKey: row.allow_openai_key === 1,
+      allowCodexOauth: row.allow_codex_oauth === 1,
+    };
+  } catch {
+    return { ...DEFAULT_CREDENTIALS_CONFIG };
+  }
+}
+
+export function setCredentialsConfig(patch: Partial<CredentialsConfig>): void {
+  const next = { ...getCredentialsConfig(), ...patch };
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_settings
+         (id, default_credential_mode, allow_anthropic_key, allow_claude_oauth, allow_openai_key, allow_codex_oauth, updated_at)
+       VALUES (1, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         default_credential_mode = excluded.default_credential_mode,
+         allow_anthropic_key     = excluded.allow_anthropic_key,
+         allow_claude_oauth      = excluded.allow_claude_oauth,
+         allow_openai_key        = excluded.allow_openai_key,
+         allow_codex_oauth       = excluded.allow_codex_oauth,
+         updated_at              = excluded.updated_at`,
+    )
+    .run(
+      next.defaultMode,
+      next.allowAnthropicKey ? 1 : 0,
+      next.allowClaudeOauth ? 1 : 0,
+      next.allowOpenaiKey ? 1 : 0,
+      next.allowCodexOauth ? 1 : 0,
+      Date.now(),
+    );
+}
+
+// Per-room mode override: NULL = inherit the global default.
+export type RoomModeOverride = CredentialMode | null;
+
+export function getRoomModeOverride(roomId: string): RoomModeOverride {
+  try {
+    const row = getDb()
+      .prepare(`SELECT credential_mode_override FROM webchat_room_settings WHERE room_id = ?`)
+      .get(roomId) as { credential_mode_override: CredentialMode | null } | undefined;
+    return row?.credential_mode_override ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function setRoomModeOverride(roomId: string, mode: RoomModeOverride): void {
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_room_settings (room_id, engage_default, credential_mode_override, updated_at)
+       VALUES (?, 'broadcast', ?, ?)
+       ON CONFLICT(room_id) DO UPDATE SET credential_mode_override = excluded.credential_mode_override, updated_at = excluded.updated_at`,
+    )
+    .run(roomId, mode, Date.now());
+}
+
+/** The room's effective credential mode: its own override, else the global default. */
+export function getEffectiveRoomMode(roomId: string): CredentialMode {
+  return getRoomModeOverride(roomId) ?? getCredentialsConfig().defaultMode;
 }
 
 // ── Messages ──
@@ -1051,6 +1214,82 @@ export function getUnreadRoomIdsForUser(userId: string): Set<string> {
 /** Drop a room's read markers — called from deleteWebchatRoom's cascade. */
 export function clearReadsForRoom(roomId: string): void {
   getDb().prepare(`DELETE FROM webchat_room_reads WHERE room_id = ?`).run(roomId);
+}
+
+// ── Per-user room pins (sticky group at the top of the sidebar) ──
+// Pins are per-(user, room), keyed on the trusted webchat user_id, so a pin
+// follows the user across devices (same model as read markers/hides).
+
+/**
+ * Pin a room for a user. Idempotent — re-pinning keeps the original pinned_at.
+ * A fresh pin lands at the BOTTOM of the user's pinned group (max position + 1)
+ * so it doesn't disturb an order the user has arranged.
+ */
+export function pinRoomForUser(userId: string, roomId: string, ts: number = Date.now()): void {
+  const next = (
+    getDb()
+      .prepare(`SELECT COALESCE(MAX(position) + 1, 0) AS n FROM webchat_room_pins WHERE user_id = ?`)
+      .get(userId) as { n: number }
+  ).n;
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_room_pins (user_id, room_id, pinned_at, position)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(user_id, room_id) DO NOTHING`,
+    )
+    .run(userId, roomId, ts, next);
+}
+
+export function unpinRoomForUser(userId: string, roomId: string): void {
+  getDb().prepare(`DELETE FROM webchat_room_pins WHERE user_id = ? AND room_id = ?`).run(userId, roomId);
+}
+
+export function getPinnedRoomIdsForUser(userId: string): Set<string> {
+  const rows = getDb().prepare(`SELECT room_id FROM webchat_room_pins WHERE user_id = ?`).all(userId) as {
+    room_id: string;
+  }[];
+  return new Set(rows.map((r) => r.room_id));
+}
+
+/** Per-user pinned room → manual sort position (lower = higher in the list). */
+export function getPinnedPositionsForUser(userId: string): Map<string, number> {
+  const rows = getDb()
+    .prepare(`SELECT room_id, position FROM webchat_room_pins WHERE user_id = ?`)
+    .all(userId) as { room_id: string; position: number }[];
+  return new Map(rows.map((r) => [r.room_id, r.position]));
+}
+
+/**
+ * Persist a user's pinned-room order. `orderedRoomIds` is the desired top-to-
+ * bottom order; each row's position is set to its index. Rows the user hasn't
+ * pinned are silently ignored (the UPDATE matches nothing), so a stale or
+ * hostile id can't create or reorder anyone else's pins.
+ */
+export function setPinnedOrderForUser(userId: string, orderedRoomIds: string[]): void {
+  const db = getDb();
+  const upd = db.prepare(`UPDATE webchat_room_pins SET position = ? WHERE user_id = ? AND room_id = ?`);
+  const tx = db.transaction((ids: string[]) => {
+    ids.forEach((roomId, i) => upd.run(i, userId, roomId));
+  });
+  tx(orderedRoomIds);
+}
+
+/** Drop a room's pins — called from deleteWebchatRoom's cascade. */
+export function clearPinsForRoom(roomId: string): void {
+  getDb().prepare(`DELETE FROM webchat_room_pins WHERE room_id = ?`).run(roomId);
+}
+
+/**
+ * Newest message `created_at` per room — the sort key for the "Recent" sidebar
+ * order. Rooms with no messages are absent; the view falls back to the room's
+ * own `created_at`. The `idx_webchat_messages_room` index makes the per-room MAX
+ * cheap.
+ */
+export function getRoomLastActivity(): Map<string, number> {
+  const rows = getDb()
+    .prepare(`SELECT room_id, MAX(created_at) AS last_at FROM webchat_messages GROUP BY room_id`)
+    .all() as { room_id: string; last_at: number }[];
+  return new Map(rows.map((r) => [r.room_id, r.last_at]));
 }
 
 // ── User @-mention handles ──────────────────────────────────────────────────

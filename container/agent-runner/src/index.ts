@@ -107,6 +107,7 @@ async function main(): Promise<void> {
     providerName,
     cwd: CWD,
     systemContext: { instructions },
+    lenientOutput: config.lenientOutput,
   });
 }
 

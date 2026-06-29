@@ -23,9 +23,11 @@ cd "$(git rev-parse --show-toplevel)" \
 
 # ── 0a. Flags ─────────────────────────────────────────────────────────────
 ALLOW_NO_PROVIDER="${ALLOW_NO_PROVIDER:-0}"
+SKIP_SQLITE_VERIFY="${SKIP_SQLITE_VERIFY:-0}"
 for arg in "$@"; do
   case "$arg" in
     --allow-no-provider) ALLOW_NO_PROVIDER=1 ;;
+    --skip-sqlite-verify) SKIP_SQLITE_VERIFY=1 ;;
   esac
 done
 
@@ -54,6 +56,83 @@ if ! provider_connected; then
     exit 1
   fi
 fi
+
+# ── 0c. better-sqlite3 native-binding verify ──────────────────────────────
+# The host's SQLite driver (better-sqlite3) is a NATIVE module compiled for one
+# Node ABI (NODE_MODULE_VERSION, which is per-major). Switch Node majors after
+# install — common with nvm/fnm/mise or a Homebrew upgrade — and the stale
+# binding makes the host crash at BOOT, long before any webchat code runs. This
+# preflight loads the binding and, if it's stale, rebuilds it under the project's
+# Node (.nvmrc) so the install leaves a host that actually starts. pnpm-native
+# (no npm); ABI is per-major so any installed minor of the right major works.
+# Idea adapted from Artificer-Innovations/nanoclaw-webchat's `verify`.
+SQLITE_VERIFY_FAILED=0
+
+node_major() { node -e 'process.stdout.write(process.versions.node.split(".")[0])' 2>/dev/null; }
+
+project_node_major() {
+  local v=""
+  if [ -f .nvmrc ]; then v="$(tr -dc '0-9.' < .nvmrc)"
+  elif [ -f .node-version ]; then v="$(tr -dc '0-9.' < .node-version)"; fi
+  [ -n "$v" ] && echo "${v%%.*}" || node_major
+}
+
+# Echo a bin dir holding `node` for the given major from a version manager
+# (nvm / fnm / mise), or nothing. Any minor of the target major is fine — the
+# ABI is per-major — so the first match wins.
+project_node_bindir() {
+  local major="$1" base match sub
+  for base in "${NVM_DIR:-$HOME/.nvm}/versions/node" \
+              "${FNM_DIR:-$HOME/.local/share/fnm}/node-versions" \
+              "$HOME/Library/Application Support/fnm/node-versions" \
+              "${MISE_DATA_DIR:-$HOME/.local/share/mise}/installs/node"; do
+    [ -d "$base" ] || continue
+    match="$(ls -1 "$base" 2>/dev/null | grep -E "^v?${major}\." | sort -r | head -1)"
+    [ -n "$match" ] || continue
+    for sub in bin installation/bin; do
+      [ -x "$base/$match/$sub/node" ] && { echo "$base/$match/$sub"; return 0; }
+    done
+  done
+  return 1
+}
+
+verify_native_sqlite() {
+  command -v node >/dev/null 2>&1 || { echo "  = node not on PATH — skipping better-sqlite3 verify" >&2; return 0; }
+  local pmajor smajor prefix="" bindir
+  pmajor="$(project_node_major)"; smajor="$(node_major)"
+  if [ -n "$pmajor" ] && [ "$pmajor" != "$smajor" ]; then
+    if bindir="$(project_node_bindir "$pmajor")"; then
+      prefix="$bindir:"
+      echo "  = bridging to Node v$pmajor (shell is on v$smajor)"
+    else
+      echo "  = shell Node is v$smajor but the project targets v$pmajor (.nvmrc) — run 'nvm use' (or fnm/mise) for the host" >&2
+    fi
+  fi
+  # Open an in-memory DB, don't just require(): better-sqlite3 loads its native
+  # binding LAZILY (on first Database open), so a bare require() returns OK even
+  # when the .node is ABI-stale/corrupt — a false pass. Opening forces dlopen.
+  local probe="new (require('better-sqlite3'))(':memory:').close();process.exit(0)"
+  if PATH="${prefix}$PATH" node -e "$probe" >/dev/null 2>&1; then
+    echo "  ✓ better-sqlite3 native binding loads (Node v$(PATH="${prefix}$PATH" node_major))"
+    return 0
+  fi
+  echo "  → better-sqlite3 binding stale — rebuilding (pnpm rebuild better-sqlite3) …"
+  PATH="${prefix}$PATH" pnpm rebuild better-sqlite3 >/dev/null 2>&1 || true
+  if PATH="${prefix}$PATH" node -e "$probe" >/dev/null 2>&1; then
+    echo "  ✓ better-sqlite3 rebuilt (Node v$(PATH="${prefix}$PATH" node_major))"
+    return 0
+  fi
+  local bsql; bsql="$(node -e "try{process.stdout.write(require('./package.json').dependencies['better-sqlite3']||'?')}catch(e){process.stdout.write('?')}" 2>/dev/null)"
+  echo "" >&2
+  echo "  ⚠  better-sqlite3 still won't load — your host will crash at boot until this is fixed." >&2
+  echo "     shell Node v$smajor · project Node (.nvmrc) v${pmajor:-?} · better-sqlite3 $bsql" >&2
+  echo "     Fix one of:" >&2
+  echo "       • run the host under the project Node:  nvm install ${pmajor:-22} && nvm use ${pmajor:-22}   (or fnm/mise)" >&2
+  echo "       • Node 26+ needs better-sqlite3 ≥ 12.10.0:  pnpm add better-sqlite3@^12.10.0 && pnpm rebuild better-sqlite3" >&2
+  echo "" >&2
+  SQLITE_VERIFY_FAILED=1
+  return 0  # non-fatal: let the rest of the install finish, but warn loudly at the end
+}
 
 # ── 1. Detect which remote carries the webchat branches ─────────────────
 # The skill/webchat branch you merged to install this skill identifies the
@@ -96,6 +175,14 @@ NEW_PATHS=(
   container/agent-runner/src/providers/summarize-thinking.test.ts
   src/onecli-preflight.ts
   src/onecli-preflight.test.ts
+  src/modules/byok
+  src/db/migrations/020-byok-credentials.ts
+  src/db/migrations/021-byok-oauth.ts
+  src/db/migrations/022-byok-provider.ts
+  src/db/migrations/023-byok-user-credentials.ts
+  setup/get-oauth-token.sh
+  docs/design/byok.md
+  docs/design/byok-oauth.md
 )
 echo "→ Copying webchat-owned files …"
 git checkout "$BR" -- "${NEW_PATHS[@]}"
@@ -140,6 +227,13 @@ HOOK_FILES=(
   src/modules/agent-to-agent/agent-route.test.ts
   src/modules/agent-to-agent/message-gate.test.ts
   .gitignore
+  src/container-runtime.ts
+  src/modules/index.ts
+  src/modules/approvals/onecli-approvals.ts
+  container/Dockerfile
+  container/agent-runner/src/integration.test.ts
+  container/agent-runner/src/poll-loop.test.ts
+  container/agent-runner/src/mcp-tools/cli.instructions.md
 )
 CONFLICTS=()
 echo "→ Applying webchat core-file hooks …"
@@ -318,6 +412,16 @@ echo "→ Installing webchat dependencies …"
 pnpm add ws@8.20.0 busboy@1.6.0 web-push@3.6.7 undici@7.16.0
 pnpm add -D @types/ws@8.18.1 @types/busboy@1.5.4 @types/web-push@3.6.4
 
+# ── 5b. Verify the native SQLite binding boots under the project Node ─────
+# Runs after `pnpm add` (which can re-touch native modules) so it checks the
+# binding the host will actually load at boot. See verify_native_sqlite above.
+if [ "$SKIP_SQLITE_VERIFY" != "1" ]; then
+  echo "→ Verifying better-sqlite3 native binding …"
+  verify_native_sqlite
+else
+  echo "= Skipping better-sqlite3 verify (SKIP_SQLITE_VERIFY=1)"
+fi
+
 # ── 6. Build host ───────────────────────────────────────────────────────
 echo "→ Building host (tsc) …"
 pnpm run build
@@ -330,6 +434,13 @@ if [ "${SKIP_CONTAINER_BUILD:-0}" != "1" ]; then
   ./container/build.sh
 else
   echo "= Skipping container image rebuild (SKIP_CONTAINER_BUILD=1)"
+fi
+
+if [ "$SQLITE_VERIFY_FAILED" = "1" ]; then
+  echo "" >&2
+  echo "⚠  Webchat files are installed, but better-sqlite3 won't load under your" >&2
+  echo "   current Node — the host will NOT boot until you fix it (see the fix" >&2
+  echo "   printed above, or re-run after 'nvm use')." >&2
 fi
 
 cat <<'DONE'

@@ -503,6 +503,40 @@ export const moduleWebchatRoomReads: Migration = {
 };
 
 /**
+ * BYOK: per-room credential mode.
+ *   disabled (default) — one shared session/agent; no per-member sessions.
+ *   optional           — members with a connected key get their own per-member
+ *                        session billed to them; others use the shared agent.
+ *   required           — every member must connect their own key.
+ * Secure-by-default: rooms start 'disabled' until an admin opts in.
+ */
+export const moduleWebchatRoomCredentialMode: Migration = {
+  version: 108,
+  name: 'webchat-room-credential-mode',
+  up(db: Database.Database) {
+    db.exec(`
+      ALTER TABLE webchat_room_settings ADD COLUMN credential_mode TEXT NOT NULL DEFAULT 'disabled';
+    `);
+  },
+};
+
+/**
+ * BYOK OAuth: per-room toggle allowing members to connect a Claude *subscription*
+ * (OAuth) token, orthogonal to `credential_mode` (which governs API-key BYOK).
+ * Off by default — a room never accepts OAuth tokens until an owner/admin opts
+ * in. See docs/design/byok-oauth.md.
+ */
+export const moduleWebchatRoomOauthAllowed: Migration = {
+  version: 109,
+  name: 'webchat-room-oauth-allowed',
+  up(db: Database.Database) {
+    db.exec(`
+      ALTER TABLE webchat_room_settings ADD COLUMN oauth_allowed INTEGER NOT NULL DEFAULT 0;
+    `);
+  },
+};
+
+/**
  * Per-user @-mention handle. `user_id` is the canonical webchat user id
  * (e.g. `webchat:tailscale:foo@bar.com`); `handle` is the lowercase slug others
  * type to @-mention them (`@alice`), UNIQUE so a handle resolves to one user.
@@ -520,6 +554,103 @@ export const moduleWebchatUserHandles: Migration = {
       );
       CREATE INDEX IF NOT EXISTS idx_webchat_user_handles_handle
         ON webchat_user_handles(handle);
+    `);
+  },
+};
+
+/**
+ * Per-user room pins. The sidebar sorts rooms by recent activity (newest
+ * message first); pinned rooms are lifted into a sticky group at the top, above
+ * a divider, so the ones you care about don't drift down as other rooms get
+ * traffic. Each user controls their own pins — pinning only affects their view.
+ *
+ * Keyed on the trusted webchat `user_id` (same as webchat_room_reads /
+ * webchat_user_room_hides), so a pin follows the user across all their devices.
+ * `room_id` is `messaging_groups.platform_id` (no FK; deleteWebchatRoom clears
+ * rows in app code).
+ */
+export const moduleWebchatRoomPins: Migration = {
+  version: 114,
+  name: 'webchat-room-pins',
+  up(db: Database.Database) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS webchat_room_pins (
+        user_id   TEXT NOT NULL,
+        room_id   TEXT NOT NULL,
+        pinned_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, room_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_webchat_room_pins_user
+        ON webchat_room_pins(user_id);
+    `);
+  },
+};
+
+/**
+ * Workspace-wide credentials policy + per-room mode inheritance.
+ *
+ * `webchat_settings` is a singleton (id=1) holding which member-credential TYPES
+ * the workspace accepts ({API key | OAuth} × {Claude | Codex}) and the default
+ * room mode. Types are global so they're configured once, not per room. The
+ * per-room control becomes an OVERRIDE: `credential_mode_override` is nullable —
+ * NULL means "inherit the global default", a value means this room overrides it.
+ * New/untouched rooms (NULL) inherit automatically.
+ *
+ * Migration preserves current behavior: any room previously set to optional/
+ * required keeps that as an explicit override, and `allow_claude_oauth` seeds to
+ * 1 if any room had the old per-room `oauth_allowed` on (so existing OAuth rooms
+ * keep working). Anthropic keys default on; Codex types default off (and are
+ * inert until the Codex provider is installed).
+ */
+export const moduleWebchatCredentialsConfig: Migration = {
+  version: 115,
+  name: 'webchat-credentials-config',
+  up(db: Database.Database) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS webchat_settings (
+        id                      INTEGER PRIMARY KEY CHECK (id = 1),
+        default_credential_mode TEXT    NOT NULL DEFAULT 'disabled',
+        allow_anthropic_key     INTEGER NOT NULL DEFAULT 1,
+        allow_claude_oauth      INTEGER NOT NULL DEFAULT 0,
+        allow_openai_key        INTEGER NOT NULL DEFAULT 0,
+        allow_codex_oauth       INTEGER NOT NULL DEFAULT 0,
+        updated_at              INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT OR IGNORE INTO webchat_settings (id, allow_claude_oauth, updated_at)
+        VALUES (
+          1,
+          (SELECT CASE WHEN EXISTS (SELECT 1 FROM webchat_room_settings WHERE oauth_allowed = 1) THEN 1 ELSE 0 END),
+          0
+        );
+      ALTER TABLE webchat_room_settings ADD COLUMN credential_mode_override TEXT;
+      UPDATE webchat_room_settings
+         SET credential_mode_override = credential_mode
+       WHERE credential_mode IN ('optional', 'required');
+    `);
+  },
+};
+
+/**
+ * Manual ordering for pinned rooms. Adds a per-user `position` to
+ * webchat_room_pins so the operator can drag pinned rooms into a fixed order
+ * (previously the pinned group auto-sorted by recent activity). Existing pins
+ * are backfilled 0-indexed by pinned_at (oldest pin at the top), a stable
+ * starting order; the room_id tiebreaker keeps it deterministic.
+ */
+export const moduleWebchatRoomPinOrder: Migration = {
+  version: 116,
+  name: 'webchat-room-pin-order',
+  up(db: Database.Database) {
+    db.exec(`
+      ALTER TABLE webchat_room_pins ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+      UPDATE webchat_room_pins
+         SET position = (
+           SELECT COUNT(*) FROM webchat_room_pins p2
+            WHERE p2.user_id = webchat_room_pins.user_id
+              AND (p2.pinned_at < webchat_room_pins.pinned_at
+                   OR (p2.pinned_at = webchat_room_pins.pinned_at
+                       AND p2.room_id < webchat_room_pins.room_id))
+         );
     `);
   },
 };
