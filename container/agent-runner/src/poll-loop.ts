@@ -865,6 +865,11 @@ function dispatchResultText(
   const primaryOrigin =
     originChannels.find((d) => d.channelType === routing.channelType && d.platformId === routing.platformId) ??
     originChannels[0];
+  // The exact destination this turn was triggered FROM — a channel OR an a2a
+  // caller (type 'agent'). findByRouting resolves the agent case by
+  // agent_group_id. primaryOrigin is channel-only, so it's undefined for an a2a
+  // turn; triggerOrigin is what lets a reply find its way back to the caller.
+  const triggerOrigin = findByRouting(routing.channelType, routing.platformId);
 
   let sent = 0;
   for (const { toName, body } of blocks) {
@@ -874,17 +879,26 @@ function dispatchResultText(
       scratchpadParts.push(`[dropped: unknown destination "${toName}"] ${body}`);
       continue;
     }
+    // Single-reply misfire guard. A lone reply to a channel the turn did NOT come
+    // from is usually the model mis-picking a destination. Redirect to the origin:
+    // the batch's room (primaryOrigin), or — for a weak (lenient) agent answering
+    // an a2a call — the agent that called it (triggerOrigin). A small model often
+    // ignores its caller and replies into a room it can see in its destination
+    // list, leaking the answer to the room instead of back to the caller. Scoped
+    // to lenient so a capable agent's deliberate room-post during an a2a turn is
+    // untouched.
+    const redirectTarget = primaryOrigin ?? (lenient ? triggerOrigin : undefined);
     if (
       blocks.length === 1 &&
       dest.type === 'channel' &&
-      primaryOrigin &&
+      redirectTarget &&
       !originSet.has(`${dest.channelType}:${dest.platformId}`)
     ) {
       log(
-        `Reply addressed to "${dest.name}" but the message came from "${primaryOrigin.name}" — ` +
+        `Reply addressed to "${dest.name}" but the turn came from "${redirectTarget.name}" — ` +
           `redirecting to origin (single-reply misfire guard)`,
       );
-      dest = primaryOrigin;
+      dest = redirectTarget;
     }
     sendToDestination(dest, body, routing);
     sent++;
@@ -906,9 +920,14 @@ function dispatchResultText(
   // model that can't wrap would only fail it again, re-hammering a slow local
   // endpoint. Purely-internal output (only an <internal> block) strips to an
   // empty scratchpad above, so this never sends an empty message.
-  if (hasUnwrapped && lenient && primaryOrigin) {
-    log(`Lenient output: no <message> envelope — delivering prose to origin "${primaryOrigin.name}"`);
-    sendToDestination(primaryOrigin, scratchpad, routing);
+  // Deliver unwrapped prose back to whoever triggered the turn — the a2a caller
+  // when that's the source, NOT a room the small model never came from (channel-
+  // only primaryOrigin would leak an a2a reply to a room). Falls back to the
+  // batch's room for a normal channel turn.
+  const lenientTarget = triggerOrigin ?? primaryOrigin;
+  if (hasUnwrapped && lenient && lenientTarget) {
+    log(`Lenient output: no <message> envelope — delivering prose to origin "${lenientTarget.name}"`);
+    sendToDestination(lenientTarget, scratchpad, routing);
     sent++;
     hasUnwrapped = false;
   }

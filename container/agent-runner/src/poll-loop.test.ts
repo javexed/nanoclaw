@@ -611,3 +611,79 @@ describe('lenient output — unwrapped prose for ollama-backed agents', () => {
     expect(getUndeliveredMessages()).toHaveLength(0);
   });
 });
+
+describe('a2a origin — a lenient agent replies to its caller, not a room', () => {
+  function seedChannel(name: string, channelType: string, platformId: string): void {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+         VALUES (?, ?, 'channel', ?, ?, NULL)`,
+      )
+      .run(name, name, channelType, platformId);
+  }
+  function seedAgent(name: string, agentGroupId: string): void {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+         VALUES (?, ?, 'agent', NULL, NULL, ?)`,
+      )
+      .run(name, name, agentGroupId);
+  }
+  // The turn was triggered by an a2a call from 'caller' (channel_type='agent',
+  // platform_id = the caller's agent_group_id). The agent is also wired to a room.
+  const A2A_ROUTING = { platformId: 'ag-caller', channelType: 'agent', threadId: null, inReplyTo: 'm1' };
+
+  it('lenient: unwrapped prose goes to the a2a caller, not the room', async () => {
+    seedChannel('the-room', 'webchat', 'room-x');
+    seedAgent('caller', 'ag-caller');
+    const originDests = [findByRouting('agent', 'ag-caller')!]; // a2a turn → agent origin only
+    const { query } = makeResultQuery({ type: 'result', text: 'Here is the script you asked for.' });
+
+    await processQuery(query, A2A_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, originDests, true);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].channel_type).toBe('agent'); // delivered back to the caller, not webchat
+    expect(out[0].platform_id).toBe('ag-caller');
+  });
+
+  it('misfire guard: a lone reply addressed to the room is redirected to the caller (lenient)', async () => {
+    seedChannel('the-room', 'webchat', 'room-x');
+    seedAgent('caller', 'ag-caller');
+    const originDests = [findByRouting('agent', 'ag-caller')!];
+    const { query } = makeResultQuery({ type: 'result', text: '<message to="the-room">answer</message>' });
+
+    await processQuery(query, A2A_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, originDests, true);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].platform_id).toBe('ag-caller'); // redirected from the-room to the caller
+  });
+
+  it('a correct reply addressed to the caller is left alone', async () => {
+    seedChannel('the-room', 'webchat', 'room-x');
+    seedAgent('caller', 'ag-caller');
+    const originDests = [findByRouting('agent', 'ag-caller')!];
+    const { query } = makeResultQuery({ type: 'result', text: '<message to="caller">on it</message>' });
+
+    await processQuery(query, A2A_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, originDests, true);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].platform_id).toBe('ag-caller');
+  });
+
+  it('non-lenient agent: a deliberate room-post during an a2a turn is NOT redirected', async () => {
+    seedChannel('the-room', 'webchat', 'room-x');
+    seedAgent('caller', 'ag-caller');
+    const originDests = [findByRouting('agent', 'ag-caller')!];
+    const { query } = makeResultQuery({ type: 'result', text: '<message to="the-room">posting for you</message>' });
+
+    await processQuery(query, A2A_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, originDests, false);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].channel_type).toBe('webchat'); // strong agent: room-post respected
+    expect(out[0].platform_id).toBe('room-x');
+  });
+});
