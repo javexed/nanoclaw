@@ -552,6 +552,14 @@ body {
   outline-offset: -3px;
   border-radius: var(--radius-md, 6px);
 }
+/* Reordering pinned rooms: highlight the insertion point above/below the row
+   the cursor is over (distinct from the whole-list pin-drop outline above). */
+#room-list li.drop-before {
+  box-shadow: inset 0 2px 0 0 var(--accent);
+}
+#room-list li.drop-after {
+  box-shadow: inset 0 -2px 0 0 var(--accent);
+}
 #room-list li .room-kebab {
   background: transparent;
   border: none;

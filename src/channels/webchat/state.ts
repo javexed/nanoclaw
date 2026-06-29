@@ -23,7 +23,7 @@ import {
   getHiddenRoomIdsForUser,
   getSharedWebchatRooms,
   getMentionedRoomIdsForUser,
-  getPinnedRoomIdsForUser,
+  getPinnedPositionsForUser,
   getRoomLastActivity,
   getUnreadRoomIdsForUser,
   getWebchatRoom,
@@ -285,6 +285,7 @@ export function annotateRoomsForUser(
     unread: boolean;
     mention: boolean;
     pinned: boolean;
+    pin_position: number | null;
     last_activity: number;
   }
 > {
@@ -292,7 +293,7 @@ export function annotateRoomsForUser(
   const hiddenSet = getHiddenRoomIdsForUser(userId); // per-user
   const unreadSet = getUnreadRoomIdsForUser(userId); // per-user
   const mentionSet = getMentionedRoomIdsForUser(userId, getWebchatUserHandle(userId) ?? ''); // per-user
-  const pinnedSet = getPinnedRoomIdsForUser(userId); // per-user
+  const pinnedPos = getPinnedPositionsForUser(userId); // per-user: room → manual order
   return visible.map((r) => ({
     ...r,
     archived: archivedSet.has(r.id),
@@ -300,7 +301,10 @@ export function annotateRoomsForUser(
     canArchive: canArchiveRoom(userId, r.id),
     unread: unreadSet.has(r.id),
     mention: mentionSet.has(r.id),
-    pinned: pinnedSet.has(r.id),
+    pinned: pinnedPos.has(r.id),
+    // Manual pin order (lower = higher); null when unpinned. The client sorts the
+    // pinned group by this instead of recent activity.
+    pin_position: pinnedPos.get(r.id) ?? null,
     // Newest-message time drives the "Recent" sort; fall back to created_at.
     last_activity: activityMap.get(r.id) ?? r.created_at,
   }));

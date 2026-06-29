@@ -1220,15 +1220,24 @@ export function clearReadsForRoom(roomId: string): void {
 // Pins are per-(user, room), keyed on the trusted webchat user_id, so a pin
 // follows the user across devices (same model as read markers/hides).
 
-/** Pin a room for a user. Idempotent — re-pinning keeps the original pinned_at. */
+/**
+ * Pin a room for a user. Idempotent — re-pinning keeps the original pinned_at.
+ * A fresh pin lands at the BOTTOM of the user's pinned group (max position + 1)
+ * so it doesn't disturb an order the user has arranged.
+ */
 export function pinRoomForUser(userId: string, roomId: string, ts: number = Date.now()): void {
+  const next = (
+    getDb()
+      .prepare(`SELECT COALESCE(MAX(position) + 1, 0) AS n FROM webchat_room_pins WHERE user_id = ?`)
+      .get(userId) as { n: number }
+  ).n;
   getDb()
     .prepare(
-      `INSERT INTO webchat_room_pins (user_id, room_id, pinned_at)
-       VALUES (?, ?, ?)
+      `INSERT INTO webchat_room_pins (user_id, room_id, pinned_at, position)
+       VALUES (?, ?, ?, ?)
        ON CONFLICT(user_id, room_id) DO NOTHING`,
     )
-    .run(userId, roomId, ts);
+    .run(userId, roomId, ts, next);
 }
 
 export function unpinRoomForUser(userId: string, roomId: string): void {
@@ -1240,6 +1249,29 @@ export function getPinnedRoomIdsForUser(userId: string): Set<string> {
     room_id: string;
   }[];
   return new Set(rows.map((r) => r.room_id));
+}
+
+/** Per-user pinned room → manual sort position (lower = higher in the list). */
+export function getPinnedPositionsForUser(userId: string): Map<string, number> {
+  const rows = getDb()
+    .prepare(`SELECT room_id, position FROM webchat_room_pins WHERE user_id = ?`)
+    .all(userId) as { room_id: string; position: number }[];
+  return new Map(rows.map((r) => [r.room_id, r.position]));
+}
+
+/**
+ * Persist a user's pinned-room order. `orderedRoomIds` is the desired top-to-
+ * bottom order; each row's position is set to its index. Rows the user hasn't
+ * pinned are silently ignored (the UPDATE matches nothing), so a stale or
+ * hostile id can't create or reorder anyone else's pins.
+ */
+export function setPinnedOrderForUser(userId: string, orderedRoomIds: string[]): void {
+  const db = getDb();
+  const upd = db.prepare(`UPDATE webchat_room_pins SET position = ? WHERE user_id = ? AND room_id = ?`);
+  const tx = db.transaction((ids: string[]) => {
+    ids.forEach((roomId, i) => upd.run(i, userId, roomId));
+  });
+  tx(orderedRoomIds);
 }
 
 /** Drop a room's pins — called from deleteWebchatRoom's cascade. */

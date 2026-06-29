@@ -1350,7 +1350,11 @@ function renderRooms(rooms) {
   const visibleRooms = showHidden ? [...rooms] : rooms.filter((r) => !r.hidden);
   const active = visibleRooms.filter((r) => !r.archived);
   const archived = visibleRooms.filter((r) => r.archived).sort(byActivity);
-  const pinned = active.filter((r) => r.pinned).sort(byActivity);
+  // Pinned rooms hold the user's MANUAL drag order (pin_position); the rest stay
+  // activity-sorted. Fall back to activity when positions are absent/equal.
+  const pinned = active
+    .filter((r) => r.pinned)
+    .sort((a, b) => (a.pin_position ?? 0) - (b.pin_position ?? 0) || byActivity(a, b));
   const unpinned = active.filter((r) => !r.pinned).sort(byActivity);
   const toggleBtn = $('#archived-toggle');
   if (archived.length === 0) {
@@ -1407,18 +1411,61 @@ function renderRooms(rooms) {
       li.appendChild(pin);
     }
 
-    // Drag-to-pin: drag an unpinned room onto the list and drop to pin it.
-    // (Archived rooms aren't draggable; pinned rooms are unpinned via the kebab.)
-    if (!room.pinned && !room.archived) {
+    // Drag behavior (archived rooms are never draggable):
+    //   - unpinned room → drag onto the list to PIN it (list-level drop handler,
+    //     gated on the `room-list-dragging` class).
+    //   - pinned room   → drag over another pinned row to REORDER (row-level
+    //     handlers below, gated on `room-list-reordering` + draggedPinId).
+    // The two modes use different classes so the list's pin-drop never fires
+    // during a reorder and vice-versa.
+    if (!room.archived) {
       li.draggable = true;
       li.addEventListener('dragstart', (e) => {
         if (e.dataTransfer) {
           e.dataTransfer.setData('text/plain', room.id);
           e.dataTransfer.effectAllowed = 'move';
         }
-        list.classList.add('room-list-dragging');
+        if (room.pinned) {
+          draggedPinId = room.id;
+          list.classList.add('room-list-reordering');
+        } else {
+          draggedPinId = null;
+          list.classList.add('room-list-dragging');
+        }
       });
-      li.addEventListener('dragend', () => list.classList.remove('room-list-dragging'));
+      li.addEventListener('dragend', () => {
+        draggedPinId = null;
+        list.classList.remove('room-list-dragging', 'room-list-reordering');
+        list.querySelectorAll('.drop-before, .drop-after').forEach((el) => el.classList.remove('drop-before', 'drop-after'));
+      });
+    }
+
+    // Reorder target: a pinned row accepts a dragged pinned room, inserting it
+    // above or below depending on which half of the row the cursor is over.
+    if (room.pinned) {
+      const clearMarkers = () => li.classList.remove('drop-before', 'drop-after');
+      li.addEventListener('dragover', (e) => {
+        if (!draggedPinId || draggedPinId === room.id) return;
+        e.preventDefault();
+        e.stopPropagation(); // don't bubble to the list-level pin-drop handler
+        const rect = li.getBoundingClientRect();
+        const after = e.clientY > rect.top + rect.height / 2;
+        li.classList.toggle('drop-after', after);
+        li.classList.toggle('drop-before', !after);
+      });
+      li.addEventListener('dragleave', clearMarkers);
+      li.addEventListener('drop', async (e) => {
+        if (!draggedPinId || draggedPinId === room.id) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const rect = li.getBoundingClientRect();
+        const after = e.clientY > rect.top + rect.height / 2;
+        const moved = draggedPinId;
+        draggedPinId = null;
+        clearMarkers();
+        list.classList.remove('room-list-reordering');
+        await reorderPinnedRoom(moved, room.id, after);
+      });
     }
 
     // Kebab — opens a tiny menu with up to two actions:
@@ -1527,6 +1574,46 @@ async function toggleRoomArchive(roomId, archive) {
     console.error('toggleRoomArchive failed:', err);
     if (target) target.archived = !archive; // roll back
     renderRooms(lastRoomsList);
+  }
+}
+
+// Id of the pinned room currently being dragged for reorder (null while
+// dragging an unpinned room to pin it, or when nothing is dragging).
+let draggedPinId = null;
+
+// Move a pinned room before/after another within the pinned group and persist
+// the new order. Optimistic: reindex pin_position locally and re-render, then
+// POST; the server's broadcastRooms re-syncs authoritative order to every device.
+async function reorderPinnedRoom(movedId, targetId, after) {
+  const order = lastRoomsList
+    .filter((r) => r.pinned && !r.archived)
+    .sort((a, b) => (a.pin_position ?? 0) - (b.pin_position ?? 0))
+    .map((r) => r.id);
+  const from = order.indexOf(movedId);
+  if (from === -1) return;
+  order.splice(from, 1);
+  let to = order.indexOf(targetId);
+  if (to === -1) return;
+  if (after) to += 1;
+  order.splice(to, 0, movedId);
+
+  order.forEach((id, i) => {
+    const r = lastRoomsList.find((x) => x.id === id);
+    if (r) r.pin_position = i;
+  });
+  renderRooms(lastRoomsList);
+
+  try {
+    const res = await authFetch('/api/rooms/pins/order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+      body: JSON.stringify({ order }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    console.error('reorderPinnedRoom failed:', err);
+    // The next authoritative `rooms` broadcast (or a manual refresh) restores
+    // the server's order; no local rollback needed for a cosmetic reorder.
   }
 }
 

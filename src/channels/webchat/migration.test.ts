@@ -88,6 +88,7 @@ describe('moduleWebchat migration', () => {
       'webchat-models',
       'webchat-room-credential-mode',
       'webchat-room-oauth-allowed',
+      'webchat-room-pin-order',
       'webchat-room-pins',
       'webchat-room-primes',
       'webchat-room-reads',
