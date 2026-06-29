@@ -1899,10 +1899,18 @@ function appendMessage(msg, statusText, beforeNode) {
       bubble.appendChild(caption);
     }
   } else if (isMine) {
-    // User's own messages are rendered as plain text — preserves whitespace,
-    // tabs, and code indentation exactly as typed. Only agent replies need
-    // Markdown interpretation.
-    bubble.textContent = msg.content;
+    // Your own messages render as full Markdown too (bold/lists/links/code
+    // blocks + agent-tinted @mentions), same pipeline as agent replies. Markdown
+    // re-flows whitespace, so fenced ``` blocks keep code exact; falls back to
+    // plain text if marked/DOMPurify throws (escaped by the DOM, no XSS risk).
+    try {
+      bubble.innerHTML = DOMPurify.sanitize(marked.parse(msg.content));
+      decorateCodeBlocks(bubble);
+      decorateMentions(bubble);
+    } catch (err) {
+      console.error('Message render failed; falling back to plain text', err);
+      bubble.textContent = msg.content;
+    }
   } else {
     // Markdown render is best-effort: a malformed message must not crash the
     // whole render loop and leave #messages half-populated. Fall back to
@@ -3248,6 +3256,13 @@ function acceptMention(input) {
  * styling tells the user "this looks like a mention." Server-side matching
  * is what actually decides routing.
  */
+// Map a mention handle (folder/slug) to its wired agent's colour, matching the
+// per-name tint used on a2a labels. Humans / unknown handles → null (default chip).
+function mentionAgentColor(handle) {
+  const a = (wiredAgentsForCurrentRoom || []).find((x) => (x.folder || '').toLowerCase() === handle);
+  return a && a.name ? agentColor(a.name) : null;
+}
+
 function decorateMentions(bubble) {
   const walker = document.createTreeWalker(bubble, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
@@ -3278,7 +3293,16 @@ function decorateMentions(bubble) {
       if (fullStart > last) frag.appendChild(document.createTextNode(txt.slice(last, fullStart)));
       const span = document.createElement('span');
       span.className = 'mention';
-      if (myHandle && m[2].toLowerCase() === myHandle) span.classList.add('mention-me');
+      const handle = m[2].toLowerCase();
+      if (myHandle && handle === myHandle) {
+        // A mention of me keeps the distinct self-highlight (warning tint).
+        span.classList.add('mention-me');
+      } else {
+        // A mention of a wired agent is tinted in that agent's colour (the same
+        // hash palette as a2a labels), so @code-reviewer reads in its colour.
+        const color = mentionAgentColor(handle);
+        if (color) span.style.background = color;
+      }
       span.textContent = `@${m[2]}`;
       frag.appendChild(span);
       last = fullStart + 1 + m[2].length;
