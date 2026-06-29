@@ -2183,6 +2183,11 @@ a.lightbox-btn {
   flex-direction: column;
   z-index: 50;
   box-shadow: 4px 0 12px rgba(0, 0, 0, 0.3);
+  /* Contain the panel's own scroll so reaching the end of a long form (e.g. the
+     wired-agents list on a small screen) doesn't chain through to the chat
+     behind it. overflow-y:auto keeps the panel — not the document — the scroller. */
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .agent-detail[hidden] {
   display: none;
@@ -2221,6 +2226,11 @@ a.lightbox-btn {
   font-weight: 600;
   font-size: 0.867rem;
   color: var(--text-dim);
+  /* Stays put while the panel body scrolls (the panel is now the scroller). */
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  z-index: 1;
 }
 .agent-detail-form {
   padding: 14px;
