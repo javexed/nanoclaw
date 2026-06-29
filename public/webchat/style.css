@@ -540,6 +540,18 @@ body {
 #room-list li.archived {
   opacity: 0.55;
 }
+/* Drag-to-pin: draggable rows grab; the list shows a drop target while dragging. */
+#room-list li[draggable='true'] {
+  cursor: grab;
+}
+#room-list li[draggable='true']:active {
+  cursor: grabbing;
+}
+#room-list.room-list-dragging {
+  outline: 2px dashed var(--accent);
+  outline-offset: -3px;
+  border-radius: var(--radius-md, 6px);
+}
 #room-list li .room-kebab {
   background: transparent;
   border: none;
