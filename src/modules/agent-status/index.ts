@@ -23,7 +23,8 @@ import type { AgentActivityStatus } from '../../channels/adapter.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { openOutboundDb } from '../../session-manager.js';
-import { getMaxStatusEventSeq, getStatusEventsSince } from '../../db/session-db.js';
+import { getMaxStatusEventSeq, getStatusEventsSince, getLastStatusEvent } from '../../db/session-db.js';
+import { isContainerRunning } from '../../container-runner.js';
 
 interface StatusAdapter {
   sendStatus?(
@@ -51,6 +52,49 @@ const watermarks = new Map<string, number>();
  * from a clean idle exit after a completed turn (stay silent).
  */
 const turnActive = new Set<string>();
+
+/**
+ * Sessions whose orphaned bubble we've already cleared via reconcileStaleBubble.
+ * Prevents re-emitting a synthetic 'done' every poll; re-armed when a fresh
+ * 'start' reopens the turn (or the last event becomes 'done').
+ */
+const cleared = new Set<string>();
+
+/**
+ * Clear a stuck "thinking" bubble. If a session's latest status event isn't
+ * 'done' yet its container is no longer running, the turn ended without closing
+ * the bubble — common after a host restart (which wipes the in-memory turn
+ * tracking) or an ungraceful container death. Emit a one-time synthetic 'done'
+ * so the client clears that agent's bubble. Best-effort and idempotent.
+ */
+async function reconcileStaleBubble(
+  session: Session,
+  outDb: ReturnType<typeof openOutboundDb>,
+  agentName: string | null,
+  mg: { channel_type: string; platform_id: string; instance?: string },
+): Promise<void> {
+  const last = getLastStatusEvent(outDb);
+  if (!last || last.kind === 'done') {
+    cleared.delete(session.id); // healthy / no open turn — allow a future reconcile
+    return;
+  }
+  if (cleared.has(session.id)) return; // already cleared this orphan
+  if (isContainerRunning(session.id)) return; // genuine in-flight turn — real bubble
+  cleared.add(session.id);
+  turnActive.delete(session.id);
+  if (!adapter?.sendStatus) return;
+  try {
+    await adapter.sendStatus(
+      mg.channel_type,
+      mg.platform_id,
+      null,
+      { kind: 'done', text: null, detail: null, agentName },
+      mg.instance,
+    );
+  } catch {
+    // Cosmetic — ignore.
+  }
+}
 
 /** Bind to the delivery adapter. Called once by src/delivery.ts. */
 export function setStatusAdapter(a: StatusAdapter): void {
@@ -88,35 +132,42 @@ export async function forwardSessionStatus(session: Session): Promise<void> {
     if (seen === undefined) {
       // First sight — seed the watermark and forward nothing (skip backlog).
       watermarks.set(session.id, getMaxStatusEventSeq(outDb));
-      return;
-    }
+    } else {
+      const events = getStatusEventsSince(outDb, seen);
+      if (events.length > 0) {
+        // Advance the watermark before awaiting any send so a slow/failed send
+        // can't cause the same row to be re-forwarded on the next tick.
+        watermarks.set(session.id, events[events.length - 1]!.seq);
 
-    const events = getStatusEventsSince(outDb, seen);
-    if (events.length === 0) return;
-
-    // Advance the watermark before awaiting any send so a slow/failed send
-    // can't cause the same row to be re-forwarded on the next tick.
-    watermarks.set(session.id, events[events.length - 1]!.seq);
-
-    for (const ev of events) {
-      const kind = ev.kind as AgentActivityStatus['kind'];
-      if (!VALID_KINDS.has(kind)) continue;
-      // Track turn boundaries so a mid-turn container death can be told from a
-      // clean idle exit (see notifySessionStopped).
-      if (kind === 'start') turnActive.add(session.id);
-      else if (kind === 'done') turnActive.delete(session.id);
-      try {
-        await adapter.sendStatus(
-          mg.channel_type,
-          mg.platform_id,
-          null,
-          { kind, text: ev.text, detail: ev.detail, agentName },
-          mg.instance,
-        );
-      } catch {
-        // Per-event best-effort.
+        for (const ev of events) {
+          const kind = ev.kind as AgentActivityStatus['kind'];
+          if (!VALID_KINDS.has(kind)) continue;
+          // Track turn boundaries so a mid-turn container death can be told from
+          // a clean idle exit (see notifySessionStopped).
+          if (kind === 'start') {
+            turnActive.add(session.id);
+            cleared.delete(session.id); // a fresh turn re-arms reconcile
+          } else if (kind === 'done') turnActive.delete(session.id);
+          try {
+            await adapter.sendStatus(
+              mg.channel_type,
+              mg.platform_id,
+              null,
+              { kind, text: ev.text, detail: ev.detail, agentName },
+              mg.instance,
+            );
+          } catch {
+            // Per-event best-effort.
+          }
+        }
       }
     }
+
+    // Clear a stuck "thinking" bubble: a turn that ended without 'done' and has
+    // no live container left an orphaned bubble (a host restart wipes the
+    // in-memory tracking above; ungraceful deaths never write 'done'). Runs
+    // every tick so it also recovers bubbles orphaned across a restart.
+    await reconcileStaleBubble(session, outDb, agentName, mg);
   } catch {
     // Cosmetic — ignore.
   } finally {
@@ -165,4 +216,5 @@ export async function notifySessionStopped(session: Session): Promise<void> {
 export function stopSessionStatus(sessionId: string): void {
   watermarks.delete(sessionId);
   turnActive.delete(sessionId);
+  cleared.delete(sessionId);
 }
