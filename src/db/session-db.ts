@@ -265,6 +265,19 @@ export function getStatusEventsSince(outDb: Database.Database, sinceSeq: number)
   }
 }
 
+/** The latest status event's seq + kind, or undefined when the table is
+ *  empty/absent. Used to detect an orphaned "thinking" bubble: a turn whose
+ *  last event isn't 'done' but whose container is gone (see agent-status). */
+export function getLastStatusEvent(outDb: Database.Database): { seq: number; kind: string } | undefined {
+  try {
+    return outDb.prepare('SELECT seq, kind FROM status_events ORDER BY seq DESC LIMIT 1').get() as
+      | { seq: number; kind: string }
+      | undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Current max status_events seq, or 0 when the table is empty/absent. Used to
  *  initialize the host watermark so a restart doesn't replay a turn's backlog. */
 export function getMaxStatusEventSeq(outDb: Database.Database): number {
