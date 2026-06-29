@@ -1316,6 +1316,24 @@ const ROOM_DIVIDER = Symbol('room-divider');
 
 function renderRooms(rooms) {
   const list = $('#room-list');
+  // Drag-to-pin: wire the list as a drop target once (survives innerHTML reset).
+  // Dropping a dragged room anywhere on the list pins it; pinned rooms sort to
+  // the top automatically. Unpin lives in the kebab.
+  if (!list.dataset.dropWired) {
+    list.dataset.dropWired = '1';
+    list.addEventListener('dragover', (e) => {
+      if (!list.classList.contains('room-list-dragging')) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    });
+    list.addEventListener('drop', async (e) => {
+      if (!list.classList.contains('room-list-dragging')) return;
+      e.preventDefault();
+      const id = e.dataTransfer ? e.dataTransfer.getData('text/plain') : '';
+      list.classList.remove('room-list-dragging');
+      if (id) await toggleRoomPin(id, true);
+    });
+  }
   list.innerHTML = '';
 
   // Recent-first: newest activity (last message) at the top. Pinned rooms are
@@ -1389,6 +1407,20 @@ function renderRooms(rooms) {
       li.appendChild(pin);
     }
 
+    // Drag-to-pin: drag an unpinned room onto the list and drop to pin it.
+    // (Archived rooms aren't draggable; pinned rooms are unpinned via the kebab.)
+    if (!room.pinned && !room.archived) {
+      li.draggable = true;
+      li.addEventListener('dragstart', (e) => {
+        if (e.dataTransfer) {
+          e.dataTransfer.setData('text/plain', room.id);
+          e.dataTransfer.effectAllowed = 'move';
+        }
+        list.classList.add('room-list-dragging');
+      });
+      li.addEventListener('dragend', () => list.classList.remove('room-list-dragging'));
+    }
+
     // Kebab — opens a tiny menu with up to two actions:
     //   - Hide / Unhide (per-user sidebar preference) — always present
     //     for anyone with room access.
@@ -1411,15 +1443,21 @@ function renderRooms(rooms) {
       const menu = document.createElement('div');
       menu.className = 'room-menu';
 
-      const pinBtn = document.createElement('button');
-      pinBtn.type = 'button';
-      pinBtn.textContent = room.pinned ? 'Unpin' : 'Pin';
-      pinBtn.addEventListener('click', async (ev) => {
-        ev.stopPropagation();
-        menu.remove();
-        await toggleRoomPin(room.id, !room.pinned);
-      });
-      menu.appendChild(pinBtn);
+      // Pinning is now drag-and-drop; the kebab keeps Unpin for pinned rooms.
+      // On touch — where HTML5 drag is unreliable — also keep a Pin action so
+      // mobile can still pin.
+      const coarsePointer = window.matchMedia('(pointer: coarse)').matches;
+      if (room.pinned || coarsePointer) {
+        const pinBtn = document.createElement('button');
+        pinBtn.type = 'button';
+        pinBtn.textContent = room.pinned ? 'Unpin' : 'Pin';
+        pinBtn.addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          menu.remove();
+          await toggleRoomPin(room.id, !room.pinned);
+        });
+        menu.appendChild(pinBtn);
+      }
 
       const hideBtn = document.createElement('button');
       hideBtn.type = 'button';
