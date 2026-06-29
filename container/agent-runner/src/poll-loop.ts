@@ -75,6 +75,11 @@ export interface PollLoopConfig {
    * polling forever and stealing messages from the next test's DB.
    */
   signal?: AbortSignal;
+  /**
+   * Deliver unwrapped prose to the originating room instead of dropping it.
+   * Set for ollama-backed agents (see RunnerConfig.lenientOutput).
+   */
+  lenientOutput?: boolean;
 }
 
 /**
@@ -273,6 +278,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         prompt,
         continuation,
         originDests,
+        config.lenientOutput ?? false,
       );
 
       // Self-heal a dead/stale continuation. Unlike a thrown error (recovered
@@ -299,6 +305,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
           prompt,
           undefined,
           originDests,
+          config.lenientOutput ?? false,
         );
       }
 
@@ -451,6 +458,7 @@ export async function processQuery(
   initialPrompt: string,
   initialContinuation: string | undefined,
   originDests: DestinationEntry[] = [],
+  lenient = false,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -662,7 +670,7 @@ export async function processQuery(
         // next follow-up re-seeds 'start'. Pairs with the reset at the push.
         appendStatusEvent('done', null);
         if (event.text) {
-          const { sent, hasUnwrapped } = dispatchResultText(event.text, routing, originDests);
+          const { sent, hasUnwrapped } = dispatchResultText(event.text, routing, originDests, lenient);
           if (sent === 0 && event.isError === true) {
             // Non-retryable error turn (e.g. a 403 billing_error) with no
             // <message> envelope: deliver the notice instead of dropping it as
@@ -829,6 +837,7 @@ function dispatchResultText(
   text: string,
   routing: RoutingContext,
   originDests: DestinationEntry[] = [],
+  lenient = false,
 ): { sent: number; hasUnwrapped: boolean } {
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
@@ -887,7 +896,22 @@ function dispatchResultText(
     log(`[scratchpad] ${scratchpad.slice(0, 500)}${scratchpad.length > 500 ? '…' : ''}`);
   }
 
-  const hasUnwrapped = sent === 0 && !!scratchpad;
+  let hasUnwrapped = sent === 0 && !!scratchpad;
+  // Lenient output (small local models): a weak model often can't emit the
+  // <message to="..."> envelope, so its plain prose is captured as scratchpad
+  // and dropped — the room stays silent turn after turn. When lenient mode is on
+  // (the host sets it for ollama-backed agents) and there's an unambiguous
+  // origin room, deliver the prose to that room instead of dropping it. This
+  // also clears hasUnwrapped, which suppresses the upstream re-wrap nudge — a
+  // model that can't wrap would only fail it again, re-hammering a slow local
+  // endpoint. Purely-internal output (only an <internal> block) strips to an
+  // empty scratchpad above, so this never sends an empty message.
+  if (hasUnwrapped && lenient && primaryOrigin) {
+    log(`Lenient output: no <message> envelope — delivering prose to origin "${primaryOrigin.name}"`);
+    sendToDestination(primaryOrigin, scratchpad, routing);
+    sent++;
+    hasUnwrapped = false;
+  }
   if (hasUnwrapped) {
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
   }
