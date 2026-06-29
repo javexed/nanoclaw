@@ -3867,6 +3867,19 @@ function renderTopology(data) {
   const drawNode = (x, yMap, item, kind, degree, stroke) => {
     const y = yPx(yMap, item.id);
     const g = svgEl('g', { class: `topo-node topo-${kind}${degree === 0 ? ' topo-orphan' : ''}` });
+    // Click a node to open that item's settings drawer (overlays the graph;
+    // closing it returns here). Keyboard-accessible too.
+    g.style.cursor = 'pointer';
+    g.setAttribute('role', 'button');
+    g.setAttribute('tabindex', '0');
+    g.setAttribute('aria-label', `Open ${kind} settings: ${item.name}`);
+    g.addEventListener('click', () => openTopologyItem(kind, item.id));
+    g.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        openTopologyItem(kind, item.id);
+      }
+    });
     const c = svgEl('circle', { cx: x, cy: y, r: NODE_X });
     // Match the room node to its edge color (skip orphans — they keep the
     // red-dashed "unused" treatment).
@@ -3882,6 +3895,26 @@ function renderTopology(data) {
   for (const m of models) drawNode(cols.model, modelY, m, 'model', (modelAgents.get(m.id) || []).length);
 
   canvas.appendChild(svg);
+}
+
+// Open the settings drawer for a clicked topology node. The detail drawers are
+// fixed overlays (z-index 110), so they layer over the graph and closing one
+// returns here. fetchAgents/fetchModels are lazy so the lookup data exists even
+// when the user jumped straight to the topology view.
+async function openTopologyItem(kind, id) {
+  try {
+    if (kind === 'room') {
+      await openRoomDetail(id);
+    } else if (kind === 'agent') {
+      if (!allAgents.length) await fetchAgents();
+      await openAgentDetail(id);
+    } else if (kind === 'model') {
+      if (!allModels.length) await fetchModels();
+      await openModelDetail(id);
+    }
+  } catch (err) {
+    showToast('Couldn’t open settings: ' + (err?.message || err), { kind: 'error' });
+  }
 }
 
 // ── Wiring matrix (rooms × agents management console) ──────────────────────
