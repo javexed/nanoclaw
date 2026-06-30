@@ -1072,10 +1072,15 @@ function connect() {
               .catch(() => {});
           }
         } else {
-          const saved = sessionStorage.getItem('lastRoom');
+          const saved = localStorage.getItem('lastRoom');
           if (saved) {
             const room = msg.rooms.find((r) => r.id === saved);
-            if (room) joinRoom(room.id, room.name);
+            if (room) {
+              // Resume the exact thread too (not just the room), so a thread you
+              // were in survives a full PWA close/reopen.
+              const savedThread = localStorage.getItem('lastThread:' + saved);
+              joinRoom(room.id, room.name, undefined, savedThread && savedThread !== 'main' ? savedThread : undefined);
+            }
           }
         }
         break;
@@ -1905,7 +1910,7 @@ function openThread(threadId) {
   $('#app').classList.add('in-room');
   $('#app').classList.remove('in-dashboard');
   currentThread = threadId;
-  sessionStorage.setItem('lastThread:' + currentRoom, threadId);
+  localStorage.setItem('lastThread:' + currentRoom, threadId);
   threadUnread.delete(threadId);
   $('#messages').innerHTML = '<div class="empty-state">Loading…</div>';
   // Re-join the room scoped to this thread; the server returns thread history.
@@ -1920,9 +1925,16 @@ function openThread(threadId) {
 function updateThreadSyncControls() {
   const inThread = !!(currentRoom && currentThread && currentThread !== 'main');
   // The header thread switcher shows whenever a room is open (CSS gates it to
-  // mobile, where the sidebar thread tree is hidden in-room).
+  // mobile, where the sidebar thread tree is hidden in-room). Badge it with the
+  // topic-thread count + accent it, so it's obvious the room HAS threads to open.
   const sw = $('#thread-switch');
-  if (sw) sw.hidden = !currentRoom;
+  if (sw) {
+    sw.hidden = !currentRoom;
+    const topicCount = roomThreads.filter((t) => t.kind !== 'main').length;
+    sw.textContent = topicCount > 0 ? `#${topicCount}` : '#';
+    sw.classList.toggle('has-threads', topicCount > 0);
+    sw.title = topicCount > 0 ? `${topicCount} thread${topicCount === 1 ? '' : 's'}` : 'Threads';
+  }
   const sync = $('#thread-sync');
   if (sync) sync.hidden = !inThread;
   const crumb = $('#thread-crumb');
@@ -2263,13 +2275,15 @@ function joinRoom(roomId, roomName, jumpMessageId, initialThread) {
   // (e.g. just-created a thread) enter that thread directly in a SINGLE join —
   // avoiding the join('main')+join(thread) race that bled main's transcript in.
   currentThread = initialThread || 'main';
-  if (initialThread) sessionStorage.setItem('lastThread:' + roomId, initialThread);
+  // Persist in localStorage (NOT sessionStorage, which iOS wipes when the PWA is
+  // fully closed) so reopening resumes the same room AND thread.
+  localStorage.setItem('lastThread:' + roomId, currentThread);
   threadUnread.clear();
   roomThreads = [];
   updateThreadSyncControls();
   ws.send(JSON.stringify({ type: 'join', room_id: roomId, thread_id: currentThread }));
   loadThreadList(roomId);
-  sessionStorage.setItem('lastRoom', roomId);
+  localStorage.setItem('lastRoom', roomId);
   $('#room-name').textContent = `#${roomId}`;
   $('#message-input').disabled = false;
   $('#message-form button[type=submit]').disabled = false;
