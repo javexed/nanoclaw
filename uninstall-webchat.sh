@@ -76,6 +76,11 @@ HOOK_FILES=(
   container/agent-runner/src/integration.test.ts
   container/agent-runner/src/poll-loop.test.ts
   container/agent-runner/src/mcp-tools/cli.instructions.md
+  src/container-config.ts
+  container/agent-runner/src/config.ts
+  container/agent-runner/src/index.ts
+  src/container-runtime.test.ts
+  src/host-sweep.ts
 )
 echo "→ Reversing webchat core-file hooks …"
 for f in "${HOOK_FILES[@]}"; do
