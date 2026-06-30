@@ -45,9 +45,12 @@ export interface WebchatMessage {
   sender: string;
   sender_type: string;
   content: string;
-  message_type: 'text' | 'file' | 'a2a' | 'approval' | 'approval_resolved';
+  message_type: 'text' | 'file' | 'a2a' | 'approval' | 'approval_resolved' | 'context-divider';
   file_meta?: FileMeta | null;
   created_at: number;
+  /** Provenance for thread context sync: null=native, 'pulled' (from main),
+   *  'pushed' (up from a thread). See docs/design/webchat-thread-context-sync.md. */
+  origin?: 'pulled' | 'pushed' | null;
 }
 
 interface WebchatMessageRow {
@@ -298,6 +301,9 @@ export function deleteWebchatRoom(id: string): void {
   }
   if (hasTable(db, 'webchat_thread_engaged')) {
     db.prepare(`DELETE FROM webchat_thread_engaged WHERE room_id = ?`).run(id);
+  }
+  if (hasTable(db, 'webchat_thread_sync')) {
+    db.prepare(`DELETE FROM webchat_thread_sync WHERE room_id = ?`).run(id);
   }
   // Drop any agent_destinations rows pointing at this room. target_id has no
   // FK so they wouldn't block, just rot. Guarded — a2a module may not be installed.
@@ -1107,7 +1113,122 @@ export function deleteWebchatThread(roomId: string, threadId: string): void {
   db.prepare(`DELETE FROM webchat_messages WHERE room_id = ? AND thread_id = ?`).run(roomId, threadId);
   db.prepare(`DELETE FROM webchat_thread_reads WHERE room_id = ? AND thread_id = ?`).run(roomId, threadId);
   db.prepare(`DELETE FROM webchat_thread_engaged WHERE room_id = ? AND thread_id = ?`).run(roomId, threadId);
+  db.prepare(`DELETE FROM webchat_thread_sync WHERE room_id = ? AND thread_id = ?`).run(roomId, threadId);
   db.prepare(`DELETE FROM webchat_threads WHERE room_id = ? AND thread_id = ?`).run(roomId, threadId);
+}
+
+// ── Thread context sync (pull / push) ──
+// High-water marks + verbatim copy helpers for moving conversation between a
+// thread and main. See docs/design/webchat-thread-context-sync.md.
+
+export interface ThreadSyncMarks {
+  pulled: number; // newest main created_at pulled into this thread
+  pushed: number; // newest native thread created_at pushed up to main
+}
+
+/** Per-thread sync high-water marks (default 0 when no row yet). */
+export function getThreadSyncMarks(roomId: string, threadId: string): ThreadSyncMarks {
+  const row = getDb()
+    .prepare(
+      `SELECT last_pulled_src_ts AS pulled, last_pushed_src_ts AS pushed
+       FROM webchat_thread_sync WHERE room_id = ? AND thread_id = ?`,
+    )
+    .get(roomId, threadId) as ThreadSyncMarks | undefined;
+  return row ?? { pulled: 0, pushed: 0 };
+}
+
+/** Advance a sync high-water mark (monotonic: never moves backwards). */
+export function setThreadSyncMark(roomId: string, threadId: string, dir: 'pulled' | 'pushed', ts: number): void {
+  const col = dir === 'pulled' ? 'last_pulled_src_ts' : 'last_pushed_src_ts';
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_thread_sync (room_id, thread_id, ${col}) VALUES (?, ?, ?)
+       ON CONFLICT(room_id, thread_id) DO UPDATE SET ${col} = MAX(${col}, excluded.${col})`,
+    )
+    .run(roomId, threadId, ts);
+}
+
+/**
+ * Native (origin IS NULL) messages in (room, srcThread) created after `sinceTs`,
+ * chronological — the delta a pull/push copies. Dividers (context-divider) and
+ * already-copied rows are excluded. `freshLimit` caps the first sync (sinceTs=0)
+ * so an initial pull can't drag in an enormous backlog; <=0 means no cap.
+ */
+export function getSyncDelta(roomId: string, srcThreadId: string, sinceTs: number, freshLimit = 0): WebchatMessage[] {
+  const db = getDb();
+  if (freshLimit > 0 && sinceTs === 0) {
+    const rows = db
+      .prepare(
+        `SELECT * FROM webchat_messages
+         WHERE room_id = ? AND thread_id = ? AND origin IS NULL AND message_type != 'context-divider'
+         ORDER BY created_at DESC LIMIT ?`,
+      )
+      .all(roomId, srcThreadId, freshLimit) as WebchatMessage[];
+    return rows.reverse();
+  }
+  return db
+    .prepare(
+      `SELECT * FROM webchat_messages
+       WHERE room_id = ? AND thread_id = ? AND origin IS NULL AND message_type != 'context-divider' AND created_at > ?
+       ORDER BY created_at ASC`,
+    )
+    .all(roomId, srcThreadId, sinceTs) as WebchatMessage[];
+}
+
+/**
+ * Append a demarcation divider + verbatim copies of `rows` into (room, destThread),
+ * marked with `origin`. New ids + created_at=now so they land at the destination's
+ * current end; originals are untouched. Returns the inserted rows (divider first)
+ * for broadcast.
+ */
+export function insertSyncedMessages(
+  roomId: string,
+  destThreadId: string,
+  rows: WebchatMessage[],
+  origin: 'pulled' | 'pushed',
+  dividerText: string,
+): WebchatMessage[] {
+  const db = getDb();
+  const base = Date.now();
+  const insert = db.prepare(
+    `INSERT INTO webchat_messages
+       (id, room_id, thread_id, sender, sender_type, content, message_type, file_meta, created_at, origin)
+     VALUES (@id, @room_id, @thread_id, @sender, @sender_type, @content, @message_type, @file_meta, @created_at, @origin)`,
+  );
+  const out: WebchatMessage[] = [];
+  db.transaction(() => {
+    const divider: WebchatMessage = {
+      id: randomUUID(),
+      room_id: roomId,
+      thread_id: destThreadId,
+      sender: 'system',
+      sender_type: 'system',
+      content: dividerText,
+      message_type: 'context-divider',
+      file_meta: null,
+      created_at: base,
+      origin,
+    };
+    insert.run({ ...divider, file_meta: null });
+    out.push(divider);
+    rows.forEach((r, i) => {
+      const copy: WebchatMessage = {
+        id: randomUUID(),
+        room_id: roomId,
+        thread_id: destThreadId,
+        sender: r.sender,
+        sender_type: r.sender_type,
+        content: r.content,
+        message_type: r.message_type,
+        file_meta: r.file_meta ?? null,
+        created_at: base + i + 1,
+        origin,
+      };
+      insert.run({ ...copy, file_meta: copy.file_meta ? JSON.stringify(copy.file_meta) : null });
+      out.push(copy);
+    });
+  })();
+  return out;
 }
 
 // ── Per-thread engaged agents ──

@@ -742,3 +742,35 @@ export const moduleWebchatRoomPinOrder: Migration = {
     `);
   },
 };
+
+/**
+ * Thread context sync (pull/push). Adds:
+ *   - webchat_messages.origin — NULL = native message; 'pulled' = copied in from
+ *     main; 'pushed' = copied up from a thread. Lets push select only native
+ *     thread messages (skip the pulled-in prefix) and the client mark imports.
+ *   - webchat_thread_sync — per-thread high-water marks so pull/push are
+ *     incremental (each sync appends only the source delta; no duplicates).
+ * See docs/design/webchat-thread-context-sync.md.
+ */
+export const moduleWebchatThreadContextSync: Migration = {
+  version: 118,
+  name: 'webchat-thread-context-sync',
+  up(db: Database.Database) {
+    // ADD COLUMN isn't idempotent — guard against a partial prior apply.
+    const hasOrigin = (db.prepare("PRAGMA table_info('webchat_messages')").all() as Array<{ name: string }>).some(
+      (c) => c.name === 'origin',
+    );
+    if (!hasOrigin) {
+      db.exec(`ALTER TABLE webchat_messages ADD COLUMN origin TEXT`);
+    }
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS webchat_thread_sync (
+        room_id            TEXT NOT NULL,
+        thread_id          TEXT NOT NULL,
+        last_pulled_src_ts INTEGER NOT NULL DEFAULT 0,
+        last_pushed_src_ts INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (room_id, thread_id)
+      );
+    `);
+  },
+};
