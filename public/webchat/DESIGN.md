@@ -137,15 +137,25 @@ is `.btn-ghost`.
 Every dismissable surface should answer "how do I make this go away" the same
 way. Target: a shared helper `dismissable(el, { onClose })` that wires all three:
 
-- **Escape** closes the topmost surface.
+- **Escape** closes the topmost surface — exactly one layer per press.
 - **Backdrop tap** closes it (desktop too, not mobile-only).
 - **History entry** (`pushState` + `popstate`) so the OS/Android back gesture
   closes it instead of leaving the PWA.
 
-Current state to converge: ESC already closes settings, lightbox, confirm modal,
-model picker, mention popup, overflow menu; full-views use a `viewStack` +
-`popstate`. The gap is the **detail asides + members panel on desktop** (× only,
-no ESC / no backdrop). Wire them through the same helper.
+**Full-screen views** (dashboard, topology, wiring, agents, models, permissions)
+are tracked in a `viewStack` and each pushes a history entry, so the Back button,
+the OS back gesture, **and Escape** all close them. The ESC handler for these runs
+in the **capture phase** and yields (`blockingOverlayOpen()`) when a modal /
+popover / menu is open, so that higher layer's own ESC handler takes the keypress
+first — one Escape, one layer. Any new full-screen view must register through
+`openView(name, teardown)` to inherit all three dismissals; do not show/hide a
+full surface by toggling its `hidden` attribute alone.
+
+Current state to converge: ESC closes settings, lightbox, confirm modal, model
+picker, mention popup, overflow menu, and all full-screen views (`viewStack` +
+`popstate` + capture-phase ESC). The remaining gap is the **detail asides +
+members panel on desktop** (× only, no ESC / no backdrop). Wire them through the
+same helper.
 
 ---
 
