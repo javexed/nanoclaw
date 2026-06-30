@@ -958,6 +958,13 @@ const mentionedRooms = new Set(); // rooms with an unread @-mention of me (disti
 let roomMentionPeople = []; // current room's human members as @ autocomplete candidates
 let showArchived = sessionStorage.getItem('webchat:showArchived') === '1';
 let showHidden = sessionStorage.getItem('webchat:showHidden') === '1';
+// A–Z sort toggles per list. Off = the list's natural "auto" order (rooms by
+// recent activity, agents newest-first, models by provider); on = alphabetical.
+let roomSortAz = sessionStorage.getItem('webchat:roomSortAz') === '1';
+let agentSortAz = sessionStorage.getItem('webchat:agentSortAz') === '1';
+let modelSortAz = sessionStorage.getItem('webchat:modelSortAz') === '1';
+let usersSortAz = sessionStorage.getItem('webchat:usersSortAz') === '1';
+let manageTab = 'agents'; // active Manage tab; the header sort icon acts on this
 let agentName = '';
 let lastSeenMessageId = sessionStorage.getItem('lastSeenMessageId') || null;
 let reconnectDelay = 1000;
@@ -1342,21 +1349,26 @@ function renderRooms(rooms) {
   // order. (Replaces the old manual drag-order, which lived only in this
   // browser's localStorage and never synced across devices.)
   const byActivity = (a, b) => activityOf(b) - activityOf(a);
+  // A–Z toggle: alphabetical by the displayed `#id` when on, recent-activity
+  // ("auto") when off. Applies to the unpinned + archived groups; pinned rooms
+  // always keep their manual pin_position order.
+  const byName = (a, b) => String(a.id).localeCompare(String(b.id));
+  const roomCmp = roomSortAz ? byName : byActivity;
 
   // Partition:
   //   - hidden (per-user "hide") — dropped unless `showHidden` is on.
   //   - archived (global flag) — collected in a collapsed "Archived" section at
   //     the bottom, revealed by the toggle.
-  //   - active — split into pinned (top) and unpinned, each activity-sorted.
+  //   - active — split into pinned (top) and unpinned.
   const visibleRooms = showHidden ? [...rooms] : rooms.filter((r) => !r.hidden);
   const active = visibleRooms.filter((r) => !r.archived);
-  const archived = visibleRooms.filter((r) => r.archived).sort(byActivity);
-  // Pinned rooms hold the user's MANUAL drag order (pin_position); the rest stay
-  // activity-sorted. Fall back to activity when positions are absent/equal.
+  const archived = visibleRooms.filter((r) => r.archived).sort(roomCmp);
+  // Pinned rooms hold the user's MANUAL drag order (pin_position); the rest follow
+  // the active sort. Fall back to activity when positions are absent/equal.
   const pinned = active
     .filter((r) => r.pinned)
     .sort((a, b) => (a.pin_position ?? 0) - (b.pin_position ?? 0) || byActivity(a, b));
-  const unpinned = active.filter((r) => !r.pinned).sort(byActivity);
+  const unpinned = active.filter((r) => !r.pinned).sort(roomCmp);
   const toggleBtn = $('#archived-toggle');
   if (archived.length === 0) {
     toggleBtn.hidden = true;
@@ -1730,6 +1742,8 @@ function clearRoomSearch() {
   }
   const roomList = $('#room-list');
   if (roomList) roomList.hidden = false;
+  const sortBtn = $('#room-sort-az');
+  if (sortBtn) sortBtn.hidden = false; // sort icon returns to the search bar's right slot
   const close = $('#room-search-close');
   if (close) close.hidden = true;
 }
@@ -1760,6 +1774,8 @@ function renderSearchResults(results) {
   list.hidden = false;
   const roomList = $('#room-list');
   if (roomList) roomList.hidden = true;
+  const sortBtn = $('#room-sort-az');
+  if (sortBtn) sortBtn.hidden = true; // hide sort icon during search (close button takes the slot)
 }
 
 $('#room-search')?.addEventListener('input', (e) => {
@@ -3608,6 +3624,7 @@ function teardownManage() {
   $('#overflow-btn')?.classList.remove('active');
 }
 function switchManageTab(tab) {
+  manageTab = tab;
   document.querySelectorAll('.manage-tab').forEach((t) => {
     const on = t.dataset.mtab === tab;
     t.classList.toggle('active', on);
@@ -3615,6 +3632,7 @@ function switchManageTab(tab) {
   });
   $('#mtab-agents').hidden = tab !== 'agents';
   $('#mtab-models').hidden = tab !== 'models';
+  if (typeof syncManageSortIcon === 'function') syncManageSortIcon(); // reflect the active tab's sort
   if (tab === 'agents') fetchAgents();
   else if (tab === 'models') fetchModels();
 }
@@ -4402,16 +4420,18 @@ function renderPermsUserList() {
       '<li class="perms-empty" style="padding:16px;">No users yet — anyone who authenticates will appear here.</li>';
     return;
   }
-  // Sort: you first, then owners, then admins, then everyone else, alphabetical
-  // within each tier. Cheap stable enough for personal-scale.
-  const sorted = [...permsUsers].sort((a, b) => {
-    const tier = (u) =>
-      u.id === myUserId ? 0 : userIsOwner(u) ? 1 : userIsGlobalAdmin(u) || userScopedAdminCount(u) ? 2 : 3;
-    const ta = tier(a);
-    const tb = tier(b);
-    if (ta !== tb) return ta - tb;
-    return userDisplayName(a).localeCompare(userDisplayName(b));
-  });
+  // A–Z toggle: flat alphabetical when on; the tiered "auto" order when off —
+  // you first, then owners, then admins, then everyone else, alpha within tier.
+  const byName = (a, b) => userDisplayName(a).localeCompare(userDisplayName(b));
+  const sorted = usersSortAz
+    ? [...permsUsers].sort(byName)
+    : [...permsUsers].sort((a, b) => {
+        const tier = (u) =>
+          u.id === myUserId ? 0 : userIsOwner(u) ? 1 : userIsGlobalAdmin(u) || userScopedAdminCount(u) ? 2 : 3;
+        const ta = tier(a);
+        const tb = tier(b);
+        return ta !== tb ? ta - tb : byName(a, b);
+      });
   // Filter by the search box — match on display name AND the namespaced id, so
   // you can find someone by handle/email or by channel prefix (e.g. "slack:").
   const rows = permsUserFilter
@@ -5177,7 +5197,11 @@ function renderAgents() {
   const list = $('#agent-list');
   list.innerHTML = '';
 
-  const sorted = [...allAgents].sort((a, b) => a.name.localeCompare(b.name));
+  // A–Z toggle: alphabetical when on; newest-first ("auto") when off.
+  const byName = (a, b) => a.name.localeCompare(b.name);
+  const sorted = agentSortAz
+    ? [...allAgents].sort(byName)
+    : [...allAgents].sort((a, b) => (b.created_at || 0) - (a.created_at || 0) || byName(a, b));
 
   for (const agent of sorted) {
     const li = document.createElement('li');
@@ -6242,6 +6266,54 @@ $('#hidden-toggle').addEventListener('click', () => {
   sessionStorage.setItem('webchat:showHidden', showHidden ? '1' : '0');
   if (lastRoomsList.length) renderRooms(lastRoomsList);
 });
+// A–Z sort toggles (rooms / agents / models). One small button each: off = the
+// list's natural order, on = alphabetical. State persists per-list.
+function wireSortToggle(btnId, storageKey, isOn, setOn, rerender) {
+  const btn = $(btnId);
+  if (!btn) return;
+  const sync = () => {
+    btn.classList.toggle('active', isOn());
+    btn.setAttribute('aria-pressed', isOn() ? 'true' : 'false');
+  };
+  sync();
+  btn.addEventListener('click', () => {
+    setOn(!isOn());
+    sessionStorage.setItem(storageKey, isOn() ? '1' : '0');
+    sync();
+    rerender();
+  });
+}
+wireSortToggle('#room-sort-az', 'webchat:roomSortAz', () => roomSortAz, (v) => (roomSortAz = v), () => {
+  if (lastRoomsList.length) renderRooms(lastRoomsList);
+});
+wireSortToggle(
+  '#perms-sort-az',
+  'webchat:usersSortAz',
+  () => usersSortAz,
+  (v) => (usersSortAz = v),
+  () => renderPermsUserList(),
+);
+// The Manage view shares ONE sort icon (in the header) that acts on the active
+// tab — toggling agents' or models' sort and reflecting that tab's state.
+function syncManageSortIcon() {
+  const btn = $('#manage-sort-az');
+  if (!btn) return;
+  const on = manageTab === 'models' ? modelSortAz : agentSortAz;
+  btn.classList.toggle('active', on);
+  btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+}
+$('#manage-sort-az')?.addEventListener('click', () => {
+  if (manageTab === 'models') {
+    modelSortAz = !modelSortAz;
+    sessionStorage.setItem('webchat:modelSortAz', modelSortAz ? '1' : '0');
+    renderModels();
+  } else {
+    agentSortAz = !agentSortAz;
+    sessionStorage.setItem('webchat:agentSortAz', agentSortAz ? '1' : '0');
+    renderAgents();
+  }
+  syncManageSortIcon();
+});
 $('#room-create-close').addEventListener('click', closeRoomDetail);
 $('#room-create-toggle-new').addEventListener('click', () => {
   $('#room-create-new-block').hidden = !$('#room-create-new-block').hidden;
@@ -6865,7 +6937,13 @@ function renderModels() {
     list.appendChild(li);
     return;
   }
-  for (const model of allModels) {
+  // A–Z toggle: alphabetical when on; by provider ("auto", Claude/anthropic
+  // first, then local) when off.
+  const byName = (a, b) => a.name.localeCompare(b.name);
+  const sortedModels = modelSortAz
+    ? [...allModels].sort(byName)
+    : [...allModels].sort((a, b) => (a.kind === 'anthropic' ? 0 : 1) - (b.kind === 'anthropic' ? 0 : 1) || byName(a, b));
+  for (const model of sortedModels) {
     const li = document.createElement('li');
     li.dataset.modelId = model.id;
     if (model.id === selectedModelId) li.classList.add('active');

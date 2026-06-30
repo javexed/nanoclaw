@@ -598,6 +598,45 @@ body {
 #room-list li .room-menu button:hover {
   background: var(--surface2);
 }
+/* A–Z sort — a single icon button tucked into each list's existing header
+   (rooms: the search bar; agents/models: the Manage header). No dedicated row. */
+.sort-icon-btn {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+.sort-icon-btn:hover {
+  color: var(--text);
+}
+.sort-icon-btn.active {
+  color: var(--accent);
+}
+.sort-icon-btn .icon {
+  width: 18px;
+  height: 18px;
+}
+/* In the room search bar: sit in the same right-edge slot as the close button
+   (they're never shown at the same time — sort when idle, close when searching). */
+.search-icon-btn {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  width: 28px;
+  height: 28px;
+}
+/* Right-side action group in a dash-header (e.g. the Permissions sort + refresh). */
+.dash-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
 .archived-toggle {
   flex-shrink: 0;
   background: transparent;
