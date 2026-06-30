@@ -1086,6 +1086,22 @@ export function listWebchatThreads(roomId: string): WebchatThread[] {
     .all(roomId) as WebchatThread[];
 }
 
+/**
+ * Per-room count of TOPIC threads (excludes the implicit 'main'/'agent' rows),
+ * keyed by room_id. Powers the sidebar's "this room has N threads" chevron so
+ * the client knows which rooms to offer an expander for — computed once per
+ * rooms broadcast rather than one query per room.
+ */
+export function getTopicThreadCounts(): Map<string, number> {
+  const counts = new Map<string, number>();
+  if (!hasTable(getDb(), 'webchat_threads')) return counts;
+  const rows = getDb()
+    .prepare(`SELECT room_id, COUNT(*) AS n FROM webchat_threads WHERE kind = 'topic' GROUP BY room_id`)
+    .all() as Array<{ room_id: string; n: number }>;
+  for (const r of rows) counts.set(r.room_id, r.n);
+  return counts;
+}
+
 export function getWebchatThread(roomId: string, threadId: string): WebchatThread | undefined {
   return getDb().prepare(`SELECT * FROM webchat_threads WHERE room_id = ? AND thread_id = ?`).get(roomId, threadId) as
     | WebchatThread

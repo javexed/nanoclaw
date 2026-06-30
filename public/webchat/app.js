@@ -1587,6 +1587,28 @@ function renderRooms(rooms) {
       }
     }
 
+    // Thread expander: rooms that HAVE topic threads get a left chevron to
+    // expand/collapse their thread list inline — WITHOUT entering the room (the
+    // active room always shows its tree, so it needs no toggle). thread_count
+    // comes from the server's rooms payload.
+    const threadCount = room.thread_count || 0;
+    if (threadCount > 0 && room.id !== currentRoom) {
+      const open = expandedRooms.has(room.id);
+      const chev = document.createElement('button');
+      chev.className = 'room-thread-toggle';
+      chev.type = 'button';
+      chev.textContent = open ? '▾' : '▸';
+      const lbl = `${threadCount} thread${threadCount === 1 ? '' : 's'}`;
+      chev.title = lbl;
+      chev.setAttribute('aria-label', `${open ? 'Collapse' : 'Show'} ${lbl}`);
+      chev.setAttribute('aria-expanded', open ? 'true' : 'false');
+      chev.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleRoomThreads(room.id);
+      });
+      li.insertBefore(chev, li.firstChild); // left-most, like a tree disclosure
+    }
+
     if (room.id === currentRoom) li.classList.add('active');
     li.setAttribute('role', 'button');
     li.setAttribute('tabindex', '0');
@@ -1600,11 +1622,17 @@ function renderRooms(rooms) {
     });
     list.appendChild(li);
 
-    // Nest the active room's thread tree directly under its row.
+    // Nest a thread tree under the row: the active room's (populated by
+    // renderThreadList below), or an EXPANDED non-active room's (its own tree).
     if (room.id === currentRoom) {
       const threadHost = document.createElement('div');
       threadHost.className = 'thread-list';
       li.appendChild(threadHost);
+    } else if (expandedRooms.has(room.id)) {
+      const threadHost = document.createElement('div');
+      threadHost.className = 'thread-list';
+      li.appendChild(threadHost);
+      renderRoomThreads(li, room.id);
     }
   }
   // Populate the active room's thread tree (no-op if no room open).
@@ -1726,6 +1754,79 @@ let threadAddRoom = null; // room id whose row is showing the inline new-thread 
 let threadRenaming = null; // thread_id whose row is showing the inline rename input
 let roomThreads = []; // threads of the open room (from GET /threads)
 const threadUnread = new Set(); // thread_ids with unread activity in the open room
+const expandedRooms = new Set(); // non-active rooms whose thread tree is expanded in the sidebar
+const threadsByRoom = new Map(); // roomId → threads[] cache for expanded non-active rooms
+
+// Expand/collapse a non-active room's thread tree inline in the sidebar (the
+// "▸/▾" chevron), lazy-loading that room's threads on first expand.
+function toggleRoomThreads(roomId) {
+  if (expandedRooms.has(roomId)) {
+    expandedRooms.delete(roomId);
+    renderRooms(lastRoomsList);
+    return;
+  }
+  expandedRooms.add(roomId);
+  if (!threadsByRoom.has(roomId)) {
+    void loadRoomThreads(roomId).then(() => {
+      if (expandedRooms.has(roomId)) renderRooms(lastRoomsList);
+    });
+  }
+  renderRooms(lastRoomsList); // immediate (shows "Loading…" until the fetch resolves)
+}
+
+async function loadRoomThreads(roomId) {
+  try {
+    const r = await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/threads`);
+    threadsByRoom.set(roomId, r.ok ? ((await r.json()) ?? []) : []);
+  } catch {
+    threadsByRoom.set(roomId, []);
+  }
+}
+
+// Render an expanded non-active room's thread rows into its .thread-list host.
+// Tapping a row enters that room AND the thread in a single clean join.
+function renderRoomThreads(li, roomId) {
+  const host = li.querySelector('.thread-list');
+  if (!host) return;
+  host.innerHTML = '';
+  const threads = threadsByRoom.get(roomId);
+  if (!Array.isArray(threads)) {
+    host.innerHTML = '<div class="thread-loading">Loading…</div>';
+    return;
+  }
+  const room = lastRoomsList.find((r) => r.id === roomId);
+  for (const t of threads.filter((t) => t.kind !== 'main')) {
+    const row = document.createElement('div');
+    row.className = 'thread-row';
+    row.dataset.threadId = t.thread_id;
+    row.style.setProperty('--thread-color', roomColor(t.thread_id));
+    row.setAttribute('role', 'button');
+    row.tabIndex = 0;
+    row.setAttribute('aria-label', `Open thread ${t.title}`);
+    const glyph = document.createElement('span');
+    glyph.className = 'thread-glyph';
+    glyph.textContent = '#';
+    glyph.setAttribute('aria-hidden', 'true');
+    row.appendChild(glyph);
+    const label = document.createElement('span');
+    label.className = 'thread-label';
+    label.textContent = t.title;
+    row.appendChild(label);
+    const enter = () => joinRoom(roomId, room ? room.name : roomId, undefined, t.thread_id);
+    row.addEventListener('click', (e) => {
+      e.stopPropagation();
+      enter();
+    });
+    row.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        e.stopPropagation();
+        enter();
+      }
+    });
+    host.appendChild(row);
+  }
+}
 
 async function loadThreadList(roomId) {
   try {
@@ -1960,6 +2061,7 @@ async function createThread(title, roomId = currentRoom) {
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
     const thread = await r.json();
+    threadsByRoom.delete(roomId); // invalidate the sidebar expand cache for this room
     // Create AND enter the new (blank) thread — but cleanly, via a SINGLE WS
     // join, so main's transcript can't bleed in (the old joinRoom+openThread
     // double-join race). Same room → openThread (one join into the thread);
@@ -2220,6 +2322,7 @@ async function deleteThreadConfirm(thread) {
       method: 'DELETE',
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    threadsByRoom.delete(currentRoom); // invalidate the sidebar expand cache
     if (currentThread === thread.thread_id) openThread('main');
     await loadThreadList(currentRoom);
     showToast('Thread deleted', { kind: 'success' });

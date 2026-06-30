@@ -1129,6 +1129,7 @@ async function handleHttp(
     const title = sanitizeThreadTitle(body.title);
     if (title === null) return json(res, 400, { error: 'title must be 1–80 characters' });
     const thread = createWebchatThread(roomId, title);
+    broadcastRooms(); // refresh each client's sidebar thread-count chevron
     return json(res, 200, thread);
   }
 
@@ -3092,6 +3093,7 @@ function deleteThreadHandler(res: ServerResponse, roomId: string, threadId: stri
   }
   // Side-effects after commit (can't roll back): kill containers + remove dirs.
   void teardownSessionResources(sessions, 'webchat thread deleted');
+  broadcastRooms(); // refresh each client's sidebar thread-count chevron
   return json(res, 200, { ok: true });
 }
 
