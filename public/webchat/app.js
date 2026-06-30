@@ -1941,8 +1941,8 @@ async function renameThreadPrompt(thread) {
 
 async function deleteThreadConfirm(thread) {
   const confirmed = await showConfirmModal({
-    title: 'Delete thread',
-    body: `Delete "${thread.title}"? Its messages and the agent's context for it are removed.`,
+    title: `Delete "${thread.title}"?`,
+    body: '',
     confirmLabel: 'Delete',
     destructive: true,
   });
