@@ -84,7 +84,9 @@ describe('thread context sync — insertSyncedMessages', () => {
     expect(inserted.slice(1).map((m) => m.content)).toEqual(['one', 'two']);
     // Copies live in the destination thread, origin-marked; originals untouched.
     const inThread = getDb()
-      .prepare(`SELECT content, origin, message_type FROM webchat_messages WHERE room_id='r' AND thread_id='t1' ORDER BY created_at`)
+      .prepare(
+        `SELECT content, origin, message_type FROM webchat_messages WHERE room_id='r' AND thread_id='t1' ORDER BY created_at`,
+      )
       .all() as { content: string; origin: string | null; message_type: string }[];
     expect(inThread.map((m) => m.content)).toEqual(['Pulled from main', 'one', 'two']);
     expect(inThread.every((m) => m.origin === 'pulled')).toBe(true);
@@ -139,7 +141,13 @@ describe('thread context sync — pull (main → thread)', () => {
       dividerText: 'Pulled from regular chat',
     });
     expect(second).toBe(1);
-    expect(contentsInThread('r', 't1')).toEqual(['Pulled from regular chat', 'a', 'b', 'Pulled from regular chat', 'c']);
+    expect(contentsInThread('r', 't1')).toEqual([
+      'Pulled from regular chat',
+      'a',
+      'b',
+      'Pulled from regular chat',
+      'c',
+    ]);
   });
 
   it('fresh pull is bounded by freshLimit', () => {

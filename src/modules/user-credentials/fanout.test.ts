@@ -31,7 +31,9 @@ const SESSION: Session = {
 
 function seedSession() {
   getDb()
-    .prepare(`INSERT OR IGNORE INTO agent_groups (id,name,folder,agent_provider,created_at) VALUES ('ag-1','ag-1','ag-1',NULL,'t')`)
+    .prepare(
+      `INSERT OR IGNORE INTO agent_groups (id,name,folder,agent_provider,created_at) VALUES ('ag-1','ag-1','ag-1',NULL,'t')`,
+    )
     .run();
   getDb()
     .prepare(
@@ -95,15 +97,33 @@ describe('writeMemberTranscript', () => {
 
   it('is idempotent — re-running adds only genuinely new messages', () => {
     const m1 = storeWebchatMessage('room-1', 'Alice', 'user', 'one');
-    writeMemberTranscript({ agentGroupId: 'ag-1', session: SESSION, roomId: 'room-1', currentMessageId: m1.id, deliveryAddr: addr });
+    writeMemberTranscript({
+      agentGroupId: 'ag-1',
+      session: SESSION,
+      roomId: 'room-1',
+      currentMessageId: m1.id,
+      deliveryAddr: addr,
+    });
     expect(inboundRows()).toHaveLength(1);
     // Same turn re-run → no dup.
-    writeMemberTranscript({ agentGroupId: 'ag-1', session: SESSION, roomId: 'room-1', currentMessageId: m1.id, deliveryAddr: addr });
+    writeMemberTranscript({
+      agentGroupId: 'ag-1',
+      session: SESSION,
+      roomId: 'room-1',
+      currentMessageId: m1.id,
+      deliveryAddr: addr,
+    });
     expect(inboundRows()).toHaveLength(1);
     // A new message arrives → only it is added (idempotent: m1 not rewritten,
     // keeps its original trigger; the new current message is trigger=1).
     const m2 = storeWebchatMessage('room-1', 'Alice', 'user', 'two');
-    writeMemberTranscript({ agentGroupId: 'ag-1', session: SESSION, roomId: 'room-1', currentMessageId: m2.id, deliveryAddr: addr });
+    writeMemberTranscript({
+      agentGroupId: 'ag-1',
+      session: SESSION,
+      roomId: 'room-1',
+      currentMessageId: m2.id,
+      deliveryAddr: addr,
+    });
     const rows = inboundRows();
     expect(rows).toHaveLength(2); // no duplication
     expect(rows.find((r) => r.id === `user-creds-sess-alice-${m2.id}`)!.trigger).toBe(1); // current wakes
@@ -130,7 +150,13 @@ describe('writeMemberTranscript', () => {
          VALUES ('a2a-1','room-1','x','a2a','{"to":"y","text":"z"}','a2a', ${Date.now() - 1000})`,
       )
       .run();
-    writeMemberTranscript({ agentGroupId: 'ag-1', session: SESSION, roomId: 'room-1', currentMessageId: cur.id, deliveryAddr: addr });
+    writeMemberTranscript({
+      agentGroupId: 'ag-1',
+      session: SESSION,
+      roomId: 'room-1',
+      currentMessageId: cur.id,
+      deliveryAddr: addr,
+    });
     const rows = inboundRows();
     expect(rows.some((r) => r.id === 'user-creds-sess-alice-a2a-1')).toBe(false);
   });

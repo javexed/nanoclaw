@@ -164,7 +164,11 @@ export async function ensureGroupEnrollment(admin: OnecliAdmin, userId: string, 
  * neutralizes any lingering assignment OneCLI couldn't clear via an empty
  * set-secrets), then mark the rows revoked.
  */
-export async function revokeUserCredential(admin: OnecliAdmin, userId: string, provider: UserCredsProvider): Promise<void> {
+export async function revokeUserCredential(
+  admin: OnecliAdmin,
+  userId: string,
+  provider: UserCredsProvider,
+): Promise<void> {
   await unenrollGroups(admin, userId, provider);
   const secretId = getUserCredential(userId, provider)?.secret_id ?? null;
   if (secretId) await admin.deleteSecret(secretId).catch(() => {}); // best-effort; row revoke below is the gate

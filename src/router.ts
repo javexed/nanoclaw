@@ -330,9 +330,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   // thread routes by its engaged set (auto-engaging @mentioned agents) instead of
   // the per-wiring engage_mode. Null → normal routing (regular chat, non-webchat,
   // agent fan-out, or nothing engaged). See docs/design/thread-engaged-agents.md.
-  const engagedDecision = engagedResolver
-    ? engagedResolver(mg, event.threadId, messageText, senderAgentGroupId)
-    : null;
+  const engagedDecision = engagedResolver ? engagedResolver(mg, event.threadId, messageText, senderAgentGroupId) : null;
 
   let engagedCount = 0;
   let accumulatedCount = 0;

@@ -165,7 +165,9 @@ describe('ensureGroupEnrollment (lazy, at first spawn)', () => {
     await ensureGroupEnrollment(admin, 'webchat:alice', 'ag-1');
     await ensureGroupEnrollment(admin, 'webchat:alice', 'ag-1');
     const n = (
-      getDb().prepare(`SELECT COUNT(*) AS n FROM user_credential_members WHERE user_id='webchat:alice'`).get() as { n: number }
+      getDb().prepare(`SELECT COUNT(*) AS n FROM user_credential_members WHERE user_id='webchat:alice'`).get() as {
+        n: number;
+      }
     ).n;
     expect(n).toBe(1);
   });
