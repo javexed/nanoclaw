@@ -1333,26 +1333,26 @@ button:focus-visible {
     display: none;
   }
 
-  /* Threads in the chat header: the active-thread breadcrumb + the sync trio
-     crowd the narrow header, so tighten the crumb width and shrink the sync
-     buttons (and their gaps) so the room name + right-side controls still fit. */
-  .thread-crumb-name {
-    max-width: 12ch;
+  /* Compact thread header on mobile: hide the breadcrumb and shrink the controls
+     so the room name + thread icons fit the narrow header. The base .thread-*
+     rules sit LATER in this file, so these use IDs / :not() to out-specify them
+     (equal-specificity overrides here would otherwise lose on source order). The
+     # switcher (current thread highlighted) + the visible sync icons still signal
+     you're in a thread without the breadcrumb. */
+  #thread-crumb {
+    display: none;
   }
-  /* The sidebar thread tree is hidden in-room on mobile, so surface the thread
-     switcher button here (it's the only in-room way to switch/create threads).
-     :not([hidden]) out-specifies the base .thread-switch{display:none} (which
-     sits later in source) while still honoring the JS hidden toggle. */
   .thread-switch:not([hidden]) {
     display: inline-flex;
   }
-  .thread-sync {
+  #thread-switch,
+  #thread-sync .thread-sync-btn {
+    width: 26px;
+    height: 26px;
+  }
+  #thread-sync {
     margin-left: 4px;
     gap: 2px;
-  }
-  .thread-sync-btn {
-    width: 28px;
-    height: 28px;
   }
 
   /* Back button in chat header */
@@ -5436,7 +5436,9 @@ a.lightbox-btn {
   border-left: 2px solid var(--thread-color, var(--border));
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   cursor: pointer;
-  font-size: var(--fs-base);
+  /* Match the room rows' font (they inherit the sidebar base) — only the color
+     (--text-dim) + identity spine differ, which is intended. */
+  font-size: inherit;
   color: var(--text-dim);
   position: relative;
 }
