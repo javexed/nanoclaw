@@ -317,7 +317,7 @@ function renderSettingsModal() {
   $('#notif-toggle').checked = settings.notifications;
 }
 
-// ── Workspace credentials policy (Settings → Member credentials, owner-only) ──
+// ── Workspace credentials policy (Settings → User credentials, owner-only) ──
 let credConfigWired = false;
 async function renderCredentialsSettings() {
   const section = $('#settings-credentials');
@@ -465,12 +465,12 @@ function renderHandleChip() {
   // When the member has connected their own credential, the handle chip doubles
   // as the credential indicator (a 🔑 prefix) — there's no separate key chip.
   // The connect/disconnect controls live in the chip's popover (#handle-creds).
-  chip.textContent = byokConnected ? `🔑 ${label}` : label;
+  chip.textContent = userCredsConnected ? `🔑 ${label}` : label;
   chip.classList.toggle('is-unset', !myHandle);
-  chip.classList.toggle('has-cred', byokConnected);
-  chip.title = byokConnected ? 'Billing your own account — click to manage' : 'Edit your handle';
+  chip.classList.toggle('has-cred', userCredsConnected);
+  chip.title = userCredsConnected ? 'Billing your own account — click to manage' : 'Edit your handle';
   // Accessible name tracks the connected state (the 🔑/title are visual-only).
-  chip.setAttribute('aria-label', byokConnected ? 'Billing your own account — manage credentials' : 'Edit your handle');
+  chip.setAttribute('aria-label', userCredsConnected ? 'Billing your own account — manage credentials' : 'Edit your handle');
 }
 
 function openHandlePopover() {
@@ -1677,7 +1677,7 @@ function joinRoom(roomId, roomName, jumpMessageId) {
   unreadRooms.delete(roomId);
   mentionedRooms.delete(roomId);
   updateUnreadDots();
-  updateByokBanner(roomId);
+  updateUserCredsBanner(roomId);
   // Set agent name for thinking bubble from the agent wired to this room.
   const roomAgent = allAgents.find((b) => b.room_id === roomId);
   if (roomAgent) agentName = roomAgent.name;
@@ -2266,45 +2266,45 @@ async function jumpToMessage(messageId) {
  * 'error'. Errors linger longer and must be dismissed-or-time-out; all toasts
  * are click-to-dismiss. Returns the element so callers can remove it early.
  */
-// ── BYOK: per-member key banner ───────────────────────────────────────────
+// ── UserCreds: per-member key banner ───────────────────────────────────────────
 // Shown in a room whose credential_mode is optional/required when the current
 // user hasn't connected their own Anthropic key. Connecting onboards the key
 // into the OneCLI vault (host-side) so the member's turns bill their account.
 // The room's model provider decides the connect vocabulary + which mint runs.
-let byokProvider = 'claude';
+let userCredsProvider = 'claude';
 // Latest banner state, so the @handle popover credentials shortcut can mirror it.
-let byokState = null;
+let userCredsState = null;
 // Whether the member has a connected credential for the open room — drives the
 // 🔑 indicator on the @handle chip (the standalone key chip was merged into it).
-let byokConnected = false;
+let userCredsConnected = false;
 
-function byokWords(provider) {
+function userCredsWords(provider) {
   return provider === 'codex'
     ? { name: 'Codex', subWord: 'ChatGPT subscription', keyWord: 'OpenAI key', keyPlaceholder: 'sk-…' }
     : { name: 'Claude', subWord: 'Claude subscription', keyWord: 'Anthropic key', keyPlaceholder: 'sk-ant-…' };
 }
 
-async function updateByokBanner(roomId) {
-  const banner = $('#byok-banner');
+async function updateUserCredsBanner(roomId) {
+  const banner = $('#user-creds-banner');
   if (!banner || !roomId) return;
   const hideAll = () => {
     banner.hidden = true;
-    byokState = null;
-    byokConnected = false;
+    userCredsState = null;
+    userCredsConnected = false;
     updateHandleCreds();
     renderHandleChip();
   };
   try {
-    const r = await authFetch(`/api/byok/credential?roomId=${encodeURIComponent(roomId)}`);
+    const r = await authFetch(`/api/user-credentials/credential?roomId=${encodeURIComponent(roomId)}`);
     if (!r.ok) {
       hideAll();
       return;
     }
     const { connected, mode, credType, oauthAllowed, apiKeyAllowed = true, provider = 'claude' } = await r.json();
-    byokProvider = provider;
-    const { name, subWord, keyWord, keyPlaceholder } = byokWords(provider);
-    // The room's mode is the master switch: 'disabled' (Member credentials: Off)
-    // means no BYOK at all — neither API keys NOR OAuth — regardless of what the
+    userCredsProvider = provider;
+    const { name, subWord, keyWord, keyPlaceholder } = userCredsWords(provider);
+    // The room's mode is the master switch: 'disabled' (User credentials: Off)
+    // means no UserCreds at all — neither API keys NOR OAuth — regardless of what the
     // workspace accepts. When the room is on, each method is offered if the
     // workspace accepts it (credential types are workspace-wide).
     const apiOffered = mode !== 'disabled' && apiKeyAllowed;
@@ -2314,8 +2314,8 @@ async function updateByokBanner(roomId) {
       return;
     }
 
-    byokState = { offered: true, connected, provider, oauthAllowed: oauthOffered, apiOffered, subWord, keyWord };
-    byokConnected = connected;
+    userCredsState = { offered: true, connected, provider, oauthAllowed: oauthOffered, apiOffered, subWord, keyWord };
+    userCredsConnected = connected;
     updateHandleCreds();
     renderHandleChip();
 
@@ -2327,9 +2327,9 @@ async function updateByokBanner(roomId) {
     }
 
     // Not connected → show the actionable banner.
-    const connectBtn = $('#byok-connect-btn');
-    const oauthBtn = $('#byok-oauth-btn');
-    const input = $('#byok-key-input');
+    const connectBtn = $('#user-creds-connect-btn');
+    const oauthBtn = $('#user-creds-oauth-btn');
+    const input = $('#user-creds-key-input');
     banner.hidden = false;
     input.hidden = true;
     input.value = '';
@@ -2347,11 +2347,11 @@ async function updateByokBanner(roomId) {
 }
 
 // The @handle popover mirrors the in-room banner state as a credentials shortcut
-// (discoverability). Shown only when the open room offers BYOK; acts on that room.
+// (discoverability). Shown only when the open room offers UserCreds; acts on that room.
 function updateHandleCreds() {
   const wrap = $('#handle-creds');
   if (!wrap) return;
-  if (!byokState || !byokState.offered) {
+  if (!userCredsState || !userCredsState.offered) {
     wrap.hidden = true;
     return;
   }
@@ -2360,45 +2360,45 @@ function updateHandleCreds() {
   const actionBtn = $('#handle-creds-action');
   // Minimalist integrations-row style: a status dot + the provider name carry
   // the connected/not state; the action button does the rest.
-  const { name } = byokWords(byokState.provider);
+  const { name } = userCredsWords(userCredsState.provider);
   if (statusEl) {
     // Text carries the connected/not state too (not just the dot colour) — for
     // screen readers and colour-blind users.
-    statusEl.textContent = `${name} — ${byokState.connected ? 'connected' : 'not connected'}`;
-    statusEl.classList.toggle('is-connected', byokState.connected);
+    statusEl.textContent = `${name} — ${userCredsState.connected ? 'connected' : 'not connected'}`;
+    statusEl.classList.toggle('is-connected', userCredsState.connected);
   }
-  if (actionBtn) actionBtn.textContent = byokState.connected ? 'Disconnect' : 'Connect';
+  if (actionBtn) actionBtn.textContent = userCredsState.connected ? 'Disconnect' : 'Connect';
 }
 
 $('#handle-creds-action')?.addEventListener('click', async () => {
-  if (!byokState) return;
+  if (!userCredsState) return;
   closeHandlePopover();
-  if (byokState.connected) {
+  if (userCredsState.connected) {
     const confirmed = await showConfirmModal({
-      title: `Disconnect ${byokWords(byokState.provider).name}?`,
+      title: `Disconnect ${userCredsWords(userCredsState.provider).name}?`,
       confirmLabel: 'Disconnect',
       destructive: true,
     });
-    if (confirmed) await disconnectByok();
-  } else if (byokState.oauthAllowed) {
+    if (confirmed) await disconnectUserCreds();
+  } else if (userCredsState.oauthAllowed) {
     // Subscriptions allowed → open the sign-in helper directly (what users expect
     // from a "Connect" action), rather than just surfacing the banner.
-    $('#byok-oauth-btn')?.click();
+    $('#user-creds-oauth-btn')?.click();
   } else {
     // API-key-only room → reveal the banner and its key input.
-    const banner = $('#byok-banner');
+    const banner = $('#user-creds-banner');
     if (banner) {
       banner.hidden = false;
       banner.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-      banner.classList.add('byok-banner-flash');
-      setTimeout(() => banner.classList.remove('byok-banner-flash'), 1200);
+      banner.classList.add('user-creds-banner-flash');
+      setTimeout(() => banner.classList.remove('user-creds-banner-flash'), 1200);
     }
-    $('#byok-connect-btn')?.click(); // reveal the key input
+    $('#user-creds-connect-btn')?.click(); // reveal the key input
   }
 });
 
-$('#byok-connect-btn')?.addEventListener('click', async () => {
-  const input = $('#byok-key-input');
+$('#user-creds-connect-btn')?.addEventListener('click', async () => {
+  const input = $('#user-creds-key-input');
   // First click reveals the input; second (with a value) submits.
   if (input.hidden) {
     input.hidden = false;
@@ -2407,33 +2407,33 @@ $('#byok-connect-btn')?.addEventListener('click', async () => {
   }
   const apiKey = input.value.trim();
   if (!apiKey) return;
-  const r = await authFetch('/api/byok/credential', {
+  const r = await authFetch('/api/user-credentials/credential', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
     body: JSON.stringify({ roomId: currentRoom, apiKey }),
   });
   if (r.ok) {
-    showToast(`Connected your ${byokWords(byokProvider).keyWord}.`, { kind: 'success' });
-    await updateByokBanner(currentRoom);
+    showToast(`Connected your ${userCredsWords(userCredsProvider).keyWord}.`, { kind: 'success' });
+    await updateUserCredsBanner(currentRoom);
   } else {
     const err = await r.json().catch(() => ({}));
     showToast('Failed to connect key: ' + (err.error || r.statusText), { kind: 'error' });
   }
 });
 
-$('#byok-key-input')?.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') $('#byok-connect-btn').click();
+$('#user-creds-key-input')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('#user-creds-connect-btn').click();
 });
 
-async function disconnectByok() {
-  const r = await authFetch('/api/byok/credential', {
+async function disconnectUserCreds() {
+  const r = await authFetch('/api/user-credentials/credential', {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
     body: JSON.stringify({ roomId: currentRoom }),
   });
   if (r.ok) {
     showToast('Disconnected your account.', { kind: 'success' });
-    await updateByokBanner(currentRoom);
+    await updateUserCredsBanner(currentRoom);
   } else {
     const err = await r.json().catch(() => ({}));
     showToast('Failed to disconnect: ' + (err.error || r.statusText), { kind: 'error' });
@@ -2442,15 +2442,15 @@ async function disconnectByok() {
 
 // The connected state lives as a compact key chip in the header; clicking it
 // disconnects (after a confirm), so the full banner no longer sits over the chat.
-// ── BYOK OAuth: connect a Claude subscription token ────────────────────────
+// ── UserCreds OAuth: connect a Claude subscription token ────────────────────────
 // Browser-mint OAuth: no terminal. Opening the form starts a server-side mint
 // (a throwaway container runs `claude setup-token`), surfaces the sign-in URL,
 // takes the pasted code, and onboards the resulting token per-member.
-let byokOauthSessionId = null;
-let byokOauthReturnFocus = null; // element to restore focus to when the modal closes
+let userCredsOauthSessionId = null;
+let userCredsOauthReturnFocus = null; // element to restore focus to when the modal closes
 
-function byokOauthStatus(msg, kind) {
-  const el = $('#byok-oauth-status');
+function userCredsOauthStatus(msg, kind) {
+  const el = $('#user-creds-oauth-status');
   if (!el) return;
   if (!msg) {
     el.hidden = true;
@@ -2458,27 +2458,27 @@ function byokOauthStatus(msg, kind) {
   }
   el.hidden = false;
   el.textContent = msg;
-  el.className = 'byok-oauth-status' + (kind ? ' ' + kind : '');
+  el.className = 'user-creds-oauth-status' + (kind ? ' ' + kind : '');
 }
 
-$('#byok-oauth-btn')?.addEventListener('click', async () => {
-  const modal = $('#byok-oauth-modal');
+$('#user-creds-oauth-btn')?.addEventListener('click', async () => {
+  const modal = $('#user-creds-oauth-modal');
   if (!modal) return;
-  const isCodex = byokProvider === 'codex';
-  const title = $('#byok-oauth-title');
-  if (title) title.textContent = `Connect to ${byokWords(byokProvider).name}`;
-  $('#byok-oauth-step2').hidden = true;
-  $('#byok-oauth-submit').hidden = true;
-  $('#byok-oauth-spinner').hidden = false; // spinner while the mint warms up
-  const code = $('#byok-oauth-code');
+  const isCodex = userCredsProvider === 'codex';
+  const title = $('#user-creds-oauth-title');
+  if (title) title.textContent = `Connect to ${userCredsWords(userCredsProvider).name}`;
+  $('#user-creds-oauth-step2').hidden = true;
+  $('#user-creds-oauth-submit').hidden = true;
+  $('#user-creds-oauth-spinner').hidden = false; // spinner while the mint warms up
+  const code = $('#user-creds-oauth-code');
   if (code) code.value = '';
-  const codexCode = $('#byok-oauth-codex-code');
-  byokOauthReturnFocus = document.activeElement; // restore focus here on close
+  const codexCode = $('#user-creds-oauth-codex-code');
+  userCredsOauthReturnFocus = document.activeElement; // restore focus here on close
   modal.hidden = false;
-  $('#byok-oauth-close')?.focus(); // move focus into the dialog
-  byokOauthStatus('Preparing sign-in…', '');
+  $('#user-creds-oauth-close')?.focus(); // move focus into the dialog
+  userCredsOauthStatus('Preparing sign-in…', '');
   try {
-    const startUrl = isCodex ? '/api/byok/codex/start' : '/api/byok/oauth/start';
+    const startUrl = isCodex ? '/api/user-credentials/codex/start' : '/api/user-credentials/oauth/start';
     const r = await authFetch(startUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
@@ -2486,15 +2486,15 @@ $('#byok-oauth-btn')?.addEventListener('click', async () => {
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.statusText);
-    byokOauthSessionId = data.sessionId;
-    const link = $('#byok-oauth-link');
+    userCredsOauthSessionId = data.sessionId;
+    const link = $('#user-creds-oauth-link');
     if (link) {
       link.href = data.url;
-      link.textContent = `Open ${byokWords(byokProvider).name} sign-in ↗`;
+      link.textContent = `Open ${userCredsWords(userCredsProvider).name} sign-in ↗`;
     }
     // Claude: paste a code back. Codex: enter a pairing code at the site, then approve.
     if (code) code.hidden = isCodex;
-    const codeLabel = $('#byok-oauth-code-label');
+    const codeLabel = $('#user-creds-oauth-code-label');
     if (codeLabel) codeLabel.hidden = isCodex;
     if (codexCode) {
       codexCode.hidden = !isCodex;
@@ -2504,48 +2504,48 @@ $('#byok-oauth-btn')?.addEventListener('click', async () => {
           : 'Open the link, then approve the sign-in.'
         : '';
     }
-    const submit = $('#byok-oauth-submit');
+    const submit = $('#user-creds-oauth-submit');
     if (submit) submit.textContent = isCodex ? 'I’ve approved — connect' : 'Connect';
-    $('#byok-oauth-spinner').hidden = true;
-    $('#byok-oauth-step2').hidden = false;
-    $('#byok-oauth-submit').hidden = false;
-    byokOauthStatus(isCodex ? 'Open the link, enter the code, and approve — then click connect.' : '', '');
-    $('#byok-oauth-link').focus();
+    $('#user-creds-oauth-spinner').hidden = true;
+    $('#user-creds-oauth-step2').hidden = false;
+    $('#user-creds-oauth-submit').hidden = false;
+    userCredsOauthStatus(isCodex ? 'Open the link, enter the code, and approve — then click connect.' : '', '');
+    $('#user-creds-oauth-link').focus();
   } catch (err) {
-    $('#byok-oauth-spinner').hidden = true;
-    byokOauthStatus(err.message || 'Could not start sign-in.', 'error');
+    $('#user-creds-oauth-spinner').hidden = true;
+    userCredsOauthStatus(err.message || 'Could not start sign-in.', 'error');
   }
 });
 
-function closeByokOauthModal() {
-  if (byokOauthSessionId) {
-    const cancelUrl = byokProvider === 'codex' ? '/api/byok/codex/cancel' : '/api/byok/oauth/cancel';
+function closeUserCredsOauthModal() {
+  if (userCredsOauthSessionId) {
+    const cancelUrl = userCredsProvider === 'codex' ? '/api/user-credentials/codex/cancel' : '/api/user-credentials/oauth/cancel';
     authFetch(cancelUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
-      body: JSON.stringify({ sessionId: byokOauthSessionId }),
+      body: JSON.stringify({ sessionId: userCredsOauthSessionId }),
     }).catch(() => {});
-    byokOauthSessionId = null;
+    userCredsOauthSessionId = null;
   }
-  const modal = $('#byok-oauth-modal');
+  const modal = $('#user-creds-oauth-modal');
   if (modal) modal.hidden = true;
   // Return focus to whatever opened the dialog (a11y dismissal contract).
-  if (byokOauthReturnFocus && typeof byokOauthReturnFocus.focus === 'function') byokOauthReturnFocus.focus();
-  byokOauthReturnFocus = null;
+  if (userCredsOauthReturnFocus && typeof userCredsOauthReturnFocus.focus === 'function') userCredsOauthReturnFocus.focus();
+  userCredsOauthReturnFocus = null;
 }
-$('#byok-oauth-cancel')?.addEventListener('click', closeByokOauthModal);
-$('#byok-oauth-close')?.addEventListener('click', closeByokOauthModal);
+$('#user-creds-oauth-cancel')?.addEventListener('click', closeUserCredsOauthModal);
+$('#user-creds-oauth-close')?.addEventListener('click', closeUserCredsOauthModal);
 // Click the backdrop (outside the modal card) to close.
-$('#byok-oauth-modal')?.addEventListener('click', (e) => {
-  if (e.target === $('#byok-oauth-modal')) closeByokOauthModal();
+$('#user-creds-oauth-modal')?.addEventListener('click', (e) => {
+  if (e.target === $('#user-creds-oauth-modal')) closeUserCredsOauthModal();
 });
 // Escape closes; Tab is trapped within the dialog (a11y, matches other modals).
 document.addEventListener('keydown', (e) => {
-  const modal = $('#byok-oauth-modal');
+  const modal = $('#user-creds-oauth-modal');
   if (!modal || modal.hidden) return;
   if (e.key === 'Escape') {
     e.preventDefault();
-    closeByokOauthModal();
+    closeUserCredsOauthModal();
     return;
   }
   if (e.key !== 'Tab') return;
@@ -2564,29 +2564,29 @@ document.addEventListener('keydown', (e) => {
   }
 });
 // Auto-submit once a code is pasted (Claude path) — no separate Connect click.
-$('#byok-oauth-code')?.addEventListener('paste', () => {
+$('#user-creds-oauth-code')?.addEventListener('paste', () => {
   setTimeout(() => {
-    const submit = $('#byok-oauth-submit');
-    if (submit && !submit.hidden && ($('#byok-oauth-code')?.value || '').trim()) submit.click();
+    const submit = $('#user-creds-oauth-submit');
+    if (submit && !submit.hidden && ($('#user-creds-oauth-code')?.value || '').trim()) submit.click();
   }, 0);
 });
 
-$('#byok-oauth-submit')?.addEventListener('click', async () => {
-  const isCodex = byokProvider === 'codex';
-  const code = ($('#byok-oauth-code')?.value || '').trim();
-  if (!byokOauthSessionId) return;
+$('#user-creds-oauth-submit')?.addEventListener('click', async () => {
+  const isCodex = userCredsProvider === 'codex';
+  const code = ($('#user-creds-oauth-code')?.value || '').trim();
+  if (!userCredsOauthSessionId) return;
   if (!isCodex && !code) return; // Claude needs the pasted code; Codex needs none.
-  const btn = $('#byok-oauth-submit');
+  const btn = $('#user-creds-oauth-submit');
   btn.disabled = true;
-  $('#byok-oauth-step2').hidden = true;
-  $('#byok-oauth-spinner').hidden = false; // spinner while connecting
-  const { subWord } = byokWords(byokProvider);
-  byokOauthStatus('Connecting…', '');
+  $('#user-creds-oauth-step2').hidden = true;
+  $('#user-creds-oauth-spinner').hidden = false; // spinner while connecting
+  const { subWord } = userCredsWords(userCredsProvider);
+  userCredsOauthStatus('Connecting…', '');
   try {
-    const finishUrl = isCodex ? '/api/byok/codex/finish' : '/api/byok/oauth/code';
+    const finishUrl = isCodex ? '/api/user-credentials/codex/finish' : '/api/user-credentials/oauth/code';
     const body = isCodex
-      ? { roomId: currentRoom, sessionId: byokOauthSessionId }
-      : { roomId: currentRoom, sessionId: byokOauthSessionId, code };
+      ? { roomId: currentRoom, sessionId: userCredsOauthSessionId }
+      : { roomId: currentRoom, sessionId: userCredsOauthSessionId, code };
     const r = await authFetch(finishUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
@@ -2594,14 +2594,14 @@ $('#byok-oauth-submit')?.addEventListener('click', async () => {
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.statusText);
-    byokOauthSessionId = null;
+    userCredsOauthSessionId = null;
     showToast(`Connected your ${subWord}.`, { kind: 'success' });
-    $('#byok-oauth-modal').hidden = true;
-    await updateByokBanner(currentRoom);
+    $('#user-creds-oauth-modal').hidden = true;
+    await updateUserCredsBanner(currentRoom);
   } catch (err) {
-    $('#byok-oauth-spinner').hidden = true;
-    $('#byok-oauth-step2').hidden = false; // restore so they can retry
-    byokOauthStatus(err.message || 'Could not connect.', 'error');
+    $('#user-creds-oauth-spinner').hidden = true;
+    $('#user-creds-oauth-step2').hidden = false; // restore so they can retry
+    userCredsOauthStatus(err.message || 'Could not connect.', 'error');
   } finally {
     btn.disabled = false;
   }
@@ -5705,7 +5705,7 @@ async function openRoomDetail(roomId) {
 
   await refreshRoomWiredAgents(roomId);
 
-  // BYOK credential-mode selector — admin/owner only (canArchive implies that).
+  // UserCreds credential-mode selector — admin/owner only (canArchive implies that).
   const credSection = $('#room-credential-mode-section');
   if (credSection) {
     if (room && room.canArchive) {
@@ -6105,14 +6105,14 @@ $('#room-credential-modes')?.addEventListener('click', async (e) => {
     const hintEl = $('#room-cred-default-hint');
     if (hintEl) hintEl.textContent = '';
     const label = { disabled: 'off', optional: 'optional', required: 'required' }[mode] ?? mode;
-    showToast(`Member credentials: ${label}.`, { kind: 'success' });
-    if (selectedRoomId === currentRoom) updateByokBanner(currentRoom);
+    showToast(`User credentials: ${label}.`, { kind: 'success' });
+    if (selectedRoomId === currentRoom) updateUserCredsBanner(currentRoom);
   } else {
     const err = await r.json().catch(() => ({}));
     showToast('Failed to set mode: ' + (err.error || r.statusText), { kind: 'error' });
   }
 });
-// Per-room credential TYPES moved to Settings → Member credentials (global); the
+// Per-room credential TYPES moved to Settings → User credentials (global); the
 // room only sets the mode override above.
 $('#room-rename-save')?.addEventListener('click', saveRoomName);
 $('#room-rename-input')?.addEventListener('keydown', (e) => {

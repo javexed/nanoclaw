@@ -201,17 +201,17 @@ async function spawnContainer(session: Session): Promise<void> {
 
   const mounts = buildMounts(agentGroup, session, containerConfig, provider, contribution);
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
-  // Run any module pre-spawn hooks BEFORE resolving identity/env. BYOK uses this
+  // Run any module pre-spawn hooks BEFORE resolving identity/env. UserCreds uses this
   // for lazy enrollment: a connected member's first use of a room creates the
   // per-member OneCLI agent here, so resolveAgentIdentity below finds it ready.
   await runSessionPrepareHooks(agentGroup.id, session.thread_id);
   // OneCLI agent identifier defaults to the agent group id (stable, reversible
-  // via getAgentGroup() for approval routing). An installed module (BYOK) may
+  // via getAgentGroup() for approval routing). An installed module (UserCreds) may
   // override it for a per-member session so the container spawns under the
   // member's own OneCLI agent (their key); approval routing then reverses it
-  // via the byok_credentials map.
+  // via the user_credential_members map.
   const agentIdentifier = resolveAgentIdentity(agentGroup.id, session.thread_id) ?? agentGroup.id;
-  // Module-contributed env for this session (BYOK OAuth injects a sentinel
+  // Module-contributed env for this session (UserCreds OAuth injects a sentinel
   // CLAUDE_CODE_OAUTH_TOKEN to flip Claude Code into OAuth mode; OneCLI swaps the
   // real token on the wire). Empty for normal sessions.
   const extraEnv = resolveContainerEnv(agentGroup.id, session.thread_id);
@@ -565,7 +565,7 @@ async function buildContainerArgs(
   }
   log.info('OneCLI gateway applied', { containerName });
 
-  // Module-contributed env (BYOK OAuth: a sentinel CLAUDE_CODE_OAUTH_TOKEN).
+  // Module-contributed env (UserCreds OAuth: a sentinel CLAUDE_CODE_OAUTH_TOKEN).
   // Applied AFTER the OneCLI gateway so it wins on key collisions (last `-e`
   // wins). Anthropic still routes through OneCLI, which swaps the sentinel bearer
   // for the member's real vault token on the wire.

@@ -85,7 +85,7 @@ export type SessionMode = 'shared' | 'per-thread' | 'agent-shared';
 
 /**
  * Optional per-message session-key override, registered by an installed module
- * (e.g. BYOK). Given the messaging group + agent + resolved sender, it can
+ * (e.g. UserCreds). Given the messaging group + agent + resolved sender, it can
  * redirect the turn to a different session (mode + threadId) — e.g. a
  * per-member session keyed by userId. Core ships with no resolver (returns
  * null → unchanged behavior); the module self-registers at import time.
@@ -94,7 +94,7 @@ export interface SessionKeyOverride {
   sessionMode: SessionMode;
   threadId: string | null;
 }
-/** A resolver may BLOCK a turn (e.g. a 'required' BYOK room where the member
+/** A resolver may BLOCK a turn (e.g. a 'required' UserCreds room where the member
  * has no key) — the router then declines to wake and shows the message. */
 export interface BlockedTurn {
   block: string;
@@ -302,10 +302,10 @@ export interface ContextMessage {
 }
 
 /**
- * Idempotently write a batch of inbound rows into a session (BYOK shared-context
+ * Idempotently write a batch of inbound rows into a session (UserCreds shared-context
  * fan-out). Opens inbound.db once, skips ids already present, and inserts the
  * rest — so re-syncing the room transcript each turn only adds genuinely new
- * messages. Caller supplies stable ids (e.g. `byok-<session>-<roomMsgId>`).
+ * messages. Caller supplies stable ids (e.g. `user-creds-<session>-<roomMsgId>`).
  */
 export function syncSessionContext(agentGroupId: string, sessionId: string, messages: ContextMessage[]): void {
   if (messages.length === 0) return;
@@ -327,7 +327,7 @@ export function syncSessionContext(agentGroupId: string, sessionId: string, mess
 }
 
 /**
- * Optional per-member inbound writer (BYOK). For a per-member session's wake
+ * Optional per-member inbound writer (UserCreds). For a per-member session's wake
  * turn, the module writes the full shared room transcript (current message →
  * trigger=1, the rest → trigger=0 context) so the responding agent has the
  * whole conversation. Returns true if it handled the write; the router then

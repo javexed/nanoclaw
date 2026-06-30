@@ -19,10 +19,10 @@
  *     finish waits for `auth.json` to appear and returns its CONTENTS.
  *
  * This module only *produces* the credential (captured server-side, never round-
- * tripped through the browser). The BYOK onboard path decides what to do with it
+ * tripped through the browser). The UserCreds onboard path decides what to do with it
  * (storeUserCredential → an `anthropic` secret for Claude, an `openai` auth.json
  * secret for Codex). Keeping mint and storage separate is deliberate: the same
- * mint can later feed an operator shared-key path, and BYOK owns the per-member
+ * mint can later feed an operator shared-key path, and UserCreds owns the per-member
  * identity wiring.
  */
 import { spawn, execFile, type ChildProcessWithoutNullStreams } from 'child_process';
@@ -357,7 +357,7 @@ export async function startClaudeMint(userId: string): Promise<{ sessionId: stri
 
 /**
  * Submit the auth code and return the captured token. Does NOT store it — the
- * caller (BYOK onboard) owns persistence. Kills the session on the way out.
+ * caller (UserCreds onboard) owns persistence. Kills the session on the way out.
  */
 export async function mintClaudeToken(userId: string, sessionId: string, code: string): Promise<string> {
   const session = sessions.get(sessionId);
@@ -535,7 +535,7 @@ export async function startCodexMint(
 
 /**
  * Wait for the member to approve in their browser, then return the captured
- * auth.json contents. Does NOT store it — the caller (BYOK onboard) owns
+ * auth.json contents. Does NOT store it — the caller (UserCreds onboard) owns
  * persistence. Kills the session (and shreds CODEX_HOME) on the way out.
  */
 export async function finishCodexMint(userId: string, sessionId: string): Promise<string> {

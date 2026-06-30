@@ -1,7 +1,7 @@
-# Design: Shared-room BYOK via per-member containers
+# Design: Shared-room user credentials via per-member containers
 
-**Status:** shipping — the core architecture behind `/add-byok`.
-**Extended by:** [byok-oauth.md](byok-oauth.md) — the Claude **subscription** (OAuth) variant builds on everything here.
+**Status:** shipping — the core architecture behind `/add-userCreds`.
+**Extended by:** [user-creds-oauth.md](user-creds-oauth.md) — the Claude **subscription** (OAuth) variant builds on everything here.
 
 ## 1. Goal
 
@@ -34,7 +34,7 @@ can replay a co-participant's token. This is inherent to the shared-container
 model, not a bug a patch can close.
 
 That implementation is preserved as a documented dead-end on the
-`archive/byok-proxy-deadend` branch. **Do not revive it.**
+`archive/user-creds-proxy-deadend` branch. **Do not revive it.**
 
 ## 4. Architecture: per-member sessions
 
@@ -49,33 +49,33 @@ or steal.
   key-holder's message routes to a session keyed by their userId, so each member
   gets their own session / container / inbound+outbound DBs per room.
 - **The override lives in `deliverToAgent`** (`src/router.ts`), where both the
-  userId and the messaging group are in scope. When the room is BYOK and the
+  userId and the messaging group are in scope. When the room is user credentials and the
   sender has an active key, a registered key-override sets
   `effectiveSessionMode = 'per-thread'` and `sessionThreadId = userId`; otherwise
   routing is unchanged. (The webchat adapter can't do this itself — it sends
   `threadId = null` and the sender is resolved later in the pipeline.)
-- **Core stays BYOK-agnostic.** `src/container-runtime.ts` exposes
+- **Core stays user-credentials-agnostic.** `src/container-runtime.ts` exposes
   `registerAgentIdentityResolver` / `registerContainerEnvResolver` hooks; the
-  byok module registers the resolvers. At spawn, `src/container-runner.ts` calls
+  userCreds module registers the resolvers. At spawn, `src/container-runner.ts` calls
   `resolveAgentIdentity(agentGroup.id, session.thread_id)` — so the identity is
   derived from **trusted session state, never agent- or user-controllable
   input**.
 
 ## 5. Per-member OneCLI identity
 
-`byokAgentIdentifier(agentGroupId, userId)` (`src/modules/byok/identity.ts`)
-returns `byok-<userSlug>-<sha256(agentGroupId|userId)[:12]>`:
+`userCredsAgentIdentifier(agentGroupId, userId)` (`src/modules/user-credentials/identity.ts`)
+returns `user-creds-<userSlug>-<sha256(agentGroupId|userId)[:12]>`:
 
 - Lowercase `[a-z0-9-]` only (OneCLI's identifier constraint), so the raw userId
   (which contains `:` / `@`) is **never embedded or split**.
 - Deterministic, so idempotent onboarding and spawn always agree.
-- The owning agent group is recovered from the `byok_credentials` table
+- The owning agent group is recovered from the `user_credential_members` table
   (§7/§9), **not** by parsing the identifier.
 
 ## 6. Shared context via fan-out
 
 The agent must see the whole conversation even though turns run in separate
-per-member containers. `src/modules/byok/fanout.ts` writes each room message into
+per-member containers. `src/modules/user-credentials/fanout.ts` writes each room message into
 **every** member's session: `trigger = 1` (wake) only to the sender's session,
 `trigger = 0` (context) to the rest; the agent's reply is fanned into the
 non-producer sessions as `trigger = 0` too.
@@ -86,7 +86,7 @@ transcript the next time they speak.
 
 ## 7. Data model
 
-- **`byok_credentials`** (migration `020-byok-credentials.ts`): PK
+- **`user_credential_members`** (migration `020-user-creds-credentials.ts`): PK
   `(user_id, agent_group_id)`; `onecli_agent_id` (the per-member identity the
   container spawns under), `secret_id` (the member's OneCLI vault secret, reused
   across their agent-group rows), `status`, timestamps. An index on
@@ -95,18 +95,18 @@ transcript the next time they speak.
 - **`webchat_room_settings.credential_mode`**: `disabled` (default) | `optional`
   | `required` (§10).
 - The OAuth variant adds a `cred_type` discriminator only; the token lives in the
-  OneCLI vault like an API key — see [byok-oauth.md](byok-oauth.md).
+  OneCLI vault like an API key — see [user-creds-oauth.md](user-creds-oauth.md).
 
 ## 8. Flow
 
-**Onboard** (member, own key only) — `POST /api/byok/credential`
+**Onboard** (member, own key only) — `POST /api/user-credentials/credential`
 (`src/channels/webchat/server.ts`): CSRF-guarded, room-access gated, and bound to
 the **authenticated** userId (never a body-supplied user). `onboard.ts` then
 creates/updates the member's vault secret via `onecli`, ensures the per-member
-agent (`byokAgentIdentifier`), sets it to `selective` secret mode, and calls
+agent (`userCredsAgentIdentifier`), sets it to `selective` secret mode, and calls
 `setSecrets` with the merged set `{ member secret } ∪ { group tool secrets }`
 (reconstructed each time, so siblings are never clobbered), and persists the
-mapping in `byok_credentials`. Keys are never logged; `onecli` exec errors are
+mapping in `user_credential_members`. Keys are never logged; `onecli` exec errors are
 scrubbed of their argv (so a key can't leak via an error message).
 
 **Route + spawn** — `deliverToAgent` keys the session to the userId (§4);
@@ -121,14 +121,14 @@ offboarding lever.
 ## 9. Approval routing
 
 A credentialed-action approval from a per-member container arrives with
-`externalId = byok-<slug>-<hash>` — not an agent-group id.
+`externalId = user-creds-<slug>-<hash>` — not an agent-group id.
 `src/modules/approvals/onecli-approvals.ts` first tries `getAgentGroup(externalId)`;
 on a miss it calls a registered fallback (`registerApprovalAgentGroupFallback`,
-provided by the byok module) that reverses the identity via
-`byok_credentials(onecli_agent_id → agent_group_id)`. Approver selection then
+provided by the userCreds module) that reverses the identity via
+`user_credential_members(onecli_agent_id → agent_group_id)`. Approver selection then
 proceeds normally (scoped admin → global admin → owner). This is **table-based
 reversal, not string-splitting** — robust to the identifier charset, and the only
-thing keeping BYOK approvals routable (a missing fallback would auto-deny).
+thing keeping user credentials approvals routable (a missing fallback would auto-deny).
 
 ## 10. No-key handling
 
@@ -138,7 +138,7 @@ Per the room's `credential_mode`:
 - **`optional`** — key-holders run per-member; members without a key use the
   shared agent.
 - **`required`** — a member without a key is **not woken** (drop reason
-  `byok-required-no-key`) and gets connect-your-key guidance; there is no shared
+  `user-creds-required-no-key`) and gets connect-your-key guidance; there is no shared
   fallback.
 
 ## 11. Security properties
@@ -153,14 +153,14 @@ Per the room's `credential_mode`:
   approval routing, and onboarding authz all held up. One credential-in-logs
   hygiene finding (an `onecli` exec error embedding the key in its argv) was
   fixed at the `onecli()` chokepoint. Residual operational risks (onboarding
-  argv exposure, OneCLI as trust anchor) are catalogued in the `/add-byok`
+  argv exposure, OneCLI as trust anchor) are catalogued in the `/add-userCreds`
   SKILL.md "Security review & residual risks" section.
 
 ## 12. Touch points
 
-- **BYOK-owned:** `src/modules/byok/` (identity, db, onboard, onecli-admin,
-  fanout, crypto, index), migrations `020-byok-credentials.ts` /
-  `021-byok-oauth.ts`.
+- **user-credentials-owned:** `src/modules/user-credentials/` (identity, db, onboard, onecli-admin,
+  fanout, crypto, index), migrations `020-user-creds-credentials.ts` /
+  `021-user-creds-oauth.ts`.
 - **Core hooks (additive):** `src/router.ts` (per-member keying + no-key drop),
   `src/container-runtime.ts` (resolver registration), `src/container-runner.ts`
   (spawn identity + env), `src/modules/approvals/onecli-approvals.ts` (approval

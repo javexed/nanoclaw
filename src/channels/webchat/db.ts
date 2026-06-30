@@ -511,7 +511,7 @@ export function setRoomEngageDefault(roomId: string, mode: EngageDefault): void 
     .run(roomId, mode, Date.now());
 }
 
-// ── BYOK: per-room credential mode ──
+// ── UserCreds: per-room credential mode ──
 export type CredentialMode = 'disabled' | 'optional' | 'required';
 
 /** Secure by default: rooms with no settings row read as 'disabled'. */
@@ -533,7 +533,7 @@ export function setRoomCredentialMode(roomId: string, mode: CredentialMode): voi
 }
 
 /**
- * BYOK OAuth per-room toggle (subscription tokens). Off by default; orthogonal
+ * UserCreds OAuth per-room toggle (subscription tokens). Off by default; orthogonal
  * to credential_mode. The column is absent until its migration runs, so read
  * defensively and treat any error/missing value as not-allowed.
  */
@@ -558,8 +558,8 @@ export function setRoomOauthAllowed(roomId: string, allowed: boolean): void {
     .run(roomId, allowed ? 1 : 0, Date.now());
 }
 
-// ── BYOK: workspace-wide credentials policy (singleton webchat_settings) ──
-// Which member-credential TYPES the workspace accepts + the default room mode.
+// ── UserCreds: workspace-wide credentials policy (singleton webchat_settings) ──
+// Which user-credential TYPES the workspace accepts + the default room mode.
 // Types live here (configured once) rather than per room.
 export interface CredentialsConfig {
   defaultMode: CredentialMode;

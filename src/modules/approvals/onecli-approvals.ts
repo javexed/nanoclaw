@@ -38,8 +38,8 @@ type Decision = 'approve' | 'deny';
 
 /**
  * Fallback to recover an agent group id from a OneCLI external identifier that
- * is NOT itself an agent group id (e.g. a BYOK per-member identity). Registered
- * by the byok module; default returns null (normal identifiers resolve directly
+ * is NOT itself an agent group id (e.g. a UserCreds per-member identity). Registered
+ * by the userCreds module; default returns null (normal identifiers resolve directly
  * via getAgentGroup).
  */
 type ApprovalAgentGroupFallback = (externalId: string) => string | null;
@@ -135,8 +135,8 @@ async function handleRequest(request: ApprovalRequest): Promise<Decision> {
   // Originating agent group is carried on the request via OneCLI's agent
   // identifier (set by container-runner.ts to agentGroup.id). Use it as
   // the scope for approver selection: admin @ group → global admin → owner.
-  // A per-member BYOK container uses a derived identity (byok-…) that isn't an
-  // agent group id; a registered fallback (byok module) reverses it to the
+  // A per-member UserCreds container uses a derived identity (user-creds-…) that isn't an
+  // agent group id; a registered fallback (userCreds module) reverses it to the
   // owning group so approvals still route correctly.
   const externalId = request.agent.externalId;
   let agentGroupId = externalId ? (getAgentGroup(externalId)?.id ?? null) : null;

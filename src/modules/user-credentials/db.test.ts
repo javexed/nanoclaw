@@ -3,17 +3,17 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { initTestDb, closeDb, getDb } from '../../db/connection.js';
 import { runMigrations } from '../../db/migrations/index.js';
 import {
-  getByokCredential,
+  getUserCredsCredential,
   userHasActiveKey,
   userHasActiveOauth,
   getUserSecretId,
   userHasConnectedCredential,
-  agentGroupForByokAgent,
+  agentGroupForUserCredsAgent,
   activeMembersForGroup,
-  upsertByokCredential,
+  upsertUserCredsCredential,
   upsertUserCredential,
   setUserCredentialStatus,
-  setByokStatus,
+  setUserCredsStatus,
 } from './db.js';
 import {
   getRoomCredentialMode,
@@ -28,11 +28,11 @@ beforeEach(() => {
 });
 afterEach(() => closeDb());
 
-describe('byok_credentials', () => {
+describe('user_credential_members', () => {
   it('upsert + get round-trips and marks active', () => {
-    upsertByokCredential('webchat:alice', 'ag-1', 'byok-alice-aaa', 'sec-1');
-    expect(getByokCredential('webchat:alice', 'ag-1')).toMatchObject({
-      onecli_agent_id: 'byok-alice-aaa',
+    upsertUserCredsCredential('webchat:alice', 'ag-1', 'user-creds-alice-aaa', 'sec-1');
+    expect(getUserCredsCredential('webchat:alice', 'ag-1')).toMatchObject({
+      onecli_agent_id: 'user-creds-alice-aaa',
       secret_id: 'sec-1',
       status: 'active',
     });
@@ -54,34 +54,34 @@ describe('byok_credentials', () => {
     expect(getUserSecretId('webchat:alice')).toBeNull();
   });
 
-  it('recovers the agent group from a BYOK agent id (approval routing)', () => {
-    upsertByokCredential('webchat:alice', 'ag-1', 'byok-alice-aaa', 'sec-1');
-    expect(agentGroupForByokAgent('byok-alice-aaa')).toBe('ag-1');
-    expect(agentGroupForByokAgent('unknown')).toBeNull();
+  it('recovers the agent group from a UserCreds agent id (approval routing)', () => {
+    upsertUserCredsCredential('webchat:alice', 'ag-1', 'user-creds-alice-aaa', 'sec-1');
+    expect(agentGroupForUserCredsAgent('user-creds-alice-aaa')).toBe('ag-1');
+    expect(agentGroupForUserCredsAgent('unknown')).toBeNull();
   });
 
   it('lists only ACTIVE members for a group (fan-out source)', () => {
-    upsertByokCredential('webchat:alice', 'ag-1', 'byok-alice', 'sec-a');
-    upsertByokCredential('webchat:bob', 'ag-1', 'byok-bob', 'sec-b');
-    upsertByokCredential('webchat:carol', 'ag-2', 'byok-carol', 'sec-c');
-    setByokStatus('webchat:bob', 'ag-1', 'revoked');
+    upsertUserCredsCredential('webchat:alice', 'ag-1', 'user-creds-alice', 'sec-a');
+    upsertUserCredsCredential('webchat:bob', 'ag-1', 'user-creds-bob', 'sec-b');
+    upsertUserCredsCredential('webchat:carol', 'ag-2', 'user-creds-carol', 'sec-c');
+    setUserCredsStatus('webchat:bob', 'ag-1', 'revoked');
     expect(activeMembersForGroup('ag-1').sort()).toEqual(['webchat:alice']);
   });
 
   it('revoke clears active status', () => {
-    upsertByokCredential('webchat:alice', 'ag-1', 'byok-alice', 'sec-1');
-    setByokStatus('webchat:alice', 'ag-1', 'revoked');
+    upsertUserCredsCredential('webchat:alice', 'ag-1', 'user-creds-alice', 'sec-1');
+    setUserCredsStatus('webchat:alice', 'ag-1', 'revoked');
     expect(userHasActiveKey('webchat:alice', 'ag-1')).toBe(false);
     // re-onboard re-activates
-    upsertByokCredential('webchat:alice', 'ag-1', 'byok-alice', 'sec-1');
+    upsertUserCredsCredential('webchat:alice', 'ag-1', 'user-creds-alice', 'sec-1');
     expect(userHasActiveKey('webchat:alice', 'ag-1')).toBe(true);
   });
 });
 
-describe('byok oauth credentials (vault-only)', () => {
+describe('userCreds oauth credentials (vault-only)', () => {
   it('stores an oauth credential with a vault secret_id + oauth cred_type', () => {
-    upsertByokCredential('webchat:alice', 'ag-1', 'byok-alice-aaa', 'sec-oat', 'oauth_token');
-    const row = getByokCredential('webchat:alice', 'ag-1')!;
+    upsertUserCredsCredential('webchat:alice', 'ag-1', 'user-creds-alice-aaa', 'sec-oat', 'oauth_token');
+    const row = getUserCredsCredential('webchat:alice', 'ag-1')!;
     expect(row.cred_type).toBe('oauth_token');
     expect(row.secret_id).toBe('sec-oat'); // lives in the OneCLI vault, like api keys
     expect(userHasActiveKey('webchat:alice', 'ag-1')).toBe(true);
@@ -89,20 +89,20 @@ describe('byok oauth credentials (vault-only)', () => {
   });
 
   it('userHasActiveOauth is false for api_key rows and after revoke', () => {
-    upsertByokCredential('webchat:bob', 'ag-1', 'byok-bob', 'sec-1'); // default api_key
+    upsertUserCredsCredential('webchat:bob', 'ag-1', 'user-creds-bob', 'sec-1'); // default api_key
     expect(userHasActiveOauth('webchat:bob', 'ag-1')).toBe(false);
 
-    upsertByokCredential('webchat:alice', 'ag-1', 'byok-alice', 'sec-oat', 'oauth_token');
-    setByokStatus('webchat:alice', 'ag-1', 'revoked');
+    upsertUserCredsCredential('webchat:alice', 'ag-1', 'user-creds-alice', 'sec-oat', 'oauth_token');
+    setUserCredsStatus('webchat:alice', 'ag-1', 'revoked');
     expect(userHasActiveOauth('webchat:alice', 'ag-1')).toBe(false); // revoked
   });
 
   it('switching oauth→api_key flips cred_type and updates secret_id', () => {
-    upsertByokCredential('webchat:alice', 'ag-1', 'byok-alice', 'sec-oat', 'oauth_token');
+    upsertUserCredsCredential('webchat:alice', 'ag-1', 'user-creds-alice', 'sec-oat', 'oauth_token');
     expect(userHasActiveOauth('webchat:alice', 'ag-1')).toBe(true);
 
-    upsertByokCredential('webchat:alice', 'ag-1', 'byok-alice', 'sec-key', 'api_key');
-    const row = getByokCredential('webchat:alice', 'ag-1')!;
+    upsertUserCredsCredential('webchat:alice', 'ag-1', 'user-creds-alice', 'sec-key', 'api_key');
+    const row = getUserCredsCredential('webchat:alice', 'ag-1')!;
     expect(row.cred_type).toBe('api_key');
     expect(row.secret_id).toBe('sec-key');
     expect(userHasActiveOauth('webchat:alice', 'ag-1')).toBe(false);
