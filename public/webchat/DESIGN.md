@@ -181,6 +181,10 @@ at all 8 destructive sites).
   "+ New agent" to create one.)
 - **Empty states:** one sentence, sentence case, no trailing period
   (e.g. "No unwired agents — switch to New to create one").
+- **Term — "user credentials":** the bring-your-own-key feature is **"user
+  credentials"** in the UI. Never "member credentials" (the old label) or "BYOK"
+  (internal jargon — `byok` no longer appears anywhere). The per-room states are
+  *off* / *optional* / *required*.
 
 ---
 
@@ -229,7 +233,27 @@ with the rows, `--text-dim` → `--accent` on hover. Microcopy follows §5: rese
 exception: it uses a bare inline "+" button placed on the room row (or the last
 thread row), not a footer "+ New thread" row.
 
-## 7. Enforcing this
+---
+
+## 7. Views
+
+The PWA has one chat surface plus a set of **full-views** — full-screen sections
+(siblings of `#chat`) opened from the header **overflow menu** (⋯): **Manage**
+(Agents / Models), **Topology**, **Wiring**, **Permissions**, **Settings**, and
+**Help**. Each is a `<section id="…" hidden>` with a `.dash-header` (a
+`.mobile-back` chevron + title) and a scrollable `.dash-body`.
+
+Open/close is uniform — copy an existing trio (e.g. `openMatrix` /
+`teardownMatrix` / `toggleMatrix`): `hideOtherFullViews('<name>')`, toggle the
+section's `hidden`, flip the `in-dashboard` body class, and route history through
+`openView('<name>', teardown)` / `closeView('<name>')` so the OS/browser back
+gesture works. A new view MUST also add its `keep !== '<name>'` branch to
+`hideOtherFullViews` or it will stack on top of the others. Settings is the
+exception — a `.modal-overlay`, not a full-view.
+
+---
+
+## 8. Enforcing this
 
 Once code is migrated onto the tokens, add a stylelint
 `declaration-property-value-allowed-list` for `border-radius`, `font-size`, and

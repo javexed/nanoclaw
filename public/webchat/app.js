@@ -560,6 +560,7 @@ $('#overflow-menu')?.addEventListener('click', (e) => {
   else if (action === 'dashboard') toggleDashboard();
   else if (action === 'permissions') togglePermissions();
   else if (action === 'settings') openSettings();
+  else if (action === 'help') toggleHelp();
 });
 document.addEventListener('click', (e) => {
   const menu = $('#overflow-menu');
@@ -1373,6 +1374,16 @@ function renderRooms(rooms) {
   } else {
     toggleBtn.hidden = false;
     toggleBtn.textContent = showArchived ? `Hide ${archived.length} archived` : `Show ${archived.length} archived`;
+  }
+  // Hidden-rooms toggle — mirrors the archived one. Without it a hidden room can
+  // never be brought back from the GUI (the only way to un-hide is to see it first).
+  const hiddenCount = rooms.filter((r) => r.hidden).length;
+  const hiddenBtn = $('#hidden-toggle');
+  if (hiddenCount === 0) {
+    hiddenBtn.hidden = true;
+  } else {
+    hiddenBtn.hidden = false;
+    hiddenBtn.textContent = showHidden ? `Hide ${hiddenCount} hidden` : `Show ${hiddenCount} hidden`;
   }
   // Divider sentinel between the pinned group and the rest — only when both
   // groups are non-empty.
@@ -4248,6 +4259,10 @@ function hideOtherFullViews(keep) {
     matrixActive = false;
     $('#matrix').hidden = true;
   }
+  if (keep !== 'help' && helpActive) {
+    helpActive = false;
+    $('#help').hidden = true;
+  }
 }
 
 function openDashboard() {
@@ -4507,6 +4522,33 @@ function toggleMatrix() {
 }
 $('#matrix-back')?.addEventListener('click', toggleMatrix);
 $('#matrix-refresh')?.addEventListener('click', refreshMatrix);
+
+// Help — a static full-view (no data to load); same open/close mechanics as the
+// matrix/topology dashboards so the back gesture and view stacking work for free.
+let helpActive = false;
+function openHelp() {
+  closeAgentDetail();
+  closeRoomDetail();
+  closeModelDetail();
+  hideOtherFullViews('help');
+  helpActive = true;
+  $('#chat').hidden = true;
+  $('#help').hidden = false;
+  $('#app').classList.add('in-dashboard');
+  $('#app').classList.remove('in-room');
+  openView('help', teardownHelp);
+}
+function teardownHelp() {
+  helpActive = false;
+  $('#chat').hidden = false;
+  $('#help').hidden = true;
+  $('#app').classList.remove('in-dashboard');
+}
+function toggleHelp() {
+  if (helpActive) closeView('help');
+  else openHelp();
+}
+$('#help-back')?.addEventListener('click', toggleHelp);
 
 async function refreshMatrix() {
   const canvas = $('#matrix-canvas');
@@ -6635,6 +6677,11 @@ $('#create-room-btn').addEventListener('click', openRoomCreate);
 $('#archived-toggle').addEventListener('click', () => {
   showArchived = !showArchived;
   sessionStorage.setItem('webchat:showArchived', showArchived ? '1' : '0');
+  if (lastRoomsList.length) renderRooms(lastRoomsList);
+});
+$('#hidden-toggle').addEventListener('click', () => {
+  showHidden = !showHidden;
+  sessionStorage.setItem('webchat:showHidden', showHidden ? '1' : '0');
   if (lastRoomsList.length) renderRooms(lastRoomsList);
 });
 $('#room-create-close').addEventListener('click', closeRoomDetail);

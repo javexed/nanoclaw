@@ -3329,6 +3329,26 @@ a.lightbox-btn {
 #matrix[hidden] {
   display: none;
 }
+#help {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+#help[hidden] {
+  display: none;
+}
+/* Readable measure for the Help prose, centred in the full-view body. */
+.help-content {
+  max-width: 60ch;
+  margin: 0 auto;
+}
+.help-content .settings-section-title {
+  margin-top: 22px;
+}
+.help-content .setting-help {
+  line-height: 1.5;
+}
 .matrix-body {
   flex: 1;
   min-height: 0;
