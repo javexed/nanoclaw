@@ -45,7 +45,8 @@ import { createMessagingGroup, getMessagingGroup, getMessagingGroupByPlatform } 
 import { registerChannelAdapter } from '../channel-registry.js';
 import type { AgentActivityStatus, ChannelAdapter, ChannelSetup, OutboundMessage } from '../adapter.js';
 import { redactSensitiveData } from './redact.js';
-import { startWebchatServer, stopWebchatServer, type WebchatServer } from './server.js';
+import { startWebchatServer, stopWebchatServer, resolveEngagedDecision, type WebchatServer } from './server.js';
+import { setEngagedResolver } from '../../router.js';
 import {
   APPROVAL_INBOX_PREFIX,
   deleteWebchatApprovalIndex,
@@ -379,6 +380,11 @@ function guessMime(filename: string): string {
 registerChannelAdapter('webchat', {
   factory: () => (isEnabled() ? createAdapter() : null),
 });
+
+// Engaged-agents routing: in a webchat thread, route by the per-thread engaged
+// set (auto-engaging @mentioned agents) instead of per-wiring engage_mode. The
+// regular chat and non-webchat groups are untouched (resolver returns null).
+setEngagedResolver(resolveEngagedDecision);
 
 // Fan-out cleanup: when an approval resolves (first responder approves/rejects),
 // push an `approval_resolved` event to every other admin whose inbox got a copy

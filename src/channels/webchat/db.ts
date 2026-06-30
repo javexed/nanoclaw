@@ -296,6 +296,9 @@ export function deleteWebchatRoom(id: string): void {
     db.prepare(`DELETE FROM webchat_thread_reads WHERE room_id = ?`).run(id);
     db.prepare(`DELETE FROM webchat_threads WHERE room_id = ?`).run(id);
   }
+  if (hasTable(db, 'webchat_thread_engaged')) {
+    db.prepare(`DELETE FROM webchat_thread_engaged WHERE room_id = ?`).run(id);
+  }
   // Drop any agent_destinations rows pointing at this room. target_id has no
   // FK so they wouldn't block, just rot. Guarded — a2a module may not be installed.
   if (hasTable(db, 'agent_destinations')) {
@@ -491,23 +494,19 @@ export function clearPrimeAgentForWebchatRoom(roomId: string): void {
 
 // ── Room settings (engage_default) ──
 
-export type EngageDefault = 'broadcast' | 'mention-only';
+export type EngageDefault = 'mention-only';
 
 /**
- * Per-room engagement default used when no prime is configured. Controls
- * what `recomputeEngagePatterns` rewrites un-primed wirings to:
+ * Per-room engagement default used when no prime is configured. Un-primed
+ * wirings are rewritten by `recomputeEngagePatterns` to `\B@<folder>\b` —
+ * agents reply only when explicitly @-mentioned.
  *
- *   'broadcast'    → engage_pattern = '.'           (every agent responds)
- *   'mention-only' → engage_pattern = `\B@<folder>\b` (only addressed agents respond)
- *
- * Rooms with no row default to 'broadcast' so installs that predate this
- * setting see no behavior change.
+ * The legacy 'broadcast' mode (every wired agent answers every message) has
+ * been retired: it is no longer offered, and any legacy stored 'broadcast'
+ * value (or a room with no settings row) now reads as 'mention-only'.
  */
-export function getRoomEngageDefault(roomId: string): EngageDefault {
-  const row = getDb().prepare(`SELECT engage_default FROM webchat_room_settings WHERE room_id = ?`).get(roomId) as
-    | { engage_default: EngageDefault }
-    | undefined;
-  return row?.engage_default ?? 'broadcast';
+export function getRoomEngageDefault(_roomId: string): EngageDefault {
+  return 'mention-only';
 }
 
 export function setRoomEngageDefault(roomId: string, mode: EngageDefault): void {
@@ -535,7 +534,7 @@ export function setRoomCredentialMode(roomId: string, mode: CredentialMode): voi
   getDb()
     .prepare(
       `INSERT INTO webchat_room_settings (room_id, engage_default, credential_mode, updated_at)
-       VALUES (?, 'broadcast', ?, ?)
+       VALUES (?, 'mention-only', ?, ?)
        ON CONFLICT(room_id) DO UPDATE SET credential_mode = excluded.credential_mode, updated_at = excluded.updated_at`,
     )
     .run(roomId, mode, Date.now());
@@ -561,7 +560,7 @@ export function setRoomOauthAllowed(roomId: string, allowed: boolean): void {
   getDb()
     .prepare(
       `INSERT INTO webchat_room_settings (room_id, engage_default, oauth_allowed, updated_at)
-       VALUES (?, 'broadcast', ?, ?)
+       VALUES (?, 'mention-only', ?, ?)
        ON CONFLICT(room_id) DO UPDATE SET oauth_allowed = excluded.oauth_allowed, updated_at = excluded.updated_at`,
     )
     .run(roomId, allowed ? 1 : 0, Date.now());
@@ -668,7 +667,7 @@ export function setRoomModeOverride(roomId: string, mode: RoomModeOverride): voi
   getDb()
     .prepare(
       `INSERT INTO webchat_room_settings (room_id, engage_default, credential_mode_override, updated_at)
-       VALUES (?, 'broadcast', ?, ?)
+       VALUES (?, 'mention-only', ?, ?)
        ON CONFLICT(room_id) DO UPDATE SET credential_mode_override = excluded.credential_mode_override, updated_at = excluded.updated_at`,
     )
     .run(roomId, mode, Date.now());
@@ -1121,7 +1120,53 @@ export function deleteWebchatThread(roomId: string, threadId: string): void {
   const db = getDb();
   db.prepare(`DELETE FROM webchat_messages WHERE room_id = ? AND thread_id = ?`).run(roomId, threadId);
   db.prepare(`DELETE FROM webchat_thread_reads WHERE room_id = ? AND thread_id = ?`).run(roomId, threadId);
+  db.prepare(`DELETE FROM webchat_thread_engaged WHERE room_id = ? AND thread_id = ?`).run(roomId, threadId);
   db.prepare(`DELETE FROM webchat_threads WHERE room_id = ? AND thread_id = ?`).run(roomId, threadId);
+}
+
+// ── Per-thread engaged agents ──
+// A row = agent_group_id is engaged in (room_id, thread_id): it receives every
+// message in that thread and replies when addressed. Never the 'main' thread —
+// the regular chat stays mention-only. See docs/design/thread-engaged-agents.md.
+
+/** Engage an agent in a thread (idempotent). No-op for the 'main' thread. */
+export function engageAgent(roomId: string, threadId: string, agentGroupId: string, ts: number = Date.now()): void {
+  if (threadId === MAIN_THREAD) return;
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_thread_engaged (room_id, thread_id, agent_group_id, engaged_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(room_id, thread_id, agent_group_id) DO NOTHING`,
+    )
+    .run(roomId, threadId, agentGroupId, ts);
+}
+
+/** Disengage an agent from a thread (the × on a chip). No-op if not engaged. */
+export function disengageAgent(roomId: string, threadId: string, agentGroupId: string): void {
+  getDb()
+    .prepare(`DELETE FROM webchat_thread_engaged WHERE room_id = ? AND thread_id = ? AND agent_group_id = ?`)
+    .run(roomId, threadId, agentGroupId);
+}
+
+/** Agent group ids currently engaged in a thread. Empty for 'main'/regular chat. */
+export function getEngagedAgents(roomId: string, threadId: string): string[] {
+  if (threadId === MAIN_THREAD) return [];
+  const rows = getDb()
+    .prepare(
+      `SELECT agent_group_id FROM webchat_thread_engaged WHERE room_id = ? AND thread_id = ? ORDER BY engaged_at`,
+    )
+    .all(roomId, threadId) as { agent_group_id: string }[];
+  return rows.map((r) => r.agent_group_id);
+}
+
+/** True if the agent is engaged in the thread. */
+export function isAgentEngaged(roomId: string, threadId: string, agentGroupId: string): boolean {
+  if (threadId === MAIN_THREAD) return false;
+  return (
+    getDb()
+      .prepare(`SELECT 1 FROM webchat_thread_engaged WHERE room_id = ? AND thread_id = ? AND agent_group_id = ?`)
+      .get(roomId, threadId, agentGroupId) !== undefined
+  );
 }
 
 /** Mark a thread read for a user (monotonic high-water mark). */

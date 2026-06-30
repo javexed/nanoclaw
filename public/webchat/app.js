@@ -1236,6 +1236,14 @@ function connect() {
         // `main` — offer to continue in its own thread. Never moves anything.
         if (msg.room_id === currentRoom && msg.suggestion) showThreadSuggestion(msg.suggestion);
         break;
+      case 'engaged_set_changed':
+        // A thread's engaged-agent set changed — refresh the chips if it's the
+        // thread we're viewing (live across devices / from @mention auto-engage).
+        if (msg.room_id === currentRoom && msg.thread_id === currentThread) {
+          engagedAgents = msg.engaged || [];
+          renderEngagedChips();
+        }
+        break;
       case 'read_cleared': {
         // Another of this user's devices read the room — drop the stale badges.
         const cleared = (msg.room_id && unreadRooms.delete(msg.room_id)) | 0;
@@ -1562,6 +1570,8 @@ async function toggleRoomHide(roomId, hide) {
 // room's threads under it; switching a thread re-joins the room scoped to that
 // thread (server filters history). See docs/design/webchat-threads.md.
 let currentThread = 'main';
+let threadCreating = false; // true while the inline "new thread" input is open
+let engagedAgents = []; // [{id,name,folder}] engaged in the current thread (chips)
 let roomThreads = []; // threads of the open room (from GET /threads)
 const threadUnread = new Set(); // thread_ids with unread activity in the open room
 
@@ -1595,13 +1605,22 @@ function renderThreadList() {
   if (!host) return;
   host.innerHTML = '';
   for (const t of roomThreads) {
+    // The room row itself is the regular chat, so the implicit 'main' thread is
+    // never shown as its own row.
+    if (t.kind === 'main') continue;
     const row = document.createElement('div');
     row.className = 'thread-row' + (t.thread_id === currentThread ? ' active' : '');
     row.dataset.threadId = t.thread_id;
 
+    const glyph = document.createElement('span');
+    glyph.className = 'thread-glyph';
+    glyph.textContent = threadGlyph(t.kind);
+    glyph.setAttribute('aria-hidden', 'true');
+    row.appendChild(glyph);
+
     const label = document.createElement('span');
     label.className = 'thread-label';
-    label.textContent = `${threadGlyph(t.kind)} ${t.title}`;
+    label.textContent = t.title;
     row.appendChild(label);
 
     if (t.thread_id !== currentThread && threadUnread.has(t.thread_id)) {
@@ -1631,15 +1650,54 @@ function renderThreadList() {
     host.appendChild(row);
   }
 
-  const add = document.createElement('button');
-  add.className = 'thread-add';
-  add.type = 'button';
-  add.textContent = '+ thread';
-  add.addEventListener('click', (e) => {
-    e.stopPropagation();
-    createThreadPrompt();
-  });
-  host.appendChild(add);
+  if (threadCreating) {
+    // Inline new-thread creation — type a name, Enter creates, Esc/blur cancels.
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'thread-add-input';
+    input.placeholder = 'Thread name…';
+    input.maxLength = 80;
+    let settled = false;
+    const cancel = () => {
+      if (settled) return;
+      settled = true;
+      threadCreating = false;
+      renderThreadList();
+    };
+    const submit = () => {
+      if (settled) return;
+      const title = input.value.trim();
+      if (!title) return cancel();
+      settled = true;
+      threadCreating = false;
+      createThread(title);
+    };
+    input.addEventListener('click', (e) => e.stopPropagation());
+    input.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        submit();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        cancel();
+      }
+    });
+    input.addEventListener('blur', cancel);
+    host.appendChild(input);
+    setTimeout(() => input.focus(), 0);
+  } else {
+    const add = document.createElement('button');
+    add.className = 'thread-add';
+    add.type = 'button';
+    add.textContent = '+ New thread';
+    add.addEventListener('click', (e) => {
+      e.stopPropagation();
+      threadCreating = true;
+      renderThreadList();
+    });
+    host.appendChild(add);
+  }
 }
 
 function openThread(threadId) {
@@ -1651,16 +1709,106 @@ function openThread(threadId) {
   // Re-join the room scoped to this thread; the server returns thread history.
   ws.send(JSON.stringify({ type: 'join', room_id: currentRoom, thread_id: threadId }));
   renderThreadList();
+  loadEngaged();
 }
 
-async function createThreadPrompt() {
-  const title = prompt('New thread name');
-  if (!title || !title.trim()) return;
+// ── Engaged agents (chips above the composer) ──
+// A thread's engaged agents listen to the thread and reply when addressed.
+// @mention engages; the × on a chip disengages. Never shown in the regular chat.
+function renderEngagedChips() {
+  const host = $('#engaged-chips');
+  if (!host) return;
+  if (!currentRoom || currentThread === 'main' || engagedAgents.length === 0) {
+    host.hidden = true;
+    host.innerHTML = '';
+    return;
+  }
+  host.innerHTML = '';
+  for (const a of engagedAgents) {
+    const chip = document.createElement('span');
+    chip.className = 'engaged-chip';
+    const name = document.createElement('span');
+    name.className = 'engaged-chip-name';
+    name.textContent = `@${a.folder}`;
+    chip.appendChild(name);
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'engaged-chip-x';
+    x.setAttribute('aria-label', `Disengage ${a.name}`);
+    x.innerHTML = '<svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>';
+    x.addEventListener('click', () => disengageAgentInThread(a.id));
+    chip.appendChild(x);
+    host.appendChild(chip);
+  }
+  host.hidden = false;
+}
+
+async function loadEngaged() {
+  if (!currentRoom || currentThread === 'main') {
+    engagedAgents = [];
+    renderEngagedChips();
+    return;
+  }
+  const room = currentRoom;
+  const thread = currentThread;
+  try {
+    const res = await authFetch(
+      `/api/rooms/${encodeURIComponent(room)}/threads/${encodeURIComponent(thread)}/engaged`,
+    );
+    if (!res.ok) return;
+    const list = await res.json();
+    if (currentRoom === room && currentThread === thread) {
+      engagedAgents = list;
+      renderEngagedChips();
+    }
+  } catch {
+    /* network blip — leave stale chips */
+  }
+}
+
+async function engageAgentInThread(agentGroupId) {
+  if (!currentRoom || currentThread === 'main') return;
+  if (engagedAgents.some((a) => a.id === agentGroupId)) return; // already engaged
+  const room = currentRoom;
+  const thread = currentThread;
+  try {
+    const res = await authFetch(
+      `/api/rooms/${encodeURIComponent(room)}/threads/${encodeURIComponent(thread)}/engaged`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agentGroupId }) },
+    );
+    if (!res.ok) return;
+    const body = await res.json();
+    if (currentRoom === room && currentThread === thread && body.engaged) {
+      engagedAgents = body.engaged;
+      renderEngagedChips();
+    }
+  } catch {
+    /* ignore — the engaged_set_changed broadcast will reconcile */
+  }
+}
+
+async function disengageAgentInThread(agentGroupId) {
+  if (!currentRoom || currentThread === 'main') return;
+  const room = currentRoom;
+  const thread = currentThread;
+  engagedAgents = engagedAgents.filter((a) => a.id !== agentGroupId); // optimistic
+  renderEngagedChips();
+  try {
+    await authFetch(
+      `/api/rooms/${encodeURIComponent(room)}/threads/${encodeURIComponent(thread)}/engaged/${encodeURIComponent(agentGroupId)}`,
+      { method: 'DELETE' },
+    );
+  } catch {
+    /* the broadcast will reconcile if this failed */
+  }
+}
+
+async function createThread(title) {
   try {
     const r = await authFetch(`/api/rooms/${encodeURIComponent(currentRoom)}/threads`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: title.trim() }),
+      body: JSON.stringify({ title }),
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
     const thread = await r.json();
@@ -1668,6 +1816,7 @@ async function createThreadPrompt() {
     openThread(thread.thread_id);
   } catch (err) {
     showToast('Could not create thread: ' + (err.message || err), { kind: 'error' });
+    renderThreadList();
   }
 }
 
@@ -1802,8 +1951,11 @@ function joinRoom(roomId, roomName, jumpMessageId) {
   $('#members-overlay').classList.remove('visible');
   renderMembers([]);
   $('#messages').innerHTML = '<div class="empty-state">Loading…</div>';
-  // Thread state: restore the last-open thread for this room (default 'main').
-  currentThread = sessionStorage.getItem('lastThread:' + roomId) || 'main';
+  // No "Main" thread row — the room itself IS the regular chat. Entering a room
+  // always lands in that regular chat ('main' keys the room's shared session);
+  // threads are opened explicitly from the sidebar.
+  currentThread = 'main';
+  loadEngaged(); // clears the chips row (regular chat never has engaged agents)
   threadUnread.clear();
   roomThreads = [];
   ws.send(JSON.stringify({ type: 'join', room_id: roomId, thread_id: currentThread }));
@@ -3447,6 +3599,11 @@ function acceptMention(input) {
   dismissMentionPopover();
   // Fire input so the textarea auto-resize logic (if any) catches up.
   input.dispatchEvent(new Event('input'));
+  // In a thread, @mentioning a wired agent engages it (chip appears). People
+  // (isUser) and the regular chat don't engage.
+  if (currentThread !== 'main' && agent && !agent.isUser && agent.id) {
+    engageAgentInThread(agent.id);
+  }
 }
 
 (() => {
@@ -5740,9 +5897,6 @@ async function openRoomDetail(roomId) {
     renameField.hidden = true;
   }
 
-  // Hide the add-agent form when opening
-  $('#room-add-agent-form').hidden = true;
-
   // Archive toggle: server tells us per room whether the caller can
   // archive (owner / admin / scoped-admin-of-wired-agent). Show the
   // button only when allowed; flip label based on current state.
@@ -5826,10 +5980,9 @@ async function saveRoomName() {
 }
 
 // Engage mode for the currently-loaded room. Populated alongside the agents
-// list. Two values surface here: 'mention-only' (default — only @-mentioned
-// agents fire) and 'broadcast' (legacy — every agent fires on every message).
-// The PWA never sets 'broadcast'; operators who want it can hit the API
-// directly. Mode-aware rendering is in renderRoomWiredAgents.
+// list. Only 'mention-only' surfaces here now (un-primed agents fire only when
+// @-mentioned); the legacy 'broadcast' mode has been retired. Mode-aware
+// rendering is in renderRoomWiredAgents.
 let roomDetailEngageMode = 'mention-only';
 
 async function refreshRoomWiredAgents(roomId) {
@@ -5839,8 +5992,8 @@ async function refreshRoomWiredAgents(roomId) {
       authFetch(`/api/rooms/${encodeURIComponent(roomId)}/engage-mode`),
     ]);
     roomDetailWiredAgents = await agentsRes.json();
-    const modeBody = await modeRes.json().catch(() => ({ mode: 'mention-only' }));
-    roomDetailEngageMode = modeBody.mode === 'broadcast' ? 'broadcast' : 'mention-only';
+    await modeRes.json().catch(() => ({}));
+    roomDetailEngageMode = 'mention-only';
   } catch (err) {
     console.error('Failed to fetch wired agents:', err);
     roomDetailWiredAgents = [];
@@ -5899,39 +6052,54 @@ function renderRoomWiredAgents() {
     list.appendChild(li);
   }
 
-  // Mode indicator pill above the helper note — shows the current engage state
-  // at a glance so the operator never has to infer it from "is anything starred".
-  let badge = $('#room-mode-badge');
-  if (!badge) {
-    badge = document.createElement('div');
-    badge.id = 'room-mode-badge';
-    badge.className = 'room-mode-badge';
-    list.parentElement?.insertBefore(badge, list.nextSibling);
-  }
-  badge.className = `room-mode-badge mode-${effectiveMode}`;
-  badge.textContent =
+  // Reply-mode info icon, lives on the "Wired agents" label line. Clicking it
+  // pops up the explanation — kept off the page until asked for.
+  const modeTip =
     effectiveMode === 'prime'
-      ? `Replies to everything: ${roomDetailWiredAgents.find((a) => a.is_prime)?.name ?? 'unknown'}`
-      : effectiveMode === 'broadcast'
-        ? 'All agents reply to every message (legacy)'
-        : 'Only replies when @-mentioned';
+      ? `Replies to everything: ${roomDetailWiredAgents.find((a) => a.is_prime)?.name ?? 'unknown'} — except messages that @-mention a different agent.`
+      : 'No agents reply unless @-mentioned. Star an agent to make it reply to everything.';
+  const modeInfo = $('#room-mode-info');
+  if (modeInfo) {
+    modeInfo.hidden = false;
+    modeInfo.className = `mode-info-btn mode-${effectiveMode}`;
+    modeInfo.setAttribute('aria-label', `Reply mode — ${modeTip}`);
+    // Reassign (not addEventListener) so re-renders don't stack handlers.
+    modeInfo.onclick = (e) => {
+      e.stopPropagation();
+      toggleModeInfoPopup(modeInfo, modeTip);
+    };
+  }
+}
 
-  // Helper line below the badge explains what the mode does. Always shown so
-  // the operator's mental model stays current as they ★ / unstar.
-  let note = $('#room-prime-note');
-  if (!note) {
-    note = document.createElement('p');
-    note.id = 'room-prime-note';
-    note.className = 'room-prime-note';
-    list.parentElement?.insertBefore(note, badge.nextSibling);
+// Click-to-open help popup for the reply-mode icon. Toggles, and dismisses on
+// outside-click or Escape (mirrors the thread/room menu dismissal pattern).
+function toggleModeInfoPopup(anchor, text) {
+  // Anchor to the label row (not the icon) so the popup left-aligns to the
+  // panel content and never overflows the narrow drawer's right edge.
+  const wrap = anchor.closest('.form-label-row');
+  const existing = wrap.querySelector('.mode-info-popup');
+  if (existing) {
+    existing.remove();
+    return;
   }
-  note.hidden = false;
-  note.textContent =
-    effectiveMode === 'prime'
-      ? 'The default agent replies to every message — except ones that @-mention a different agent.'
-      : effectiveMode === 'broadcast'
-        ? 'Every wired agent responds to every message. (Legacy mode — not produced by this UI.)'
-        : 'Agents reply only when @-mentioned. Star an agent to make it the default (replies to everything).';
+  const pop = document.createElement('div');
+  pop.className = 'mode-info-popup';
+  pop.setAttribute('role', 'tooltip');
+  pop.textContent = text;
+  wrap.appendChild(pop);
+  const close = (e) => {
+    if (e && (pop.contains(e.target) || anchor.contains(e.target))) return;
+    pop.remove();
+    document.removeEventListener('click', close);
+    document.removeEventListener('keydown', onKey);
+  };
+  const onKey = (e) => {
+    if (e.key === 'Escape') close();
+  };
+  setTimeout(() => {
+    document.addEventListener('click', close);
+    document.addEventListener('keydown', onKey);
+  }, 0);
 }
 
 async function togglePrimeAgent(agent) {
@@ -6047,7 +6215,6 @@ async function addAgentToRoom(roomId, ref) {
       showToast('Failed to add agent: ' + (err.error || res.statusText), { kind: 'error' });
       return;
     }
-    $('#room-add-agent-form').hidden = true;
     $('#room-add-agent-new-name').value = '';
     $('#room-add-agent-new-instructions').value = '';
     // Refresh agents (in case a new one was created), then re-render wirings.
@@ -6169,9 +6336,6 @@ $('#room-archive-toggle').addEventListener('click', async () => {
   await toggleRoomArchive(selectedRoomId, !room.archived);
   // Refresh the panel so the button label flips.
   if (!$('#room-detail').hidden) openRoomDetail(selectedRoomId);
-});
-$('#room-add-agent-toggle').addEventListener('click', () => {
-  $('#room-add-agent-form').hidden = !$('#room-add-agent-form').hidden;
 });
 $('#room-add-agent-existing-submit').addEventListener('click', addExistingAgentToRoom);
 $('#room-add-agent-new-submit').addEventListener('click', addNewAgentToRoom);

@@ -184,7 +184,50 @@ at all 8 destructive sites).
 
 ---
 
-## 6. Enforcing this
+## 6. Lists & navigation
+
+The sidebar is the canonical list surface — flat room rows plus the nested
+thread tree under the active room. These rules keep any list (rooms, threads,
+agents, models) reading the same.
+
+**Row anatomy.** A row is a flex line: an optional leading glyph/identity mark, a
+`flex: 1` label that truncates with ellipsis (`overflow:hidden;
+text-overflow:ellipsis; white-space:nowrap`), then trailing markers (unread dot /
+mention badge / kebab). The kebab is **hover/focus-revealed** (`opacity: 0` →
+`1` on `:hover, :focus-within`), never always-on.
+
+**Three row states — three distinct treatments.** They must never collapse into
+each other (the bug the thread tree had: active and hover were both plain
+`--surface2`, indistinguishable, and active also matched the active *room*):
+
+| State | Treatment |
+|-------|-----------|
+| Hover | `background: var(--surface2)` (+ brighten text to `--text`) |
+| Active / selected | accent — `background: color-mix(in srgb, var(--accent) 12%, transparent)` + `color: var(--accent-strong)` + an accent left bar. **Never** reuse the hover background for active. |
+| Unread | a 7–8px `--accent` dot (`--radius-pill`), trailing. A mention escalates to the warning-colored `@` badge (higher signal). |
+
+**Identity vs selection color.** A room carries its **own hue** on the row's
+left border (`roomColor`) — that's identity and is independent of selection. The
+accent bar/tint above signals *selected*. Don't conflate the two.
+
+**Nesting via a per-row spine.** A nested list (the thread tree) drops onto its
+**own full-width line** beneath its parent row — `#room-list li:has(.thread-list)
+{ flex-wrap: wrap }` + `.thread-list { flex-basis: 100% }` — then indents with a
+left margin. Draw the tree spine as **each child row's `border-left`**, not a
+container border: that way the active child's accent bar simply recolors the
+spine segment with no layout shift, and the "+ New …" footer aligns by carrying a
+transparent spine slot (`border-left: 2px solid transparent`).
+
+**Glyphs.** List-row glyphs (`#` topic, `@` agent) live in their own
+fixed-width span tinted `--text-dim`, brightening on hover/active — a quiet
+prefix, `aria-hidden`, kept **out of the label string** (so truncation and
+styling are independent).
+
+**Create affordance.** The "+ New …" row sits at the end of the list, aligned
+with the rows, `--text-dim` → `--accent` on hover. Microcopy follows §5: reserve
+*new* for creation ("+ New thread", "+ New agent").
+
+## 7. Enforcing this
 
 Once code is migrated onto the tokens, add a stylelint
 `declaration-property-value-allowed-list` for `border-radius`, `font-size`, and

@@ -39,6 +39,11 @@
         <path d="M12 9v4" />
         <path d="M12 17h.01" />
       </symbol>
+      <symbol id="i-info" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="10" />
+        <path d="M12 16v-4" />
+        <path d="M12 8h.01" />
+      </symbol>
       <symbol id="i-layout-dashboard" viewBox="0 0 24 24">
         <rect width="7" height="9" x="3" y="3" rx="1" />
         <rect width="7" height="5" x="14" y="3" rx="1" />
@@ -317,6 +322,8 @@
               </span>
             </div>
             <div id="file-preview" class="file-preview" hidden></div>
+            <!-- Engaged-agents chips (thread only): @mention engages, × disengages. -->
+            <div id="engaged-chips" class="engaged-chips" hidden></div>
             <form id="message-form">
               <button type="button" id="file-picker" class="file-picker-btn" title="Upload file">
                 <svg class="icon" aria-hidden="true"><use href="#i-paperclip"></use></svg>
@@ -520,15 +527,18 @@
                       <span>Required</span>
                     </label>
                   </div>
-                  <p class="setting-help">
-                    Credential types are set workspace-wide in <strong>Settings → Member credentials</strong>.
-                  </p>
                 </div>
                 <div>
-                  <span class="form-label">Wired agents</span>
+                  <div class="form-label-row">
+                    <span class="form-label">Wired agents</span>
+                    <span class="mode-info-wrap">
+                      <button type="button" id="room-mode-info" class="mode-info-btn" aria-label="Reply mode" hidden>
+                        <svg class="icon" aria-hidden="true"><use href="#i-info"></use></svg>
+                      </button>
+                    </span>
+                  </div>
                   <ul id="room-wired-agents" class="room-wired-agents"></ul>
-                  <button type="button" id="room-add-agent-toggle" class="btn btn-secondary">+ Wire agent</button>
-                  <div id="room-add-agent-form" class="room-add-agent-form" hidden>
+                  <div id="room-add-agent-form" class="room-add-agent-form">
                     <div class="room-agent-picker-tabs">
                       <button type="button" class="room-agent-picker-tab active" data-picker="existing">
                         Existing

@@ -693,3 +693,27 @@ export const moduleWebchatThreads: Migration = {
     }
   },
 };
+
+/**
+ * Per-thread "engaged agents" set. A row means agent_group_id is engaged in
+ * (room_id, thread_id): it receives every message in that thread and is expected
+ * to reply when addressed. Never written for the 'main' thread (the regular chat
+ * stays mention-only). See docs/design/thread-engaged-agents.md.
+ */
+export const moduleWebchatThreadEngaged: Migration = {
+  version: 117,
+  name: 'webchat-thread-engaged',
+  up(db: Database.Database) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS webchat_thread_engaged (
+        room_id        TEXT NOT NULL,
+        thread_id      TEXT NOT NULL,
+        agent_group_id TEXT NOT NULL,
+        engaged_at     INTEGER NOT NULL,
+        PRIMARY KEY (room_id, thread_id, agent_group_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_webchat_engaged_thread
+        ON webchat_thread_engaged(room_id, thread_id);
+    `);
+  },
+};

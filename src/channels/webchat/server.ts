@@ -14,7 +14,7 @@
  *   DELETE /api/rooms/:id/agents/:agentId        unwire an agent (refuses last)  [owner]
  *   PUT  /api/rooms/:id/prime                    set { agentId } as the room's prime  [owner]
  *   DELETE /api/rooms/:id/prime                  clear the room's prime designation  [owner]
- *   GET  /api/rooms/:id/engage-mode              read room's engage default ('mention-only' | 'broadcast')
+ *   GET  /api/rooms/:id/engage-mode              read room's engage default ('mention-only')
  *   PUT  /api/rooms/:id/engage-mode              set { mode } for the room  [owner]
  *   PUT  /api/rooms/:id/name                     rename the room (set { name })  [owner]
  *   GET  /api/rooms/:id/threads                  list threads (+ per-thread unread)
@@ -85,7 +85,8 @@ import {
   teardownSessionResources,
   type TeardownTarget,
 } from '../../session-teardown.js';
-import type { AgentGroup } from '../../types.js';
+import type { AgentGroup, MessagingGroup } from '../../types.js';
+import type { EngagedDecision } from '../../router.js';
 import {
   createAgentGroup,
   deleteAgentGroup,
@@ -165,6 +166,9 @@ import {
   getWebchatThread,
   renameWebchatThread,
   deleteWebchatThread,
+  engageAgent,
+  disengageAgent,
+  getEngagedAgents,
   getUnreadThreadIdsForRoom,
   markThreadRead,
   sanitizeThreadTitle,
@@ -989,9 +993,8 @@ async function handleHttp(
   // ── Engage mode (room-scoped) ──
   // Controls what `recomputeEngagePatterns` rewrites un-primed wirings to:
   //   'mention-only' — agents fire only on explicit @-mention (no fallback).
-  //   'broadcast'    — legacy: every wired agent answers every message.
-  // The PWA never sends 'broadcast' (operator preference is mention-only-only),
-  // but the API accepts both for symmetry with the DB schema.
+  // This is the only mode; the legacy 'broadcast' (every wired agent answers
+  // every message) has been retired.
   const roomEngageMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/engage-mode$/);
   if (roomEngageMatch && method === 'GET') {
     const roomId = decodeURIComponent(roomEngageMatch[1]);
@@ -1011,8 +1014,8 @@ async function handleHttp(
     } catch {
       return json(res, 400, { error: 'Invalid JSON' });
     }
-    if (body.mode !== 'mention-only' && body.mode !== 'broadcast') {
-      return json(res, 400, { error: "mode must be 'mention-only' or 'broadcast'" });
+    if (body.mode !== 'mention-only') {
+      return json(res, 400, { error: "mode must be 'mention-only'" });
     }
     setRoomEngageDefault(roomId, body.mode);
     // Re-run pattern computation so the new mode is reflected in every wiring.
@@ -1151,6 +1154,55 @@ async function handleHttp(
     if (threadId === 'main') return json(res, 400, { error: 'The main thread cannot be deleted' });
     if (!getWebchatThread(roomId, threadId)) return json(res, 404, { error: 'Thread not found' });
     return deleteThreadHandler(res, roomId, threadId);
+  }
+
+  // ── Engaged agents (per-thread set) ──
+  // GET lists, POST engages, DELETE disengages. The 'main' thread (regular chat)
+  // can never engage. See docs/design/thread-engaged-agents.md.
+  const roomThreadEngagedMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads\/([^/]+)\/engaged$/);
+  if (roomThreadEngagedMatch && method === 'GET') {
+    const roomId = decodeURIComponent(roomThreadEngagedMatch[1]);
+    const threadId = decodeURIComponent(roomThreadEngagedMatch[2]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    return json(res, 200, engagedAgentsForThread(roomId, threadId));
+  }
+  if (roomThreadEngagedMatch && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const roomId = decodeURIComponent(roomThreadEngagedMatch[1]);
+    const threadId = decodeURIComponent(roomThreadEngagedMatch[2]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    if (threadId === 'main') return json(res, 400, { error: 'The regular chat cannot engage agents' });
+    if (!getWebchatThread(roomId, threadId)) return json(res, 404, { error: 'Thread not found' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { agentGroupId?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    const agentGroupId = typeof body.agentGroupId === 'string' ? body.agentGroupId : '';
+    // Only agents actually wired to this room can be engaged.
+    if (!getAgentsForWebchatRoom(roomId).some((a) => a.id === agentGroupId)) {
+      return json(res, 400, { error: 'Agent is not wired to this room' });
+    }
+    engageAgent(roomId, threadId, agentGroupId);
+    broadcastEngagedSet(roomId, threadId);
+    return json(res, 200, { ok: true, engaged: engagedAgentsForThread(roomId, threadId) });
+  }
+  const roomThreadDisengageMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads\/([^/]+)\/engaged\/([^/]+)$/);
+  if (roomThreadDisengageMatch && method === 'DELETE') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const roomId = decodeURIComponent(roomThreadDisengageMatch[1]);
+    const threadId = decodeURIComponent(roomThreadDisengageMatch[2]);
+    const agentGroupId = decodeURIComponent(roomThreadDisengageMatch[3]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    disengageAgent(roomId, threadId, agentGroupId);
+    broadcastEngagedSet(roomId, threadId);
+    return json(res, 200, { ok: true, engaged: engagedAgentsForThread(roomId, threadId) });
   }
 
   // Room → agent → model topology for the explore view, scoped to the caller's
@@ -1818,6 +1870,90 @@ function ensureA2aDestination(ownerAgentId: string, targetAgentId: string, targe
  * every wiring-change path: wireAgentToWebchatRoom, unwireAgentFromWebchatRoom,
  * and the prime PUT/DELETE handlers.
  */
+/** Engaged agents in a thread, resolved to {id, name, folder} for the UI. */
+function engagedAgentsForThread(roomId: string, threadId: string): Array<{ id: string; name: string; folder: string }> {
+  const ids = new Set(getEngagedAgents(roomId, threadId));
+  if (ids.size === 0) return [];
+  return getAgentsForWebchatRoom(roomId)
+    .filter((a) => ids.has(a.id))
+    .map((a) => ({ id: a.id, name: a.name, folder: a.folder }));
+}
+
+/** Push the current engaged set for a thread to all room clients (live chips). */
+function broadcastEngagedSet(roomId: string, threadId: string): void {
+  broadcast(roomId, {
+    type: 'engaged_set_changed',
+    room_id: roomId,
+    thread_id: threadId,
+    engaged: engagedAgentsForThread(roomId, threadId),
+  });
+}
+
+const ENGAGE_FOLDER_ESCAPE_RE = /[.*+?^${}()|[\]\\]/g;
+
+/**
+ * Engaged-thread routing decision for the host router (registered via
+ * setEngagedResolver). Auto-engages @mentioned wired agents, then classifies each
+ * engaged agent as 'expected' (addressed, or the sole engaged agent on an
+ * un-addressed message → a one-agent thread keeps replying without re-mention) or
+ * 'defer' (engaged but someone else was addressed → receives context, no reply).
+ * Returns null when engagement doesn't apply so the router falls back to normal
+ * mention-only routing. See docs/design/thread-engaged-agents.md.
+ */
+export function resolveEngagedDecision(
+  mg: MessagingGroup,
+  threadId: string | null,
+  messageText: string,
+  senderAgentGroupId: string | undefined,
+): EngagedDecision | null {
+  if (mg.channel_type !== 'webchat') return null;
+  if (threadId === null || threadId === 'main') return null;
+  const roomId = mg.platform_id;
+  const wired = getAgentsForWebchatRoom(roomId);
+  if (wired.length === 0) return null;
+  const wiredIds = new Set(wired.map((a) => a.id));
+
+  // Peer fan-out: an engaged agent's own reply is delivered to the OTHER engaged
+  // agents as silent context (isPeerReply, trigger=0) so they stay in sync but
+  // never reply to a peer (no cascades). The producer is excluded.
+  if (senderAgentGroupId) {
+    const allEngaged = [...getEngagedAgents(roomId, threadId)].filter((id) => wiredIds.has(id));
+    const recipients = allEngaged.filter((id) => id !== senderAgentGroupId);
+    if (recipients.length === 0) return null;
+    const perAgent = new Map<string, 'expected' | 'defer'>();
+    for (const id of recipients) perAgent.set(id, 'defer');
+    return { engaged: allEngaged, perAgent, isPeerReply: true };
+  }
+
+  // Which wired agents are explicitly @mentioned (case-insensitive, word-boundary).
+  const mentioned = new Set<string>();
+  for (const a of wired) {
+    const re = new RegExp(`\\B@${a.folder.replace(ENGAGE_FOLDER_ESCAPE_RE, '\\$&')}\\b`, 'i');
+    if (re.test(messageText)) mentioned.add(a.id);
+  }
+
+  // Auto-engage any newly-mentioned wired agent (broadcast the chip change once).
+  const engaged = new Set([...getEngagedAgents(roomId, threadId)].filter((id) => wiredIds.has(id)));
+  let changed = false;
+  for (const id of mentioned) {
+    if (!engaged.has(id)) {
+      engageAgent(roomId, threadId, id);
+      engaged.add(id);
+      changed = true;
+    }
+  }
+  if (changed) broadcastEngagedSet(roomId, threadId);
+  if (engaged.size === 0) return null; // nothing engaged → normal mention-only routing
+
+  const soleEngaged = engaged.size === 1;
+  const perAgent = new Map<string, 'expected' | 'defer'>();
+  for (const id of engaged) {
+    const addressed = mentioned.has(id) || (mentioned.size === 0 && soleEngaged);
+    perAgent.set(id, addressed ? 'expected' : 'defer');
+  }
+  return { engaged: [...engaged], perAgent };
+}
+
 export function recomputeEngagePatterns(roomId: string): void {
   const mg = getMessagingGroupByPlatform('webchat', roomId);
   if (!mg) return;
@@ -1838,17 +1974,10 @@ export function recomputeEngagePatterns(roomId: string): void {
   const update = getDb().prepare(`UPDATE messaging_group_agents SET engage_pattern = ? WHERE id = ?`);
 
   if (!validPrime) {
-    // No prime — fall through to the room's engage_default. 'broadcast' is
-    // the legacy behavior (every agent responds to every message). 'mention-only'
-    // makes the room silent until an agent is explicitly @-mentioned, which is
-    // the right model for a many-agent shared room where catch-all responses
-    // would just be noise.
-    const engageDefault = getRoomEngageDefault(roomId);
-    if (engageDefault === 'mention-only') {
-      for (const w of wirings) update.run(`\\B@${ciFolderToken(w.folder)}\\b`, w.id);
-    } else {
-      for (const w of wirings) update.run('.', w.id);
-    }
+    // No prime — un-primed agents reply only when explicitly @-mentioned. The
+    // legacy 'broadcast' fallback (every agent answers every message) has been
+    // retired; a shared room stays quiet until an agent is addressed.
+    for (const w of wirings) update.run(`\\B@${ciFolderToken(w.folder)}\\b`, w.id);
     return;
   }
 
