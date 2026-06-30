@@ -132,6 +132,7 @@ if [ -z "$INST" ]; then fail "no install-webchat.sh on $CHANNEL"; else
       install-webchat.sh|uninstall-webchat.sh|configure-webchat.sh|verify-webchat-publish.sh) covered=yes ;;
       e2e/*|playwright.config.ts) covered=yes ;;                                   # dev-only e2e infra — intentionally not installed
       webchat-hooks/*) covered=yes ;;                                              # provider overlays (step 2d) — applied/copied by name
+      README.md|CHANGELOG.md) covered=yes ;;                                       # root project docs — branch documents the GUI; overlay never patches them
     esac
     [ "$covered" = no ] && uncovered="${uncovered}${f}"$'\n'
   done < <(git diff --name-only "$BASE" "$CHANNEL")
@@ -188,6 +189,13 @@ WEBCHAT_HOOK_ALLOWLIST=(
   container/agent-runner/src/integration.test.ts
   container/agent-runner/src/poll-loop.test.ts
   container/agent-runner/src/mcp-tools/cli.instructions.md
+  src/modules/typing/index.ts
+  src/modules/typing/index.test.ts
+  src/container-config.ts
+  container/agent-runner/src/config.ts
+  container/agent-runner/src/index.ts
+  src/container-runtime.test.ts
+  src/host-sweep.ts
 )
 DECLARED=$(git show "$CHANNEL:install-webchat.sh" 2>/dev/null \
   | awk '/^HOOK_FILES=\(/{f=1;next} f&&/^\)/{f=0} f{gsub(/^[ \t]+/,"");print}')

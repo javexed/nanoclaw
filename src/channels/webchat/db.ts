@@ -40,17 +40,23 @@ export interface FileMeta {
 export interface WebchatMessage {
   id: string;
   room_id: string;
+  /** Thread this message belongs to. 'main' is the room's default thread. */
+  thread_id: string;
   sender: string;
   sender_type: string;
   content: string;
-  message_type: 'text' | 'file' | 'a2a' | 'approval' | 'approval_resolved';
+  message_type: 'text' | 'file' | 'a2a' | 'approval' | 'approval_resolved' | 'context-divider';
   file_meta?: FileMeta | null;
   created_at: number;
+  /** Provenance for thread context sync: null=native, 'pulled' (from main),
+   *  'pushed' (up from a thread). See docs/design/webchat-thread-context-sync.md. */
+  origin?: 'pulled' | 'pushed' | null;
 }
 
 interface WebchatMessageRow {
   id: string;
   room_id: string;
+  thread_id: string;
   sender: string;
   sender_type: string;
   content: string;
@@ -287,6 +293,18 @@ export function deleteWebchatRoom(id: string): void {
   db.prepare(`DELETE FROM webchat_room_archives WHERE room_id = ?`).run(id);
   db.prepare(`DELETE FROM webchat_room_reads WHERE room_id = ?`).run(id);
   db.prepare(`DELETE FROM webchat_room_pins WHERE room_id = ?`).run(id);
+  // Thread registry + per-thread read markers (guarded — the threads migration
+  // may predate this room's data, but the tables exist once migrated).
+  if (hasTable(db, 'webchat_threads')) {
+    db.prepare(`DELETE FROM webchat_thread_reads WHERE room_id = ?`).run(id);
+    db.prepare(`DELETE FROM webchat_threads WHERE room_id = ?`).run(id);
+  }
+  if (hasTable(db, 'webchat_thread_engaged')) {
+    db.prepare(`DELETE FROM webchat_thread_engaged WHERE room_id = ?`).run(id);
+  }
+  if (hasTable(db, 'webchat_thread_sync')) {
+    db.prepare(`DELETE FROM webchat_thread_sync WHERE room_id = ?`).run(id);
+  }
   // Drop any agent_destinations rows pointing at this room. target_id has no
   // FK so they wouldn't block, just rot. Guarded — a2a module may not be installed.
   if (hasTable(db, 'agent_destinations')) {
@@ -482,23 +500,19 @@ export function clearPrimeAgentForWebchatRoom(roomId: string): void {
 
 // ── Room settings (engage_default) ──
 
-export type EngageDefault = 'broadcast' | 'mention-only';
+export type EngageDefault = 'mention-only';
 
 /**
- * Per-room engagement default used when no prime is configured. Controls
- * what `recomputeEngagePatterns` rewrites un-primed wirings to:
+ * Per-room engagement default used when no prime is configured. Un-primed
+ * wirings are rewritten by `recomputeEngagePatterns` to `\B@<folder>\b` —
+ * agents reply only when explicitly @-mentioned.
  *
- *   'broadcast'    → engage_pattern = '.'           (every agent responds)
- *   'mention-only' → engage_pattern = `\B@<folder>\b` (only addressed agents respond)
- *
- * Rooms with no row default to 'broadcast' so installs that predate this
- * setting see no behavior change.
+ * The legacy 'broadcast' mode (every wired agent answers every message) has
+ * been retired: it is no longer offered, and any legacy stored 'broadcast'
+ * value (or a room with no settings row) now reads as 'mention-only'.
  */
-export function getRoomEngageDefault(roomId: string): EngageDefault {
-  const row = getDb().prepare(`SELECT engage_default FROM webchat_room_settings WHERE room_id = ?`).get(roomId) as
-    | { engage_default: EngageDefault }
-    | undefined;
-  return row?.engage_default ?? 'broadcast';
+export function getRoomEngageDefault(_roomId: string): EngageDefault {
+  return 'mention-only';
 }
 
 export function setRoomEngageDefault(roomId: string, mode: EngageDefault): void {
@@ -511,7 +525,7 @@ export function setRoomEngageDefault(roomId: string, mode: EngageDefault): void 
     .run(roomId, mode, Date.now());
 }
 
-// ── BYOK: per-room credential mode ──
+// ── UserCreds: per-room credential mode ──
 export type CredentialMode = 'disabled' | 'optional' | 'required';
 
 /** Secure by default: rooms with no settings row read as 'disabled'. */
@@ -526,14 +540,14 @@ export function setRoomCredentialMode(roomId: string, mode: CredentialMode): voi
   getDb()
     .prepare(
       `INSERT INTO webchat_room_settings (room_id, engage_default, credential_mode, updated_at)
-       VALUES (?, 'broadcast', ?, ?)
+       VALUES (?, 'mention-only', ?, ?)
        ON CONFLICT(room_id) DO UPDATE SET credential_mode = excluded.credential_mode, updated_at = excluded.updated_at`,
     )
     .run(roomId, mode, Date.now());
 }
 
 /**
- * BYOK OAuth per-room toggle (subscription tokens). Off by default; orthogonal
+ * UserCreds OAuth per-room toggle (subscription tokens). Off by default; orthogonal
  * to credential_mode. The column is absent until its migration runs, so read
  * defensively and treat any error/missing value as not-allowed.
  */
@@ -552,14 +566,14 @@ export function setRoomOauthAllowed(roomId: string, allowed: boolean): void {
   getDb()
     .prepare(
       `INSERT INTO webchat_room_settings (room_id, engage_default, oauth_allowed, updated_at)
-       VALUES (?, 'broadcast', ?, ?)
+       VALUES (?, 'mention-only', ?, ?)
        ON CONFLICT(room_id) DO UPDATE SET oauth_allowed = excluded.oauth_allowed, updated_at = excluded.updated_at`,
     )
     .run(roomId, allowed ? 1 : 0, Date.now());
 }
 
-// ── BYOK: workspace-wide credentials policy (singleton webchat_settings) ──
-// Which member-credential TYPES the workspace accepts + the default room mode.
+// ── UserCreds: workspace-wide credentials policy (singleton webchat_settings) ──
+// Which user-credential TYPES the workspace accepts + the default room mode.
 // Types live here (configured once) rather than per room.
 export interface CredentialsConfig {
   defaultMode: CredentialMode;
@@ -645,7 +659,7 @@ export function setRoomModeOverride(roomId: string, mode: RoomModeOverride): voi
   getDb()
     .prepare(
       `INSERT INTO webchat_room_settings (room_id, engage_default, credential_mode_override, updated_at)
-       VALUES (?, 'broadcast', ?, ?)
+       VALUES (?, 'mention-only', ?, ?)
        ON CONFLICT(room_id) DO UPDATE SET credential_mode_override = excluded.credential_mode_override, updated_at = excluded.updated_at`,
     )
     .run(roomId, mode, Date.now());
@@ -670,10 +684,12 @@ export function storeWebchatMessage(
   sender: string,
   senderType: string,
   content: string,
+  threadId = 'main',
 ): WebchatMessage {
   const msg: WebchatMessage = {
     id: randomUUID(),
     room_id: roomId,
+    thread_id: threadId,
     sender,
     sender_type: senderType,
     content,
@@ -683,8 +699,8 @@ export function storeWebchatMessage(
   };
   getDb()
     .prepare(
-      `INSERT INTO webchat_messages (id, room_id, sender, sender_type, content, message_type, file_meta, created_at)
-       VALUES (@id, @room_id, @sender, @sender_type, @content, @message_type, @file_meta, @created_at)`,
+      `INSERT INTO webchat_messages (id, room_id, thread_id, sender, sender_type, content, message_type, file_meta, created_at)
+       VALUES (@id, @room_id, @thread_id, @sender, @sender_type, @content, @message_type, @file_meta, @created_at)`,
     )
     .run({ ...msg, file_meta: null });
   return msg;
@@ -708,10 +724,12 @@ export function storeWebchatApprovalCard(
     action: string;
     approvers: string[];
   },
+  threadId = 'main',
 ): WebchatMessage {
   const msg: WebchatMessage = {
     id: `appr-card-${payload.questionId}`,
     room_id: roomId,
+    thread_id: threadId,
     sender,
     sender_type: 'agent',
     content: JSON.stringify(payload),
@@ -721,8 +739,8 @@ export function storeWebchatApprovalCard(
   };
   getDb()
     .prepare(
-      `INSERT OR REPLACE INTO webchat_messages (id, room_id, sender, sender_type, content, message_type, file_meta, created_at)
-       VALUES (@id, @room_id, @sender, @sender_type, @content, @message_type, @file_meta, @created_at)`,
+      `INSERT OR REPLACE INTO webchat_messages (id, room_id, thread_id, sender, sender_type, content, message_type, file_meta, created_at)
+       VALUES (@id, @room_id, @thread_id, @sender, @sender_type, @content, @message_type, @file_meta, @created_at)`,
     )
     .run({ ...msg, file_meta: null });
   return msg;
@@ -759,10 +777,17 @@ export function markRoomApprovalResolved(approvalId: string, resolvedBy: string)
  * `{to, text}` — the client renders a "from → to" label. `sender` is the
  * source agent's display name; no users-table row is created (display only).
  */
-export function storeWebchatA2aMessage(roomId: string, fromName: string, toName: string, text: string): WebchatMessage {
+export function storeWebchatA2aMessage(
+  roomId: string,
+  fromName: string,
+  toName: string,
+  text: string,
+  threadId = 'main',
+): WebchatMessage {
   const msg: WebchatMessage = {
     id: randomUUID(),
     room_id: roomId,
+    thread_id: threadId,
     sender: fromName,
     sender_type: 'a2a',
     content: JSON.stringify({ to: toName, text }),
@@ -772,8 +797,8 @@ export function storeWebchatA2aMessage(roomId: string, fromName: string, toName:
   };
   getDb()
     .prepare(
-      `INSERT INTO webchat_messages (id, room_id, sender, sender_type, content, message_type, file_meta, created_at)
-       VALUES (@id, @room_id, @sender, @sender_type, @content, @message_type, @file_meta, @created_at)`,
+      `INSERT INTO webchat_messages (id, room_id, thread_id, sender, sender_type, content, message_type, file_meta, created_at)
+       VALUES (@id, @room_id, @thread_id, @sender, @sender_type, @content, @message_type, @file_meta, @created_at)`,
     )
     .run({ ...msg, file_meta: null });
   return msg;
@@ -804,10 +829,12 @@ export function storeWebchatFileMessage(
   senderType: string,
   caption: string,
   fileMeta: FileMeta,
+  threadId = 'main',
 ): WebchatMessage {
   const msg: WebchatMessage = {
     id: randomUUID(),
     room_id: roomId,
+    thread_id: threadId,
     sender,
     sender_type: senderType,
     content: caption,
@@ -817,17 +844,25 @@ export function storeWebchatFileMessage(
   };
   getDb()
     .prepare(
-      `INSERT INTO webchat_messages (id, room_id, sender, sender_type, content, message_type, file_meta, created_at)
-       VALUES (@id, @room_id, @sender, @sender_type, @content, @message_type, @file_meta, @created_at)`,
+      `INSERT INTO webchat_messages (id, room_id, thread_id, sender, sender_type, content, message_type, file_meta, created_at)
+       VALUES (@id, @room_id, @thread_id, @sender, @sender_type, @content, @message_type, @file_meta, @created_at)`,
     )
     .run({ ...msg, file_meta: JSON.stringify(fileMeta) });
   return msg;
 }
 
-export function getWebchatMessages(roomId: string, limit = 200): WebchatMessage[] {
-  const rows = getDb()
-    .prepare(`SELECT * FROM webchat_messages WHERE room_id = ? ORDER BY created_at DESC LIMIT ?`)
-    .all(roomId, limit) as WebchatMessageRow[];
+export function getWebchatMessages(roomId: string, limit = 200, threadId?: string): WebchatMessage[] {
+  const rows = (
+    threadId === undefined
+      ? getDb()
+          .prepare(`SELECT * FROM webchat_messages WHERE room_id = ? ORDER BY created_at DESC LIMIT ?`)
+          .all(roomId, limit)
+      : getDb()
+          .prepare(
+            `SELECT * FROM webchat_messages WHERE room_id = ? AND thread_id = ? ORDER BY created_at DESC LIMIT ?`,
+          )
+          .all(roomId, threadId, limit)
+  ) as WebchatMessageRow[];
   return rows.reverse().map(rowToMessage);
 }
 
@@ -846,18 +881,33 @@ export function deleteWebchatMessage(messageId: string, requesterIdentity: strin
   return result.changes > 0;
 }
 
-export function getWebchatMessagesAfterId(roomId: string, afterId: string, limit = 500): WebchatMessage[] {
+export function getWebchatMessagesAfterId(
+  roomId: string,
+  afterId: string,
+  limit = 500,
+  threadId?: string,
+): WebchatMessage[] {
   const anchor = getDb().prepare(`SELECT created_at FROM webchat_messages WHERE id = ?`).get(afterId) as
     | { created_at: number }
     | undefined;
   if (!anchor) return [];
-  const rows = getDb()
-    .prepare(
-      `SELECT * FROM webchat_messages
-       WHERE room_id = ? AND created_at > ?
-       ORDER BY created_at LIMIT ?`,
-    )
-    .all(roomId, anchor.created_at, limit) as WebchatMessageRow[];
+  const rows = (
+    threadId === undefined
+      ? getDb()
+          .prepare(
+            `SELECT * FROM webchat_messages
+             WHERE room_id = ? AND created_at > ?
+             ORDER BY created_at LIMIT ?`,
+          )
+          .all(roomId, anchor.created_at, limit)
+      : getDb()
+          .prepare(
+            `SELECT * FROM webchat_messages
+             WHERE room_id = ? AND thread_id = ? AND created_at > ?
+             ORDER BY created_at LIMIT ?`,
+          )
+          .all(roomId, threadId, anchor.created_at, limit)
+  ) as WebchatMessageRow[];
   return rows.map(rowToMessage);
 }
 
@@ -909,19 +959,407 @@ export function searchWebchatMessages(roomIds: string[], rawQuery: string, limit
     .all(match, ...roomIds, limit) as WebchatSearchResult[];
 }
 
-export function getWebchatMessagesBeforeId(roomId: string, beforeId: string, limit = 50): WebchatMessage[] {
+export function getWebchatMessagesBeforeId(
+  roomId: string,
+  beforeId: string,
+  limit = 50,
+  threadId?: string,
+): WebchatMessage[] {
   const anchor = getDb().prepare(`SELECT created_at FROM webchat_messages WHERE id = ?`).get(beforeId) as
     | { created_at: number }
     | undefined;
   if (!anchor) return [];
+  const rows = (
+    threadId === undefined
+      ? getDb()
+          .prepare(
+            `SELECT * FROM webchat_messages
+             WHERE room_id = ? AND created_at < ?
+             ORDER BY created_at DESC LIMIT ?`,
+          )
+          .all(roomId, anchor.created_at, limit)
+      : getDb()
+          .prepare(
+            `SELECT * FROM webchat_messages
+             WHERE room_id = ? AND thread_id = ? AND created_at < ?
+             ORDER BY created_at DESC LIMIT ?`,
+          )
+          .all(roomId, threadId, anchor.created_at, limit)
+  ) as WebchatMessageRow[];
+  return rows.reverse().map(rowToMessage);
+}
+
+// ── Threads ──
+// A webchat thread maps to an agent session (thread_id = session.thread_id), so
+// each thread is an isolated conversation. 'main' is every room's implicit
+// default thread. See docs/design/webchat-threads.md.
+
+export const MAIN_THREAD = 'main';
+
+/**
+ * Map a stored/UI thread id to the SESSION key. 'main' (and absent) key the
+ * legacy null-thread session, so a room that never uses threads keeps its exact
+ * existing session/continuity; named threads key their own session. This is
+ * what makes turning threads on a no-op until a real thread is used.
+ */
+export function threadToSessionKey(threadId: string | null | undefined): string | null {
+  return !threadId || threadId === MAIN_THREAD ? null : threadId;
+}
+
+/** Inverse: a session's thread_id (null/absent) → the stored/UI thread ('main'). */
+export function sessionKeyToThread(threadId: string | null | undefined): string {
+  return threadId ?? MAIN_THREAD;
+}
+
+export interface WebchatThread {
+  room_id: string;
+  thread_id: string;
+  title: string;
+  kind: 'main' | 'agent' | 'topic';
+  created_at: number;
+  updated_at: number;
+}
+
+/** Ensure a thread row exists; idempotent (never clobbers an existing title).
+ * Returns the thread_id. Used for lazy 'main' and per-agent lanes. */
+export function ensureThread(roomId: string, threadId: string, title: string, kind: WebchatThread['kind']): string {
+  const now = Date.now();
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_threads (room_id, thread_id, title, kind, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(room_id, thread_id) DO NOTHING`,
+    )
+    .run(roomId, threadId, title, kind, now, now);
+  return threadId;
+}
+
+/** Ensure the room's 'main' thread exists. */
+export function ensureMainThread(roomId: string): string {
+  return ensureThread(roomId, MAIN_THREAD, 'Main', 'main');
+}
+
+/** Ensure a per-agent lane ('agent:<folder>'); returns its thread_id. */
+export function ensureAgentThread(roomId: string, folder: string, displayName: string): string {
+  return ensureThread(roomId, `agent:${folder}`, displayName, 'agent');
+}
+
+/** Clean a user-supplied thread title: strip control chars, collapse
+ * whitespace, trim, bound to 80. Returns null when empty/too-long. */
+export function sanitizeThreadTitle(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const t = raw
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return !t || t.length > 80 ? null : t;
+}
+
+/** Create a manual topic thread (uuid). Returns the new thread. */
+export function createWebchatThread(roomId: string, title: string): WebchatThread {
+  const now = Date.now();
+  const thread: WebchatThread = {
+    room_id: roomId,
+    thread_id: randomUUID(),
+    title,
+    kind: 'topic',
+    created_at: now,
+    updated_at: now,
+  };
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_threads (room_id, thread_id, title, kind, created_at, updated_at)
+       VALUES (@room_id, @thread_id, @title, @kind, @created_at, @updated_at)`,
+    )
+    .run(thread);
+  return thread;
+}
+
+/** All threads in a room, 'main' first, then by most-recent activity. */
+export function listWebchatThreads(roomId: string): WebchatThread[] {
+  return getDb()
+    .prepare(
+      `SELECT * FROM webchat_threads WHERE room_id = ?
+       ORDER BY (kind = 'main') DESC, updated_at DESC`,
+    )
+    .all(roomId) as WebchatThread[];
+}
+
+/**
+ * Per-room count of TOPIC threads (excludes the implicit 'main'/'agent' rows),
+ * keyed by room_id. Powers the sidebar's "this room has N threads" chevron so
+ * the client knows which rooms to offer an expander for — computed once per
+ * rooms broadcast rather than one query per room.
+ */
+export function getTopicThreadCounts(): Map<string, number> {
+  const counts = new Map<string, number>();
+  if (!hasTable(getDb(), 'webchat_threads')) return counts;
   const rows = getDb()
+    .prepare(`SELECT room_id, COUNT(*) AS n FROM webchat_threads WHERE kind = 'topic' GROUP BY room_id`)
+    .all() as Array<{ room_id: string; n: number }>;
+  for (const r of rows) counts.set(r.room_id, r.n);
+  return counts;
+}
+
+export function getWebchatThread(roomId: string, threadId: string): WebchatThread | undefined {
+  return getDb().prepare(`SELECT * FROM webchat_threads WHERE room_id = ? AND thread_id = ?`).get(roomId, threadId) as
+    | WebchatThread
+    | undefined;
+}
+
+/**
+ * Bound a client-supplied thread_id to one that is allowed to route, so an
+ * arbitrary id can't lazily spawn unbounded per-thread sessions/containers (the
+ * spawn-amplification vector). Only three sources are honored; anything else
+ * falls back to 'main':
+ *   • 'main' / absent — the room's default thread.
+ *   • 'agent:<folder>' — an auto-spawn lane for a WIRED agent only; created on
+ *     first use (bounded by the room's agent count).
+ *   • an already-existing topic thread (created via POST /threads).
+ * An unknown topic id is NOT lazily created — topic threads must exist before
+ * they route. Shared by the WS send path (ws.ts) and the file-upload handlers
+ * (files.ts) so both enforce the identical bound.
+ */
+export function resolveBoundedThread(roomId: string, requested: unknown): string {
+  const want = typeof requested === 'string' && requested ? requested : MAIN_THREAD;
+  if (want === MAIN_THREAD) return MAIN_THREAD;
+  if (want.startsWith('agent:')) {
+    const folder = want.slice('agent:'.length);
+    const agent = getAgentsForWebchatRoom(roomId).find((a) => a.folder === folder);
+    if (agent) {
+      ensureAgentThread(roomId, folder, agent.name ?? folder);
+      return want;
+    }
+    return MAIN_THREAD; // unknown agent folder → main (don't spawn)
+  }
+  return getWebchatThread(roomId, want) ? want : MAIN_THREAD; // unknown topic id → main (no lazy create)
+}
+
+export function renameWebchatThread(roomId: string, threadId: string, title: string): void {
+  getDb()
+    .prepare(`UPDATE webchat_threads SET title = ?, updated_at = ? WHERE room_id = ? AND thread_id = ?`)
+    .run(title, Date.now(), roomId, threadId);
+}
+
+/** Touch a thread's updated_at (called on new activity so the sort reflects it). */
+export function touchWebchatThread(roomId: string, threadId: string): void {
+  getDb()
+    .prepare(`UPDATE webchat_threads SET updated_at = ? WHERE room_id = ? AND thread_id = ?`)
+    .run(Date.now(), roomId, threadId);
+}
+
+/** Delete a thread + its messages + its read markers. 'main' is not deletable
+ * (the caller enforces; this guards too). Session teardown is the caller's job. */
+export function deleteWebchatThread(roomId: string, threadId: string): void {
+  if (threadId === MAIN_THREAD) return;
+  const db = getDb();
+  db.prepare(`DELETE FROM webchat_messages WHERE room_id = ? AND thread_id = ?`).run(roomId, threadId);
+  db.prepare(`DELETE FROM webchat_thread_reads WHERE room_id = ? AND thread_id = ?`).run(roomId, threadId);
+  db.prepare(`DELETE FROM webchat_thread_engaged WHERE room_id = ? AND thread_id = ?`).run(roomId, threadId);
+  db.prepare(`DELETE FROM webchat_thread_sync WHERE room_id = ? AND thread_id = ?`).run(roomId, threadId);
+  db.prepare(`DELETE FROM webchat_threads WHERE room_id = ? AND thread_id = ?`).run(roomId, threadId);
+}
+
+// ── Thread context sync (pull / push) ──
+// High-water marks + verbatim copy helpers for moving conversation between a
+// thread and main. See docs/design/webchat-thread-context-sync.md.
+
+export interface ThreadSyncMarks {
+  pulled: number; // newest main created_at pulled into this thread
+  pushed: number; // newest native thread created_at pushed up to main
+}
+
+/** Per-thread sync high-water marks (default 0 when no row yet). */
+export function getThreadSyncMarks(roomId: string, threadId: string): ThreadSyncMarks {
+  const row = getDb()
+    .prepare(
+      `SELECT last_pulled_src_ts AS pulled, last_pushed_src_ts AS pushed
+       FROM webchat_thread_sync WHERE room_id = ? AND thread_id = ?`,
+    )
+    .get(roomId, threadId) as ThreadSyncMarks | undefined;
+  return row ?? { pulled: 0, pushed: 0 };
+}
+
+/** Advance a sync high-water mark (monotonic: never moves backwards). */
+export function setThreadSyncMark(roomId: string, threadId: string, dir: 'pulled' | 'pushed', ts: number): void {
+  const col = dir === 'pulled' ? 'last_pulled_src_ts' : 'last_pushed_src_ts';
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_thread_sync (room_id, thread_id, ${col}) VALUES (?, ?, ?)
+       ON CONFLICT(room_id, thread_id) DO UPDATE SET ${col} = MAX(${col}, excluded.${col})`,
+    )
+    .run(roomId, threadId, ts);
+}
+
+/**
+ * Native (origin IS NULL) messages in (room, srcThread) created after `sinceTs`,
+ * chronological — the delta a pull/push copies. Dividers (context-divider) and
+ * already-copied rows are excluded. `freshLimit` caps the first sync (sinceTs=0)
+ * so an initial pull can't drag in an enormous backlog; <=0 means no cap.
+ */
+export function getSyncDelta(roomId: string, srcThreadId: string, sinceTs: number, freshLimit = 0): WebchatMessage[] {
+  const db = getDb();
+  if (freshLimit > 0 && sinceTs === 0) {
+    const rows = db
+      .prepare(
+        `SELECT * FROM webchat_messages
+         WHERE room_id = ? AND thread_id = ? AND origin IS NULL AND message_type != 'context-divider'
+         ORDER BY created_at DESC LIMIT ?`,
+      )
+      .all(roomId, srcThreadId, freshLimit) as WebchatMessage[];
+    return rows.reverse();
+  }
+  return db
     .prepare(
       `SELECT * FROM webchat_messages
-       WHERE room_id = ? AND created_at < ?
-       ORDER BY created_at DESC LIMIT ?`,
+       WHERE room_id = ? AND thread_id = ? AND origin IS NULL AND message_type != 'context-divider' AND created_at > ?
+       ORDER BY created_at ASC`,
     )
-    .all(roomId, anchor.created_at, limit) as WebchatMessageRow[];
-  return rows.reverse().map(rowToMessage);
+    .all(roomId, srcThreadId, sinceTs) as WebchatMessage[];
+}
+
+/**
+ * Append a demarcation divider + verbatim copies of `rows` into (room, destThread),
+ * marked with `origin`. New ids + created_at=now so they land at the destination's
+ * current end; originals are untouched. Returns the inserted rows (divider first)
+ * for broadcast.
+ */
+export function insertSyncedMessages(
+  roomId: string,
+  destThreadId: string,
+  rows: WebchatMessage[],
+  origin: 'pulled' | 'pushed',
+  dividerText: string,
+): WebchatMessage[] {
+  const db = getDb();
+  // Land strictly after the destination's current tail. Date.now() alone collides
+  // when two syncs fire inside the same millisecond (back-to-back pushes), which
+  // would interleave their dividers ahead of their messages; clamping to the
+  // existing max+1 keeps each batch contiguous and in order.
+  const tail = (
+    db
+      .prepare(`SELECT COALESCE(MAX(created_at), 0) AS m FROM webchat_messages WHERE room_id = ? AND thread_id = ?`)
+      .get(roomId, destThreadId) as { m: number }
+  ).m;
+  const base = Math.max(Date.now(), tail + 1);
+  const insert = db.prepare(
+    `INSERT INTO webchat_messages
+       (id, room_id, thread_id, sender, sender_type, content, message_type, file_meta, created_at, origin)
+     VALUES (@id, @room_id, @thread_id, @sender, @sender_type, @content, @message_type, @file_meta, @created_at, @origin)`,
+  );
+  const out: WebchatMessage[] = [];
+  db.transaction(() => {
+    const divider: WebchatMessage = {
+      id: randomUUID(),
+      room_id: roomId,
+      thread_id: destThreadId,
+      sender: 'system',
+      sender_type: 'system',
+      content: dividerText,
+      message_type: 'context-divider',
+      file_meta: null,
+      created_at: base,
+      origin,
+    };
+    insert.run({ ...divider, file_meta: null });
+    out.push(divider);
+    rows.forEach((r, i) => {
+      const copy: WebchatMessage = {
+        id: randomUUID(),
+        room_id: roomId,
+        thread_id: destThreadId,
+        sender: r.sender,
+        sender_type: r.sender_type,
+        content: r.content,
+        message_type: r.message_type,
+        // getSyncDelta returns raw rows (SELECT *), so file_meta is the stored
+        // JSON string. Parse it back to the object shape for the returned copy
+        // (broadcast expects parsed, like getWebchatMessages); the insert below
+        // re-stringifies it.
+        file_meta: r.file_meta ? (JSON.parse(r.file_meta as unknown as string) as FileMeta) : null,
+        created_at: base + i + 1,
+        origin,
+      };
+      insert.run({ ...copy, file_meta: copy.file_meta ? JSON.stringify(copy.file_meta) : null });
+      out.push(copy);
+    });
+  })();
+  return out;
+}
+
+// ── Per-thread engaged agents ──
+// A row = agent_group_id is engaged in (room_id, thread_id): it receives every
+// message in that thread and replies when addressed. Never the 'main' thread —
+// the regular chat stays mention-only. See docs/design/thread-engaged-agents.md.
+
+/** Engage an agent in a thread (idempotent). No-op for the 'main' thread. */
+export function engageAgent(roomId: string, threadId: string, agentGroupId: string, ts: number = Date.now()): void {
+  if (threadId === MAIN_THREAD) return;
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_thread_engaged (room_id, thread_id, agent_group_id, engaged_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(room_id, thread_id, agent_group_id) DO NOTHING`,
+    )
+    .run(roomId, threadId, agentGroupId, ts);
+}
+
+/** Disengage an agent from a thread (the × on a chip). No-op if not engaged. */
+export function disengageAgent(roomId: string, threadId: string, agentGroupId: string): void {
+  getDb()
+    .prepare(`DELETE FROM webchat_thread_engaged WHERE room_id = ? AND thread_id = ? AND agent_group_id = ?`)
+    .run(roomId, threadId, agentGroupId);
+}
+
+/** Agent group ids currently engaged in a thread. Empty for 'main'/regular chat. */
+export function getEngagedAgents(roomId: string, threadId: string): string[] {
+  if (threadId === MAIN_THREAD) return [];
+  const rows = getDb()
+    .prepare(
+      `SELECT agent_group_id FROM webchat_thread_engaged WHERE room_id = ? AND thread_id = ? ORDER BY engaged_at`,
+    )
+    .all(roomId, threadId) as { agent_group_id: string }[];
+  return rows.map((r) => r.agent_group_id);
+}
+
+/** True if the agent is engaged in the thread. */
+export function isAgentEngaged(roomId: string, threadId: string, agentGroupId: string): boolean {
+  if (threadId === MAIN_THREAD) return false;
+  return (
+    getDb()
+      .prepare(`SELECT 1 FROM webchat_thread_engaged WHERE room_id = ? AND thread_id = ? AND agent_group_id = ?`)
+      .get(roomId, threadId, agentGroupId) !== undefined
+  );
+}
+
+/** Mark a thread read for a user (monotonic high-water mark). */
+export function markThreadRead(userId: string, roomId: string, threadId: string, ts: number = Date.now()): void {
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_thread_reads (user_id, room_id, thread_id, last_read_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(user_id, room_id, thread_id)
+         DO UPDATE SET last_read_at = MAX(last_read_at, excluded.last_read_at)`,
+    )
+    .run(userId, roomId, threadId, ts);
+}
+
+/** Thread ids in a room with unread messages for this user (newest message
+ * newer than the user's per-thread marker; no marker = unread if any message). */
+export function getUnreadThreadIdsForRoom(userId: string, roomId: string): Set<string> {
+  const rows = getDb()
+    .prepare(
+      `SELECT m.thread_id AS thread_id
+         FROM webchat_messages m
+         LEFT JOIN webchat_thread_reads r
+           ON r.room_id = m.room_id AND r.thread_id = m.thread_id AND r.user_id = ?
+        WHERE m.room_id = ?
+        GROUP BY m.thread_id
+       HAVING MAX(m.created_at) > COALESCE(MAX(r.last_read_at), 0)`,
+    )
+    .all(userId, roomId) as { thread_id: string }[];
+  return new Set(rows.map((r) => r.thread_id));
 }
 
 // ── Push subscriptions ──
@@ -1253,9 +1691,10 @@ export function getPinnedRoomIdsForUser(userId: string): Set<string> {
 
 /** Per-user pinned room → manual sort position (lower = higher in the list). */
 export function getPinnedPositionsForUser(userId: string): Map<string, number> {
-  const rows = getDb()
-    .prepare(`SELECT room_id, position FROM webchat_room_pins WHERE user_id = ?`)
-    .all(userId) as { room_id: string; position: number }[];
+  const rows = getDb().prepare(`SELECT room_id, position FROM webchat_room_pins WHERE user_id = ?`).all(userId) as {
+    room_id: string;
+    position: number;
+  }[];
   return new Map(rows.map((r) => [r.room_id, r.position]));
 }
 

@@ -60,6 +60,7 @@ import {
   storeWebchatApprovalCard,
   storeWebchatMessage,
   storeWebchatFileMessage,
+  sessionKeyToThread,
   userForApprovalInbox,
   type FileMeta,
   type WebchatRoomAgent,
@@ -86,12 +87,16 @@ function createAdapter(): ChannelAdapter {
   const adapter: ChannelAdapter = {
     name: 'webchat',
     channelType: CHANNEL_TYPE,
-    supportsThreads: false,
+    // Threads on: the router keys a per-thread session per (room, thread). A
+    // null/main thread keys the legacy null-thread session, so thread-less rooms
+    // are unchanged until the client sends a real thread id. See
+    // docs/design/webchat-threads.md and threadToSessionKey().
+    supportsThreads: true,
 
     async setup(config: ChannelSetup): Promise<void> {
       adapterConfig = config;
       server = await startWebchatServer({
-        onInbound: (roomId, message) => {
+        onInbound: (roomId, message, threadId) => {
           // Surface the room's display name to the router so messaging_groups
           // gets a friendly label on first sight (mirrors discord/slack).
           const room = getWebchatRoom(roomId);
@@ -100,8 +105,8 @@ function createAdapter(): ChannelAdapter {
           }
           // Standard inbound — userId resolution + access gating happens in
           // the router/permissions module via the `senderId` field that the
-          // server attaches to message.content.
-          void config.onInbound(roomId, null, message);
+          // server attaches to message.content. threadId is the session key.
+          void config.onInbound(roomId, threadId, message);
         },
         onAction: (questionId, selectedOption, userId) => {
           config.onAction(questionId, selectedOption, userId);
@@ -151,7 +156,7 @@ function createAdapter(): ChannelAdapter {
       return platformId;
     },
 
-    async deliver(platformId, _threadId, message: OutboundMessage): Promise<string | undefined> {
+    async deliver(platformId, threadId, message: OutboundMessage): Promise<string | undefined> {
       if (!server) return undefined;
 
       // Approval inbox path: ask_question payloads (and only those) to a
@@ -202,9 +207,12 @@ function createAdapter(): ChannelAdapter {
       if (!producer) producer = findActiveAgentForWebchatRoom(roomId);
       const senderName = producer?.name ?? agentDisplayName();
       const text = extractText(message);
+      // The reply belongs to the producing session's thread. The session key
+      // (null = main) maps back to the stored/UI thread id.
+      const storeThread = sessionKeyToThread(threadId);
       let storedMessageId: string | null = null;
       if (text !== null && text.length > 0) {
-        const stored = storeWebchatMessage(roomId, senderName, 'agent', text);
+        const stored = storeWebchatMessage(roomId, senderName, 'agent', text, storeThread);
         server.broadcast(roomId, { type: 'message', ...stored });
         storedMessageId = stored.id;
       }
@@ -218,7 +226,7 @@ function createAdapter(): ChannelAdapter {
             mime: guessMime(file.filename),
             size: file.data.length,
           };
-          const stored = storeWebchatFileMessage(roomId, senderName, 'agent', file.filename, meta);
+          const stored = storeWebchatFileMessage(roomId, senderName, 'agent', file.filename, meta, storeThread);
           server.broadcast(roomId, { type: 'message', ...stored });
         }
       }
@@ -241,7 +249,7 @@ function createAdapter(): ChannelAdapter {
         // `sender` here would auto-create `webchat:<AgentName>` rows in the
         // users table on every loop-back, cluttering the permissions tab with
         // pseudo-users that have no roles or memberships.
-        adapterConfig.onInbound(roomId, null, {
+        adapterConfig.onInbound(roomId, threadId, {
           id: loopbackId,
           kind: 'chat',
           content: {
@@ -258,12 +266,14 @@ function createAdapter(): ChannelAdapter {
       return undefined;
     },
 
-    async setTyping(platformId): Promise<void> {
+    async setTyping(platformId, _threadId, agentName): Promise<void> {
       if (!server) return;
       server.broadcast(platformId, {
         type: 'typing',
         room_id: platformId,
-        identity: senderForRoom(platformId),
+        // Prefer the actual typing agent's name (multi-agent rooms); fall back to
+        // the room's default agent for older callers that don't pass it.
+        identity: agentName || senderForRoom(platformId),
         identity_type: 'agent',
         is_typing: true,
       });
@@ -373,6 +383,14 @@ function guessMime(filename: string): string {
 registerChannelAdapter('webchat', {
   factory: () => (isEnabled() ? createAdapter() : null),
 });
+
+// Engaged-agents routing is DISABLED for now: the per-thread engaged set + the
+// chips UI were removed (the model didn't fit the "separate conversations per
+// thread" goal). Threads route like the regular chat — mention an agent to talk
+// to it. The backend (resolveEngagedDecision, webchat_thread_engaged table,
+// /engaged endpoints) is left dormant; re-wire it via setEngagedResolver to turn
+// it back on, or remove it when the future "separate conversations" model lands.
+// See docs/design/thread-engaged-agents.md.
 
 // Lenient output for ollama-backed groups: a small local model rarely emits the
 // <message to="..."> envelope the runner requires, so its replies would be

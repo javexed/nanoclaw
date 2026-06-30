@@ -70,10 +70,17 @@ HOOK_FILES=(
   src/container-runtime.ts
   src/modules/index.ts
   src/modules/approvals/onecli-approvals.ts
+  src/modules/typing/index.ts
+  src/modules/typing/index.test.ts
   container/Dockerfile
   container/agent-runner/src/integration.test.ts
   container/agent-runner/src/poll-loop.test.ts
   container/agent-runner/src/mcp-tools/cli.instructions.md
+  src/container-config.ts
+  container/agent-runner/src/config.ts
+  container/agent-runner/src/index.ts
+  src/container-runtime.test.ts
+  src/host-sweep.ts
 )
 echo "→ Reversing webchat core-file hooks …"
 for f in "${HOOK_FILES[@]}"; do
@@ -131,14 +138,19 @@ rm -rf \
   container/agent-runner/src/providers/summarize-thinking.test.ts \
   src/onecli-preflight.ts \
   src/onecli-preflight.test.ts \
-  src/modules/byok \
+  src/modules/user-credentials \
   src/db/migrations/020-byok-credentials.ts \
   src/db/migrations/021-byok-oauth.ts \
   src/db/migrations/022-byok-provider.ts \
   src/db/migrations/023-byok-user-credentials.ts \
+  src/db/migrations/024-rename-user-credentials.ts \
   setup/get-oauth-token.sh \
-  docs/design/byok.md \
-  docs/design/byok-oauth.md
+  docs/design/user-credentials.md \
+  docs/design/user-credentials-oauth.md \
+  docs/design/webchat-threads.md \
+  docs/design/webchat-threads-qa.md \
+  docs/design/thread-engaged-agents.md \
+  docs/design/webchat-thread-context-sync.md
 
 # ── 4. Unwire the channels barrel ────────────────────────────────────────
 if grep -qF "'./webchat/index.js'" src/channels/index.ts; then

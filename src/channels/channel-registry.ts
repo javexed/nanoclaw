@@ -110,9 +110,10 @@ export function createChannelDeliveryAdapter(): ChannelDeliveryAdapter {
       platformId: string,
       threadId: string | null,
       instance?: string,
+      agentName?: string,
     ): Promise<void> {
       const adapter = getChannelAdapterExact(instance ?? channelType);
-      await adapter?.setTyping?.(platformId, threadId);
+      await adapter?.setTyping?.(platformId, threadId, agentName);
     },
     async sendStatus(
       channelType: string,

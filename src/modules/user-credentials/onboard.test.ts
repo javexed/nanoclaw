@@ -4,14 +4,14 @@ import { initTestDb, closeDb, getDb } from '../../db/connection.js';
 import { runMigrations } from '../../db/migrations/index.js';
 import { storeUserCredential, ensureGroupEnrollment, revokeUserCredential } from './onboard.js';
 import {
-  getByokCredential,
+  getUserCredsCredential,
   userHasActiveKey,
   userHasActiveOauth,
   userHasConnectedCredential,
   getUserCredential,
   getUserSecretId,
 } from './db.js';
-import { byokAgentIdentifier } from './identity.js';
+import { userCredsAgentIdentifier } from './identity.js';
 import type { OnecliAdmin } from './onecli-admin.js';
 import { ensureContainerConfig, updateContainerConfigScalars } from '../../db/container-configs.js';
 
@@ -126,9 +126,9 @@ describe('ensureGroupEnrollment (lazy, at first spawn)', () => {
     const { admin, agents } = fakeAdmin();
     await storeUserCredential(admin, 'webchat:alice', 'claude', 'sk-ant-alice', 'api_key');
     await ensureGroupEnrollment(admin, 'webchat:alice', 'ag-1');
-    const ident = byokAgentIdentifier('ag-1', 'webchat:alice');
+    const ident = userCredsAgentIdentifier('ag-1', 'webchat:alice');
     expect(userHasActiveKey('webchat:alice', 'ag-1')).toBe(true);
-    expect(getByokCredential('webchat:alice', 'ag-1')?.onecli_agent_id).toBe(ident);
+    expect(getUserCredsCredential('webchat:alice', 'ag-1')?.onecli_agent_id).toBe(ident);
     const agent = agents.get(ident)!;
     expect(agent.mode).toBe('selective');
     expect(agent.secretIds).toEqual([getUserSecretId('webchat:alice')]); // just the user's key
@@ -142,7 +142,7 @@ describe('ensureGroupEnrollment (lazy, at first spawn)', () => {
     ]);
     await storeUserCredential(admin, 'webchat:bob', 'claude', 'sk-ant-bob', 'api_key');
     await ensureGroupEnrollment(admin, 'webchat:bob', 'ag-1');
-    const ident = byokAgentIdentifier('ag-1', 'webchat:bob');
+    const ident = userCredsAgentIdentifier('ag-1', 'webchat:bob');
     const userSecret = getUserSecretId('webchat:bob')!;
     // user's anthropic + the group's gmail; NOT the group's anthropic
     expect(agents.get(ident)!.secretIds.sort()).toEqual([userSecret, 'grp-gmail'].sort());
@@ -154,8 +154,8 @@ describe('ensureGroupEnrollment (lazy, at first spawn)', () => {
     await ensureGroupEnrollment(admin, 'webchat:alice', 'ag-1');
     await ensureGroupEnrollment(admin, 'webchat:alice', 'ag-2');
     const sec = getUserSecretId('webchat:alice')!;
-    expect(getByokCredential('webchat:alice', 'ag-1')!.secret_id).toBe(sec);
-    expect(getByokCredential('webchat:alice', 'ag-2')!.secret_id).toBe(sec);
+    expect(getUserCredsCredential('webchat:alice', 'ag-1')!.secret_id).toBe(sec);
+    expect(getUserCredsCredential('webchat:alice', 'ag-2')!.secret_id).toBe(sec);
     expect(userHasActiveKey('webchat:alice', 'ag-2')).toBe(true);
   });
 
@@ -165,7 +165,9 @@ describe('ensureGroupEnrollment (lazy, at first spawn)', () => {
     await ensureGroupEnrollment(admin, 'webchat:alice', 'ag-1');
     await ensureGroupEnrollment(admin, 'webchat:alice', 'ag-1');
     const n = (
-      getDb().prepare(`SELECT COUNT(*) AS n FROM byok_credentials WHERE user_id='webchat:alice'`).get() as { n: number }
+      getDb().prepare(`SELECT COUNT(*) AS n FROM user_credential_members WHERE user_id='webchat:alice'`).get() as {
+        n: number;
+      }
     ).n;
     expect(n).toBe(1);
   });
@@ -173,7 +175,7 @@ describe('ensureGroupEnrollment (lazy, at first spawn)', () => {
   it('does nothing when the member has not connected a credential for the provider', async () => {
     const { admin, agents } = fakeAdmin();
     await ensureGroupEnrollment(admin, 'webchat:nobody', 'ag-1');
-    expect(getByokCredential('webchat:nobody', 'ag-1')).toBeNull();
+    expect(getUserCredsCredential('webchat:nobody', 'ag-1')).toBeNull();
     expect(agents.size).toBe(0);
   });
 
@@ -186,13 +188,13 @@ describe('ensureGroupEnrollment (lazy, at first spawn)', () => {
     ensureContainerConfig('ag-sw');
     await storeUserCredential(admin, 'webchat:frank', 'claude', 'sk-ant-frank', 'api_key');
     await ensureGroupEnrollment(admin, 'webchat:frank', 'ag-sw');
-    expect(getByokCredential('webchat:frank', 'ag-sw')!.provider).toBe('claude');
+    expect(getUserCredsCredential('webchat:frank', 'ag-sw')!.provider).toBe('claude');
     // Group switched to codex; member connects a codex cred. The stale active
     // claude row must NOT short-circuit enrollment — re-enroll with the codex secret.
     updateContainerConfigScalars('ag-sw', { provider: 'codex' });
     await storeUserCredential(admin, 'webchat:frank', 'codex', 'sk-openai-frank', 'api_key');
     await ensureGroupEnrollment(admin, 'webchat:frank', 'ag-sw');
-    const row = getByokCredential('webchat:frank', 'ag-sw')!;
+    const row = getUserCredsCredential('webchat:frank', 'ag-sw')!;
     expect(row.provider).toBe('codex');
     expect(secrets.get(row.secret_id!)!.type).toBe('openai');
   });
@@ -201,7 +203,7 @@ describe('ensureGroupEnrollment (lazy, at first spawn)', () => {
     const { admin } = fakeAdmin();
     await storeUserCredential(admin, 'webchat:alice', 'claude', 'sk-ant-oat-TOKEN', 'oauth_token');
     await ensureGroupEnrollment(admin, 'webchat:alice', 'ag-1');
-    const row = getByokCredential('webchat:alice', 'ag-1')!;
+    const row = getUserCredsCredential('webchat:alice', 'ag-1')!;
     expect(row.cred_type).toBe('oauth_token');
     expect(userHasActiveOauth('webchat:alice', 'ag-1')).toBe(true);
   });
@@ -219,8 +221,8 @@ describe('Codex provider (per-member ChatGPT/Codex credential)', () => {
     await storeUserCredential(admin, 'webchat:carol', 'codex', authJson, 'oauth_token');
     await ensureGroupEnrollment(admin, 'webchat:carol', 'ag-cdx');
 
-    const ident = byokAgentIdentifier('ag-cdx', 'webchat:carol');
-    const row = getByokCredential('webchat:carol', 'ag-cdx')!;
+    const ident = userCredsAgentIdentifier('ag-cdx', 'webchat:carol');
+    const row = getUserCredsCredential('webchat:carol', 'ag-cdx')!;
     expect(row.provider).toBe('codex');
     expect(row.cred_type).toBe('oauth_token');
     expect(secrets.get(row.secret_id!)!.type).toBe('openai'); // openai, not anthropic
@@ -236,7 +238,7 @@ describe('Codex provider (per-member ChatGPT/Codex credential)', () => {
     makeCodexGroup('ag-cdx');
     await storeUserCredential(admin, 'webchat:dave', 'codex', 'sk-openai-dave', 'api_key');
     await ensureGroupEnrollment(admin, 'webchat:dave', 'ag-cdx');
-    const row = getByokCredential('webchat:dave', 'ag-cdx')!;
+    const row = getUserCredsCredential('webchat:dave', 'ag-cdx')!;
     expect(row.provider).toBe('codex');
     expect(row.cred_type).toBe('api_key');
     expect(secrets.get(row.secret_id!)!.type).toBe('openai');
@@ -259,8 +261,8 @@ describe('revokeUserCredential (disconnect once → un-enroll everywhere)', () =
     expect(userHasActiveKey('webchat:alice', 'ag-1')).toBe(false);
     expect(userHasActiveKey('webchat:alice', 'ag-2')).toBe(false);
     expect(secrets.has(userSecret)).toBe(false); // real credential purged from the vault, not just revoked
-    const ident1 = byokAgentIdentifier('ag-1', 'webchat:alice');
-    const ident2 = byokAgentIdentifier('ag-2', 'webchat:alice');
+    const ident1 = userCredsAgentIdentifier('ag-1', 'webchat:alice');
+    const ident2 = userCredsAgentIdentifier('ag-2', 'webchat:alice');
     expect(agents.get(ident1)!.secretIds).not.toContain(userSecret); // member secret removed
     expect(agents.get(ident1)!.secretIds).toContain('grp-gmail'); // tools left
     expect(agents.get(ident2)!.secretIds).not.toContain(userSecret);

@@ -175,14 +175,19 @@ NEW_PATHS=(
   container/agent-runner/src/providers/summarize-thinking.test.ts
   src/onecli-preflight.ts
   src/onecli-preflight.test.ts
-  src/modules/byok
+  src/modules/user-credentials
   src/db/migrations/020-byok-credentials.ts
   src/db/migrations/021-byok-oauth.ts
   src/db/migrations/022-byok-provider.ts
   src/db/migrations/023-byok-user-credentials.ts
+  src/db/migrations/024-rename-user-credentials.ts
   setup/get-oauth-token.sh
-  docs/design/byok.md
-  docs/design/byok-oauth.md
+  docs/design/user-credentials.md
+  docs/design/user-credentials-oauth.md
+  docs/design/webchat-threads.md
+  docs/design/webchat-threads-qa.md
+  docs/design/thread-engaged-agents.md
+  docs/design/webchat-thread-context-sync.md
 )
 echo "→ Copying webchat-owned files …"
 git checkout "$BR" -- "${NEW_PATHS[@]}"
@@ -230,10 +235,17 @@ HOOK_FILES=(
   src/container-runtime.ts
   src/modules/index.ts
   src/modules/approvals/onecli-approvals.ts
+  src/modules/typing/index.ts
+  src/modules/typing/index.test.ts
   container/Dockerfile
   container/agent-runner/src/integration.test.ts
   container/agent-runner/src/poll-loop.test.ts
   container/agent-runner/src/mcp-tools/cli.instructions.md
+  src/container-config.ts
+  container/agent-runner/src/config.ts
+  container/agent-runner/src/index.ts
+  src/container-runtime.test.ts
+  src/host-sweep.ts
 )
 CONFLICTS=()
 echo "→ Applying webchat core-file hooks …"
@@ -393,6 +405,74 @@ NODE_EOF
 WEBCHAT_SYMBOLS="$WEBCHAT_SYMBOLS" node "$TMPFILE"
 rm -f "$TMPFILE"
 
+# ── 4a. File-based migrations: register numbered migrations from NEW_PATHS ──
+# The barrel pass above only registers `moduleWebchat*` symbols imported from
+# `channels/webchat/migration.js`. The user-credentials (and any future)
+# migrations ship as their OWN numbered files in src/db/migrations/NNN-*.ts —
+# copied via NEW_PATHS, exported as `migrationNNN`, and imported from the file
+# itself, NOT the barrel. Without this they get copied + run by nothing → the
+# table is missing at first use (e.g. webchat 500s with `no such table:
+# user_credentials`). Each is added idempotently: import line + array entry,
+# skipping any already present.
+FILE_MIGRATIONS=()
+for p in "${NEW_PATHS[@]}"; do
+  case "$p" in
+    src/db/migrations/*.ts) [ -f "$p" ] && FILE_MIGRATIONS+=("$p") ;;
+  esac
+done
+if [ "${#FILE_MIGRATIONS[@]}" -gt 0 ]; then
+  TMPFILE2=$(mktemp --suffix=.mjs)
+  cat > "$TMPFILE2" <<'NODE_EOF'
+import { readFileSync, writeFileSync } from 'node:fs';
+
+// One src/db/migrations/NNN-*.ts path per entry (copied via NEW_PATHS). Their
+// array order here is the registration order — matches the channel branch,
+// which lists the file migrations last.
+const files = process.env.FILE_MIGRATIONS.trim().split(/\s+/);
+const target = 'src/db/migrations/index.ts';
+let src = readFileSync(target, 'utf8');
+let changed = false;
+const arrayRe = /(const migrations: Migration\[\] = \[[\s\S]*?)\];/;
+
+for (const file of files) {
+  // The exported symbol + its import path come from the migration file itself,
+  // so this never drifts from what the file actually exports.
+  const body = readFileSync(file, 'utf8');
+  const m = body.match(/export (?:const|function) (migration[0-9A-Za-z]+)\b/);
+  if (!m) {
+    console.error(`  ! ${file}: no exported migration symbol — skipping`);
+    continue;
+  }
+  const sym = m[1];
+  const rel = './' + file.replace(/^src\/db\/migrations\//, '').replace(/\.ts$/, '.js');
+  const importLine = `import { ${sym} } from '${rel}';`;
+
+  // Import order is irrelevant to behavior, so insert after the first import to
+  // stay robust against however the surrounding imports are arranged.
+  if (!src.includes(importLine)) {
+    src = src.replace(/^(import .*\n)/m, `$1${importLine}\n`);
+    changed = true;
+  }
+  // Array order IS load-bearing (migrations run top-to-bottom); append in the
+  // NEW_PATHS order, skipping any symbol already registered.
+  const arr = src.match(arrayRe);
+  if (arr && !new RegExp(`\\b${sym}\\b`).test(arr[1])) {
+    src = src.replace(arrayRe, `$1  ${sym},\n];`);
+    changed = true;
+  }
+}
+
+if (changed) {
+  writeFileSync(target, src);
+  console.log(`→ Registered ${files.length} file-based migration(s) in ${target}`);
+} else {
+  console.log('= File-based migrations already registered (skip)');
+}
+NODE_EOF
+  FILE_MIGRATIONS="${FILE_MIGRATIONS[*]}" node "$TMPFILE2"
+  rm -f "$TMPFILE2"
+fi
+
 # ── 4b. Surface any unresolved hooks before the build ────────────────────
 # A conflicted hook was reverted to your version, so the webchat code that
 # depends on it will fail to typecheck in step 6. Warn loudly and point at
@@ -453,7 +533,7 @@ Next: configure environment + auth.
 Or set the .env vars by hand — see .claude/skills/add-webchat/SKILL.md
 under "Configure" for the full menu (auth methods, TLS, VAPID).
 
-Optional add-on: secure shared-room BYOK — several people in one room, each
+Built in: secure shared-room user credentials — several people in one room, each
 billing their own turns to their own Anthropic API key or Claude subscription.
-Opt-in, off by default; run /add-byok (needs OneCLI: /init-onecli).
+Off by default; enable it per room from room settings (needs OneCLI: /init-onecli).
 DONE

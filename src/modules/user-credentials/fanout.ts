@@ -1,5 +1,5 @@
 /**
- * BYOK shared-context fan-out.
+ * UserCreds shared-context fan-out.
  *
  * On a per-member session's wake turn, write the full recent room transcript
  * into that member's session — the current message as the wake (trigger=1), the
@@ -7,11 +7,11 @@
  * conversation, even though each member runs in their own container. Idle
  * members catch up the same way when they next speak.
  *
- * Stable ids `byok-<session>-<roomMsgId>` make this idempotent: re-syncing each
+ * Stable ids `user-creds-<session>-<roomMsgId>` make this idempotent: re-syncing each
  * turn only adds genuinely new messages. Content matches the webchat inbound
  * shape ({text, sender, senderName}) so the agent-runner formats it identically.
  *
- * BLAST RADIUS (by design): in a SHARED BYOK room, every connected member's
+ * BLAST RADIUS (by design): in a SHARED UserCreds room, every connected member's
  * own container receives the full room transcript — i.e. each member's container
  * is a read surface for all members' message *content* (never their
  * credentials — keys never cross containers). This is the price of giving each
@@ -36,7 +36,7 @@ export function writeMemberTranscript(args: PerMemberInboundArgs): boolean {
     const isCurrent = m.id === args.currentMessageId;
     if (isCurrent) sawCurrent = true;
     msgs.push({
-      id: `byok-${args.session.id}-${m.id}`,
+      id: `user-creds-${args.session.id}-${m.id}`,
       kind: 'chat',
       timestamp: new Date(m.created_at).toISOString(),
       platformId: args.deliveryAddr.platformId,

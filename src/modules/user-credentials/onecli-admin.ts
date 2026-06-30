@@ -1,5 +1,5 @@
 /**
- * Thin wrapper over the `onecli` CLI for BYOK onboarding (the SDK has no secret
+ * Thin wrapper over the `onecli` CLI for UserCreds onboarding (the SDK has no secret
  * management). The CLI reads ONECLI_URL/ONECLI_API_KEY from the host env, same
  * as the SDK. Isolated behind an interface so onboarding orchestration is
  * testable with a fake and the real CLI shapes live in one place.
@@ -18,7 +18,7 @@
  */
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import type { ByokCredType } from './db.js';
+import type { UserCredsCredType } from './db.js';
 import { writeFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -34,7 +34,7 @@ const TIMEOUT_MS = 20_000;
  * `secrets create/update --file` reads it off disk instead.
  */
 async function withSecretFile<T>(content: string, fn: (path: string) => Promise<T>): Promise<T> {
-  const path = join(tmpdir(), `byok-${randomBytes(12).toString('hex')}.json`);
+  const path = join(tmpdir(), `user-creds-${randomBytes(12).toString('hex')}.json`);
   writeFileSync(path, content, { mode: 0o600 });
   try {
     return await fn(path);
@@ -52,7 +52,7 @@ async function onecli(args: string[]): Promise<unknown> {
     // `.message`/`.cmd`; those propagate to callers that log err.message and would
     // leak a member's plaintext key into the persistent host log. Rethrow a scrubbed
     // error that names only the resource+verb (args[0]/args[1] are never secrets) and
-    // the exit code — never the argv. See byok-adversarial-review (cred-storage).
+    // the exit code — never the argv. See user-creds-adversarial-review (cred-storage).
     const code = (err as { code?: unknown } | null)?.code;
     throw new Error(`onecli ${args[0] ?? '?'} ${args[1] ?? ''}`.trim() + ` failed (exit ${code ?? '?'})`);
   }
@@ -95,7 +95,7 @@ export interface OnecliAdmin {
    * stores the key via `--value` (host pattern `api.openai.com`). Mirrors how the
    * Codex provider's operator credential is registered (setup/providers/codex.ts).
    */
-  createOpenAISecret(name: string, value: string, credType: ByokCredType): Promise<string>;
+  createOpenAISecret(name: string, value: string, credType: UserCredsCredType): Promise<string>;
   /** Update a secret's value. `asFile=true` writes the value (e.g. a refreshed
    *  Codex auth.json) via `--file` instead of `--value`. */
   updateSecretValue(secretId: string, value: string, asFile?: boolean): Promise<void>;

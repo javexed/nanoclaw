@@ -317,7 +317,7 @@ function renderSettingsModal() {
   $('#notif-toggle').checked = settings.notifications;
 }
 
-// ── Workspace credentials policy (Settings → Member credentials, owner-only) ──
+// ── Workspace credentials policy (Settings → User credentials, owner-only) ──
 let credConfigWired = false;
 async function renderCredentialsSettings() {
   const section = $('#settings-credentials');
@@ -465,12 +465,12 @@ function renderHandleChip() {
   // When the member has connected their own credential, the handle chip doubles
   // as the credential indicator (a 🔑 prefix) — there's no separate key chip.
   // The connect/disconnect controls live in the chip's popover (#handle-creds).
-  chip.textContent = byokConnected ? `🔑 ${label}` : label;
+  chip.textContent = userCredsConnected ? `🔑 ${label}` : label;
   chip.classList.toggle('is-unset', !myHandle);
-  chip.classList.toggle('has-cred', byokConnected);
-  chip.title = byokConnected ? 'Billing your own account — click to manage' : 'Edit your handle';
+  chip.classList.toggle('has-cred', userCredsConnected);
+  chip.title = userCredsConnected ? 'Billing your own account — click to manage' : 'Edit your handle';
   // Accessible name tracks the connected state (the 🔑/title are visual-only).
-  chip.setAttribute('aria-label', byokConnected ? 'Billing your own account — manage credentials' : 'Edit your handle');
+  chip.setAttribute('aria-label', userCredsConnected ? 'Billing your own account — manage credentials' : 'Edit your handle');
 }
 
 function openHandlePopover() {
@@ -560,6 +560,7 @@ $('#overflow-menu')?.addEventListener('click', (e) => {
   else if (action === 'dashboard') toggleDashboard();
   else if (action === 'permissions') togglePermissions();
   else if (action === 'settings') openSettings();
+  else if (action === 'help') toggleHelp();
 });
 document.addEventListener('click', (e) => {
   const menu = $('#overflow-menu');
@@ -749,6 +750,40 @@ window.addEventListener('popstate', (e) => {
     }
   }
 });
+
+// True when a modal / popover / menu is open that should consume Escape before a
+// full-screen view does. These each have their own ESC handler (bubble phase);
+// the view-close handler below runs in the CAPTURE phase, so it sees the overlay
+// still open and yields to it — one Escape closes exactly one layer.
+function blockingOverlayOpen() {
+  // `.modal-overlay` covers the settings, user-creds, and (dynamically mounted)
+  // confirm modals; the rest are listed explicitly. Visible = present and not
+  // [hidden].
+  if (document.querySelector('.modal-overlay:not([hidden])')) return true;
+  const others = ['model-picker', 'lightbox', 'members-overlay', 'handle-popover', 'overflow-menu', 'search-results'];
+  return others.some((id) => {
+    const el = document.getElementById(id);
+    return el && !el.hidden;
+  });
+}
+
+// Escape closes the topmost full-screen view (dashboard, topology, wiring,
+// permissions, agents/models) — the same path as its Back button, so history
+// and the OS back gesture stay in sync. Capture phase so it can defer to any
+// open modal/menu (which closes on its own bubble-phase handler instead).
+document.addEventListener(
+  'keydown',
+  (e) => {
+    if (e.key !== 'Escape' || viewStack.length === 0) return;
+    if (blockingOverlayOpen()) return; // a higher layer owns this Escape
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    closeView(viewStack[viewStack.length - 1].name);
+  },
+  true,
+);
 
 // Pinch-zoom + drag-to-pan on the image. Native pinch-zoom on a fixed-position
 // overlay doesn't work reliably on iOS Safari, so we handle touches ourselves.
@@ -957,6 +992,13 @@ const mentionedRooms = new Set(); // rooms with an unread @-mention of me (disti
 let roomMentionPeople = []; // current room's human members as @ autocomplete candidates
 let showArchived = sessionStorage.getItem('webchat:showArchived') === '1';
 let showHidden = sessionStorage.getItem('webchat:showHidden') === '1';
+// A–Z sort toggles per list. Off = the list's natural "auto" order (rooms by
+// recent activity, agents newest-first, models by provider); on = alphabetical.
+let roomSortAz = sessionStorage.getItem('webchat:roomSortAz') === '1';
+let agentSortAz = sessionStorage.getItem('webchat:agentSortAz') === '1';
+let modelSortAz = sessionStorage.getItem('webchat:modelSortAz') === '1';
+let usersSortAz = sessionStorage.getItem('webchat:usersSortAz') === '1';
+let manageTab = 'agents'; // active Manage tab; the header sort icon acts on this
 let agentName = '';
 let lastSeenMessageId = sessionStorage.getItem('lastSeenMessageId') || null;
 let reconnectDelay = 1000;
@@ -1071,10 +1113,15 @@ function connect() {
               .catch(() => {});
           }
         } else {
-          const saved = sessionStorage.getItem('lastRoom');
+          const saved = localStorage.getItem('lastRoom');
           if (saved) {
             const room = msg.rooms.find((r) => r.id === saved);
-            if (room) joinRoom(room.id, room.name);
+            if (room) {
+              // Resume the exact thread too (not just the room), so a thread you
+              // were in survives a full PWA close/reopen.
+              const savedThread = localStorage.getItem('lastThread:' + saved);
+              joinRoom(room.id, room.name, undefined, savedThread && savedThread !== 'main' ? savedThread : undefined);
+            }
           }
         }
         break;
@@ -1124,6 +1171,17 @@ function connect() {
           roomActivity.set(msg.room_id, Math.max(roomActivity.get(msg.room_id) || 0, msg.created_at));
           if (lastRoomsList.length) renderRooms(lastRoomsList);
         }
+        // Thread routing: a message for another thread of the open room doesn't
+        // belong in this view — flag that thread unread and stop. (Messages for
+        // other rooms never reach this client; the server scopes broadcasts.)
+        const msgThread = msg.thread_id || 'main';
+        if ((msg.room_id || currentRoom) === currentRoom && msgThread !== currentThread) {
+          if (msg.sender !== myIdentity) {
+            threadUnread.add(msgThread);
+            renderThreadList();
+          }
+          break;
+        }
         // Snapshot the scroll position BEFORE appending. If we check after,
         // the newly-inserted message has already pushed the bottom past our
         // 80px threshold and `isNearBottom()` lies about the user's intent.
@@ -1167,7 +1225,7 @@ function connect() {
           // badge stays cleared across this user's other devices too. Skip when
           // backgrounded — a hidden tab hasn't actually been seen.
           if (!document.hidden && ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'read', room_id: currentRoom }));
+            ws.send(JSON.stringify({ type: 'read', room_id: currentRoom, thread_id: currentThread }));
           }
         }
         const shouldScroll = wasNearBottom || (forceScrollCount > 0 && !userScrolledAway);
@@ -1283,7 +1341,7 @@ document.addEventListener('visibilitychange', () => {
     // Returning to a focused tab with a room open means its messages are now
     // seen — advance the server marker (and sync other devices). The reconnect
     // path already re-joins (which reads) when the socket was actually down.
-    if (currentRoom) ws.send(JSON.stringify({ type: 'read', room_id: currentRoom }));
+    if (currentRoom) ws.send(JSON.stringify({ type: 'read', room_id: currentRoom, thread_id: currentThread }));
   }
 });
 
@@ -1341,27 +1399,42 @@ function renderRooms(rooms) {
   // order. (Replaces the old manual drag-order, which lived only in this
   // browser's localStorage and never synced across devices.)
   const byActivity = (a, b) => activityOf(b) - activityOf(a);
+  // A–Z toggle: alphabetical by the displayed `#id` when on, recent-activity
+  // ("auto") when off. Applies to the unpinned + archived groups; pinned rooms
+  // always keep their manual pin_position order.
+  const byName = (a, b) => String(a.id).localeCompare(String(b.id));
+  const roomCmp = roomSortAz ? byName : byActivity;
 
   // Partition:
   //   - hidden (per-user "hide") — dropped unless `showHidden` is on.
   //   - archived (global flag) — collected in a collapsed "Archived" section at
   //     the bottom, revealed by the toggle.
-  //   - active — split into pinned (top) and unpinned, each activity-sorted.
+  //   - active — split into pinned (top) and unpinned.
   const visibleRooms = showHidden ? [...rooms] : rooms.filter((r) => !r.hidden);
   const active = visibleRooms.filter((r) => !r.archived);
-  const archived = visibleRooms.filter((r) => r.archived).sort(byActivity);
-  // Pinned rooms hold the user's MANUAL drag order (pin_position); the rest stay
-  // activity-sorted. Fall back to activity when positions are absent/equal.
+  const archived = visibleRooms.filter((r) => r.archived).sort(roomCmp);
+  // Pinned rooms hold the user's MANUAL drag order (pin_position); the rest follow
+  // the active sort. Fall back to activity when positions are absent/equal.
   const pinned = active
     .filter((r) => r.pinned)
     .sort((a, b) => (a.pin_position ?? 0) - (b.pin_position ?? 0) || byActivity(a, b));
-  const unpinned = active.filter((r) => !r.pinned).sort(byActivity);
+  const unpinned = active.filter((r) => !r.pinned).sort(roomCmp);
   const toggleBtn = $('#archived-toggle');
   if (archived.length === 0) {
     toggleBtn.hidden = true;
   } else {
     toggleBtn.hidden = false;
     toggleBtn.textContent = showArchived ? `Hide ${archived.length} archived` : `Show ${archived.length} archived`;
+  }
+  // Hidden-rooms toggle — mirrors the archived one. Without it a hidden room can
+  // never be brought back from the GUI (the only way to un-hide is to see it first).
+  const hiddenCount = rooms.filter((r) => r.hidden).length;
+  const hiddenBtn = $('#hidden-toggle');
+  if (hiddenCount === 0) {
+    hiddenBtn.hidden = true;
+  } else {
+    hiddenBtn.hidden = false;
+    hiddenBtn.textContent = showHidden ? `Hide ${hiddenCount} hidden` : `Show ${hiddenCount} hidden`;
   }
   // Divider sentinel between the pinned group and the rest — only when both
   // groups are non-empty.
@@ -1505,6 +1578,34 @@ function renderRooms(rooms) {
         });
         menu.appendChild(pinBtn);
       }
+      // Reorder pinned rooms from the menu — the touch/keyboard-friendly path
+      // since dragging is mouse-only. Shown for any pinned room when more than
+      // one is pinned (works on desktop too — also serves accessibility).
+      if (room.pinned && pinned.length > 1) {
+        const pinIdx = pinned.findIndex((r) => r.id === room.id);
+        if (pinIdx > 0) {
+          const upBtn = document.createElement('button');
+          upBtn.type = 'button';
+          upBtn.textContent = 'Move up';
+          upBtn.addEventListener('click', async (ev) => {
+            ev.stopPropagation();
+            menu.remove();
+            await movePinnedRoom(room.id, -1);
+          });
+          menu.appendChild(upBtn);
+        }
+        if (pinIdx < pinned.length - 1) {
+          const downBtn = document.createElement('button');
+          downBtn.type = 'button';
+          downBtn.textContent = 'Move down';
+          downBtn.addEventListener('click', async (ev) => {
+            ev.stopPropagation();
+            menu.remove();
+            await movePinnedRoom(room.id, 1);
+          });
+          menu.appendChild(downBtn);
+        }
+      }
 
       const hideBtn = document.createElement('button');
       hideBtn.type = 'button';
@@ -1537,6 +1638,51 @@ function renderRooms(rooms) {
     });
     li.appendChild(kebab);
 
+    // A "+" on every OTHER room row so a new thread can be started in any room
+    // straight from the list (the active room's "+" comes from its thread tree
+    // below, via renderThreadList). Clicking opens an inline name input on the row.
+    if (room.id !== currentRoom) {
+      if (threadAddRoom === room.id) {
+        appendRoomThreadInput(li, room);
+      } else {
+        const add = document.createElement('button');
+        add.className = 'thread-add-inline';
+        add.type = 'button';
+        add.textContent = '+';
+        add.title = 'New thread';
+        add.setAttribute('aria-label', `New thread in #${room.id}`);
+        add.addEventListener('click', (e) => {
+          e.stopPropagation();
+          threadAddRoom = room.id;
+          threadCreating = false;
+          renderRooms(lastRoomsList);
+        });
+        li.appendChild(add);
+      }
+    }
+
+    // Thread expander: rooms that HAVE topic threads get a left chevron to
+    // expand/collapse their thread list inline — WITHOUT entering the room (the
+    // active room always shows its tree, so it needs no toggle). thread_count
+    // comes from the server's rooms payload.
+    const threadCount = room.thread_count || 0;
+    if (threadCount > 0 && room.id !== currentRoom) {
+      const open = expandedRooms.has(room.id);
+      const chev = document.createElement('button');
+      chev.className = 'room-thread-toggle';
+      chev.type = 'button';
+      chev.textContent = open ? '▾' : '▸';
+      const lbl = `${threadCount} thread${threadCount === 1 ? '' : 's'}`;
+      chev.title = lbl;
+      chev.setAttribute('aria-label', `${open ? 'Collapse' : 'Show'} ${lbl}`);
+      chev.setAttribute('aria-expanded', open ? 'true' : 'false');
+      chev.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleRoomThreads(room.id);
+      });
+      li.insertBefore(chev, li.firstChild); // left-most, like a tree disclosure
+    }
+
     if (room.id === currentRoom) li.classList.add('active');
     li.setAttribute('role', 'button');
     li.setAttribute('tabindex', '0');
@@ -1549,7 +1695,22 @@ function renderRooms(rooms) {
       }
     });
     list.appendChild(li);
+
+    // Nest a thread tree under the row: the active room's (populated by
+    // renderThreadList below), or an EXPANDED non-active room's (its own tree).
+    if (room.id === currentRoom) {
+      const threadHost = document.createElement('div');
+      threadHost.className = 'thread-list';
+      li.appendChild(threadHost);
+    } else if (expandedRooms.has(room.id)) {
+      const threadHost = document.createElement('div');
+      threadHost.className = 'thread-list';
+      li.appendChild(threadHost);
+      renderRoomThreads(li, room.id);
+    }
   }
+  // Populate the active room's thread tree (no-op if no room open).
+  if (currentRoom) renderThreadList();
 }
 
 let lastRoomsList = [];
@@ -1617,6 +1778,37 @@ async function reorderPinnedRoom(movedId, targetId, after) {
   }
 }
 
+// Touch-friendly pinned-room reorder: drag is mouse-only (native HTML5 DnD
+// doesn't fire from touch), so the kebab's Move up / Move down call this to swap
+// a pinned room with its neighbour. Same optimistic reindex + persist as
+// reorderPinnedRoom. `dir` is -1 (up) or +1 (down).
+async function movePinnedRoom(roomId, dir) {
+  const order = lastRoomsList
+    .filter((r) => r.pinned && !r.archived)
+    .sort((a, b) => (a.pin_position ?? 0) - (b.pin_position ?? 0))
+    .map((r) => r.id);
+  const i = order.indexOf(roomId);
+  const j = i + dir;
+  if (i === -1 || j < 0 || j >= order.length) return;
+  [order[i], order[j]] = [order[j], order[i]];
+  order.forEach((id, k) => {
+    const r = lastRoomsList.find((x) => x.id === id);
+    if (r) r.pin_position = k;
+  });
+  renderRooms(lastRoomsList);
+  try {
+    const res = await authFetch('/api/rooms/pins/order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+      body: JSON.stringify({ order }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    console.error('movePinnedRoom failed:', err);
+    // The next authoritative `rooms` broadcast restores order; no rollback needed.
+  }
+}
+
 async function toggleRoomPin(roomId, pin) {
   // PER-USER pin. Optimistic flip + re-render, same pattern as hide/archive.
   // The server replays authoritative state via broadcastRooms (which also syncs
@@ -1657,8 +1849,576 @@ async function toggleRoomHide(roomId, hide) {
   }
 }
 
+// ── Threads ─────────────────────────────────────────────────────────────────
+// A webchat thread maps to an isolated agent session. The sidebar nests a
+// room's threads under it; switching a thread re-joins the room scoped to that
+// thread (server filters history). See docs/design/webchat-threads.md.
+let currentThread = 'main';
+let threadCreating = false; // true while the inline "new thread" input is open
+let threadAddRoom = null; // room id whose row is showing the inline new-thread input
+let threadRenaming = null; // thread_id whose row is showing the inline rename input
+const threadUnread = new Set(); // thread_ids with unread activity in the open room
+const expandedRooms = new Set(); // non-active rooms whose thread tree is expanded in the sidebar
+// Single source of truth for a room's threads (roomId → threads[]), keyed by
+// room. The active room's threads are just threadCache.get(currentRoom) — see
+// roomThreads(). loadThreadList/loadRoomThreads write it; render reads it. One
+// cache means one invalidation point (no roomThreads-vs-threadsByRoom drift).
+const threadCache = new Map();
+function roomThreads() {
+  return threadCache.get(currentRoom) || [];
+}
+
+// Expand/collapse a non-active room's thread tree inline in the sidebar (the
+// "▸/▾" chevron), lazy-loading that room's threads on first expand.
+function toggleRoomThreads(roomId) {
+  if (expandedRooms.has(roomId)) {
+    expandedRooms.delete(roomId);
+    renderRooms(lastRoomsList);
+    return;
+  }
+  expandedRooms.add(roomId);
+  if (!threadCache.has(roomId)) {
+    void loadRoomThreads(roomId).then(() => {
+      if (expandedRooms.has(roomId)) renderRooms(lastRoomsList);
+    });
+  }
+  renderRooms(lastRoomsList); // immediate (shows "Loading…" until the fetch resolves)
+}
+
+async function loadRoomThreads(roomId) {
+  try {
+    const r = await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/threads`);
+    threadCache.set(roomId, r.ok ? ((await r.json()) ?? []) : []);
+  } catch {
+    threadCache.set(roomId, []);
+  }
+}
+
+// Render an expanded non-active room's thread rows into its .thread-list host.
+// Tapping a row enters that room AND the thread in a single clean join.
+function renderRoomThreads(li, roomId) {
+  const host = li.querySelector('.thread-list');
+  if (!host) return;
+  host.innerHTML = '';
+  const threads = threadCache.get(roomId);
+  if (!Array.isArray(threads)) {
+    host.innerHTML = '<div class="thread-loading">Loading…</div>';
+    return;
+  }
+  const room = lastRoomsList.find((r) => r.id === roomId);
+  for (const t of threads.filter((t) => t.kind !== 'main')) {
+    const row = document.createElement('div');
+    row.className = 'thread-row';
+    row.dataset.threadId = t.thread_id;
+    row.style.setProperty('--thread-color', roomColor(t.thread_id));
+    row.setAttribute('role', 'button');
+    row.tabIndex = 0;
+    row.setAttribute('aria-label', `Open thread ${t.title}`);
+    const glyph = document.createElement('span');
+    glyph.className = 'thread-glyph';
+    glyph.textContent = '#';
+    glyph.setAttribute('aria-hidden', 'true');
+    row.appendChild(glyph);
+    const label = document.createElement('span');
+    label.className = 'thread-label';
+    label.textContent = t.title;
+    row.appendChild(label);
+    const enter = () => joinRoom(roomId, room ? room.name : roomId, undefined, t.thread_id);
+    row.addEventListener('click', (e) => {
+      e.stopPropagation();
+      enter();
+    });
+    row.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        e.stopPropagation();
+        enter();
+      }
+    });
+    host.appendChild(row);
+  }
+}
+
+async function loadThreadList(roomId) {
+  try {
+    const r = await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/threads`);
+    if (roomId !== currentRoom) return; // raced past a room switch
+    if (!r.ok) {
+      threadCache.set(roomId, []);
+      renderThreadList();
+      showToast('Could not load threads', { kind: 'error' });
+      return;
+    }
+    const threads = await r.json();
+    const list = Array.isArray(threads) ? threads : [];
+    threadCache.set(roomId, list);
+    for (const t of list) if (t.unread && t.thread_id !== currentThread) threadUnread.add(t.thread_id);
+    renderThreadList();
+    updateThreadSyncControls(); // refresh the breadcrumb title (covers rename + late load)
+  } catch {
+    if (roomId !== currentRoom) return;
+    threadCache.set(roomId, []);
+    renderThreadList();
+    showToast('Could not load threads', { kind: 'error' });
+  }
+}
+
+function threadGlyph(kind) {
+  return kind === 'agent' ? '@' : '#';
+}
+
+// Render the thread tree under the active room's sidebar row. Called from
+// renderRooms (so it survives room-list re-renders) and on thread changes.
+function renderThreadList() {
+  const li = document.querySelector(`#room-list li[data-room-id="${cssEscape(currentRoom)}"]`);
+  // Drop any prior inline "+" so its placement is recomputed cleanly each render.
+  li?.querySelector('.thread-add-inline')?.remove();
+  const host = li?.querySelector('.thread-list');
+  if (!host) return;
+  host.innerHTML = '';
+  // Only non-main threads render as rows (the room row is the regular chat).
+  const nonMain = roomThreads().filter((t) => t.kind !== 'main');
+  for (const t of nonMain) {
+    if (t.thread_id === threadRenaming) {
+      // Inline rename in place — mirrors the inline "new thread" input.
+      host.appendChild(buildThreadRenameRow(t));
+      continue;
+    }
+    const row = document.createElement('div');
+    row.className = 'thread-row' + (t.thread_id === currentThread ? ' active' : '');
+    row.dataset.threadId = t.thread_id;
+    // Keyboard-operable like the room rows: role + tabindex + Enter/Space.
+    row.setAttribute('role', 'button');
+    row.tabIndex = 0;
+    row.setAttribute('aria-label', `Open thread ${t.title}`);
+    if (t.thread_id === currentThread) row.setAttribute('aria-current', 'true');
+    // Per-thread identity hue on the spine (mirrors rooms' colored left bar). The
+    // active thread overrides to accent via CSS for an unmistakable selection.
+    row.style.setProperty('--thread-color', roomColor(t.thread_id));
+
+    const glyph = document.createElement('span');
+    glyph.className = 'thread-glyph';
+    glyph.textContent = threadGlyph(t.kind);
+    glyph.setAttribute('aria-hidden', 'true');
+    row.appendChild(glyph);
+
+    const label = document.createElement('span');
+    label.className = 'thread-label';
+    label.textContent = t.title;
+    row.appendChild(label);
+
+    if (t.thread_id !== currentThread && threadUnread.has(t.thread_id)) {
+      const dot = document.createElement('span');
+      dot.className = 'thread-unread';
+      row.appendChild(dot);
+    }
+
+    // Rename/delete for non-main threads (delete owner-only; server re-checks).
+    if (t.kind !== 'main') {
+      const menu = document.createElement('button');
+      menu.className = 'thread-kebab';
+      menu.type = 'button';
+      menu.innerHTML = lucide('ellipsis');
+      menu.setAttribute('aria-label', 'Thread actions');
+      menu.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openThreadMenu(t, menu);
+      });
+      row.appendChild(menu);
+    }
+
+    row.addEventListener('click', (e) => {
+      e.stopPropagation(); // don't bubble to the room <li> (which re-joins)
+      openThread(t.thread_id);
+    });
+    row.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        e.stopPropagation();
+        openThread(t.thread_id);
+      }
+    });
+    host.appendChild(row);
+  }
+
+  if (threadCreating) {
+    // Inline new-thread creation — type a name, Enter creates, Esc/blur cancels.
+    host.appendChild(
+      makeThreadNameInput({
+        ariaLabel: 'New thread name',
+        onCancel: () => {
+          threadCreating = false;
+          renderThreadList();
+        },
+        onSubmit: (title) => {
+          threadCreating = false;
+          createThread(title);
+        },
+      }),
+    );
+  } else if (nonMain.length === 0) {
+    // No threads yet → put the "+" inline on the room row (right of the name).
+    // The empty .thread-list collapses (:empty), so this costs no extra line.
+    const add = document.createElement('button');
+    add.className = 'thread-add-inline';
+    add.type = 'button';
+    add.textContent = '+';
+    add.title = 'New thread';
+    add.setAttribute('aria-label', 'New thread');
+    add.addEventListener('click', (e) => {
+      e.stopPropagation();
+      threadCreating = true;
+      renderThreadList();
+    });
+    li.appendChild(add);
+  } else {
+    // Has threads → the "+" goes inline on the LAST thread row (right of its
+    // name), mirroring the no-threads case where it sits on the room row. No
+    // separate "+" line.
+    const add = document.createElement('button');
+    add.className = 'thread-add-inline';
+    add.type = 'button';
+    add.textContent = '+';
+    add.title = 'New thread';
+    add.setAttribute('aria-label', 'New thread');
+    add.addEventListener('click', (e) => {
+      e.stopPropagation();
+      threadCreating = true;
+      renderThreadList();
+    });
+    const lastRow = host.lastElementChild;
+    if (lastRow) lastRow.appendChild(add);
+    else li.appendChild(add);
+  }
+}
+
+function openThread(threadId) {
+  if (!currentRoom || threadId === currentThread) return;
+  // Make the chat pane visible — on mobile, opening a thread from the room-list
+  // view must switch INTO the chat (mirror joinRoom), otherwise the click just
+  // changes state behind the still-shown sidebar and looks like it did nothing.
+  hideOtherFullViews();
+  $('#chat').hidden = false;
+  $('#app').classList.add('in-room');
+  $('#app').classList.remove('in-dashboard');
+  currentThread = threadId;
+  localStorage.setItem('lastThread:' + currentRoom, threadId);
+  threadUnread.delete(threadId);
+  $('#messages').innerHTML = '<div class="empty-state">Loading…</div>';
+  // Re-join the room scoped to this thread; the server returns thread history.
+  ws.send(JSON.stringify({ type: 'join', room_id: currentRoom, thread_id: threadId }));
+  renderThreadList();
+  updateThreadSyncControls();
+}
+
+// The breadcrumb + pull/push/delete controls only make sense inside a topic
+// thread — the main chat ('main') is the trunk both directions sync against, so
+// it has nothing of its own to pull/push. See webchat-thread-context-sync.md.
+function updateThreadSyncControls() {
+  const inThread = !!(currentRoom && currentThread && currentThread !== 'main');
+  // The header thread switcher shows whenever a room is open (CSS gates it to
+  // mobile, where the sidebar thread tree is hidden in-room). Badge it with the
+  // topic-thread count + accent it, so it's obvious the room HAS threads to open.
+  const sw = $('#thread-switch');
+  if (sw) {
+    sw.hidden = !currentRoom;
+    const topicCount = roomThreads().filter((t) => t.kind !== 'main').length;
+    sw.textContent = topicCount > 0 ? `#${topicCount}` : '#';
+    sw.classList.toggle('has-threads', topicCount > 0);
+    sw.title = topicCount > 0 ? `${topicCount} thread${topicCount === 1 ? '' : 's'}` : 'Threads';
+  }
+  const sync = $('#thread-sync');
+  if (sync) sync.hidden = !inThread;
+  const crumb = $('#thread-crumb');
+  if (crumb) {
+    crumb.hidden = !inThread;
+    if (inThread) {
+      const thread = roomThreads().find((t) => t.thread_id === currentThread);
+      const nameEl = $('#thread-crumb-name');
+      if (nameEl) {
+        nameEl.textContent = thread ? thread.title : currentThread;
+        nameEl.style.setProperty('--thread-color', roomColor(currentThread));
+      }
+    }
+  }
+}
+
+async function createThread(title, roomId = currentRoom) {
+  try {
+    const r = await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/threads`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    const thread = await r.json();
+    // Create AND enter the new (blank) thread — but cleanly, via a SINGLE WS
+    // join, so main's transcript can't bleed in (the old joinRoom+openThread
+    // double-join race). Same room → openThread (one join into the thread);
+    // another room → joinRoom straight into the thread.
+    if (roomId === currentRoom) {
+      await loadThreadList(roomId); // so the tree shows it as active
+      openThread(thread.thread_id);
+    } else {
+      const room = lastRoomsList.find((x) => x.id === roomId);
+      joinRoom(roomId, room ? room.name : roomId, undefined, thread.thread_id);
+    }
+  } catch (err) {
+    showToast('Could not create thread: ' + (err.message || err), { kind: 'error' });
+    if (roomId === currentRoom) renderThreadList();
+  }
+}
+
+// Inline "new thread" input on a NON-active room's row — dropped onto its own
+// full-width line via the reused .thread-list wrap, so it's reachable from the
+// room list on both desktop and mobile. Submit creates the thread in that room
+// and switches into it.
+// Shared inline thread-name input (create + rename). Builds the styled input and
+// wires the common behavior — Enter=submit, Escape=cancel, click-stop, blur, and
+// autofocus — so the four call sites only supply value/aria + their onSubmit /
+// onCancel. `blurSubmits` commits on blur (the switcher) instead of cancelling;
+// `selectAll` pre-selects the text (rename). An empty or unchanged value cancels.
+function makeThreadNameInput({
+  value = '',
+  placeholder = 'Thread name…',
+  ariaLabel,
+  selectAll = false,
+  blurSubmits = false,
+  onSubmit,
+  onCancel,
+}) {
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'thread-add-input';
+  input.maxLength = 80;
+  if (value) input.value = value;
+  else input.placeholder = placeholder;
+  if (ariaLabel) input.setAttribute('aria-label', ariaLabel);
+  let settled = false;
+  const cancel = () => {
+    if (settled) return;
+    settled = true;
+    onCancel?.();
+  };
+  const submit = () => {
+    if (settled) return;
+    const title = input.value.trim();
+    if (!title || title === value) return cancel(); // empty or unchanged → cancel
+    settled = true;
+    onSubmit(title);
+  };
+  input.addEventListener('click', (e) => e.stopPropagation());
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      submit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancel();
+    }
+  });
+  input.addEventListener('blur', blurSubmits ? submit : cancel);
+  setTimeout(() => {
+    input.focus();
+    if (selectAll) input.select();
+  }, 0);
+  return input;
+}
+
+function appendRoomThreadInput(li, room) {
+  const host = document.createElement('div');
+  host.className = 'thread-list';
+  host.appendChild(
+    makeThreadNameInput({
+      ariaLabel: `New thread in #${room.id}`,
+      onCancel: () => {
+        threadAddRoom = null;
+        renderRooms(lastRoomsList);
+      },
+      onSubmit: (title) => {
+        threadAddRoom = null;
+        createThread(title, room.id);
+      },
+    }),
+  );
+  li.appendChild(host);
+}
+
+function openThreadMenu(thread, anchor) {
+  closeThreadMenus();
+  const menu = document.createElement('div');
+  menu.className = 'thread-menu';
+  const rename = document.createElement('button');
+  rename.textContent = 'Rename';
+  rename.addEventListener('click', () => {
+    closeThreadMenus();
+    startThreadRename(thread);
+  });
+  menu.appendChild(rename);
+  if (isOwnerView) {
+    const del = document.createElement('button');
+    del.className = 'danger';
+    del.textContent = 'Delete';
+    del.addEventListener('click', () => {
+      closeThreadMenus();
+      deleteThreadConfirm(thread);
+    });
+    menu.appendChild(del);
+  }
+  anchor.parentElement.appendChild(menu);
+  setTimeout(() => document.addEventListener('click', closeThreadMenus, { once: true }), 0);
+}
+
+function closeThreadMenus() {
+  document.querySelectorAll('.thread-menu').forEach((m) => m.remove());
+}
+
+// In-room thread switcher (the chat-header '#' button). The sidebar thread tree
+// is hidden on mobile while a room is open, so this is the mobile way to switch
+// between Main/topic threads and create a new one without backing out.
+function closeThreadSwitcher() {
+  document.querySelectorAll('.thread-switcher').forEach((m) => m.remove());
+}
+
+function openThreadSwitcher() {
+  closeThreadSwitcher();
+  if (!currentRoom) return;
+  const btn = $('#thread-switch');
+  if (!btn) return;
+  const pop = document.createElement('div');
+  pop.className = 'thread-switcher';
+  pop.setAttribute('role', 'menu');
+
+  const addRow = (label, threadId, tinted) => {
+    const b = document.createElement('button');
+    b.className = 'thread-switcher-item' + (threadId === currentThread ? ' active' : '');
+    b.type = 'button';
+    b.setAttribute('role', 'menuitem');
+    if (tinted) {
+      const dot = document.createElement('span');
+      dot.className = 'thread-switcher-dot';
+      dot.style.background = roomColor(threadId);
+      b.appendChild(dot);
+    }
+    const name = document.createElement('span');
+    name.className = 'thread-switcher-label';
+    name.textContent = label;
+    b.appendChild(name);
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeThreadSwitcher();
+      openThread(threadId); // openThread handles 'main' too (no-op if already there)
+    });
+    pop.appendChild(b);
+  };
+
+  addRow('Main chat', 'main', false);
+  for (const t of roomThreads().filter((t) => t.kind !== 'main')) addRow(t.title, t.thread_id, true);
+
+  const add = document.createElement('button');
+  add.className = 'thread-switcher-item thread-switcher-new';
+  add.type = 'button';
+  add.textContent = '+ New thread';
+  add.addEventListener('click', (e) => {
+    e.stopPropagation();
+    switcherCreate(pop, add);
+  });
+  pop.appendChild(add);
+
+  btn.parentElement.appendChild(pop);
+  setTimeout(() => document.addEventListener('click', closeThreadSwitcher, { once: true }), 0);
+}
+
+// Replace the "+ New thread" row with an inline name input (no native prompt).
+function switcherCreate(pop, addBtn) {
+  addBtn.replaceWith(
+    makeThreadNameInput({
+      ariaLabel: 'New thread name',
+      blurSubmits: true, // clicking away commits, matching the prior switcher behavior
+      onCancel: closeThreadSwitcher,
+      onSubmit: (title) => {
+        closeThreadSwitcher();
+        createThread(title);
+      },
+    }),
+  );
+}
+
+// Open the inline rename input on a thread row (no native prompt() — DESIGN.md §4).
+function startThreadRename(thread) {
+  threadRenaming = thread.thread_id;
+  threadCreating = false;
+  renderThreadList();
+}
+
+// Build a thread row showing an inline rename input, mirroring the create input.
+function buildThreadRenameRow(t) {
+  const row = document.createElement('div');
+  row.className = 'thread-row';
+  row.dataset.threadId = t.thread_id;
+  row.style.setProperty('--thread-color', roomColor(t.thread_id));
+  row.appendChild(
+    makeThreadNameInput({
+      value: t.title,
+      ariaLabel: 'Rename thread',
+      selectAll: true,
+      onCancel: () => {
+        threadRenaming = null;
+        renderThreadList();
+      },
+      onSubmit: (title) => {
+        threadRenaming = null;
+        submitThreadRename(t.thread_id, title);
+      },
+    }),
+  );
+  return row;
+}
+
+async function submitThreadRename(threadId, title) {
+  try {
+    const r = await authFetch(`/api/rooms/${encodeURIComponent(currentRoom)}/threads/${encodeURIComponent(threadId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    await loadThreadList(currentRoom);
+  } catch (err) {
+    showToast('Rename failed: ' + (err.message || err), { kind: 'error' });
+  }
+}
+
+async function deleteThreadConfirm(thread) {
+  const confirmed = await showConfirmModal({
+    title: `Delete "${thread.title}"?`,
+    body: '',
+    confirmLabel: 'Delete',
+    destructive: true,
+  });
+  if (!confirmed) return;
+  try {
+    const r = await authFetch(`/api/rooms/${encodeURIComponent(currentRoom)}/threads/${encodeURIComponent(thread.thread_id)}`, {
+      method: 'DELETE',
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    if (currentThread === thread.thread_id) openThread('main');
+    await loadThreadList(currentRoom);
+    showToast('Thread deleted', { kind: 'success' });
+  } catch (err) {
+    showToast('Delete failed: ' + (err.message || err), { kind: 'error' });
+  }
+}
+
+// CSS.escape shim for older webviews.
+function cssEscape(s) {
+  if (window.CSS && CSS.escape) return CSS.escape(String(s));
+  return String(s).replace(/["\\\]]/g, '\\$&');
+}
+
 let pendingJumpMessageId = null;
-function joinRoom(roomId, roomName, jumpMessageId) {
+function joinRoom(roomId, roomName, jumpMessageId, initialThread) {
   // When set (e.g. from a search-result click), the `history` handler lands on
   // this message instead of scrolling to the bottom.
   pendingJumpMessageId = jumpMessageId || null;
@@ -1674,10 +2434,11 @@ function joinRoom(roomId, roomName, jumpMessageId) {
   // elapsed timer / reasoning traces can't leak into the new room.
   endAllAgentTurns();
   currentRoom = roomId;
+  threadAddRoom = null; // clear any other room's pending inline new-thread input
   unreadRooms.delete(roomId);
   mentionedRooms.delete(roomId);
   updateUnreadDots();
-  updateByokBanner(roomId);
+  updateUserCredsBanner(roomId);
   // Set agent name for thinking bubble from the agent wired to this room.
   const roomAgent = allAgents.find((b) => b.room_id === roomId);
   if (roomAgent) agentName = roomAgent.name;
@@ -1690,15 +2451,30 @@ function joinRoom(roomId, roomName, jumpMessageId) {
   $('#members-overlay').classList.remove('visible');
   renderMembers([]);
   $('#messages').innerHTML = '<div class="empty-state">Loading…</div>';
-  ws.send(JSON.stringify({ type: 'join', room_id: roomId }));
-  sessionStorage.setItem('lastRoom', roomId);
+  // No "Main" thread row — the room itself IS the regular chat. Entering a room
+  // always lands in that regular chat ('main' keys the room's shared session);
+  // threads are opened explicitly from the sidebar.
+  // Normally land in the regular chat ('main'); `initialThread` lets a caller
+  // (e.g. just-created a thread) enter that thread directly in a SINGLE join —
+  // avoiding the join('main')+join(thread) race that bled main's transcript in.
+  currentThread = initialThread || 'main';
+  // Persist in localStorage (NOT sessionStorage, which iOS wipes when the PWA is
+  // fully closed) so reopening resumes the same room AND thread.
+  localStorage.setItem('lastThread:' + roomId, currentThread);
+  threadUnread.clear();
+  threadCache.delete(roomId); // clear this room's cached threads; loadThreadList refills
+  updateThreadSyncControls();
+  ws.send(JSON.stringify({ type: 'join', room_id: roomId, thread_id: currentThread }));
+  loadThreadList(roomId);
+  localStorage.setItem('lastRoom', roomId);
   $('#room-name').textContent = `#${roomId}`;
   $('#message-input').disabled = false;
   $('#message-form button[type=submit]').disabled = false;
   showRoomSettingsToggle(true);
-  document.querySelectorAll('#room-list li').forEach((li) => {
-    li.classList.toggle('active', li.dataset.roomId === roomId);
-  });
+  // Re-render the room list so the now-active room gets its nested thread
+  // tree container (renderRooms adds .thread-list for the active room, then
+  // loadThreadList populates it when its fetch resolves).
+  if (lastRoomsList.length) renderRooms(lastRoomsList);
   // Prime the mention-autocomplete caches so the first '@' the user types
   // doesn't have to wait on a fetch.
   refreshWiredAgentsForCurrentRoom();
@@ -1719,6 +2495,8 @@ function clearRoomSearch() {
   }
   const roomList = $('#room-list');
   if (roomList) roomList.hidden = false;
+  const sortBtn = $('#room-sort-az');
+  if (sortBtn) sortBtn.hidden = false; // sort icon returns to the search bar's right slot
   const close = $('#room-search-close');
   if (close) close.hidden = true;
 }
@@ -1749,6 +2527,8 @@ function renderSearchResults(results) {
   list.hidden = false;
   const roomList = $('#room-list');
   if (roomList) roomList.hidden = true;
+  const sortBtn = $('#room-sort-az');
+  if (sortBtn) sortBtn.hidden = true; // hide sort icon during search (close button takes the slot)
 }
 
 $('#room-search')?.addEventListener('input', (e) => {
@@ -1928,6 +2708,20 @@ function appendMessage(msg, statusText, beforeNode) {
   if (msg.message_type === 'approval' || msg.message_type === 'approval_resolved') {
     appendApprovalCard(msg, beforeNode);
     return;
+  }
+  // Context-sync divider: a labelled rule marking where pulled/pushed messages
+  // begin. See docs/design/webchat-thread-context-sync.md.
+  if (msg.message_type === 'context-divider') {
+    const rule = document.createElement('div');
+    rule.className = 'context-divider';
+    const label = document.createElement('span');
+    label.textContent = msg.content || 'Synced context';
+    rule.appendChild(label);
+    const tb = $('#messages .thinking-bubble');
+    if (beforeNode) $('#messages').insertBefore(rule, beforeNode);
+    else if (tb) $('#messages').insertBefore(rule, tb);
+    else $('#messages').appendChild(rule);
+    return rule;
   }
   const div = document.createElement('div');
   const isMine = msg.sender === myIdentity;
@@ -2266,45 +3060,45 @@ async function jumpToMessage(messageId) {
  * 'error'. Errors linger longer and must be dismissed-or-time-out; all toasts
  * are click-to-dismiss. Returns the element so callers can remove it early.
  */
-// ── BYOK: per-member key banner ───────────────────────────────────────────
+// ── UserCreds: per-member key banner ───────────────────────────────────────────
 // Shown in a room whose credential_mode is optional/required when the current
 // user hasn't connected their own Anthropic key. Connecting onboards the key
 // into the OneCLI vault (host-side) so the member's turns bill their account.
 // The room's model provider decides the connect vocabulary + which mint runs.
-let byokProvider = 'claude';
+let userCredsProvider = 'claude';
 // Latest banner state, so the @handle popover credentials shortcut can mirror it.
-let byokState = null;
+let userCredsState = null;
 // Whether the member has a connected credential for the open room — drives the
 // 🔑 indicator on the @handle chip (the standalone key chip was merged into it).
-let byokConnected = false;
+let userCredsConnected = false;
 
-function byokWords(provider) {
+function userCredsWords(provider) {
   return provider === 'codex'
     ? { name: 'Codex', subWord: 'ChatGPT subscription', keyWord: 'OpenAI key', keyPlaceholder: 'sk-…' }
     : { name: 'Claude', subWord: 'Claude subscription', keyWord: 'Anthropic key', keyPlaceholder: 'sk-ant-…' };
 }
 
-async function updateByokBanner(roomId) {
-  const banner = $('#byok-banner');
+async function updateUserCredsBanner(roomId) {
+  const banner = $('#user-creds-banner');
   if (!banner || !roomId) return;
   const hideAll = () => {
     banner.hidden = true;
-    byokState = null;
-    byokConnected = false;
+    userCredsState = null;
+    userCredsConnected = false;
     updateHandleCreds();
     renderHandleChip();
   };
   try {
-    const r = await authFetch(`/api/byok/credential?roomId=${encodeURIComponent(roomId)}`);
+    const r = await authFetch(`/api/user-credentials/credential?roomId=${encodeURIComponent(roomId)}`);
     if (!r.ok) {
       hideAll();
       return;
     }
     const { connected, mode, credType, oauthAllowed, apiKeyAllowed = true, provider = 'claude' } = await r.json();
-    byokProvider = provider;
-    const { name, subWord, keyWord, keyPlaceholder } = byokWords(provider);
-    // The room's mode is the master switch: 'disabled' (Member credentials: Off)
-    // means no BYOK at all — neither API keys NOR OAuth — regardless of what the
+    userCredsProvider = provider;
+    const { name, subWord, keyWord, keyPlaceholder } = userCredsWords(provider);
+    // The room's mode is the master switch: 'disabled' (User credentials: Off)
+    // means no UserCreds at all — neither API keys NOR OAuth — regardless of what the
     // workspace accepts. When the room is on, each method is offered if the
     // workspace accepts it (credential types are workspace-wide).
     const apiOffered = mode !== 'disabled' && apiKeyAllowed;
@@ -2314,8 +3108,8 @@ async function updateByokBanner(roomId) {
       return;
     }
 
-    byokState = { offered: true, connected, provider, oauthAllowed: oauthOffered, apiOffered, subWord, keyWord };
-    byokConnected = connected;
+    userCredsState = { offered: true, connected, provider, oauthAllowed: oauthOffered, apiOffered, subWord, keyWord };
+    userCredsConnected = connected;
     updateHandleCreds();
     renderHandleChip();
 
@@ -2327,9 +3121,9 @@ async function updateByokBanner(roomId) {
     }
 
     // Not connected → show the actionable banner.
-    const connectBtn = $('#byok-connect-btn');
-    const oauthBtn = $('#byok-oauth-btn');
-    const input = $('#byok-key-input');
+    const connectBtn = $('#user-creds-connect-btn');
+    const oauthBtn = $('#user-creds-oauth-btn');
+    const input = $('#user-creds-key-input');
     banner.hidden = false;
     input.hidden = true;
     input.value = '';
@@ -2347,11 +3141,11 @@ async function updateByokBanner(roomId) {
 }
 
 // The @handle popover mirrors the in-room banner state as a credentials shortcut
-// (discoverability). Shown only when the open room offers BYOK; acts on that room.
+// (discoverability). Shown only when the open room offers UserCreds; acts on that room.
 function updateHandleCreds() {
   const wrap = $('#handle-creds');
   if (!wrap) return;
-  if (!byokState || !byokState.offered) {
+  if (!userCredsState || !userCredsState.offered) {
     wrap.hidden = true;
     return;
   }
@@ -2360,45 +3154,45 @@ function updateHandleCreds() {
   const actionBtn = $('#handle-creds-action');
   // Minimalist integrations-row style: a status dot + the provider name carry
   // the connected/not state; the action button does the rest.
-  const { name } = byokWords(byokState.provider);
+  const { name } = userCredsWords(userCredsState.provider);
   if (statusEl) {
     // Text carries the connected/not state too (not just the dot colour) — for
     // screen readers and colour-blind users.
-    statusEl.textContent = `${name} — ${byokState.connected ? 'connected' : 'not connected'}`;
-    statusEl.classList.toggle('is-connected', byokState.connected);
+    statusEl.textContent = `${name} — ${userCredsState.connected ? 'connected' : 'not connected'}`;
+    statusEl.classList.toggle('is-connected', userCredsState.connected);
   }
-  if (actionBtn) actionBtn.textContent = byokState.connected ? 'Disconnect' : 'Connect';
+  if (actionBtn) actionBtn.textContent = userCredsState.connected ? 'Disconnect' : 'Connect';
 }
 
 $('#handle-creds-action')?.addEventListener('click', async () => {
-  if (!byokState) return;
+  if (!userCredsState) return;
   closeHandlePopover();
-  if (byokState.connected) {
+  if (userCredsState.connected) {
     const confirmed = await showConfirmModal({
-      title: `Disconnect ${byokWords(byokState.provider).name}?`,
+      title: `Disconnect ${userCredsWords(userCredsState.provider).name}?`,
       confirmLabel: 'Disconnect',
       destructive: true,
     });
-    if (confirmed) await disconnectByok();
-  } else if (byokState.oauthAllowed) {
+    if (confirmed) await disconnectUserCreds();
+  } else if (userCredsState.oauthAllowed) {
     // Subscriptions allowed → open the sign-in helper directly (what users expect
     // from a "Connect" action), rather than just surfacing the banner.
-    $('#byok-oauth-btn')?.click();
+    $('#user-creds-oauth-btn')?.click();
   } else {
     // API-key-only room → reveal the banner and its key input.
-    const banner = $('#byok-banner');
+    const banner = $('#user-creds-banner');
     if (banner) {
       banner.hidden = false;
       banner.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-      banner.classList.add('byok-banner-flash');
-      setTimeout(() => banner.classList.remove('byok-banner-flash'), 1200);
+      banner.classList.add('user-creds-banner-flash');
+      setTimeout(() => banner.classList.remove('user-creds-banner-flash'), 1200);
     }
-    $('#byok-connect-btn')?.click(); // reveal the key input
+    $('#user-creds-connect-btn')?.click(); // reveal the key input
   }
 });
 
-$('#byok-connect-btn')?.addEventListener('click', async () => {
-  const input = $('#byok-key-input');
+$('#user-creds-connect-btn')?.addEventListener('click', async () => {
+  const input = $('#user-creds-key-input');
   // First click reveals the input; second (with a value) submits.
   if (input.hidden) {
     input.hidden = false;
@@ -2407,33 +3201,33 @@ $('#byok-connect-btn')?.addEventListener('click', async () => {
   }
   const apiKey = input.value.trim();
   if (!apiKey) return;
-  const r = await authFetch('/api/byok/credential', {
+  const r = await authFetch('/api/user-credentials/credential', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
     body: JSON.stringify({ roomId: currentRoom, apiKey }),
   });
   if (r.ok) {
-    showToast(`Connected your ${byokWords(byokProvider).keyWord}.`, { kind: 'success' });
-    await updateByokBanner(currentRoom);
+    showToast(`Connected your ${userCredsWords(userCredsProvider).keyWord}.`, { kind: 'success' });
+    await updateUserCredsBanner(currentRoom);
   } else {
     const err = await r.json().catch(() => ({}));
     showToast('Failed to connect key: ' + (err.error || r.statusText), { kind: 'error' });
   }
 });
 
-$('#byok-key-input')?.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') $('#byok-connect-btn').click();
+$('#user-creds-key-input')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('#user-creds-connect-btn').click();
 });
 
-async function disconnectByok() {
-  const r = await authFetch('/api/byok/credential', {
+async function disconnectUserCreds() {
+  const r = await authFetch('/api/user-credentials/credential', {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
     body: JSON.stringify({ roomId: currentRoom }),
   });
   if (r.ok) {
     showToast('Disconnected your account.', { kind: 'success' });
-    await updateByokBanner(currentRoom);
+    await updateUserCredsBanner(currentRoom);
   } else {
     const err = await r.json().catch(() => ({}));
     showToast('Failed to disconnect: ' + (err.error || r.statusText), { kind: 'error' });
@@ -2442,15 +3236,15 @@ async function disconnectByok() {
 
 // The connected state lives as a compact key chip in the header; clicking it
 // disconnects (after a confirm), so the full banner no longer sits over the chat.
-// ── BYOK OAuth: connect a Claude subscription token ────────────────────────
+// ── UserCreds OAuth: connect a Claude subscription token ────────────────────────
 // Browser-mint OAuth: no terminal. Opening the form starts a server-side mint
 // (a throwaway container runs `claude setup-token`), surfaces the sign-in URL,
 // takes the pasted code, and onboards the resulting token per-member.
-let byokOauthSessionId = null;
-let byokOauthReturnFocus = null; // element to restore focus to when the modal closes
+let userCredsOauthSessionId = null;
+let userCredsOauthReturnFocus = null; // element to restore focus to when the modal closes
 
-function byokOauthStatus(msg, kind) {
-  const el = $('#byok-oauth-status');
+function userCredsOauthStatus(msg, kind) {
+  const el = $('#user-creds-oauth-status');
   if (!el) return;
   if (!msg) {
     el.hidden = true;
@@ -2458,27 +3252,27 @@ function byokOauthStatus(msg, kind) {
   }
   el.hidden = false;
   el.textContent = msg;
-  el.className = 'byok-oauth-status' + (kind ? ' ' + kind : '');
+  el.className = 'user-creds-oauth-status' + (kind ? ' ' + kind : '');
 }
 
-$('#byok-oauth-btn')?.addEventListener('click', async () => {
-  const modal = $('#byok-oauth-modal');
+$('#user-creds-oauth-btn')?.addEventListener('click', async () => {
+  const modal = $('#user-creds-oauth-modal');
   if (!modal) return;
-  const isCodex = byokProvider === 'codex';
-  const title = $('#byok-oauth-title');
-  if (title) title.textContent = `Connect to ${byokWords(byokProvider).name}`;
-  $('#byok-oauth-step2').hidden = true;
-  $('#byok-oauth-submit').hidden = true;
-  $('#byok-oauth-spinner').hidden = false; // spinner while the mint warms up
-  const code = $('#byok-oauth-code');
+  const isCodex = userCredsProvider === 'codex';
+  const title = $('#user-creds-oauth-title');
+  if (title) title.textContent = `Connect to ${userCredsWords(userCredsProvider).name}`;
+  $('#user-creds-oauth-step2').hidden = true;
+  $('#user-creds-oauth-submit').hidden = true;
+  $('#user-creds-oauth-spinner').hidden = false; // spinner while the mint warms up
+  const code = $('#user-creds-oauth-code');
   if (code) code.value = '';
-  const codexCode = $('#byok-oauth-codex-code');
-  byokOauthReturnFocus = document.activeElement; // restore focus here on close
+  const codexCode = $('#user-creds-oauth-codex-code');
+  userCredsOauthReturnFocus = document.activeElement; // restore focus here on close
   modal.hidden = false;
-  $('#byok-oauth-close')?.focus(); // move focus into the dialog
-  byokOauthStatus('Preparing sign-in…', '');
+  $('#user-creds-oauth-close')?.focus(); // move focus into the dialog
+  userCredsOauthStatus('Preparing sign-in…', '');
   try {
-    const startUrl = isCodex ? '/api/byok/codex/start' : '/api/byok/oauth/start';
+    const startUrl = isCodex ? '/api/user-credentials/codex/start' : '/api/user-credentials/oauth/start';
     const r = await authFetch(startUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
@@ -2486,15 +3280,15 @@ $('#byok-oauth-btn')?.addEventListener('click', async () => {
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.statusText);
-    byokOauthSessionId = data.sessionId;
-    const link = $('#byok-oauth-link');
+    userCredsOauthSessionId = data.sessionId;
+    const link = $('#user-creds-oauth-link');
     if (link) {
       link.href = data.url;
-      link.textContent = `Open ${byokWords(byokProvider).name} sign-in ↗`;
+      link.textContent = `Open ${userCredsWords(userCredsProvider).name} sign-in ↗`;
     }
     // Claude: paste a code back. Codex: enter a pairing code at the site, then approve.
     if (code) code.hidden = isCodex;
-    const codeLabel = $('#byok-oauth-code-label');
+    const codeLabel = $('#user-creds-oauth-code-label');
     if (codeLabel) codeLabel.hidden = isCodex;
     if (codexCode) {
       codexCode.hidden = !isCodex;
@@ -2504,48 +3298,48 @@ $('#byok-oauth-btn')?.addEventListener('click', async () => {
           : 'Open the link, then approve the sign-in.'
         : '';
     }
-    const submit = $('#byok-oauth-submit');
+    const submit = $('#user-creds-oauth-submit');
     if (submit) submit.textContent = isCodex ? 'I’ve approved — connect' : 'Connect';
-    $('#byok-oauth-spinner').hidden = true;
-    $('#byok-oauth-step2').hidden = false;
-    $('#byok-oauth-submit').hidden = false;
-    byokOauthStatus(isCodex ? 'Open the link, enter the code, and approve — then click connect.' : '', '');
-    $('#byok-oauth-link').focus();
+    $('#user-creds-oauth-spinner').hidden = true;
+    $('#user-creds-oauth-step2').hidden = false;
+    $('#user-creds-oauth-submit').hidden = false;
+    userCredsOauthStatus(isCodex ? 'Open the link, enter the code, and approve — then click connect.' : '', '');
+    $('#user-creds-oauth-link').focus();
   } catch (err) {
-    $('#byok-oauth-spinner').hidden = true;
-    byokOauthStatus(err.message || 'Could not start sign-in.', 'error');
+    $('#user-creds-oauth-spinner').hidden = true;
+    userCredsOauthStatus(err.message || 'Could not start sign-in.', 'error');
   }
 });
 
-function closeByokOauthModal() {
-  if (byokOauthSessionId) {
-    const cancelUrl = byokProvider === 'codex' ? '/api/byok/codex/cancel' : '/api/byok/oauth/cancel';
+function closeUserCredsOauthModal() {
+  if (userCredsOauthSessionId) {
+    const cancelUrl = userCredsProvider === 'codex' ? '/api/user-credentials/codex/cancel' : '/api/user-credentials/oauth/cancel';
     authFetch(cancelUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
-      body: JSON.stringify({ sessionId: byokOauthSessionId }),
+      body: JSON.stringify({ sessionId: userCredsOauthSessionId }),
     }).catch(() => {});
-    byokOauthSessionId = null;
+    userCredsOauthSessionId = null;
   }
-  const modal = $('#byok-oauth-modal');
+  const modal = $('#user-creds-oauth-modal');
   if (modal) modal.hidden = true;
   // Return focus to whatever opened the dialog (a11y dismissal contract).
-  if (byokOauthReturnFocus && typeof byokOauthReturnFocus.focus === 'function') byokOauthReturnFocus.focus();
-  byokOauthReturnFocus = null;
+  if (userCredsOauthReturnFocus && typeof userCredsOauthReturnFocus.focus === 'function') userCredsOauthReturnFocus.focus();
+  userCredsOauthReturnFocus = null;
 }
-$('#byok-oauth-cancel')?.addEventListener('click', closeByokOauthModal);
-$('#byok-oauth-close')?.addEventListener('click', closeByokOauthModal);
+$('#user-creds-oauth-cancel')?.addEventListener('click', closeUserCredsOauthModal);
+$('#user-creds-oauth-close')?.addEventListener('click', closeUserCredsOauthModal);
 // Click the backdrop (outside the modal card) to close.
-$('#byok-oauth-modal')?.addEventListener('click', (e) => {
-  if (e.target === $('#byok-oauth-modal')) closeByokOauthModal();
+$('#user-creds-oauth-modal')?.addEventListener('click', (e) => {
+  if (e.target === $('#user-creds-oauth-modal')) closeUserCredsOauthModal();
 });
 // Escape closes; Tab is trapped within the dialog (a11y, matches other modals).
 document.addEventListener('keydown', (e) => {
-  const modal = $('#byok-oauth-modal');
+  const modal = $('#user-creds-oauth-modal');
   if (!modal || modal.hidden) return;
   if (e.key === 'Escape') {
     e.preventDefault();
-    closeByokOauthModal();
+    closeUserCredsOauthModal();
     return;
   }
   if (e.key !== 'Tab') return;
@@ -2564,29 +3358,29 @@ document.addEventListener('keydown', (e) => {
   }
 });
 // Auto-submit once a code is pasted (Claude path) — no separate Connect click.
-$('#byok-oauth-code')?.addEventListener('paste', () => {
+$('#user-creds-oauth-code')?.addEventListener('paste', () => {
   setTimeout(() => {
-    const submit = $('#byok-oauth-submit');
-    if (submit && !submit.hidden && ($('#byok-oauth-code')?.value || '').trim()) submit.click();
+    const submit = $('#user-creds-oauth-submit');
+    if (submit && !submit.hidden && ($('#user-creds-oauth-code')?.value || '').trim()) submit.click();
   }, 0);
 });
 
-$('#byok-oauth-submit')?.addEventListener('click', async () => {
-  const isCodex = byokProvider === 'codex';
-  const code = ($('#byok-oauth-code')?.value || '').trim();
-  if (!byokOauthSessionId) return;
+$('#user-creds-oauth-submit')?.addEventListener('click', async () => {
+  const isCodex = userCredsProvider === 'codex';
+  const code = ($('#user-creds-oauth-code')?.value || '').trim();
+  if (!userCredsOauthSessionId) return;
   if (!isCodex && !code) return; // Claude needs the pasted code; Codex needs none.
-  const btn = $('#byok-oauth-submit');
+  const btn = $('#user-creds-oauth-submit');
   btn.disabled = true;
-  $('#byok-oauth-step2').hidden = true;
-  $('#byok-oauth-spinner').hidden = false; // spinner while connecting
-  const { subWord } = byokWords(byokProvider);
-  byokOauthStatus('Connecting…', '');
+  $('#user-creds-oauth-step2').hidden = true;
+  $('#user-creds-oauth-spinner').hidden = false; // spinner while connecting
+  const { subWord } = userCredsWords(userCredsProvider);
+  userCredsOauthStatus('Connecting…', '');
   try {
-    const finishUrl = isCodex ? '/api/byok/codex/finish' : '/api/byok/oauth/code';
+    const finishUrl = isCodex ? '/api/user-credentials/codex/finish' : '/api/user-credentials/oauth/code';
     const body = isCodex
-      ? { roomId: currentRoom, sessionId: byokOauthSessionId }
-      : { roomId: currentRoom, sessionId: byokOauthSessionId, code };
+      ? { roomId: currentRoom, sessionId: userCredsOauthSessionId }
+      : { roomId: currentRoom, sessionId: userCredsOauthSessionId, code };
     const r = await authFetch(finishUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
@@ -2594,14 +3388,14 @@ $('#byok-oauth-submit')?.addEventListener('click', async () => {
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.statusText);
-    byokOauthSessionId = null;
+    userCredsOauthSessionId = null;
     showToast(`Connected your ${subWord}.`, { kind: 'success' });
-    $('#byok-oauth-modal').hidden = true;
-    await updateByokBanner(currentRoom);
+    $('#user-creds-oauth-modal').hidden = true;
+    await updateUserCredsBanner(currentRoom);
   } catch (err) {
-    $('#byok-oauth-spinner').hidden = true;
-    $('#byok-oauth-step2').hidden = false; // restore so they can retry
-    byokOauthStatus(err.message || 'Could not connect.', 'error');
+    $('#user-creds-oauth-spinner').hidden = true;
+    $('#user-creds-oauth-step2').hidden = false; // restore so they can retry
+    userCredsOauthStatus(err.message || 'Could not connect.', 'error');
   } finally {
     btn.disabled = false;
   }
@@ -3122,7 +3916,7 @@ function sendCurrentMessage() {
     return;
   }
   const clientId = `local-${++clientMsgSeq}-${Date.now()}`;
-  ws.send(JSON.stringify({ type: 'message', content: text, client_id: clientId }));
+  ws.send(JSON.stringify({ type: 'message', content: text, client_id: clientId, thread_id: currentThread }));
   const el = appendMessage({ sender: myIdentity, sender_type: 'user', content: text }, '✓');
   pendingMessages.set(clientId, el);
   userScrolledAway = false;
@@ -3597,6 +4391,7 @@ function teardownManage() {
   $('#overflow-btn')?.classList.remove('active');
 }
 function switchManageTab(tab) {
+  manageTab = tab;
   document.querySelectorAll('.manage-tab').forEach((t) => {
     const on = t.dataset.mtab === tab;
     t.classList.toggle('active', on);
@@ -3604,6 +4399,7 @@ function switchManageTab(tab) {
   });
   $('#mtab-agents').hidden = tab !== 'agents';
   $('#mtab-models').hidden = tab !== 'models';
+  if (typeof syncManageSortIcon === 'function') syncManageSortIcon(); // reflect the active tab's sort
   if (tab === 'agents') fetchAgents();
   else if (tab === 'models') fetchModels();
 }
@@ -3847,6 +4643,10 @@ function hideOtherFullViews(keep) {
   if (keep !== 'matrix' && matrixActive) {
     matrixActive = false;
     $('#matrix').hidden = true;
+  }
+  if (keep !== 'help' && helpActive) {
+    helpActive = false;
+    $('#help').hidden = true;
   }
 }
 
@@ -4108,6 +4908,33 @@ function toggleMatrix() {
 $('#matrix-back')?.addEventListener('click', toggleMatrix);
 $('#matrix-refresh')?.addEventListener('click', refreshMatrix);
 
+// Help — a static full-view (no data to load); same open/close mechanics as the
+// matrix/topology dashboards so the back gesture and view stacking work for free.
+let helpActive = false;
+function openHelp() {
+  closeAgentDetail();
+  closeRoomDetail();
+  closeModelDetail();
+  hideOtherFullViews('help');
+  helpActive = true;
+  $('#chat').hidden = true;
+  $('#help').hidden = false;
+  $('#app').classList.add('in-dashboard');
+  $('#app').classList.remove('in-room');
+  openView('help', teardownHelp);
+}
+function teardownHelp() {
+  helpActive = false;
+  $('#chat').hidden = false;
+  $('#help').hidden = true;
+  $('#app').classList.remove('in-dashboard');
+}
+function toggleHelp() {
+  if (helpActive) closeView('help');
+  else openHelp();
+}
+$('#help-back')?.addEventListener('click', toggleHelp);
+
 async function refreshMatrix() {
   const canvas = $('#matrix-canvas');
   if (!canvas) return;
@@ -4360,16 +5187,18 @@ function renderPermsUserList() {
       '<li class="perms-empty" style="padding:16px;">No users yet — anyone who authenticates will appear here.</li>';
     return;
   }
-  // Sort: you first, then owners, then admins, then everyone else, alphabetical
-  // within each tier. Cheap stable enough for personal-scale.
-  const sorted = [...permsUsers].sort((a, b) => {
-    const tier = (u) =>
-      u.id === myUserId ? 0 : userIsOwner(u) ? 1 : userIsGlobalAdmin(u) || userScopedAdminCount(u) ? 2 : 3;
-    const ta = tier(a);
-    const tb = tier(b);
-    if (ta !== tb) return ta - tb;
-    return userDisplayName(a).localeCompare(userDisplayName(b));
-  });
+  // A–Z toggle: flat alphabetical when on; the tiered "auto" order when off —
+  // you first, then owners, then admins, then everyone else, alpha within tier.
+  const byName = (a, b) => userDisplayName(a).localeCompare(userDisplayName(b));
+  const sorted = usersSortAz
+    ? [...permsUsers].sort(byName)
+    : [...permsUsers].sort((a, b) => {
+        const tier = (u) =>
+          u.id === myUserId ? 0 : userIsOwner(u) ? 1 : userIsGlobalAdmin(u) || userScopedAdminCount(u) ? 2 : 3;
+        const ta = tier(a);
+        const tb = tier(b);
+        return ta !== tb ? ta - tb : byName(a, b);
+      });
   // Filter by the search box — match on display name AND the namespaced id, so
   // you can find someone by handle/email or by channel prefix (e.g. "slack:").
   const rows = permsUserFilter
@@ -5135,7 +5964,11 @@ function renderAgents() {
   const list = $('#agent-list');
   list.innerHTML = '';
 
-  const sorted = [...allAgents].sort((a, b) => a.name.localeCompare(b.name));
+  // A–Z toggle: alphabetical when on; newest-first ("auto") when off.
+  const byName = (a, b) => a.name.localeCompare(b.name);
+  const sorted = agentSortAz
+    ? [...allAgents].sort(byName)
+    : [...allAgents].sort((a, b) => (b.created_at || 0) - (a.created_at || 0) || byName(a, b));
 
   for (const agent of sorted) {
     const li = document.createElement('li');
@@ -5689,9 +6522,6 @@ async function openRoomDetail(roomId) {
     renameField.hidden = true;
   }
 
-  // Hide the add-agent form when opening
-  $('#room-add-agent-form').hidden = true;
-
   // Archive toggle: server tells us per room whether the caller can
   // archive (owner / admin / scoped-admin-of-wired-agent). Show the
   // button only when allowed; flip label based on current state.
@@ -5705,7 +6535,7 @@ async function openRoomDetail(roomId) {
 
   await refreshRoomWiredAgents(roomId);
 
-  // BYOK credential-mode selector — admin/owner only (canArchive implies that).
+  // UserCreds credential-mode selector — admin/owner only (canArchive implies that).
   const credSection = $('#room-credential-mode-section');
   if (credSection) {
     if (room && room.canArchive) {
@@ -5779,10 +6609,9 @@ async function saveRoomName() {
 }
 
 // Engage mode for the currently-loaded room. Populated alongside the agents
-// list. Two values surface here: 'mention-only' (default — only @-mentioned
-// agents fire) and 'broadcast' (legacy — every agent fires on every message).
-// The PWA never sets 'broadcast'; operators who want it can hit the API
-// directly. Mode-aware rendering is in renderRoomWiredAgents.
+// list. Only 'mention-only' surfaces here now (un-primed agents fire only when
+// @-mentioned); the legacy 'broadcast' mode has been retired. Mode-aware
+// rendering is in renderRoomWiredAgents.
 let roomDetailEngageMode = 'mention-only';
 
 async function refreshRoomWiredAgents(roomId) {
@@ -5792,8 +6621,8 @@ async function refreshRoomWiredAgents(roomId) {
       authFetch(`/api/rooms/${encodeURIComponent(roomId)}/engage-mode`),
     ]);
     roomDetailWiredAgents = await agentsRes.json();
-    const modeBody = await modeRes.json().catch(() => ({ mode: 'mention-only' }));
-    roomDetailEngageMode = modeBody.mode === 'broadcast' ? 'broadcast' : 'mention-only';
+    await modeRes.json().catch(() => ({}));
+    roomDetailEngageMode = 'mention-only';
   } catch (err) {
     console.error('Failed to fetch wired agents:', err);
     roomDetailWiredAgents = [];
@@ -5852,39 +6681,54 @@ function renderRoomWiredAgents() {
     list.appendChild(li);
   }
 
-  // Mode indicator pill above the helper note — shows the current engage state
-  // at a glance so the operator never has to infer it from "is anything starred".
-  let badge = $('#room-mode-badge');
-  if (!badge) {
-    badge = document.createElement('div');
-    badge.id = 'room-mode-badge';
-    badge.className = 'room-mode-badge';
-    list.parentElement?.insertBefore(badge, list.nextSibling);
-  }
-  badge.className = `room-mode-badge mode-${effectiveMode}`;
-  badge.textContent =
+  // Reply-mode info icon, lives on the "Wired agents" label line. Clicking it
+  // pops up the explanation — kept off the page until asked for.
+  const modeTip =
     effectiveMode === 'prime'
-      ? `Replies to everything: ${roomDetailWiredAgents.find((a) => a.is_prime)?.name ?? 'unknown'}`
-      : effectiveMode === 'broadcast'
-        ? 'All agents reply to every message (legacy)'
-        : 'Only replies when @-mentioned';
+      ? `Replies to everything: ${roomDetailWiredAgents.find((a) => a.is_prime)?.name ?? 'unknown'} — except messages that @-mention a different agent.`
+      : 'No agents reply unless @-mentioned. Star an agent to make it reply to everything.';
+  const modeInfo = $('#room-mode-info');
+  if (modeInfo) {
+    modeInfo.hidden = false;
+    modeInfo.className = `mode-info-btn mode-${effectiveMode}`;
+    modeInfo.setAttribute('aria-label', `Reply mode — ${modeTip}`);
+    // Reassign (not addEventListener) so re-renders don't stack handlers.
+    modeInfo.onclick = (e) => {
+      e.stopPropagation();
+      toggleModeInfoPopup(modeInfo, modeTip);
+    };
+  }
+}
 
-  // Helper line below the badge explains what the mode does. Always shown so
-  // the operator's mental model stays current as they ★ / unstar.
-  let note = $('#room-prime-note');
-  if (!note) {
-    note = document.createElement('p');
-    note.id = 'room-prime-note';
-    note.className = 'room-prime-note';
-    list.parentElement?.insertBefore(note, badge.nextSibling);
+// Click-to-open help popup for the reply-mode icon. Toggles, and dismisses on
+// outside-click or Escape (mirrors the thread/room menu dismissal pattern).
+function toggleModeInfoPopup(anchor, text) {
+  // Anchor to the label row (not the icon) so the popup left-aligns to the
+  // panel content and never overflows the narrow drawer's right edge.
+  const wrap = anchor.closest('.form-label-row');
+  const existing = wrap.querySelector('.mode-info-popup');
+  if (existing) {
+    existing.remove();
+    return;
   }
-  note.hidden = false;
-  note.textContent =
-    effectiveMode === 'prime'
-      ? 'The default agent replies to every message — except ones that @-mention a different agent.'
-      : effectiveMode === 'broadcast'
-        ? 'Every wired agent responds to every message. (Legacy mode — not produced by this UI.)'
-        : 'Agents reply only when @-mentioned. Star an agent to make it the default (replies to everything).';
+  const pop = document.createElement('div');
+  pop.className = 'mode-info-popup';
+  pop.setAttribute('role', 'tooltip');
+  pop.textContent = text;
+  wrap.appendChild(pop);
+  const close = (e) => {
+    if (e && (pop.contains(e.target) || anchor.contains(e.target))) return;
+    pop.remove();
+    document.removeEventListener('click', close);
+    document.removeEventListener('keydown', onKey);
+  };
+  const onKey = (e) => {
+    if (e.key === 'Escape') close();
+  };
+  setTimeout(() => {
+    document.addEventListener('click', close);
+    document.addEventListener('keydown', onKey);
+  }, 0);
 }
 
 async function togglePrimeAgent(agent) {
@@ -6000,7 +6844,6 @@ async function addAgentToRoom(roomId, ref) {
       showToast('Failed to add agent: ' + (err.error || res.statusText), { kind: 'error' });
       return;
     }
-    $('#room-add-agent-form').hidden = true;
     $('#room-add-agent-new-name').value = '';
     $('#room-add-agent-new-instructions').value = '';
     // Refresh agents (in case a new one was created), then re-render wirings.
@@ -6086,6 +6929,45 @@ $('#room-name').addEventListener('keydown', (e) => {
     toggleRoomSettings();
   }
 });
+// Thread context-sync: pull the regular chat into this thread / push this
+// thread back up. Confirm first (the copy is verbatim and additive), then
+// report the count — "nothing new" when the delta is empty.
+async function syncThread(direction) {
+  if (!currentRoom || currentThread === 'main') return;
+  const room = currentRoom;
+  const thread = currentThread;
+  const isPull = direction === 'pull';
+  const ok = await showConfirmModal({
+    title: isPull ? 'Pull main chat down' : 'Push this thread up',
+    body: '',
+    confirmLabel: isPull ? 'Pull down' : 'Push up',
+  });
+  if (!ok) return;
+  try {
+    const r = await authFetch(
+      `/api/rooms/${encodeURIComponent(room)}/threads/${encodeURIComponent(thread)}/${direction}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+    );
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    const { copied = 0 } = await r.json();
+    if (copied === 0) showToast(isPull ? 'Nothing new to pull' : 'Nothing new to push', { kind: 'info' });
+    else showToast(`Copied ${copied} message${copied === 1 ? '' : 's'}`, { kind: 'success' });
+  } catch (err) {
+    showToast('Sync failed: ' + (err.message || err), { kind: 'error' });
+  }
+}
+$('#thread-switch')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  openThreadSwitcher();
+});
+$('#thread-pull')?.addEventListener('click', () => syncThread('pull'));
+$('#thread-push')?.addEventListener('click', () => syncThread('push'));
+$('#thread-delete')?.addEventListener('click', () => {
+  if (!currentRoom || currentThread === 'main') return;
+  const thread = roomThreads().find((t) => t.thread_id === currentThread);
+  if (thread) deleteThreadConfirm(thread);
+});
+
 $('#room-detail-close').addEventListener('click', closeRoomDetail);
 $('#room-delete').addEventListener('click', deleteCurrentRoom);
 $('#room-credential-modes')?.addEventListener('click', async (e) => {
@@ -6105,14 +6987,14 @@ $('#room-credential-modes')?.addEventListener('click', async (e) => {
     const hintEl = $('#room-cred-default-hint');
     if (hintEl) hintEl.textContent = '';
     const label = { disabled: 'off', optional: 'optional', required: 'required' }[mode] ?? mode;
-    showToast(`Member credentials: ${label}.`, { kind: 'success' });
-    if (selectedRoomId === currentRoom) updateByokBanner(currentRoom);
+    showToast(`User credentials: ${label}.`, { kind: 'success' });
+    if (selectedRoomId === currentRoom) updateUserCredsBanner(currentRoom);
   } else {
     const err = await r.json().catch(() => ({}));
     showToast('Failed to set mode: ' + (err.error || r.statusText), { kind: 'error' });
   }
 });
-// Per-room credential TYPES moved to Settings → Member credentials (global); the
+// Per-room credential TYPES moved to Settings → User credentials (global); the
 // room only sets the mode override above.
 $('#room-rename-save')?.addEventListener('click', saveRoomName);
 $('#room-rename-input')?.addEventListener('keydown', (e) => {
@@ -6128,9 +7010,6 @@ $('#room-archive-toggle').addEventListener('click', async () => {
   await toggleRoomArchive(selectedRoomId, !room.archived);
   // Refresh the panel so the button label flips.
   if (!$('#room-detail').hidden) openRoomDetail(selectedRoomId);
-});
-$('#room-add-agent-toggle').addEventListener('click', () => {
-  $('#room-add-agent-form').hidden = !$('#room-add-agent-form').hidden;
 });
 $('#room-add-agent-existing-submit').addEventListener('click', addExistingAgentToRoom);
 $('#room-add-agent-new-submit').addEventListener('click', addNewAgentToRoom);
@@ -6194,6 +7073,59 @@ $('#archived-toggle').addEventListener('click', () => {
   showArchived = !showArchived;
   sessionStorage.setItem('webchat:showArchived', showArchived ? '1' : '0');
   if (lastRoomsList.length) renderRooms(lastRoomsList);
+});
+$('#hidden-toggle').addEventListener('click', () => {
+  showHidden = !showHidden;
+  sessionStorage.setItem('webchat:showHidden', showHidden ? '1' : '0');
+  if (lastRoomsList.length) renderRooms(lastRoomsList);
+});
+// A–Z sort toggles (rooms / agents / models). One small button each: off = the
+// list's natural order, on = alphabetical. State persists per-list.
+function wireSortToggle(btnId, storageKey, isOn, setOn, rerender) {
+  const btn = $(btnId);
+  if (!btn) return;
+  const sync = () => {
+    btn.classList.toggle('active', isOn());
+    btn.setAttribute('aria-pressed', isOn() ? 'true' : 'false');
+  };
+  sync();
+  btn.addEventListener('click', () => {
+    setOn(!isOn());
+    sessionStorage.setItem(storageKey, isOn() ? '1' : '0');
+    sync();
+    rerender();
+  });
+}
+wireSortToggle('#room-sort-az', 'webchat:roomSortAz', () => roomSortAz, (v) => (roomSortAz = v), () => {
+  if (lastRoomsList.length) renderRooms(lastRoomsList);
+});
+wireSortToggle(
+  '#perms-sort-az',
+  'webchat:usersSortAz',
+  () => usersSortAz,
+  (v) => (usersSortAz = v),
+  () => renderPermsUserList(),
+);
+// The Manage view shares ONE sort icon (in the header) that acts on the active
+// tab — toggling agents' or models' sort and reflecting that tab's state.
+function syncManageSortIcon() {
+  const btn = $('#manage-sort-az');
+  if (!btn) return;
+  const on = manageTab === 'models' ? modelSortAz : agentSortAz;
+  btn.classList.toggle('active', on);
+  btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+}
+$('#manage-sort-az')?.addEventListener('click', () => {
+  if (manageTab === 'models') {
+    modelSortAz = !modelSortAz;
+    sessionStorage.setItem('webchat:modelSortAz', modelSortAz ? '1' : '0');
+    renderModels();
+  } else {
+    agentSortAz = !agentSortAz;
+    sessionStorage.setItem('webchat:agentSortAz', agentSortAz ? '1' : '0');
+    renderAgents();
+  }
+  syncManageSortIcon();
 });
 $('#room-create-close').addEventListener('click', closeRoomDetail);
 $('#room-create-toggle-new').addEventListener('click', () => {
@@ -6818,7 +7750,13 @@ function renderModels() {
     list.appendChild(li);
     return;
   }
-  for (const model of allModels) {
+  // A–Z toggle: alphabetical when on; by provider ("auto", Claude/anthropic
+  // first, then local) when off.
+  const byName = (a, b) => a.name.localeCompare(b.name);
+  const sortedModels = modelSortAz
+    ? [...allModels].sort(byName)
+    : [...allModels].sort((a, b) => (a.kind === 'anthropic' ? 0 : 1) - (b.kind === 'anthropic' ? 0 : 1) || byName(a, b));
+  for (const model of sortedModels) {
     const li = document.createElement('li');
     li.dataset.modelId = model.id;
     if (model.id === selectedModelId) li.classList.add('active');

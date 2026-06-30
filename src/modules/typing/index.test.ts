@@ -16,13 +16,19 @@ vi.mock('../../config.js', async () => {
 
 import { setTypingAdapter, startTypingRefresh, stopTypingRefresh } from './index.js';
 
-type Call = { channelType: string; platformId: string; threadId: string | null; instance?: string };
+type Call = {
+  channelType: string;
+  platformId: string;
+  threadId: string | null;
+  instance?: string;
+  agentName?: string;
+};
 
 function captureAdapter() {
   const calls: Call[] = [];
   setTypingAdapter({
-    async setTyping(channelType, platformId, threadId, instance) {
-      calls.push({ channelType, platformId, threadId, instance });
+    async setTyping(channelType, platformId, threadId, instance, agentName) {
+      calls.push({ channelType, platformId, threadId, instance, agentName });
     },
   });
   return calls;
@@ -40,7 +46,7 @@ afterEach(() => {
 describe('startTypingRefresh — instance forwarding', () => {
   it('immediate tick passes the instance to the adapter', async () => {
     const calls = captureAdapter();
-    startTypingRefresh('sess-1', 'ag-1', 'slack', 'slack:C1', null, 'slack-tester');
+    startTypingRefresh('sess-1', 'ag-1', 'Agent', 'slack', 'slack:C1', null, 'slack-tester');
     await vi.advanceTimersByTimeAsync(0);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toEqual({
@@ -48,12 +54,13 @@ describe('startTypingRefresh — instance forwarding', () => {
       platformId: 'slack:C1',
       threadId: null,
       instance: 'slack-tester',
+      agentName: 'Agent',
     });
   });
 
   it('interval ticks inside the grace window pass the stored entry instance', async () => {
     const calls = captureAdapter();
-    startTypingRefresh('sess-1', 'ag-1', 'slack', 'slack:C1', 'T1', 'slack-tester');
+    startTypingRefresh('sess-1', 'ag-1', 'Agent', 'slack', 'slack:C1', 'T1', 'slack-tester');
     await vi.advanceTimersByTimeAsync(0);
     calls.length = 0;
 
@@ -69,12 +76,12 @@ describe('startTypingRefresh — instance forwarding', () => {
 
   it('re-trigger on an active session passes (and stores) the new instance', async () => {
     const calls = captureAdapter();
-    startTypingRefresh('sess-1', 'ag-1', 'slack', 'slack:C1', null, 'slack-tester');
+    startTypingRefresh('sess-1', 'ag-1', 'Agent', 'slack', 'slack:C1', null, 'slack-tester');
     await vi.advanceTimersByTimeAsync(0);
     calls.length = 0;
 
     // Second call for the same session: immediate tick with the new value.
-    startTypingRefresh('sess-1', 'ag-1', 'slack', 'slack:C1', null, 'slack-worker');
+    startTypingRefresh('sess-1', 'ag-1', 'Agent', 'slack', 'slack:C1', null, 'slack-worker');
     await vi.advanceTimersByTimeAsync(0);
     expect(calls).toHaveLength(1);
     expect(calls[0].instance).toBe('slack-worker');
@@ -88,7 +95,7 @@ describe('startTypingRefresh — instance forwarding', () => {
 
   it('re-trigger with a changed address updates the whole entry — interval ticks stay self-consistent', async () => {
     const calls = captureAdapter();
-    startTypingRefresh('sess-1', 'ag-1', 'slack', 'slack:C1', 'T1', 'slack-tester');
+    startTypingRefresh('sess-1', 'ag-1', 'Agent', 'slack', 'slack:C1', 'T1', 'slack-tester');
     await vi.advanceTimersByTimeAsync(0);
     calls.length = 0;
 
@@ -96,7 +103,7 @@ describe('startTypingRefresh — instance forwarding', () => {
     // (agent-shared sessions span messaging groups). The stored entry must
     // not tear: keeping the old address with the new instance would hand a
     // telegram platformId to the slack-tester adapter on the next tick.
-    startTypingRefresh('sess-1', 'ag-1', 'telegram', 'tg:99', null, 'telegram');
+    startTypingRefresh('sess-1', 'ag-1', 'Agent', 'telegram', 'tg:99', null, 'telegram');
     await vi.advanceTimersByTimeAsync(0);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toEqual({
@@ -104,6 +111,7 @@ describe('startTypingRefresh — instance forwarding', () => {
       platformId: 'tg:99',
       threadId: null,
       instance: 'telegram',
+      agentName: 'Agent',
     });
 
     // Interval ticks fire from the stored entry — all four fields must
@@ -117,6 +125,7 @@ describe('startTypingRefresh — instance forwarding', () => {
         platformId: 'tg:99',
         threadId: null,
         instance: 'telegram',
+        agentName: 'Agent',
       });
     }
   });
