@@ -1940,17 +1940,16 @@ async function createThread(title, roomId = currentRoom) {
       body: JSON.stringify({ title }),
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
-    const thread = await r.json();
-    // Created in another room from the list → switch into that room first.
-    if (roomId !== currentRoom) {
-      const room = lastRoomsList.find((x) => x.id === roomId);
-      joinRoom(roomId, room ? room.name : roomId);
-    }
-    await loadThreadList(roomId);
-    openThread(thread.thread_id);
+    // Just create — do NOT jump into the new thread. Jumping was both surprising
+    // and buggy: switching rooms + opening the thread in one go raced two WS
+    // joins, briefly bleeding main's transcript into the (actually-empty) thread.
+    // The thread now simply appears in its room's list; tap it to enter a clean,
+    // blank thread.
+    if (roomId === currentRoom) await loadThreadList(roomId); // refresh the open room's tree so it shows
+    showToast(`Thread "${title}" created`, { kind: 'success' });
   } catch (err) {
     showToast('Could not create thread: ' + (err.message || err), { kind: 'error' });
-    renderThreadList();
+    if (roomId === currentRoom) renderThreadList();
   }
 }
 
