@@ -1729,6 +1729,9 @@ function renderThreadList() {
     const row = document.createElement('div');
     row.className = 'thread-row' + (t.thread_id === currentThread ? ' active' : '');
     row.dataset.threadId = t.thread_id;
+    // Per-thread identity hue on the spine (mirrors rooms' colored left bar). The
+    // active thread overrides to accent via CSS for an unmistakable selection.
+    row.style.setProperty('--thread-color', roomColor(t.thread_id));
 
     const glyph = document.createElement('span');
     glyph.className = 'thread-glyph';

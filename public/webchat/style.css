@@ -5218,8 +5218,9 @@ a.lightbox-btn {
   align-items: center;
   gap: 0.4rem;
   padding: 0.25rem 0.5rem;
-  /* Left border is the tree spine; turns accent when the thread is active. */
-  border-left: 2px solid var(--border);
+  /* Spine carries the thread's identity hue (set inline via --thread-color,
+     mirrors rooms' colored left bar); the active thread overrides to accent. */
+  border-left: 2px solid var(--thread-color, var(--border));
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   cursor: pointer;
   font-size: var(--fs-base);
@@ -5229,7 +5230,6 @@ a.lightbox-btn {
 .thread-row:hover {
   background: var(--surface2);
   color: var(--text);
-  border-left-color: var(--text-dim);
 }
 .thread-row.active {
   /* Distinct from hover (plain surface2): accent tint + accent text + accent
