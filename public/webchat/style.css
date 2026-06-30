@@ -1408,19 +1408,26 @@ button:focus-visible {
     max-width: 90%;
   }
 }
-/* Under ~400px the chip crowds the members count — collapse the chip to "@"
-   (or "+@" when unset) so #members-toggle stays visible. */
-@media (max-width: 400px) {
-  .handle-chip {
+/* On phones the chip crowds the members count and the long handle slug clips —
+   collapse it to a compact icon: "@" (set), "+@" (unset), or "🔑" (own
+   credential connected). Scoped under .header-controls so `font-size: 0` wins
+   over the base .handle-chip font-size, which is defined later in this file
+   (equal specificity → source order would otherwise keep the text visible and
+   leave the ::after "@" dangling after it). */
+@media (max-width: 500px) {
+  .header-controls .handle-chip {
     font-size: 0;
     padding: 6px 10px;
   }
-  .handle-chip::after {
+  .header-controls .handle-chip::after {
     content: '@';
     font-size: var(--fs-sm);
   }
-  .handle-chip.is-unset::after {
+  .header-controls .handle-chip.is-unset::after {
     content: '+@';
+  }
+  .header-controls .handle-chip.has-cred::after {
+    content: '🔑';
   }
 }
 
