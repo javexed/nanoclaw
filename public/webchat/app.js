@@ -6470,9 +6470,7 @@ async function syncThread(direction) {
   const isPull = direction === 'pull';
   const ok = await showConfirmModal({
     title: isPull ? 'Pull main chat in' : 'Push this thread up',
-    body: isPull
-      ? 'Copy the main chat into this thread as context. Only messages added since the last pull are copied; nothing is overwritten.'
-      : 'Copy this thread into the main chat. Only this thread’s own messages added since the last push are copied; nothing is overwritten.',
+    body: '',
     confirmLabel: isPull ? 'Pull in' : 'Push up',
   });
   if (!ok) return;
