@@ -1345,7 +1345,10 @@ button:focus-visible {
   .thread-switch:not([hidden]) {
     display: inline-flex;
   }
-  #thread-switch,
+  #thread-switch {
+    min-width: 26px;
+    height: 26px;
+  }
   #thread-sync .thread-sync-btn {
     width: 26px;
     height: 26px;
@@ -2089,8 +2092,10 @@ a.lightbox-btn {
   flex: none;
   align-items: center;
   justify-content: center;
-  width: 28px;
+  min-width: 28px;
   height: 28px;
+  padding: 0 5px;
+  box-sizing: border-box;
   background: var(--surface2);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -2098,6 +2103,12 @@ a.lightbox-btn {
   font-weight: 700;
   font-size: var(--fs-base);
   cursor: pointer;
+}
+/* Accent the switcher when the room actually has topic threads (badged with the
+   count in JS), so it reads as "there are threads here" rather than just a glyph. */
+.thread-switch.has-threads {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
 }
 .thread-switch[hidden] {
   display: none;
