@@ -25,6 +25,7 @@ import {
   getMentionedRoomIdsForUser,
   getPinnedPositionsForUser,
   getRoomLastActivity,
+  getTopicThreadCounts,
   getUnreadRoomIdsForUser,
   getWebchatRoom,
   getWebchatUserHandle,
@@ -279,6 +280,7 @@ export function annotateRoomsForUser(
   allRooms: WebchatRoom[] = getAllWebchatRooms(),
   archivedSet: Set<string> = getArchivedRoomIds(),
   activityMap: Map<string, number> = getRoomLastActivity(),
+  threadCounts: Map<string, number> = getTopicThreadCounts(),
 ): Array<
   WebchatRoom & {
     archived: boolean;
@@ -289,6 +291,7 @@ export function annotateRoomsForUser(
     pinned: boolean;
     pin_position: number | null;
     last_activity: number;
+    thread_count: number;
   }
 > {
   const visible = filterRoomsForUser(userId, allRooms);
@@ -309,6 +312,8 @@ export function annotateRoomsForUser(
     pin_position: pinnedPos.get(r.id) ?? null,
     // Newest-message time drives the "Recent" sort; fall back to created_at.
     last_activity: activityMap.get(r.id) ?? r.created_at,
+    // Topic-thread count — drives the sidebar expand chevron.
+    thread_count: threadCounts.get(r.id) ?? 0,
   }));
 }
 
@@ -316,10 +321,14 @@ export function broadcastRooms(): void {
   const allRooms = getAllWebchatRooms();
   const archivedSet = getArchivedRoomIds(); // global, computed once per broadcast
   const activityMap = getRoomLastActivity(); // global, computed once per broadcast
+  const threadCounts = getTopicThreadCounts(); // global, computed once per broadcast
   for (const c of clients.values()) {
     if (c.ws.readyState !== WebSocket.OPEN) continue;
     c.ws.send(
-      JSON.stringify({ type: 'rooms', rooms: annotateRoomsForUser(c.userId, allRooms, archivedSet, activityMap) }),
+      JSON.stringify({
+        type: 'rooms',
+        rooms: annotateRoomsForUser(c.userId, allRooms, archivedSet, activityMap, threadCounts),
+      }),
     );
   }
 }

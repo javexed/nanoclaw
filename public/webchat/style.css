@@ -5425,6 +5425,29 @@ a.lightbox-btn {
 }
 /* Inline new-thread "+" on the room row (no-threads case). The room name is
    flex:1, so this sits at the right. Always visible for the active room. */
+/* Left disclosure chevron on room rows that have topic threads — expands the
+   thread list inline without entering the room. */
+.room-thread-toggle {
+  flex: 0 0 auto;
+  width: 16px;
+  margin-right: 4px;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+.room-thread-toggle:hover {
+  color: var(--text);
+}
+/* Placeholder while an expanded room's threads are being fetched. */
+.thread-loading {
+  padding: 0.25rem 0.5rem;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
 .thread-add-inline {
   flex: 0 0 auto;
   border: none;
