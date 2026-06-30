@@ -1752,10 +1752,16 @@ let currentThread = 'main';
 let threadCreating = false; // true while the inline "new thread" input is open
 let threadAddRoom = null; // room id whose row is showing the inline new-thread input
 let threadRenaming = null; // thread_id whose row is showing the inline rename input
-let roomThreads = []; // threads of the open room (from GET /threads)
 const threadUnread = new Set(); // thread_ids with unread activity in the open room
 const expandedRooms = new Set(); // non-active rooms whose thread tree is expanded in the sidebar
-const threadsByRoom = new Map(); // roomId → threads[] cache for expanded non-active rooms
+// Single source of truth for a room's threads (roomId → threads[]), keyed by
+// room. The active room's threads are just threadCache.get(currentRoom) — see
+// roomThreads(). loadThreadList/loadRoomThreads write it; render reads it. One
+// cache means one invalidation point (no roomThreads-vs-threadsByRoom drift).
+const threadCache = new Map();
+function roomThreads() {
+  return threadCache.get(currentRoom) || [];
+}
 
 // Expand/collapse a non-active room's thread tree inline in the sidebar (the
 // "▸/▾" chevron), lazy-loading that room's threads on first expand.
@@ -1766,7 +1772,7 @@ function toggleRoomThreads(roomId) {
     return;
   }
   expandedRooms.add(roomId);
-  if (!threadsByRoom.has(roomId)) {
+  if (!threadCache.has(roomId)) {
     void loadRoomThreads(roomId).then(() => {
       if (expandedRooms.has(roomId)) renderRooms(lastRoomsList);
     });
@@ -1777,9 +1783,9 @@ function toggleRoomThreads(roomId) {
 async function loadRoomThreads(roomId) {
   try {
     const r = await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/threads`);
-    threadsByRoom.set(roomId, r.ok ? ((await r.json()) ?? []) : []);
+    threadCache.set(roomId, r.ok ? ((await r.json()) ?? []) : []);
   } catch {
-    threadsByRoom.set(roomId, []);
+    threadCache.set(roomId, []);
   }
 }
 
@@ -1789,7 +1795,7 @@ function renderRoomThreads(li, roomId) {
   const host = li.querySelector('.thread-list');
   if (!host) return;
   host.innerHTML = '';
-  const threads = threadsByRoom.get(roomId);
+  const threads = threadCache.get(roomId);
   if (!Array.isArray(threads)) {
     host.innerHTML = '<div class="thread-loading">Loading…</div>';
     return;
@@ -1833,19 +1839,20 @@ async function loadThreadList(roomId) {
     const r = await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/threads`);
     if (roomId !== currentRoom) return; // raced past a room switch
     if (!r.ok) {
-      roomThreads = [];
+      threadCache.set(roomId, []);
       renderThreadList();
       showToast('Could not load threads', { kind: 'error' });
       return;
     }
     const threads = await r.json();
-    roomThreads = Array.isArray(threads) ? threads : [];
-    for (const t of roomThreads) if (t.unread && t.thread_id !== currentThread) threadUnread.add(t.thread_id);
+    const list = Array.isArray(threads) ? threads : [];
+    threadCache.set(roomId, list);
+    for (const t of list) if (t.unread && t.thread_id !== currentThread) threadUnread.add(t.thread_id);
     renderThreadList();
     updateThreadSyncControls(); // refresh the breadcrumb title (covers rename + late load)
   } catch {
     if (roomId !== currentRoom) return;
-    roomThreads = [];
+    threadCache.set(roomId, []);
     renderThreadList();
     showToast('Could not load threads', { kind: 'error' });
   }
@@ -1865,7 +1872,7 @@ function renderThreadList() {
   if (!host) return;
   host.innerHTML = '';
   // Only non-main threads render as rows (the room row is the regular chat).
-  const nonMain = roomThreads.filter((t) => t.kind !== 'main');
+  const nonMain = roomThreads().filter((t) => t.kind !== 'main');
   for (const t of nonMain) {
     if (t.thread_id === threadRenaming) {
       // Inline rename in place — mirrors the inline "new thread" input.
@@ -1931,40 +1938,19 @@ function renderThreadList() {
 
   if (threadCreating) {
     // Inline new-thread creation — type a name, Enter creates, Esc/blur cancels.
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.className = 'thread-add-input';
-    input.placeholder = 'Thread name…';
-    input.maxLength = 80;
-    let settled = false;
-    const cancel = () => {
-      if (settled) return;
-      settled = true;
-      threadCreating = false;
-      renderThreadList();
-    };
-    const submit = () => {
-      if (settled) return;
-      const title = input.value.trim();
-      if (!title) return cancel();
-      settled = true;
-      threadCreating = false;
-      createThread(title);
-    };
-    input.addEventListener('click', (e) => e.stopPropagation());
-    input.addEventListener('keydown', (e) => {
-      e.stopPropagation();
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        submit();
-      } else if (e.key === 'Escape') {
-        e.preventDefault();
-        cancel();
-      }
-    });
-    input.addEventListener('blur', cancel);
-    host.appendChild(input);
-    setTimeout(() => input.focus(), 0);
+    host.appendChild(
+      makeThreadNameInput({
+        ariaLabel: 'New thread name',
+        onCancel: () => {
+          threadCreating = false;
+          renderThreadList();
+        },
+        onSubmit: (title) => {
+          threadCreating = false;
+          createThread(title);
+        },
+      }),
+    );
   } else if (nonMain.length === 0) {
     // No threads yet → put the "+" inline on the room row (right of the name).
     // The empty .thread-list collapses (:empty), so this costs no extra line.
@@ -2031,7 +2017,7 @@ function updateThreadSyncControls() {
   const sw = $('#thread-switch');
   if (sw) {
     sw.hidden = !currentRoom;
-    const topicCount = roomThreads.filter((t) => t.kind !== 'main').length;
+    const topicCount = roomThreads().filter((t) => t.kind !== 'main').length;
     sw.textContent = topicCount > 0 ? `#${topicCount}` : '#';
     sw.classList.toggle('has-threads', topicCount > 0);
     sw.title = topicCount > 0 ? `${topicCount} thread${topicCount === 1 ? '' : 's'}` : 'Threads';
@@ -2042,7 +2028,7 @@ function updateThreadSyncControls() {
   if (crumb) {
     crumb.hidden = !inThread;
     if (inThread) {
-      const thread = roomThreads.find((t) => t.thread_id === currentThread);
+      const thread = roomThreads().find((t) => t.thread_id === currentThread);
       const nameEl = $('#thread-crumb-name');
       if (nameEl) {
         nameEl.textContent = thread ? thread.title : currentThread;
@@ -2061,7 +2047,6 @@ async function createThread(title, roomId = currentRoom) {
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
     const thread = await r.json();
-    threadsByRoom.delete(roomId); // invalidate the sidebar expand cache for this room
     // Create AND enter the new (blank) thread — but cleanly, via a SINGLE WS
     // join, so main's transcript can't bleed in (the old joinRoom+openThread
     // double-join race). Same room → openThread (one join into the thread);
@@ -2083,29 +2068,39 @@ async function createThread(title, roomId = currentRoom) {
 // full-width line via the reused .thread-list wrap, so it's reachable from the
 // room list on both desktop and mobile. Submit creates the thread in that room
 // and switches into it.
-function appendRoomThreadInput(li, room) {
-  const host = document.createElement('div');
-  host.className = 'thread-list';
+// Shared inline thread-name input (create + rename). Builds the styled input and
+// wires the common behavior — Enter=submit, Escape=cancel, click-stop, blur, and
+// autofocus — so the four call sites only supply value/aria + their onSubmit /
+// onCancel. `blurSubmits` commits on blur (the switcher) instead of cancelling;
+// `selectAll` pre-selects the text (rename). An empty or unchanged value cancels.
+function makeThreadNameInput({
+  value = '',
+  placeholder = 'Thread name…',
+  ariaLabel,
+  selectAll = false,
+  blurSubmits = false,
+  onSubmit,
+  onCancel,
+}) {
   const input = document.createElement('input');
   input.type = 'text';
   input.className = 'thread-add-input';
-  input.placeholder = 'Thread name…';
   input.maxLength = 80;
-  input.setAttribute('aria-label', `New thread in #${room.id}`);
+  if (value) input.value = value;
+  else input.placeholder = placeholder;
+  if (ariaLabel) input.setAttribute('aria-label', ariaLabel);
   let settled = false;
   const cancel = () => {
     if (settled) return;
     settled = true;
-    threadAddRoom = null;
-    renderRooms(lastRoomsList);
+    onCancel?.();
   };
   const submit = () => {
     if (settled) return;
     const title = input.value.trim();
-    if (!title) return cancel();
+    if (!title || title === value) return cancel(); // empty or unchanged → cancel
     settled = true;
-    threadAddRoom = null;
-    createThread(title, room.id);
+    onSubmit(title);
   };
   input.addEventListener('click', (e) => e.stopPropagation());
   input.addEventListener('keydown', (e) => {
@@ -2118,10 +2113,31 @@ function appendRoomThreadInput(li, room) {
       cancel();
     }
   });
-  input.addEventListener('blur', cancel);
-  host.appendChild(input);
+  input.addEventListener('blur', blurSubmits ? submit : cancel);
+  setTimeout(() => {
+    input.focus();
+    if (selectAll) input.select();
+  }, 0);
+  return input;
+}
+
+function appendRoomThreadInput(li, room) {
+  const host = document.createElement('div');
+  host.className = 'thread-list';
+  host.appendChild(
+    makeThreadNameInput({
+      ariaLabel: `New thread in #${room.id}`,
+      onCancel: () => {
+        threadAddRoom = null;
+        renderRooms(lastRoomsList);
+      },
+      onSubmit: (title) => {
+        threadAddRoom = null;
+        createThread(title, room.id);
+      },
+    }),
+  );
   li.appendChild(host);
-  setTimeout(() => input.focus(), 0);
 }
 
 function openThreadMenu(thread, anchor) {
@@ -2193,7 +2209,7 @@ function openThreadSwitcher() {
   };
 
   addRow('Main chat', 'main', false);
-  for (const t of roomThreads.filter((t) => t.kind !== 'main')) addRow(t.title, t.thread_id, true);
+  for (const t of roomThreads().filter((t) => t.kind !== 'main')) addRow(t.title, t.thread_id, true);
 
   const add = document.createElement('button');
   add.className = 'thread-switcher-item thread-switcher-new';
@@ -2211,34 +2227,17 @@ function openThreadSwitcher() {
 
 // Replace the "+ New thread" row with an inline name input (no native prompt).
 function switcherCreate(pop, addBtn) {
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.className = 'thread-add-input';
-  input.placeholder = 'Thread name…';
-  input.maxLength = 80;
-  input.setAttribute('aria-label', 'New thread name');
-  let settled = false;
-  const finish = (create) => {
-    if (settled) return;
-    settled = true;
-    const title = input.value.trim();
-    closeThreadSwitcher();
-    if (create && title) createThread(title);
-  };
-  input.addEventListener('click', (e) => e.stopPropagation());
-  input.addEventListener('keydown', (e) => {
-    e.stopPropagation();
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      finish(true);
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      finish(false);
-    }
-  });
-  input.addEventListener('blur', () => finish(true));
-  addBtn.replaceWith(input);
-  setTimeout(() => input.focus(), 0);
+  addBtn.replaceWith(
+    makeThreadNameInput({
+      ariaLabel: 'New thread name',
+      blurSubmits: true, // clicking away commits, matching the prior switcher behavior
+      onCancel: closeThreadSwitcher,
+      onSubmit: (title) => {
+        closeThreadSwitcher();
+        createThread(title);
+      },
+    }),
+  );
 }
 
 // Open the inline rename input on a thread row (no native prompt() — DESIGN.md §4).
@@ -2254,44 +2253,21 @@ function buildThreadRenameRow(t) {
   row.className = 'thread-row';
   row.dataset.threadId = t.thread_id;
   row.style.setProperty('--thread-color', roomColor(t.thread_id));
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.className = 'thread-add-input';
-  input.value = t.title;
-  input.maxLength = 80;
-  input.setAttribute('aria-label', 'Rename thread');
-  let settled = false;
-  const cancel = () => {
-    if (settled) return;
-    settled = true;
-    threadRenaming = null;
-    renderThreadList();
-  };
-  const submit = () => {
-    if (settled) return;
-    const title = input.value.trim();
-    if (!title || title === t.title) return cancel();
-    settled = true;
-    threadRenaming = null;
-    submitThreadRename(t.thread_id, title);
-  };
-  input.addEventListener('click', (e) => e.stopPropagation());
-  input.addEventListener('keydown', (e) => {
-    e.stopPropagation();
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      submit();
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      cancel();
-    }
-  });
-  input.addEventListener('blur', cancel);
-  row.appendChild(input);
-  setTimeout(() => {
-    input.focus();
-    input.select();
-  }, 0);
+  row.appendChild(
+    makeThreadNameInput({
+      value: t.title,
+      ariaLabel: 'Rename thread',
+      selectAll: true,
+      onCancel: () => {
+        threadRenaming = null;
+        renderThreadList();
+      },
+      onSubmit: (title) => {
+        threadRenaming = null;
+        submitThreadRename(t.thread_id, title);
+      },
+    }),
+  );
   return row;
 }
 
@@ -2303,7 +2279,6 @@ async function submitThreadRename(threadId, title) {
       body: JSON.stringify({ title }),
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
-    threadsByRoom.delete(currentRoom); // keep the sidebar expand cache in sync with the new title
     await loadThreadList(currentRoom);
   } catch (err) {
     showToast('Rename failed: ' + (err.message || err), { kind: 'error' });
@@ -2323,7 +2298,6 @@ async function deleteThreadConfirm(thread) {
       method: 'DELETE',
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
-    threadsByRoom.delete(currentRoom); // invalidate the sidebar expand cache
     if (currentThread === thread.thread_id) openThread('main');
     await loadThreadList(currentRoom);
     showToast('Thread deleted', { kind: 'success' });
@@ -2383,7 +2357,7 @@ function joinRoom(roomId, roomName, jumpMessageId, initialThread) {
   // fully closed) so reopening resumes the same room AND thread.
   localStorage.setItem('lastThread:' + roomId, currentThread);
   threadUnread.clear();
-  roomThreads = [];
+  threadCache.delete(roomId); // clear this room's cached threads; loadThreadList refills
   updateThreadSyncControls();
   ws.send(JSON.stringify({ type: 'join', room_id: roomId, thread_id: currentThread }));
   loadThreadList(roomId);
@@ -6873,7 +6847,7 @@ $('#thread-pull')?.addEventListener('click', () => syncThread('pull'));
 $('#thread-push')?.addEventListener('click', () => syncThread('push'));
 $('#thread-delete')?.addEventListener('click', () => {
   if (!currentRoom || currentThread === 'main') return;
-  const thread = roomThreads.find((t) => t.thread_id === currentThread);
+  const thread = roomThreads().find((t) => t.thread_id === currentThread);
   if (thread) deleteThreadConfirm(thread);
 });
 
