@@ -2256,7 +2256,7 @@ function buildThreadRenameRow(t) {
   row.style.setProperty('--thread-color', roomColor(t.thread_id));
   const input = document.createElement('input');
   input.type = 'text';
-  input.className = 'thread-add-input thread-rename-input';
+  input.className = 'thread-add-input';
   input.value = t.title;
   input.maxLength = 80;
   input.setAttribute('aria-label', 'Rename thread');
@@ -2303,6 +2303,7 @@ async function submitThreadRename(threadId, title) {
       body: JSON.stringify({ title }),
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    threadsByRoom.delete(currentRoom); // keep the sidebar expand cache in sync with the new title
     await loadThreadList(currentRoom);
   } catch (err) {
     showToast('Rename failed: ' + (err.message || err), { kind: 'error' });
