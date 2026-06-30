@@ -1231,11 +1231,6 @@ function connect() {
           updateUnreadDots();
         }
         break;
-      case 'thread_suggestion':
-        // Confirm-first auto-spawn (slice 3): you single-mentioned an agent in
-        // `main` — offer to continue in its own thread. Never moves anything.
-        if (msg.room_id === currentRoom && msg.suggestion) showThreadSuggestion(msg.suggestion);
-        break;
       case 'read_cleared': {
         // Another of this user's devices read the room — drop the stale badges.
         const cleared = (msg.room_id && unreadRooms.delete(msg.room_id)) | 0;
@@ -1688,26 +1683,30 @@ async function toggleRoomHide(roomId, hide) {
 // thread (server filters history). See docs/design/webchat-threads.md.
 let currentThread = 'main';
 let threadCreating = false; // true while the inline "new thread" input is open
+let threadRenaming = null; // thread_id whose row is showing the inline rename input
 let roomThreads = []; // threads of the open room (from GET /threads)
 const threadUnread = new Set(); // thread_ids with unread activity in the open room
 
 async function loadThreadList(roomId) {
   try {
     const r = await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/threads`);
+    if (roomId !== currentRoom) return; // raced past a room switch
     if (!r.ok) {
       roomThreads = [];
       renderThreadList();
+      showToast('Could not load threads', { kind: 'error' });
       return;
     }
     const threads = await r.json();
-    if (roomId !== currentRoom) return; // raced past a room switch
     roomThreads = Array.isArray(threads) ? threads : [];
     for (const t of roomThreads) if (t.unread && t.thread_id !== currentThread) threadUnread.add(t.thread_id);
     renderThreadList();
     updateThreadSyncControls(); // refresh the breadcrumb title (covers rename + late load)
   } catch {
+    if (roomId !== currentRoom) return;
     roomThreads = [];
     renderThreadList();
+    showToast('Could not load threads', { kind: 'error' });
   }
 }
 
@@ -1727,9 +1726,19 @@ function renderThreadList() {
   // Only non-main threads render as rows (the room row is the regular chat).
   const nonMain = roomThreads.filter((t) => t.kind !== 'main');
   for (const t of nonMain) {
+    if (t.thread_id === threadRenaming) {
+      // Inline rename in place — mirrors the inline "new thread" input.
+      host.appendChild(buildThreadRenameRow(t));
+      continue;
+    }
     const row = document.createElement('div');
     row.className = 'thread-row' + (t.thread_id === currentThread ? ' active' : '');
     row.dataset.threadId = t.thread_id;
+    // Keyboard-operable like the room rows: role + tabindex + Enter/Space.
+    row.setAttribute('role', 'button');
+    row.tabIndex = 0;
+    row.setAttribute('aria-label', `Open thread ${t.title}`);
+    if (t.thread_id === currentThread) row.setAttribute('aria-current', 'true');
     // Per-thread identity hue on the spine (mirrors rooms' colored left bar). The
     // active thread overrides to accent via CSS for an unmistakable selection.
     row.style.setProperty('--thread-color', roomColor(t.thread_id));
@@ -1768,6 +1777,13 @@ function renderThreadList() {
     row.addEventListener('click', (e) => {
       e.stopPropagation(); // don't bubble to the room <li> (which re-joins)
       openThread(t.thread_id);
+    });
+    row.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        e.stopPropagation();
+        openThread(t.thread_id);
+      }
     });
     host.appendChild(row);
   }
@@ -1902,7 +1918,7 @@ function openThreadMenu(thread, anchor) {
   rename.textContent = 'Rename';
   rename.addEventListener('click', () => {
     closeThreadMenus();
-    renameThreadPrompt(thread);
+    startThreadRename(thread);
   });
   menu.appendChild(rename);
   if (isOwnerView) {
@@ -1923,14 +1939,66 @@ function closeThreadMenus() {
   document.querySelectorAll('.thread-menu').forEach((m) => m.remove());
 }
 
-async function renameThreadPrompt(thread) {
-  const title = prompt('Rename thread', thread.title);
-  if (!title || !title.trim()) return;
+// Open the inline rename input on a thread row (no native prompt() — DESIGN.md §4).
+function startThreadRename(thread) {
+  threadRenaming = thread.thread_id;
+  threadCreating = false;
+  renderThreadList();
+}
+
+// Build a thread row showing an inline rename input, mirroring the create input.
+function buildThreadRenameRow(t) {
+  const row = document.createElement('div');
+  row.className = 'thread-row';
+  row.dataset.threadId = t.thread_id;
+  row.style.setProperty('--thread-color', roomColor(t.thread_id));
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'thread-add-input thread-rename-input';
+  input.value = t.title;
+  input.maxLength = 80;
+  input.setAttribute('aria-label', 'Rename thread');
+  let settled = false;
+  const cancel = () => {
+    if (settled) return;
+    settled = true;
+    threadRenaming = null;
+    renderThreadList();
+  };
+  const submit = () => {
+    if (settled) return;
+    const title = input.value.trim();
+    if (!title || title === t.title) return cancel();
+    settled = true;
+    threadRenaming = null;
+    submitThreadRename(t.thread_id, title);
+  };
+  input.addEventListener('click', (e) => e.stopPropagation());
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      submit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancel();
+    }
+  });
+  input.addEventListener('blur', cancel);
+  row.appendChild(input);
+  setTimeout(() => {
+    input.focus();
+    input.select();
+  }, 0);
+  return row;
+}
+
+async function submitThreadRename(threadId, title) {
   try {
-    const r = await authFetch(`/api/rooms/${encodeURIComponent(currentRoom)}/threads/${encodeURIComponent(thread.thread_id)}`, {
+    const r = await authFetch(`/api/rooms/${encodeURIComponent(currentRoom)}/threads/${encodeURIComponent(threadId)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: title.trim() }),
+      body: JSON.stringify({ title }),
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
     await loadThreadList(currentRoom);
@@ -1958,38 +2026,6 @@ async function deleteThreadConfirm(thread) {
   } catch (err) {
     showToast('Delete failed: ' + (err.message || err), { kind: 'error' });
   }
-}
-
-$('#thread-suggestion-open')?.addEventListener('click', acceptThreadSuggestion);
-$('#thread-suggestion-dismiss')?.addEventListener('click', dismissThreadSuggestion);
-
-function showThreadSuggestion(suggestion) {
-  const banner = $('#thread-suggestion');
-  if (!banner) return;
-  banner.querySelector('.thread-suggestion-text').textContent = `Continue with @${suggestion.title} in its own thread?`;
-  banner.dataset.threadId = suggestion.threadId;
-  banner.dataset.title = suggestion.title;
-  banner.hidden = false;
-}
-
-function dismissThreadSuggestion() {
-  const banner = $('#thread-suggestion');
-  if (banner) banner.hidden = true;
-}
-
-function acceptThreadSuggestion() {
-  const banner = $('#thread-suggestion');
-  if (!banner) return;
-  const threadId = banner.dataset.threadId;
-  const title = banner.dataset.title;
-  dismissThreadSuggestion();
-  if (!threadId) return;
-  // Optimistically surface the lane so it's in the tree before its first
-  // message lands (the server registers the row on that message).
-  if (!roomThreads.some((t) => t.thread_id === threadId)) {
-    roomThreads.push({ thread_id: threadId, title, kind: 'agent', unread: false });
-  }
-  openThread(threadId);
 }
 
 // CSS.escape shim for older webviews.
@@ -6481,7 +6517,7 @@ async function syncThread(direction) {
     );
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
     const { copied = 0 } = await r.json();
-    if (copied === 0) showToast('Nothing new to sync', { kind: 'info' });
+    if (copied === 0) showToast(isPull ? 'Nothing new to pull' : 'Nothing new to push', { kind: 'info' });
     else showToast(`Copied ${copied} message${copied === 1 ? '' : 's'}`, { kind: 'success' });
   } catch (err) {
     showToast('Sync failed: ' + (err.message || err), { kind: 'error' });

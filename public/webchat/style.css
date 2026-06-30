@@ -1333,6 +1333,21 @@ button:focus-visible {
     display: none;
   }
 
+  /* Threads in the chat header: the active-thread breadcrumb + the sync trio
+     crowd the narrow header, so tighten the crumb width and shrink the sync
+     buttons (and their gaps) so the room name + right-side controls still fit. */
+  .thread-crumb-name {
+    max-width: 12ch;
+  }
+  .thread-sync {
+    margin-left: 4px;
+    gap: 2px;
+  }
+  .thread-sync-btn {
+    width: 28px;
+    height: 28px;
+  }
+
   /* Back button in chat header */
   .mobile-back {
     display: inline-block;
@@ -5371,26 +5386,6 @@ a.lightbox-btn {
   width: 14px;
   height: 14px;
 }
-.thread-add {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  border: none;
-  /* Transparent spine slot keeps "+ New thread" aligned under the rows above
-     without drawing a spine segment of its own. */
-  border-left: 2px solid transparent;
-  background: none;
-  color: var(--text-dim);
-  cursor: pointer;
-  text-align: left;
-  padding: 0.25rem 0.5rem;
-  font-size: var(--fs-base);
-  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-}
-.thread-add:hover {
-  background: var(--surface2);
-  color: var(--accent);
-}
 /* Inline new-thread input — replaces the "+ New thread" button in place, aligned
    with the thread rows above it. */
 .thread-add-input {
@@ -5418,7 +5413,7 @@ a.lightbox-btn {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 4px 12px var(--shadow, rgba(0, 0, 0, 0.25));
   display: flex;
   flex-direction: column;
   min-width: 6rem;
@@ -5437,22 +5432,4 @@ a.lightbox-btn {
 }
 .thread-menu button.danger {
   color: var(--danger);
-}
-.thread-suggestion {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-  margin: 0 0.5rem 0.4rem;
-  padding: 0.4rem 0.6rem;
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  font-size: var(--fs-sm);
-  color: var(--text);
-}
-.thread-suggestion-actions {
-  display: flex;
-  gap: 0.4rem;
-  flex: 0 0 auto;
 }

@@ -121,8 +121,10 @@ display-only — they are NOT written to agent sessions.
   meaningless in the regular chat:
   - **↓ from main** — pull.
   - **↑ to main** — push.
-- **Confirm-first with counts:** *"Pull 8 messages from main into this thread?"* /
-  *"Push 3 new messages from #thread to main?"* (reuse `showConfirmModal`).
+- **Confirm-first, title-only (no counts):** *"Pull main chat down"* /
+  *"Push this thread up"* (reuse `showConfirmModal`). The message count is
+  reported afterward in the result toast (*"Copied N messages"*), not in the
+  confirm.
 - **Nothing-new** → a `showToast` ("Nothing new to pull/push"), no empty block, no
   confirm.
 - Owner/member access via the existing room access checks; mutations carry the
@@ -154,8 +156,8 @@ display-only — they are NOT written to agent sessions.
 2. **Push** — endpoint + native-only delta + session backfill + broadcast. Tests:
    thread-own only (skip pulled prefix); multi-push = deltas, never duplicate;
    no-op.
-3. **UI** — header controls (in-thread only), confirm-with-count, nothing-new
-   toast, divider rendering.
+3. **UI** — header controls (in-thread only), title-only confirm (count reported
+   in the result toast), nothing-new toast, divider rendering.
 4. **Docs** — CLAUDE.md threads section + this doc → "built".
 
 ## 11. Hook coordination / mergeability

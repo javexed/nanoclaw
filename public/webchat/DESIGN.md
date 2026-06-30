@@ -225,7 +225,9 @@ styling are independent).
 
 **Create affordance.** The "+ New …" row sits at the end of the list, aligned
 with the rows, `--text-dim` → `--accent` on hover. Microcopy follows §5: reserve
-*new* for creation ("+ New thread", "+ New agent").
+*new* for creation ("+ New agent", "+ New model"). The **thread** list is the
+exception: it uses a bare inline "+" button placed on the room row (or the last
+thread row), not a footer "+ New thread" row.
 
 ## 7. Enforcing this
 
