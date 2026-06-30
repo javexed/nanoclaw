@@ -1516,6 +1516,34 @@ function renderRooms(rooms) {
         });
         menu.appendChild(pinBtn);
       }
+      // Reorder pinned rooms from the menu — the touch/keyboard-friendly path
+      // since dragging is mouse-only. Shown for any pinned room when more than
+      // one is pinned (works on desktop too — also serves accessibility).
+      if (room.pinned && pinned.length > 1) {
+        const pinIdx = pinned.findIndex((r) => r.id === room.id);
+        if (pinIdx > 0) {
+          const upBtn = document.createElement('button');
+          upBtn.type = 'button';
+          upBtn.textContent = 'Move up';
+          upBtn.addEventListener('click', async (ev) => {
+            ev.stopPropagation();
+            menu.remove();
+            await movePinnedRoom(room.id, -1);
+          });
+          menu.appendChild(upBtn);
+        }
+        if (pinIdx < pinned.length - 1) {
+          const downBtn = document.createElement('button');
+          downBtn.type = 'button';
+          downBtn.textContent = 'Move down';
+          downBtn.addEventListener('click', async (ev) => {
+            ev.stopPropagation();
+            menu.remove();
+            await movePinnedRoom(room.id, 1);
+          });
+          menu.appendChild(downBtn);
+        }
+      }
 
       const hideBtn = document.createElement('button');
       hideBtn.type = 'button';
@@ -1625,6 +1653,37 @@ async function reorderPinnedRoom(movedId, targetId, after) {
     console.error('reorderPinnedRoom failed:', err);
     // The next authoritative `rooms` broadcast (or a manual refresh) restores
     // the server's order; no local rollback needed for a cosmetic reorder.
+  }
+}
+
+// Touch-friendly pinned-room reorder: drag is mouse-only (native HTML5 DnD
+// doesn't fire from touch), so the kebab's Move up / Move down call this to swap
+// a pinned room with its neighbour. Same optimistic reindex + persist as
+// reorderPinnedRoom. `dir` is -1 (up) or +1 (down).
+async function movePinnedRoom(roomId, dir) {
+  const order = lastRoomsList
+    .filter((r) => r.pinned && !r.archived)
+    .sort((a, b) => (a.pin_position ?? 0) - (b.pin_position ?? 0))
+    .map((r) => r.id);
+  const i = order.indexOf(roomId);
+  const j = i + dir;
+  if (i === -1 || j < 0 || j >= order.length) return;
+  [order[i], order[j]] = [order[j], order[i]];
+  order.forEach((id, k) => {
+    const r = lastRoomsList.find((x) => x.id === id);
+    if (r) r.pin_position = k;
+  });
+  renderRooms(lastRoomsList);
+  try {
+    const res = await authFetch('/api/rooms/pins/order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+      body: JSON.stringify({ order }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    console.error('movePinnedRoom failed:', err);
+    // The next authoritative `rooms` broadcast restores order; no rollback needed.
   }
 }
 
