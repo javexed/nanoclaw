@@ -264,7 +264,11 @@ import {
   MAX_ACTIVE_MINTS,
 } from './oauth-mint.js';
 import { realOnecliAdmin } from '../../modules/user-credentials/onecli-admin.js';
-import { userHasConnectedCredential, getUserCredential, listEnrolledGroups } from '../../modules/user-credentials/db.js';
+import {
+  userHasConnectedCredential,
+  getUserCredential,
+  listEnrolledGroups,
+} from '../../modules/user-credentials/db.js';
 import { getContainerConfig } from '../../db/container-configs.js';
 import { broadcast, broadcastRooms } from './state.js';
 import { setupWebSocket } from './ws.js';
@@ -686,7 +690,10 @@ async function handleHttp(
 
   // ── UserCreds: a member connects / disconnects THEIR own Anthropic key ──────────
   // userId is the server-resolved caller — a user can only manage their own key.
-  if (url.pathname === '/api/user-credentials/credential' && (method === 'POST' || method === 'DELETE' || method === 'GET')) {
+  if (
+    url.pathname === '/api/user-credentials/credential' &&
+    (method === 'POST' || method === 'DELETE' || method === 'GET')
+  ) {
     const reqRoomId = method === 'GET' ? (url.searchParams.get('roomId') ?? '') : undefined; // POST/DELETE read roomId from the body below
     if (method === 'GET') {
       const roomId = decodeURIComponent(reqRoomId ?? '');
@@ -1228,18 +1235,25 @@ async function handleHttp(
     return json(res, 200, { copied });
   }
 
-  // ── Engaged agents (per-thread set) ──
-  // GET lists, POST engages, DELETE disengages. The 'main' thread (regular chat)
-  // can never engage. See docs/design/thread-engaged-agents.md.
+  // ── Engaged agents (per-thread set) — DORMANT ──
+  // The engaged-agents routing model is disabled (see the dormancy note in
+  // index.ts): nothing registers setEngagedResolver, so the stored set has no
+  // routing effect and no client calls these routes. They are gated OFF behind
+  // ENGAGED_AGENTS_ENABLED rather than left live-but-inert — a write that does
+  // nothing is a footgun. When off, the routes fall through to the default 404.
+  // To bring the subsystem back: flip this flag AND add the setEngagedResolver
+  // wiring. GET lists, POST engages, DELETE disengages; the 'main' thread can
+  // never engage. See docs/design/thread-engaged-agents.md.
+  const ENGAGED_AGENTS_ENABLED: boolean = false;
   const roomThreadEngagedMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads\/([^/]+)\/engaged$/);
-  if (roomThreadEngagedMatch && method === 'GET') {
+  if (ENGAGED_AGENTS_ENABLED && roomThreadEngagedMatch && method === 'GET') {
     const roomId = decodeURIComponent(roomThreadEngagedMatch[1]);
     const threadId = decodeURIComponent(roomThreadEngagedMatch[2]);
     if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
     if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
     return json(res, 200, engagedAgentsForThread(roomId, threadId));
   }
-  if (roomThreadEngagedMatch && method === 'POST') {
+  if (ENGAGED_AGENTS_ENABLED && roomThreadEngagedMatch && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     const roomId = decodeURIComponent(roomThreadEngagedMatch[1]);
     const threadId = decodeURIComponent(roomThreadEngagedMatch[2]);
@@ -1265,7 +1279,7 @@ async function handleHttp(
     return json(res, 200, { ok: true, engaged: engagedAgentsForThread(roomId, threadId) });
   }
   const roomThreadDisengageMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads\/([^/]+)\/engaged\/([^/]+)$/);
-  if (roomThreadDisengageMatch && method === 'DELETE') {
+  if (ENGAGED_AGENTS_ENABLED && roomThreadDisengageMatch && method === 'DELETE') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     const roomId = decodeURIComponent(roomThreadDisengageMatch[1]);
     const threadId = decodeURIComponent(roomThreadDisengageMatch[2]);
