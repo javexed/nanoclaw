@@ -20,7 +20,12 @@ import { getDb, hasTable } from '../../db/connection.js';
 import { getContainerConfig } from '../../db/container-configs.js';
 import { registerApprovalAgentGroupFallback } from '../approvals/onecli-approvals.js';
 import { getEffectiveRoomMode, getCredentialsConfig } from '../../channels/webchat/db.js';
-import { userHasConnectedCredential, getUserCredential, agentGroupForUserCredsAgent, type UserCredsProvider } from './db.js';
+import {
+  userHasConnectedCredential,
+  getUserCredential,
+  agentGroupForUserCredsAgent,
+  type UserCredsProvider,
+} from './db.js';
 import { ensureGroupEnrollment } from './onboard.js';
 import { realOnecliAdmin } from './onecli-admin.js';
 import { userCredsAgentIdentifier } from './identity.js';

@@ -1333,6 +1333,21 @@ button:focus-visible {
     display: none;
   }
 
+  /* Threads in the chat header: the active-thread breadcrumb + the sync trio
+     crowd the narrow header, so tighten the crumb width and shrink the sync
+     buttons (and their gaps) so the room name + right-side controls still fit. */
+  .thread-crumb-name {
+    max-width: 12ch;
+  }
+  .thread-sync {
+    margin-left: 4px;
+    gap: 2px;
+  }
+  .thread-sync-btn {
+    width: 28px;
+    height: 28px;
+  }
+
   /* Back button in chat header */
   .mobile-back {
     display: inline-block;
@@ -2049,6 +2064,96 @@ a.lightbox-btn {
   align-items: center;
   gap: 8px;
 }
+/* Room name › active-thread crumb › sync controls, kept together on the left
+   (the header is space-between, so without this group they'd splay apart). */
+.chat-title-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+/* Active-thread breadcrumb — room name › thread name, the thread tinted with
+   its sidebar color. Shown only inside a topic thread. */
+.thread-crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.thread-crumb[hidden] {
+  display: none;
+}
+.thread-crumb-sep {
+  color: var(--text-dim);
+  flex: none;
+}
+.thread-crumb-name {
+  color: var(--thread-color, var(--text));
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 28ch;
+}
+/* Thread context-sync controls — sit just right of the room name, shown only
+   inside a topic thread. Icon-only siblings of the header chips. */
+.thread-sync {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+}
+.thread-sync[hidden] {
+  display: none;
+}
+.thread-sync-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition:
+    background var(--transition),
+    color var(--transition),
+    transform var(--transition);
+}
+.thread-sync-btn:hover {
+  background: var(--border);
+  color: var(--text);
+  transform: translateY(-1px);
+}
+.thread-sync-btn--danger:hover {
+  background: color-mix(in srgb, var(--danger) 15%, var(--surface2));
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.thread-sync-btn .icon {
+  font-size: var(--fs-sm);
+}
+/* Labelled rule marking where pulled/pushed context begins in the transcript. */
+.context-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 4px;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+.context-divider::before,
+.context-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.context-divider span {
+  white-space: nowrap;
+}
 /* The @handle chip — visual sibling of .members-toggle. */
 .handle-chip {
   background: var(--surface2);
@@ -2586,29 +2691,51 @@ a.lightbox-btn {
   opacity: 0.75;
   line-height: 1.4;
 }
-.room-mode-badge {
-  margin: 8px 0 4px;
-  padding: 4px 8px;
-  font-size: 0.733rem;
-  font-weight: 600;
-  letter-spacing: 0.3px;
-  border-radius: 4px;
-  display: inline-block;
+/* Reply-mode info icon on the "Wired agents" label line. Click pops up the
+   explanation (.mode-info-popup). Tinted by mode; mention-only falls through to
+   the dim default. */
+.form-label-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  position: relative;
+}
+.mode-info-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.mode-info-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--text-dim);
+}
+.mode-info-btn .icon {
+  width: 15px;
+  height: 15px;
+}
+.mode-info-btn.mode-prime {
+  color: var(--accent);
+}
+.mode-info-popup {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 30;
+  margin-top: 6px;
+  width: max-content;
+  max-width: 260px;
+  padding: 8px 10px;
+  background: var(--surface);
   border: 1px solid var(--border);
-}
-.room-mode-badge.mode-prime {
-  background: var(--accent);
-  color: var(--surface);
-  border-color: var(--accent);
-}
-.room-mode-badge.mode-mention-only {
-  background: var(--surface2);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 12px var(--shadow, rgba(0, 0, 0, 0.25));
+  font-size: var(--fs-xs);
+  line-height: 1.4;
   color: var(--text);
-}
-.room-mode-badge.mode-broadcast {
-  background: #f5b1a0;
-  color: #4a1a10;
-  border-color: #d97050;
 }
 
 .room-add-agent-form {
@@ -2961,12 +3088,6 @@ a.lightbox-btn {
   padding-top: 18px;
   border-top: 1px solid var(--border);
 }
-.setting-help {
-  margin: 0;
-  font-size: var(--fs-xs);
-  color: var(--text-dim);
-}
-
 /* Setting groups */
 .setting-group {
   display: flex;
@@ -3726,10 +3847,6 @@ a.lightbox-btn {
 .handle-popover-close:hover {
   color: var(--text);
 }
-.handle-popover .setting-help {
-  margin: 0;
-}
-
 /* Your @handle field (shared by the popover) */
 .handle-row {
   display: flex;
@@ -5181,4 +5298,158 @@ a.lightbox-btn {
    but still clickable, so a click explains how to enable it. */
 .setting-option.is-unavailable {
   opacity: 0.5;
+}
+/* ── Threads (sidebar tree + suggestion banner) ─────────────────────────── */
+/* The thread tree wraps onto its own full-width line beneath the active room
+   row: the row content stays a flex row, and :has + flex-basis:100% drops the
+   tree below it (the room <li> name span is flex:1, so without this the tree
+   gets shoved to the right of the row). The spine is drawn per-row via
+   .thread-row's left border so the active row's accent bar overlays it with no
+   layout shift. */
+#room-list li:has(.thread-list) {
+  flex-wrap: wrap;
+}
+.thread-list {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 4px 0 6px 0.55rem;
+  padding-left: 0;
+}
+/* When the active room has no threads, the "+" moves inline onto the room row;
+   the empty tree must collapse so it costs no vertical space. */
+.thread-list:empty {
+  display: none;
+}
+/* Inline new-thread "+" on the room row (no-threads case). The room name is
+   flex:1, so this sits at the right. Always visible for the active room. */
+.thread-add-inline {
+  flex: 0 0 auto;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: var(--fs-lg);
+  line-height: 1;
+  padding: 0 4px;
+  margin-left: 2px;
+}
+.thread-add-inline:hover {
+  color: var(--accent);
+}
+.thread-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.5rem;
+  /* Spine carries the thread's identity hue (set inline via --thread-color,
+     mirrors rooms' colored left bar); the active thread overrides to accent. */
+  border-left: 2px solid var(--thread-color, var(--border));
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  cursor: pointer;
+  font-size: var(--fs-base);
+  color: var(--text-dim);
+  position: relative;
+}
+.thread-row:hover {
+  background: var(--surface2);
+  color: var(--text);
+}
+.thread-row.active {
+  /* Distinct from hover (plain surface2): accent tint + accent text + accent
+     spine bar, so selection and hover never read the same. */
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent-strong);
+  border-left-color: var(--accent);
+  font-weight: 600;
+}
+.thread-glyph {
+  flex: 0 0 auto;
+  width: 0.85rem;
+  text-align: center;
+  color: var(--text-dim);
+}
+.thread-row:hover .thread-glyph {
+  color: var(--text);
+}
+.thread-row.active .thread-glyph {
+  color: var(--accent-strong);
+}
+.thread-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.thread-unread {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  flex: 0 0 auto;
+}
+.thread-kebab {
+  flex: 0 0 auto;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0 2px;
+  opacity: 0;
+  transition: opacity var(--transition);
+}
+.thread-row:hover .thread-kebab {
+  opacity: 1;
+}
+.thread-kebab .icon {
+  width: 14px;
+  height: 14px;
+}
+/* Inline new-thread input — replaces the "+ New thread" button in place, aligned
+   with the thread rows above it. */
+.thread-add-input {
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+.thread-add-input:focus {
+  outline: none;
+}
+.thread-add-input::placeholder {
+  color: var(--text-dim);
+}
+.thread-menu {
+  position: absolute;
+  right: 0.4rem;
+  top: 100%;
+  z-index: 20;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 12px var(--shadow, rgba(0, 0, 0, 0.25));
+  display: flex;
+  flex-direction: column;
+  min-width: 6rem;
+}
+.thread-menu button {
+  border: none;
+  background: none;
+  color: var(--text);
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  cursor: pointer;
+  font-size: var(--fs-sm);
+}
+.thread-menu button:hover {
+  background: var(--surface2);
+}
+.thread-menu button.danger {
+  color: var(--danger);
 }

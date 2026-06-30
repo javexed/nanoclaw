@@ -70,6 +70,8 @@ HOOK_FILES=(
   src/container-runtime.ts
   src/modules/index.ts
   src/modules/approvals/onecli-approvals.ts
+  src/modules/typing/index.ts
+  src/modules/typing/index.test.ts
   container/Dockerfile
   container/agent-runner/src/integration.test.ts
   container/agent-runner/src/poll-loop.test.ts
@@ -139,7 +141,11 @@ rm -rf \
   src/db/migrations/024-rename-user-credentials.ts \
   setup/get-oauth-token.sh \
   docs/design/user-credentials.md \
-  docs/design/user-credentials-oauth.md
+  docs/design/user-credentials-oauth.md \
+  docs/design/webchat-threads.md \
+  docs/design/webchat-threads-qa.md \
+  docs/design/thread-engaged-agents.md \
+  docs/design/webchat-thread-context-sync.md
 
 # ── 4. Unwire the channels barrel ────────────────────────────────────────
 if grep -qF "'./webchat/index.js'" src/channels/index.ts; then

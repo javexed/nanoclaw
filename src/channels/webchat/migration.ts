@@ -631,6 +631,94 @@ export const moduleWebchatCredentialsConfig: Migration = {
 };
 
 /**
+ * Per-room threads. A webchat "thread" maps to an agent session via `thread_id`
+ * (the session key), so each thread is an isolated conversation. See
+ * docs/design/webchat-threads.md.
+ *
+ *   - `webchat_threads` is the thread registry; `thread_id` becomes
+ *     `session.thread_id` for that room. Ids: 'main' (implicit default),
+ *     'agent:<folder>' (per-agent lane), or a uuid (manual topic thread).
+ *   - `webchat_messages.thread_id` partitions history per thread; the column
+ *     default 'main' migrates all existing rows into each room's main thread
+ *     with no data loss and no visible change.
+ *   - `webchat_thread_reads` widens the per-room read marker to per-thread;
+ *     existing `webchat_room_reads` rows seed the 'main' thread marker.
+ */
+export const moduleWebchatThreads: Migration = {
+  version: 116,
+  name: 'webchat-threads',
+  up(db: Database.Database) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS webchat_threads (
+        room_id    TEXT NOT NULL,
+        thread_id  TEXT NOT NULL,
+        title      TEXT NOT NULL,
+        kind       TEXT NOT NULL DEFAULT 'topic',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (room_id, thread_id)
+      );
+      CREATE TABLE IF NOT EXISTS webchat_thread_reads (
+        user_id      TEXT NOT NULL,
+        room_id      TEXT NOT NULL,
+        thread_id    TEXT NOT NULL,
+        last_read_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, room_id, thread_id)
+      );
+    `);
+    // ADD COLUMN is not idempotent — guard it so a re-run (or a partial prior
+    // apply) doesn't throw "duplicate column name".
+    const hasThreadCol = (db.prepare("PRAGMA table_info('webchat_messages')").all() as Array<{ name: string }>).some(
+      (c) => c.name === 'thread_id',
+    );
+    if (!hasThreadCol) {
+      db.exec(`ALTER TABLE webchat_messages ADD COLUMN thread_id TEXT NOT NULL DEFAULT 'main'`);
+    }
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_webchat_messages_thread
+        ON webchat_messages(room_id, thread_id, created_at);
+    `);
+    // Seed per-thread read markers from existing per-room markers (→ 'main').
+    db.exec(`
+      INSERT OR IGNORE INTO webchat_thread_reads (user_id, room_id, thread_id, last_read_at)
+        SELECT user_id, room_id, 'main', last_read_at FROM webchat_room_reads;
+    `);
+    // Per-room auto-thread setting (confirm-first per-agent lanes). NULL = unset
+    // → effective default is "on for multi-agent rooms" (computed at read).
+    const hasAutoThread = (
+      db.prepare("PRAGMA table_info('webchat_room_settings')").all() as Array<{ name: string }>
+    ).some((c) => c.name === 'auto_thread');
+    if (!hasAutoThread) {
+      db.exec(`ALTER TABLE webchat_room_settings ADD COLUMN auto_thread INTEGER`);
+    }
+  },
+};
+
+/**
+ * Per-thread "engaged agents" set. A row means agent_group_id is engaged in
+ * (room_id, thread_id): it receives every message in that thread and is expected
+ * to reply when addressed. Never written for the 'main' thread (the regular chat
+ * stays mention-only). See docs/design/thread-engaged-agents.md.
+ */
+export const moduleWebchatThreadEngaged: Migration = {
+  version: 117,
+  name: 'webchat-thread-engaged',
+  up(db: Database.Database) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS webchat_thread_engaged (
+        room_id        TEXT NOT NULL,
+        thread_id      TEXT NOT NULL,
+        agent_group_id TEXT NOT NULL,
+        engaged_at     INTEGER NOT NULL,
+        PRIMARY KEY (room_id, thread_id, agent_group_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_webchat_engaged_thread
+        ON webchat_thread_engaged(room_id, thread_id);
+    `);
+  },
+};
+
+/**
  * Manual ordering for pinned rooms. Adds a per-user `position` to
  * webchat_room_pins so the operator can drag pinned rooms into a fixed order
  * (previously the pinned group auto-sorted by recent activity). Existing pins
@@ -651,6 +739,38 @@ export const moduleWebchatRoomPinOrder: Migration = {
                    OR (p2.pinned_at = webchat_room_pins.pinned_at
                        AND p2.room_id < webchat_room_pins.room_id))
          );
+    `);
+  },
+};
+
+/**
+ * Thread context sync (pull/push). Adds:
+ *   - webchat_messages.origin — NULL = native message; 'pulled' = copied in from
+ *     main; 'pushed' = copied up from a thread. Lets push select only native
+ *     thread messages (skip the pulled-in prefix) and the client mark imports.
+ *   - webchat_thread_sync — per-thread high-water marks so pull/push are
+ *     incremental (each sync appends only the source delta; no duplicates).
+ * See docs/design/webchat-thread-context-sync.md.
+ */
+export const moduleWebchatThreadContextSync: Migration = {
+  version: 118,
+  name: 'webchat-thread-context-sync',
+  up(db: Database.Database) {
+    // ADD COLUMN isn't idempotent — guard against a partial prior apply.
+    const hasOrigin = (db.prepare("PRAGMA table_info('webchat_messages')").all() as Array<{ name: string }>).some(
+      (c) => c.name === 'origin',
+    );
+    if (!hasOrigin) {
+      db.exec(`ALTER TABLE webchat_messages ADD COLUMN origin TEXT`);
+    }
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS webchat_thread_sync (
+        room_id            TEXT NOT NULL,
+        thread_id          TEXT NOT NULL,
+        last_pulled_src_ts INTEGER NOT NULL DEFAULT 0,
+        last_pushed_src_ts INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (room_id, thread_id)
+      );
     `);
   },
 };

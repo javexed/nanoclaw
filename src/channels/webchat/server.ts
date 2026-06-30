@@ -14,10 +14,15 @@
  *   DELETE /api/rooms/:id/agents/:agentId        unwire an agent (refuses last)  [owner]
  *   PUT  /api/rooms/:id/prime                    set { agentId } as the room's prime  [owner]
  *   DELETE /api/rooms/:id/prime                  clear the room's prime designation  [owner]
- *   GET  /api/rooms/:id/engage-mode              read room's engage default ('mention-only' | 'broadcast')
+ *   GET  /api/rooms/:id/engage-mode              read room's engage default ('mention-only')
  *   PUT  /api/rooms/:id/engage-mode              set { mode } for the room  [owner]
  *   PUT  /api/rooms/:id/name                     rename the room (set { name })  [owner]
- *   GET  /api/rooms/:id/messages                 history (?after_id= catch-up, ?before_id= scroll-back)
+ *   GET  /api/rooms/:id/threads                  list threads (+ per-thread unread)
+ *   POST /api/rooms/:id/threads                  create a topic thread ({ title })  [member]
+ *   PATCH /api/rooms/:id/threads/:tid            rename a thread ({ title })  [member]
+ *   DELETE /api/rooms/:id/threads/:tid           delete a thread + its session  [owner]
+ *   PUT  /api/rooms/:id/threads/:tid/read        mark a thread read  [member]
+ *   GET  /api/rooms/:id/messages                 history (?after_id= catch-up, ?before_id= scroll-back, ?thread_id=)
  *   POST /api/rooms/:id/archive                  mark room archived (owner + admin) — global
  *   POST /api/rooms/:id/unarchive                clear global archive (owner + admin)
  *   POST /api/rooms/:id/hide                     hide room from this user's sidebar — per-user
@@ -74,10 +79,12 @@ import {
   deleteSessionDbState,
   findSessionsByAgentGroup,
   findSessionsByMessagingGroup,
+  findSessionsByMessagingGroupThread,
   teardownSessionResources,
   type TeardownTarget,
 } from '../../session-teardown.js';
-import type { AgentGroup } from '../../types.js';
+import type { AgentGroup, MessagingGroup } from '../../types.js';
+import type { EngagedDecision } from '../../router.js';
 import {
   createAgentGroup,
   deleteAgentGroup,
@@ -87,6 +94,7 @@ import {
   updateAgentGroup,
 } from '../../db/agent-groups.js';
 import { createMessagingGroupAgent, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
+import { syncSessionContext, type ContextMessage } from '../../session-manager.js';
 import { getPendingApproval, getSessionsByAgentGroup } from '../../db/sessions.js';
 import { killContainer } from '../../container-runner.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
@@ -152,6 +160,24 @@ import {
   getWebchatMessagesAfterId,
   getWebchatMessagesBeforeId,
   searchWebchatMessages,
+  ensureMainThread,
+  listWebchatThreads,
+  createWebchatThread,
+  getWebchatThread,
+  renameWebchatThread,
+  deleteWebchatThread,
+  MAIN_THREAD,
+  threadToSessionKey,
+  getThreadSyncMarks,
+  setThreadSyncMark,
+  getSyncDelta,
+  insertSyncedMessages,
+  engageAgent,
+  disengageAgent,
+  getEngagedAgents,
+  getUnreadThreadIdsForRoom,
+  markThreadRead,
+  sanitizeThreadTitle,
   getWebchatTopology,
   getWebchatModel,
   getWebchatPendingApprovalsForUser,
@@ -234,7 +260,11 @@ import {
   MAX_ACTIVE_MINTS,
 } from './oauth-mint.js';
 import { realOnecliAdmin } from '../../modules/user-credentials/onecli-admin.js';
-import { userHasConnectedCredential, getUserCredential, listEnrolledGroups } from '../../modules/user-credentials/db.js';
+import {
+  userHasConnectedCredential,
+  getUserCredential,
+  listEnrolledGroups,
+} from '../../modules/user-credentials/db.js';
 import { getContainerConfig } from '../../db/container-configs.js';
 import { broadcast, broadcastRooms } from './state.js';
 import { setupWebSocket } from './ws.js';
@@ -260,7 +290,8 @@ const STATIC_MIME: Record<string, string> = {
 };
 
 export interface WebchatServerHooks {
-  onInbound: (roomId: string, message: InboundMessage) => void;
+  /** `threadId` is the session key (null = the room's main/default thread). */
+  onInbound: (roomId: string, message: InboundMessage, threadId: string | null) => void;
   onAction: (questionId: string, selectedOption: string, userId: string) => void;
 }
 
@@ -655,7 +686,10 @@ async function handleHttp(
 
   // ── UserCreds: a member connects / disconnects THEIR own Anthropic key ──────────
   // userId is the server-resolved caller — a user can only manage their own key.
-  if (url.pathname === '/api/user-credentials/credential' && (method === 'POST' || method === 'DELETE' || method === 'GET')) {
+  if (
+    url.pathname === '/api/user-credentials/credential' &&
+    (method === 'POST' || method === 'DELETE' || method === 'GET')
+  ) {
     const reqRoomId = method === 'GET' ? (url.searchParams.get('roomId') ?? '') : undefined; // POST/DELETE read roomId from the body below
     if (method === 'GET') {
       const roomId = decodeURIComponent(reqRoomId ?? '');
@@ -994,9 +1028,8 @@ async function handleHttp(
   // ── Engage mode (room-scoped) ──
   // Controls what `recomputeEngagePatterns` rewrites un-primed wirings to:
   //   'mention-only' — agents fire only on explicit @-mention (no fallback).
-  //   'broadcast'    — legacy: every wired agent answers every message.
-  // The PWA never sends 'broadcast' (operator preference is mention-only-only),
-  // but the API accepts both for symmetry with the DB schema.
+  // This is the only mode; the legacy 'broadcast' (every wired agent answers
+  // every message) has been retired.
   const roomEngageMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/engage-mode$/);
   if (roomEngageMatch && method === 'GET') {
     const roomId = decodeURIComponent(roomEngageMatch[1]);
@@ -1016,8 +1049,8 @@ async function handleHttp(
     } catch {
       return json(res, 400, { error: 'Invalid JSON' });
     }
-    if (body.mode !== 'mention-only' && body.mode !== 'broadcast') {
-      return json(res, 400, { error: "mode must be 'mention-only' or 'broadcast'" });
+    if (body.mode !== 'mention-only') {
+      return json(res, 400, { error: "mode must be 'mention-only'" });
     }
     setRoomEngageDefault(roomId, body.mode);
     // Re-run pattern computation so the new mode is reflected in every wiring.
@@ -1050,6 +1083,181 @@ async function handleHttp(
     updateWebchatRoomName(roomId, name);
     broadcastRooms();
     return json(res, 200, { ok: true, name });
+  }
+
+  // ── Threads (per-room) ────────────────────────────────────────────────
+  // A thread maps to an agent session; see docs/design/webchat-threads.md.
+  // List/read/create/rename are member-gated; delete (destroys history + tears
+  // down the thread's session) is owner-only.
+  const roomThreadReadMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads\/([^/]+)\/read$/);
+  if (roomThreadReadMatch && method === 'PUT') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const roomId = decodeURIComponent(roomThreadReadMatch[1]);
+    const threadId = decodeURIComponent(roomThreadReadMatch[2]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    markThreadRead(userId, roomId, threadId);
+    return json(res, 200, { ok: true });
+  }
+
+  const roomThreadsMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads$/);
+  if (roomThreadsMatch && method === 'GET') {
+    const roomId = decodeURIComponent(roomThreadsMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    ensureMainThread(roomId); // every room has a main thread once listed
+    const unread = getUnreadThreadIdsForRoom(userId, roomId);
+    return json(
+      res,
+      200,
+      listWebchatThreads(roomId).map((t) => ({ ...t, unread: unread.has(t.thread_id) })),
+    );
+  }
+  if (roomThreadsMatch && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const roomId = decodeURIComponent(roomThreadsMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { title?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    const title = sanitizeThreadTitle(body.title);
+    if (title === null) return json(res, 400, { error: 'title must be 1–80 characters' });
+    const thread = createWebchatThread(roomId, title);
+    return json(res, 200, thread);
+  }
+
+  const roomThreadMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads\/([^/]+)$/);
+  if (roomThreadMatch && method === 'PATCH') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const roomId = decodeURIComponent(roomThreadMatch[1]);
+    const threadId = decodeURIComponent(roomThreadMatch[2]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    if (!getWebchatThread(roomId, threadId)) return json(res, 404, { error: 'Thread not found' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { title?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    const title = sanitizeThreadTitle(body.title);
+    if (title === null) return json(res, 400, { error: 'title must be 1–80 characters' });
+    renameWebchatThread(roomId, threadId, title);
+    return json(res, 200, { ok: true, title });
+  }
+  if (roomThreadMatch && method === 'DELETE') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const roomId = decodeURIComponent(roomThreadMatch[1]);
+    const threadId = decodeURIComponent(roomThreadMatch[2]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (threadId === 'main') return json(res, 400, { error: 'The main thread cannot be deleted' });
+    if (!getWebchatThread(roomId, threadId)) return json(res, 404, { error: 'Thread not found' });
+    return deleteThreadHandler(res, roomId, threadId);
+  }
+
+  // ── Thread context sync (pull main → thread / push thread → main) ──
+  // Both are verbatim + additive: copy the source's native message delta into
+  // the destination, seed the destination agent session(s) as silent context,
+  // broadcast the copies, and advance the per-thread high-water mark so repeat
+  // syncs only carry genuinely new messages. The 'main' regular chat is the
+  // shared trunk; only a topic thread can pull from / push to it.
+  // See docs/design/webchat-thread-context-sync.md.
+  const roomThreadPullMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads\/([^/]+)\/(pull|push)$/);
+  if (roomThreadPullMatch && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const roomId = decodeURIComponent(roomThreadPullMatch[1]);
+    const threadId = decodeURIComponent(roomThreadPullMatch[2]);
+    const dir = roomThreadPullMatch[3] as 'pull' | 'push';
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    if (threadId === MAIN_THREAD) return json(res, 400, { error: 'The regular chat has no main to sync with' });
+    if (!getWebchatThread(roomId, threadId)) return json(res, 404, { error: 'Thread not found' });
+    const copied =
+      dir === 'pull'
+        ? syncThreadContext({
+            roomId,
+            srcThreadId: MAIN_THREAD,
+            destThreadId: threadId,
+            markThreadId: threadId,
+            direction: 'pulled',
+            dividerText: 'Pulled from main chat',
+            freshLimit: FRESH_SYNC_LIMIT,
+          })
+        : syncThreadContext({
+            roomId,
+            srcThreadId: threadId,
+            destThreadId: MAIN_THREAD,
+            markThreadId: threadId,
+            direction: 'pushed',
+            dividerText: 'Pushed from thread',
+            freshLimit: FRESH_SYNC_LIMIT,
+          });
+    return json(res, 200, { copied });
+  }
+
+  // ── Engaged agents (per-thread set) — DORMANT ──
+  // The engaged-agents routing model is disabled (see the dormancy note in
+  // index.ts): nothing registers setEngagedResolver, so the stored set has no
+  // routing effect and no client calls these routes. They are gated OFF behind
+  // ENGAGED_AGENTS_ENABLED rather than left live-but-inert — a write that does
+  // nothing is a footgun. When off, the routes fall through to the default 404.
+  // To bring the subsystem back: flip this flag AND add the setEngagedResolver
+  // wiring. GET lists, POST engages, DELETE disengages; the 'main' thread can
+  // never engage. See docs/design/thread-engaged-agents.md.
+  const ENGAGED_AGENTS_ENABLED: boolean = false;
+  const roomThreadEngagedMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads\/([^/]+)\/engaged$/);
+  if (ENGAGED_AGENTS_ENABLED && roomThreadEngagedMatch && method === 'GET') {
+    const roomId = decodeURIComponent(roomThreadEngagedMatch[1]);
+    const threadId = decodeURIComponent(roomThreadEngagedMatch[2]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    return json(res, 200, engagedAgentsForThread(roomId, threadId));
+  }
+  if (ENGAGED_AGENTS_ENABLED && roomThreadEngagedMatch && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const roomId = decodeURIComponent(roomThreadEngagedMatch[1]);
+    const threadId = decodeURIComponent(roomThreadEngagedMatch[2]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    if (threadId === 'main') return json(res, 400, { error: 'The regular chat cannot engage agents' });
+    if (!getWebchatThread(roomId, threadId)) return json(res, 404, { error: 'Thread not found' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { agentGroupId?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    const agentGroupId = typeof body.agentGroupId === 'string' ? body.agentGroupId : '';
+    // Only agents actually wired to this room can be engaged.
+    if (!getAgentsForWebchatRoom(roomId).some((a) => a.id === agentGroupId)) {
+      return json(res, 400, { error: 'Agent is not wired to this room' });
+    }
+    engageAgent(roomId, threadId, agentGroupId);
+    broadcastEngagedSet(roomId, threadId);
+    return json(res, 200, { ok: true, engaged: engagedAgentsForThread(roomId, threadId) });
+  }
+  const roomThreadDisengageMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads\/([^/]+)\/engaged\/([^/]+)$/);
+  if (ENGAGED_AGENTS_ENABLED && roomThreadDisengageMatch && method === 'DELETE') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const roomId = decodeURIComponent(roomThreadDisengageMatch[1]);
+    const threadId = decodeURIComponent(roomThreadDisengageMatch[2]);
+    const agentGroupId = decodeURIComponent(roomThreadDisengageMatch[3]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    disengageAgent(roomId, threadId, agentGroupId);
+    broadcastEngagedSet(roomId, threadId);
+    return json(res, 200, { ok: true, engaged: engagedAgentsForThread(roomId, threadId) });
   }
 
   // Room → agent → model topology for the explore view, scoped to the caller's
@@ -1094,11 +1302,13 @@ async function handleHttp(
     if (!canAccessRoom(userId, room.id)) return json(res, 403, { error: 'Access denied' });
     const afterId = url.searchParams.get('after_id');
     const beforeId = url.searchParams.get('before_id');
+    // Optional thread filter — absent = the whole room (back-compat).
+    const threadId = url.searchParams.get('thread_id') || undefined;
     const msgs = afterId
-      ? getWebchatMessagesAfterId(room.id, afterId, 200)
+      ? getWebchatMessagesAfterId(room.id, afterId, 200, threadId)
       : beforeId
-        ? getWebchatMessagesBeforeId(room.id, beforeId, 50)
-        : getWebchatMessages(room.id, 100);
+        ? getWebchatMessagesBeforeId(room.id, beforeId, 50, threadId)
+        : getWebchatMessages(room.id, 100, threadId);
     return json(
       res,
       200,
@@ -1126,7 +1336,15 @@ async function handleHttp(
     });
     if (!csrfOk) return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     if (!accessOk) return json(res, 403, { error: 'Access denied' });
-    return handleMultipartUpload(req, res, roomId, senderIdentity, userId, hooks);
+    return handleMultipartUpload(
+      req,
+      res,
+      roomId,
+      senderIdentity,
+      userId,
+      hooks,
+      url.searchParams.get('thread_id') || undefined,
+    );
   }
   const chunkMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/upload\/chunk$/);
   if (chunkMatch && method === 'POST') {
@@ -1143,7 +1361,15 @@ async function handleHttp(
     });
     if (!csrfOk) return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     if (!accessOk) return json(res, 403, { error: 'Access denied' });
-    return handleChunkedUpload(req, res, roomId, senderIdentity, userId, hooks);
+    return handleChunkedUpload(
+      req,
+      res,
+      roomId,
+      senderIdentity,
+      userId,
+      hooks,
+      url.searchParams.get('thread_id') || undefined,
+    );
   }
   const fileMatch = url.pathname.match(/^\/api\/files\/([^/]+)\/([^/]+)$/);
   if (fileMatch && method === 'GET') {
@@ -1699,6 +1925,176 @@ function ensureA2aDestination(ownerAgentId: string, targetAgentId: string, targe
  * every wiring-change path: wireAgentToWebchatRoom, unwireAgentFromWebchatRoom,
  * and the prime PUT/DELETE handlers.
  */
+/**
+ * Cap on the *fresh* sync (high-water mark = 0): bounds the first pull/push so it
+ * can't dump an enormous backlog. Incremental syncs are naturally small (delta).
+ */
+const FRESH_SYNC_LIMIT = 50;
+
+/** Live agent sessions for a destination thread key (null = the room's main
+ * session). Existing sessions only — a thread with no session yet has no agent
+ * memory to seed; the copied transcript is still visible in chat and the agent
+ * picks it up when its session is first created through the normal inbound path. */
+function sessionsForThreadKey(messagingGroupId: string, sessionKey: string | null): TeardownTarget[] {
+  const rows = (
+    sessionKey === null
+      ? getDb()
+          .prepare(`SELECT id, agent_group_id FROM sessions WHERE messaging_group_id = ? AND thread_id IS NULL`)
+          .all(messagingGroupId)
+      : getDb()
+          .prepare(`SELECT id, agent_group_id FROM sessions WHERE messaging_group_id = ? AND thread_id = ?`)
+          .all(messagingGroupId, sessionKey)
+  ) as { id: string; agent_group_id: string }[];
+  return rows.map((r) => ({ sessionId: r.id, agentGroupId: r.agent_group_id }));
+}
+
+/**
+ * Copy the native message delta from one thread into another (verbatim, additive),
+ * seed the destination thread's agent session(s) with it as silent context
+ * (trigger=0 — never wakes a turn), broadcast the copies to connected clients, and
+ * advance the per-thread high-water mark so repeat syncs only carry genuinely new
+ * messages. `markThreadId` is always the topic thread the (main, topic) pair is
+ * keyed under — both directions track progress against that one row so a push and
+ * a pull on the same thread don't share a mark. Returns the number of messages
+ * copied (excluding the divider; 0 = nothing new). See
+ * docs/design/webchat-thread-context-sync.md.
+ */
+export function syncThreadContext(opts: {
+  roomId: string;
+  srcThreadId: string;
+  destThreadId: string;
+  markThreadId: string;
+  direction: 'pulled' | 'pushed';
+  dividerText: string;
+  freshLimit?: number;
+}): number {
+  const { roomId, srcThreadId, destThreadId, markThreadId, direction, dividerText, freshLimit = 0 } = opts;
+  const marks = getThreadSyncMarks(roomId, markThreadId);
+  const sinceTs = direction === 'pulled' ? marks.pulled : marks.pushed;
+  const delta = getSyncDelta(roomId, srcThreadId, sinceTs, sinceTs === 0 ? freshLimit : 0);
+  if (delta.length === 0) return 0;
+
+  const inserted = insertSyncedMessages(roomId, destThreadId, delta, direction, dividerText);
+
+  // Advance the high-water mark to the newest source row carried, so a repeat
+  // sync only picks up messages added after this batch (setThreadSyncMark is
+  // monotonic, so a concurrent larger mark never moves backwards).
+  const maxSrcTs = delta.reduce((mx, m) => Math.max(mx, m.created_at), sinceTs);
+  setThreadSyncMark(roomId, markThreadId, direction, maxSrcTs);
+
+  // Broadcast the copies (divider + messages) so the destination thread updates live.
+  for (const row of inserted) {
+    broadcast(roomId, { type: 'message', ...row });
+  }
+
+  // Seed the destination thread's agent session(s) with the copied transcript as
+  // silent context. Content matches the webchat inbound shape so the agent-runner
+  // formats it identically to a real message.
+  const copies = inserted.filter((m) => m.message_type !== 'context-divider');
+  const mg = getMessagingGroupByPlatform('webchat', roomId);
+  if (mg) {
+    const destKey = threadToSessionKey(destThreadId);
+    for (const s of sessionsForThreadKey(mg.id, destKey)) {
+      const ctx: ContextMessage[] = copies.map((m) => ({
+        id: `ctx-${direction}-${s.sessionId}-${m.id}`,
+        kind: 'chat',
+        timestamp: new Date(m.created_at).toISOString(),
+        platformId: roomId,
+        channelType: 'webchat',
+        threadId: destKey,
+        content: JSON.stringify({ text: m.content, sender: m.sender, senderName: m.sender, senderId: '' }),
+        trigger: 0,
+      }));
+      syncSessionContext(s.agentGroupId, s.sessionId, ctx);
+    }
+  }
+  return copies.length;
+}
+
+/** Engaged agents in a thread, resolved to {id, name, folder} for the UI. */
+function engagedAgentsForThread(roomId: string, threadId: string): Array<{ id: string; name: string; folder: string }> {
+  const ids = new Set(getEngagedAgents(roomId, threadId));
+  if (ids.size === 0) return [];
+  return getAgentsForWebchatRoom(roomId)
+    .filter((a) => ids.has(a.id))
+    .map((a) => ({ id: a.id, name: a.name, folder: a.folder }));
+}
+
+/** Push the current engaged set for a thread to all room clients (live chips). */
+function broadcastEngagedSet(roomId: string, threadId: string): void {
+  broadcast(roomId, {
+    type: 'engaged_set_changed',
+    room_id: roomId,
+    thread_id: threadId,
+    engaged: engagedAgentsForThread(roomId, threadId),
+  });
+}
+
+const ENGAGE_FOLDER_ESCAPE_RE = /[.*+?^${}()|[\]\\]/g;
+
+/**
+ * Engaged-thread routing decision for the host router (registered via
+ * setEngagedResolver). Auto-engages @mentioned wired agents, then classifies each
+ * engaged agent as 'expected' (addressed, or the sole engaged agent on an
+ * un-addressed message → a one-agent thread keeps replying without re-mention) or
+ * 'defer' (engaged but someone else was addressed → receives context, no reply).
+ * Returns null when engagement doesn't apply so the router falls back to normal
+ * mention-only routing. See docs/design/thread-engaged-agents.md.
+ */
+export function resolveEngagedDecision(
+  mg: MessagingGroup,
+  threadId: string | null,
+  messageText: string,
+  senderAgentGroupId: string | undefined,
+): EngagedDecision | null {
+  if (mg.channel_type !== 'webchat') return null;
+  if (threadId === null || threadId === 'main') return null;
+  const roomId = mg.platform_id;
+  const wired = getAgentsForWebchatRoom(roomId);
+  if (wired.length === 0) return null;
+  const wiredIds = new Set(wired.map((a) => a.id));
+
+  // Peer fan-out: an engaged agent's own reply is delivered to the OTHER engaged
+  // agents as silent context (isPeerReply, trigger=0) so they stay in sync but
+  // never reply to a peer (no cascades). The producer is excluded.
+  if (senderAgentGroupId) {
+    const allEngaged = [...getEngagedAgents(roomId, threadId)].filter((id) => wiredIds.has(id));
+    const recipients = allEngaged.filter((id) => id !== senderAgentGroupId);
+    if (recipients.length === 0) return null;
+    const perAgent = new Map<string, 'expected' | 'defer'>();
+    for (const id of recipients) perAgent.set(id, 'defer');
+    return { engaged: allEngaged, perAgent, isPeerReply: true };
+  }
+
+  // Which wired agents are explicitly @mentioned (case-insensitive, word-boundary).
+  const mentioned = new Set<string>();
+  for (const a of wired) {
+    const re = new RegExp(`\\B@${a.folder.replace(ENGAGE_FOLDER_ESCAPE_RE, '\\$&')}\\b`, 'i');
+    if (re.test(messageText)) mentioned.add(a.id);
+  }
+
+  // Auto-engage any newly-mentioned wired agent (broadcast the chip change once).
+  const engaged = new Set([...getEngagedAgents(roomId, threadId)].filter((id) => wiredIds.has(id)));
+  let changed = false;
+  for (const id of mentioned) {
+    if (!engaged.has(id)) {
+      engageAgent(roomId, threadId, id);
+      engaged.add(id);
+      changed = true;
+    }
+  }
+  if (changed) broadcastEngagedSet(roomId, threadId);
+  if (engaged.size === 0) return null; // nothing engaged → normal mention-only routing
+
+  const soleEngaged = engaged.size === 1;
+  const perAgent = new Map<string, 'expected' | 'defer'>();
+  for (const id of engaged) {
+    const addressed = mentioned.has(id) || (mentioned.size === 0 && soleEngaged);
+    perAgent.set(id, addressed ? 'expected' : 'defer');
+  }
+  return { engaged: [...engaged], perAgent };
+}
+
 export function recomputeEngagePatterns(roomId: string): void {
   const mg = getMessagingGroupByPlatform('webchat', roomId);
   if (!mg) return;
@@ -1719,17 +2115,10 @@ export function recomputeEngagePatterns(roomId: string): void {
   const update = getDb().prepare(`UPDATE messaging_group_agents SET engage_pattern = ? WHERE id = ?`);
 
   if (!validPrime) {
-    // No prime — fall through to the room's engage_default. 'broadcast' is
-    // the legacy behavior (every agent responds to every message). 'mention-only'
-    // makes the room silent until an agent is explicitly @-mentioned, which is
-    // the right model for a many-agent shared room where catch-all responses
-    // would just be noise.
-    const engageDefault = getRoomEngageDefault(roomId);
-    if (engageDefault === 'mention-only') {
-      for (const w of wirings) update.run(`\\B@${ciFolderToken(w.folder)}\\b`, w.id);
-    } else {
-      for (const w of wirings) update.run('.', w.id);
-    }
+    // No prime — un-primed agents reply only when explicitly @-mentioned. The
+    // legacy 'broadcast' fallback (every agent answers every message) has been
+    // retired; a shared room stays quiet until an agent is addressed.
+    for (const w of wirings) update.run(`\\B@${ciFolderToken(w.folder)}\\b`, w.id);
     return;
   }
 
@@ -2682,6 +3071,27 @@ function deleteRoomHandler(res: ServerResponse, roomId: string): void {
   }
 
   broadcastRooms();
+  return json(res, 200, { ok: true });
+}
+
+/** Delete a thread: drop its registry row + messages + read markers, and tear
+ * down its per-thread session (DB state in the txn; container/dir after commit).
+ * The room and other threads are untouched. */
+function deleteThreadHandler(res: ServerResponse, roomId: string, threadId: string): void {
+  const mg = getMessagingGroupByPlatform('webchat', roomId);
+  // The session for a named thread is keyed by thread_id = threadId.
+  const sessions: TeardownTarget[] = mg ? findSessionsByMessagingGroupThread(mg.id, threadId) : [];
+  try {
+    getDb().transaction(() => {
+      for (const s of sessions) deleteSessionDbState(s.sessionId);
+      deleteWebchatThread(roomId, threadId);
+    })();
+  } catch (err) {
+    log.error('Webchat: deleteThreadHandler failed', { roomId, threadId, err });
+    return json(res, 500, { error: 'Failed to delete thread' });
+  }
+  // Side-effects after commit (can't roll back): kill containers + remove dirs.
+  void teardownSessionResources(sessions, 'webchat thread deleted');
   return json(res, 200, { ok: true });
 }
 

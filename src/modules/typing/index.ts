@@ -45,11 +45,20 @@ const HEARTBEAT_FRESH_MS = 6000;
 const POST_DELIVERY_PAUSE_MS = 10000;
 
 interface TypingAdapter {
-  setTyping?(channelType: string, platformId: string, threadId: string | null, instance?: string): Promise<void>;
+  setTyping?(
+    channelType: string,
+    platformId: string,
+    threadId: string | null,
+    instance?: string,
+    agentName?: string,
+  ): Promise<void>;
 }
 
 interface TypingTarget {
   agentGroupId: string;
+  /** Display name of the agent that's typing — so multi-agent rooms label the
+   *  indicator with the actual responder, not the room's default agent. */
+  agentName: string;
   channelType: string;
   platformId: string;
   threadId: string | null;
@@ -79,9 +88,10 @@ async function triggerTyping(
   platformId: string,
   threadId: string | null,
   instance?: string,
+  agentName?: string,
 ): Promise<void> {
   try {
-    await adapter?.setTyping?.(channelType, platformId, threadId, instance);
+    await adapter?.setTyping?.(channelType, platformId, threadId, instance, agentName);
   } catch {
     // Typing is best-effort — don't let it fail delivery or routing.
   }
@@ -100,6 +110,7 @@ function isHeartbeatFresh(agentGroupId: string, sessionId: string): boolean {
 export function startTypingRefresh(
   sessionId: string,
   agentGroupId: string,
+  agentName: string,
   channelType: string,
   platformId: string,
   threadId: string | null,
@@ -112,9 +123,10 @@ export function startTypingRefresh(
     // the container-wake latency budget. Also clear any lingering
     // post-delivery pause: a new inbound means the user expects
     // typing to show immediately.
-    triggerTyping(channelType, platformId, threadId, instance).catch(() => {});
+    triggerTyping(channelType, platformId, threadId, instance, agentName).catch(() => {});
     existing.startedAt = Date.now();
     existing.pausedUntil = 0;
+    existing.agentName = agentName;
     // Keep the stored entry self-consistent: a re-trigger can arrive from
     // a different chat address (agent-shared sessions span messaging
     // groups, possibly on different platforms/instances), so the address
@@ -129,7 +141,7 @@ export function startTypingRefresh(
   }
 
   // Immediate tick + periodic refresh.
-  triggerTyping(channelType, platformId, threadId, instance).catch(() => {});
+  triggerTyping(channelType, platformId, threadId, instance, agentName).catch(() => {});
   const startedAt = Date.now();
   const interval = setInterval(() => {
     const entry = typingRefreshers.get(sessionId);
@@ -142,7 +154,9 @@ export function startTypingRefresh(
 
     const withinGrace = Date.now() - entry.startedAt < TYPING_GRACE_MS;
     if (withinGrace || isHeartbeatFresh(entry.agentGroupId, sessionId)) {
-      triggerTyping(entry.channelType, entry.platformId, entry.threadId, entry.instance).catch(() => {});
+      triggerTyping(entry.channelType, entry.platformId, entry.threadId, entry.instance, entry.agentName).catch(
+        () => {},
+      );
       return;
     }
 
@@ -154,6 +168,7 @@ export function startTypingRefresh(
   interval.unref();
   typingRefreshers.set(sessionId, {
     agentGroupId,
+    agentName,
     channelType,
     platformId,
     threadId,

@@ -184,6 +184,10 @@ NEW_PATHS=(
   setup/get-oauth-token.sh
   docs/design/user-credentials.md
   docs/design/user-credentials-oauth.md
+  docs/design/webchat-threads.md
+  docs/design/webchat-threads-qa.md
+  docs/design/thread-engaged-agents.md
+  docs/design/webchat-thread-context-sync.md
 )
 echo "→ Copying webchat-owned files …"
 git checkout "$BR" -- "${NEW_PATHS[@]}"
@@ -231,6 +235,8 @@ HOOK_FILES=(
   src/container-runtime.ts
   src/modules/index.ts
   src/modules/approvals/onecli-approvals.ts
+  src/modules/typing/index.ts
+  src/modules/typing/index.test.ts
   container/Dockerfile
   container/agent-runner/src/integration.test.ts
   container/agent-runner/src/poll-loop.test.ts

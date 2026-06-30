@@ -115,6 +115,39 @@ export function setSenderScopeGate(fn: SenderScopeGateFn): void {
 }
 
 /**
+ * Per-thread engaged-agents resolver (webchat). For an engaged thread it returns
+ * which agents participate and whether each is addressed (`'expected'` → wakes and
+ * replies) or just listening (`'defer'` → receives the message as context, no
+ * wake). Side effect: auto-engages @mentioned agents. Returns `null` when
+ * engagement doesn't apply (non-webchat, regular chat, agent-authored fan-out, or
+ * nothing engaged) — the router then uses the normal engage_mode logic. When no
+ * resolver is registered (module absent) it's always `null`. See
+ * docs/design/thread-engaged-agents.md.
+ */
+export interface EngagedDecision {
+  engaged: string[]; // engaged agent_group_ids — passed to each container as a hint
+  perAgent: Map<string, 'expected' | 'defer'>; // agents absent are NOT engaged → silent
+  isPeerReply?: boolean; // true when this is an agent's reply fanned out to peers (context only)
+}
+export type EngagedResolverFn = (
+  mg: MessagingGroup,
+  threadId: string | null,
+  messageText: string,
+  // The producing agent for agent-authored messages (webchat loop-back) — used to
+  // fan a reply out to the OTHER engaged agents; undefined for human messages.
+  senderAgentGroupId: string | undefined,
+) => EngagedDecision | null;
+
+let engagedResolver: EngagedResolverFn | null = null;
+
+export function setEngagedResolver(fn: EngagedResolverFn): void {
+  if (engagedResolver) {
+    log.warn('Engaged resolver overwritten');
+  }
+  engagedResolver = fn;
+}
+
+/**
  * Message-interceptor hook. Runs at the very top of routeInbound, before
  * messaging-group resolution. When the interceptor returns true the message
  * is consumed and routing stops. Used by the permissions module to capture
@@ -293,6 +326,12 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   //     intent is to greet humans, not to chain off other agents' chatter.
   const senderAgentGroupId = event.message.senderAgentGroupId;
 
+  // Engaged-agents overlay (webchat threads): resolve once. Non-null means this
+  // thread routes by its engaged set (auto-engaging @mentioned agents) instead of
+  // the per-wiring engage_mode. Null → normal routing (regular chat, non-webchat,
+  // agent fan-out, or nothing engaged). See docs/design/thread-engaged-agents.md.
+  const engagedDecision = engagedResolver ? engagedResolver(mg, event.threadId, messageText, senderAgentGroupId) : null;
+
   let engagedCount = 0;
   let accumulatedCount = 0;
   let subscribed = false;
@@ -310,6 +349,32 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       // Self-exclusion: agent's own loop-back never re-engages itself.
       continue;
     }
+    // Engaged-thread routing (runs BEFORE the prime-skip so an engaged prime
+    // agent still receives peer context): bypass engage_mode entirely. Addressed
+    // agents wake and reply; other engaged agents receive the message as silent
+    // context (trigger=0) so they stay in sync and answer when next addressed; a
+    // peer reply is fanned to the other engaged agents as context only. Agents not
+    // in the engaged set are skipped. The responseExpectation / engagedAgents /
+    // isPeerReply hint rides in the content JSON (no schema change).
+    if (engagedDecision) {
+      const expectation = engagedDecision.perAgent.get(agent.agent_group_id);
+      if (!expectation) continue; // not engaged in this thread → silent
+      const engagedWake = expectation === 'expected';
+      if (engagedWake) {
+        const eAccessOk = !accessGate || accessGate(event, userId, mg, agent.agent_group_id).allowed;
+        const eScopeOk = !senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed;
+        if (!eAccessOk || !eScopeOk) continue;
+      }
+      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter?.supportsThreads === true, engagedWake, {
+        responseExpectation: expectation,
+        engagedAgents: engagedDecision.engaged,
+        ...(engagedDecision.isPeerReply ? { isPeerReply: true } : {}),
+      });
+      if (engagedWake) engagedCount++;
+      else accumulatedCount++;
+      continue;
+    }
+
     if (senderAgentGroupId && agent.engage_pattern?.startsWith('^(?!')) {
       // Prime negative-lookahead: catch-all for unaddressed *human* messages.
       // Skipping on agent fan-out prevents the prime from sweeping in on every
@@ -466,6 +531,10 @@ async function deliverToAgent(
   userId: string | null,
   adapterSupportsThreads: boolean,
   wake: boolean,
+  // Optional routing hints merged into the message content JSON (engaged-agents:
+  // responseExpectation / engagedAgents / isPeerReply). Ignored by readers that
+  // don't look for them. See docs/design/thread-engaged-agents.md.
+  hints?: Record<string, unknown>,
 ): Promise<void> {
   // Apply the adapter thread policy: threaded adapter in a group chat →
   // per-thread session regardless of wiring. agent-shared preserved (it's
@@ -561,6 +630,16 @@ async function deliverToAgent(
       : false;
 
   if (!handledByMember) {
+    // Merge any routing hints into the content JSON (best-effort — leave as-is if
+    // content isn't parseable JSON).
+    let content = event.message.content;
+    if (hints) {
+      try {
+        content = JSON.stringify({ ...JSON.parse(content), ...hints });
+      } catch {
+        /* non-JSON content — deliver without hints */
+      }
+    }
     writeSessionMessage(session.agent_group_id, session.id, {
       id: messageIdForAgent(event.message.id, agent.agent_group_id),
       kind: event.message.kind,
@@ -568,7 +647,7 @@ async function deliverToAgent(
       platformId: deliveryAddr.platformId,
       channelType: deliveryAddr.channelType,
       threadId: deliveryAddr.threadId,
-      content: event.message.content,
+      content,
       trigger: wake ? 1 : 0,
     });
   }
@@ -591,6 +670,7 @@ async function deliverToAgent(
     startTypingRefresh(
       session.id,
       session.agent_group_id,
+      agentGroup.name,
       event.channelType,
       event.platformId,
       event.threadId,
