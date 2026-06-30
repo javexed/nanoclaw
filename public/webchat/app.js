@@ -6469,9 +6469,9 @@ async function syncThread(direction) {
   const thread = currentThread;
   const isPull = direction === 'pull';
   const ok = await showConfirmModal({
-    title: isPull ? 'Pull main chat in' : 'Push this thread up',
+    title: isPull ? 'Pull main chat down' : 'Push this thread up',
     body: '',
-    confirmLabel: isPull ? 'Pull in' : 'Push up',
+    confirmLabel: isPull ? 'Pull down' : 'Push up',
   });
   if (!ok) return;
   try {
