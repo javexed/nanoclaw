@@ -76,6 +76,7 @@ See [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) for what's different an
 ## What It Supports
 
 - **Multi-channel messaging** — WhatsApp, Telegram, Discord, Slack, Microsoft Teams, iMessage, Matrix, Google Chat, Webex, Linear, GitHub, WeChat, and email via Resend. Installed on demand with `/add-<channel>` skills. Run one or many at the same time.
+- **Web chat GUI** — an installable browser app (PWA) for chatting and managing everything from one place. You talk to agents in **rooms** (each room its own conversation), **wire** rooms to **agents**, and **assign** each agent a **model** (default Claude, or a local model via Ollama) — all from the UI, no terminal. Pin/reorder and hide rooms, see the room↔agent↔model topology, and (optionally) let each person connect their own key with **user credentials**. Installed with `/add-webchat`.
 - **Flexible isolation** — connect each channel to its own agent for full privacy, share one agent across many channels for unified memory with separate conversations, or fold multiple channels into a single shared session so one conversation spans many surfaces. Pick per channel via `/manage-channels`. See [docs/isolation-model.md](docs/isolation-model.md).
 - **Per-agent workspace** — each agent group has its own `CLAUDE.md`, its own memory, its own container, and only the mounts you allow. Nothing crosses the boundary unless you wire it to.
 - **Scheduled tasks** — recurring jobs that run Claude and can message you back
