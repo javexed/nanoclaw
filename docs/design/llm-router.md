@@ -230,8 +230,13 @@ worth a container (+ Postgres).
    (networking); register it as a NanoClaw `openai-compat` model.
 2. **Harness** — `/add-opencode`; wire an agent group → LiteLLM; prove a turn.
 3. **Agentic** — prove a multi-step tool-using turn with a strong model.
-4. **Hardening** — fallbacks, budgets, observability; virtual key in OneCLI vault.
-5. **(separate track)** — `/add-codex` for the Codex subscription plane.
+4. **Install skill** — `/add-litellm` (config.yaml, same-host container, OneCLI
+   virtual key, optional Postgres), surfaced by the webchat install when OpenCode is
+   detected (§15).
+5. **Management UX** — webchat **v1** link to LiteLLM `/ui`; **v2** passthrough to
+   `/model/new` etc. (§14).
+6. **Hardening** — fallbacks, budgets, observability; virtual key in OneCLI vault.
+7. **(separate track)** — `/add-codex` for the Codex subscription plane.
 
 ## 12. What this is explicitly NOT
 
@@ -250,17 +255,20 @@ worth a container (+ Postgres).
   cleanly OpenAI-shaped.)
 - **Selection granularity** — per-agent-group model (today) vs per-user/per-room
   model picking (the webchat already has a models UI to build on).
-- **Where LiteLLM runs** — alongside NanoClaw vs on the GPU box (affects the
-  networking hop in §6).
-- **Model-management UX** — see §14 (decided in principle: link to LiteLLM's UI
-  first, optional webchat passthrough later).
+- **Where LiteLLM runs** — **decided: same host as NanoClaw.** Agent containers
+  reach it at `host.docker.internal:<port>`; LiteLLM reaches local Ollama/vLLM on the
+  host's `localhost` (§15 networking).
+- **Model-management UX** — **decided: both v1 (link) and v2 (passthrough), phased**
+  (§14).
+- **Install integration** — **decided: a `/add-litellm` skill, offered by the
+  webchat install when OpenCode is detected** (§15).
 
 ## 14. Model-management UX (decision)
 
 Requirement (operator): manage LiteLLM's `model_list` **from the webchat GUI**, or —
 at minimum — a **link to LiteLLM's own admin UI**. LiteLLM already ships an admin UI
-at **`/ui`** (models, virtual keys, budgets, logs), so both levels are viable;
-recommend phased:
+at **`/ui`** (models, virtual keys, budgets, logs). **Decided: both, phased** — ship
+v1, then v2:
 
 - **v1 — Link out (low effort, full capability).** A link/button in webchat (Models
   area / settings) that opens LiteLLM's `/ui`. LiteLLM stays the source of truth for
@@ -281,3 +289,31 @@ LiteLLM's backend keys at config time (more complex). A §7-strictness call.
 pointing at an endpoint (the agent-selection side). v1/v2 here manage *LiteLLM's*
 backends. They can converge later into one Models surface that both registers the
 agent's endpoint and manages the router behind it.
+
+## 15. Install integration (decision)
+
+LiteLLM installs as its **own skill** (`/add-litellm`), *surfaced* by the webchat
+install when OpenCode is detected — **not** baked into the webchat installer.
+Rationale: LiteLLM's real dependency is **OpenCode (the harness)**, not webchat (the
+channel); webchat is just where it's *managed* (§14), so a sensible place to *offer*
+it.
+
+- **`/add-litellm` (new skill)** — idempotent installer: writes a starter
+  `config.yaml`, runs the LiteLLM container **same-host** on a port (e.g. `:4000`),
+  registers the LiteLLM **virtual/master key in OneCLI** by host-pattern, optionally
+  stands up **Postgres** (for the v2 keys/budgets tier), and writes the webchat
+  wiring (LiteLLM endpoint + admin-key secret id) so the v1 link and v2 passthrough
+  work. Independently runnable anytime.
+- **Detection-gated prompt** — the webchat install (`add-webchat` /
+  `install-webchat.sh`, which already has a `provider_connected()` detection gate)
+  checks for OpenCode (`src/providers/opencode.ts` + barrel import, or any group with
+  `provider=opencode`); if present and LiteLLM isn't installed, it offers
+  `/add-litellm`.
+- **Install-order robustness** — mirror the same offer in `/add-opencode` (detect
+  webchat), so it fires whether OpenCode is added before or after webchat. The skill
+  is the single source of truth; both entry points just call it.
+
+**Same-host networking** (placement decision, §13): LiteLLM listens on the host;
+agent containers reach it at `host.docker.internal:<port>` (the `--add-host` alias is
+already wired), with the virtual key injected by OneCLI's proxy via host-pattern;
+LiteLLM reaches Ollama/vLLM on the host's `localhost`. No new networking primitives.
