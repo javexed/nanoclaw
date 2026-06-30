@@ -1213,7 +1213,7 @@ async function handleHttp(
             destThreadId: threadId,
             markThreadId: threadId,
             direction: 'pulled',
-            dividerText: 'Pulled from regular chat',
+            dividerText: 'Pulled from main chat',
             freshLimit: FRESH_SYNC_LIMIT,
           })
         : syncThreadContext({

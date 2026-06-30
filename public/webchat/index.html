@@ -134,6 +134,12 @@
         <path d="M12 19V5" />
         <path d="m5 12 7-7 7 7" />
       </symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24">
+        <path d="M3 6h18" />
+        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+        <path d="M10 11v6" />
+        <path d="M14 11v6" />
+      </symbol>
     </svg>
     <!-- Login screen (shown when auth required) -->
     <div id="login-screen" class="login-screen" hidden>
@@ -245,15 +251,24 @@
             <svg class="icon" aria-hidden="true"><use href="#i-chevron-left"></use></svg>
           </button>
           <span id="room-name" role="button" tabindex="0" title="Room settings">Select a room</span>
-          <!-- Thread context-sync controls — shown only inside a topic thread.
-               Pull copies the regular chat into this thread; push copies this
-               thread's messages back up. See webchat-thread-context-sync.md. -->
+          <!-- Thread context-sync + delete controls — shown only inside a topic
+               thread. Pull copies the main chat into this thread; push copies
+               this thread's messages up; delete removes the thread. See
+               webchat-thread-context-sync.md. -->
           <div id="thread-sync" class="thread-sync" hidden>
-            <button id="thread-pull" class="thread-sync-btn" type="button" title="Pull regular chat into this thread">
+            <button id="thread-pull" class="thread-sync-btn" type="button" title="Pull main chat into this thread">
               <svg class="icon" aria-hidden="true"><use href="#i-arrow-down"></use></svg>
             </button>
-            <button id="thread-push" class="thread-sync-btn" type="button" title="Push this thread to the regular chat">
+            <button id="thread-push" class="thread-sync-btn" type="button" title="Push this thread into main chat">
               <svg class="icon" aria-hidden="true"><use href="#i-arrow-up"></use></svg>
+            </button>
+            <button
+              id="thread-delete"
+              class="thread-sync-btn thread-sync-btn--danger"
+              type="button"
+              title="Delete this thread"
+            >
+              <svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg>
             </button>
           </div>
           <div class="header-controls">

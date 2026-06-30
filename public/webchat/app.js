@@ -6455,10 +6455,10 @@ async function syncThread(direction) {
   const thread = currentThread;
   const isPull = direction === 'pull';
   const ok = await showConfirmModal({
-    title: isPull ? 'Pull regular chat in' : 'Push thread up',
+    title: isPull ? 'Pull main chat in' : 'Push this thread up',
     body: isPull
-      ? 'Copy the regular chat into this thread as context. Only messages added since the last pull are copied; nothing is overwritten.'
-      : 'Copy this thread back into the regular chat. Only this thread’s own messages added since the last push are copied; nothing is overwritten.',
+      ? 'Copy the main chat into this thread as context. Only messages added since the last pull are copied; nothing is overwritten.'
+      : 'Copy this thread into the main chat. Only this thread’s own messages added since the last push are copied; nothing is overwritten.',
     confirmLabel: isPull ? 'Pull in' : 'Push up',
   });
   if (!ok) return;
@@ -6477,6 +6477,11 @@ async function syncThread(direction) {
 }
 $('#thread-pull')?.addEventListener('click', () => syncThread('pull'));
 $('#thread-push')?.addEventListener('click', () => syncThread('push'));
+$('#thread-delete')?.addEventListener('click', () => {
+  if (!currentRoom || currentThread === 'main') return;
+  const thread = roomThreads.find((t) => t.thread_id === currentThread);
+  if (thread) deleteThreadConfirm(thread);
+});
 
 $('#room-detail-close').addEventListener('click', closeRoomDetail);
 $('#room-delete').addEventListener('click', deleteCurrentRoom);
