@@ -1717,13 +1717,15 @@ function threadGlyph(kind) {
 // Render the thread tree under the active room's sidebar row. Called from
 // renderRooms (so it survives room-list re-renders) and on thread changes.
 function renderThreadList() {
-  const host = document.querySelector(`#room-list li[data-room-id="${cssEscape(currentRoom)}"] .thread-list`);
+  const li = document.querySelector(`#room-list li[data-room-id="${cssEscape(currentRoom)}"]`);
+  // Drop any prior inline "+" so its placement is recomputed cleanly each render.
+  li?.querySelector('.thread-add-inline')?.remove();
+  const host = li?.querySelector('.thread-list');
   if (!host) return;
   host.innerHTML = '';
-  for (const t of roomThreads) {
-    // The room row itself is the regular chat, so the implicit 'main' thread is
-    // never shown as its own row.
-    if (t.kind === 'main') continue;
+  // Only non-main threads render as rows (the room row is the regular chat).
+  const nonMain = roomThreads.filter((t) => t.kind !== 'main');
+  for (const t of nonMain) {
     const row = document.createElement('div');
     row.className = 'thread-row' + (t.thread_id === currentThread ? ' active' : '');
     row.dataset.threadId = t.thread_id;
@@ -1802,7 +1804,23 @@ function renderThreadList() {
     input.addEventListener('blur', cancel);
     host.appendChild(input);
     setTimeout(() => input.focus(), 0);
+  } else if (nonMain.length === 0) {
+    // No threads yet → put the "+" inline on the room row (right of the name).
+    // The empty .thread-list collapses (:empty), so this costs no extra line.
+    const add = document.createElement('button');
+    add.className = 'thread-add-inline';
+    add.type = 'button';
+    add.textContent = '+';
+    add.title = 'New thread';
+    add.setAttribute('aria-label', 'New thread');
+    add.addEventListener('click', (e) => {
+      e.stopPropagation();
+      threadCreating = true;
+      renderThreadList();
+    });
+    li.appendChild(add);
   } else {
+    // Has threads → "+" sits at the bottom of the nested tree.
     const add = document.createElement('button');
     add.className = 'thread-add';
     add.type = 'button';

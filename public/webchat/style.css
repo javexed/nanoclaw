@@ -5192,6 +5192,27 @@ a.lightbox-btn {
   margin: 4px 0 6px 0.55rem;
   padding-left: 0;
 }
+/* When the active room has no threads, the "+" moves inline onto the room row;
+   the empty tree must collapse so it costs no vertical space. */
+.thread-list:empty {
+  display: none;
+}
+/* Inline new-thread "+" on the room row (no-threads case). The room name is
+   flex:1, so this sits at the right. Always visible for the active room. */
+.thread-add-inline {
+  flex: 0 0 auto;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: var(--fs-lg);
+  line-height: 1;
+  padding: 0 4px;
+  margin-left: 2px;
+}
+.thread-add-inline:hover {
+  color: var(--accent);
+}
 .thread-row {
   display: flex;
   align-items: center;
