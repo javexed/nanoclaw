@@ -1897,6 +1897,13 @@ function renderThreadList() {
 
 function openThread(threadId) {
   if (!currentRoom || threadId === currentThread) return;
+  // Make the chat pane visible — on mobile, opening a thread from the room-list
+  // view must switch INTO the chat (mirror joinRoom), otherwise the click just
+  // changes state behind the still-shown sidebar and looks like it did nothing.
+  hideOtherFullViews();
+  $('#chat').hidden = false;
+  $('#app').classList.add('in-room');
+  $('#app').classList.remove('in-dashboard');
   currentThread = threadId;
   sessionStorage.setItem('lastThread:' + currentRoom, threadId);
   threadUnread.delete(threadId);
