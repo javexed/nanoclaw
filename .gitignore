@@ -1,5 +1,5 @@
 # Dependencies
-node_modules/
+node_modules
 .npm-cache/
 # pnpm content-addressable store (created when running in sandbox mode)
 .pnpm-store/
