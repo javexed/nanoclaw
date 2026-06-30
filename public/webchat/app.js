@@ -1940,13 +1940,18 @@ async function createThread(title, roomId = currentRoom) {
       body: JSON.stringify({ title }),
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
-    // Just create — do NOT jump into the new thread. Jumping was both surprising
-    // and buggy: switching rooms + opening the thread in one go raced two WS
-    // joins, briefly bleeding main's transcript into the (actually-empty) thread.
-    // The thread now simply appears in its room's list; tap it to enter a clean,
-    // blank thread.
-    if (roomId === currentRoom) await loadThreadList(roomId); // refresh the open room's tree so it shows
-    showToast(`Thread "${title}" created`, { kind: 'success' });
+    const thread = await r.json();
+    // Create AND enter the new (blank) thread — but cleanly, via a SINGLE WS
+    // join, so main's transcript can't bleed in (the old joinRoom+openThread
+    // double-join race). Same room → openThread (one join into the thread);
+    // another room → joinRoom straight into the thread.
+    if (roomId === currentRoom) {
+      await loadThreadList(roomId); // so the tree shows it as active
+      openThread(thread.thread_id);
+    } else {
+      const room = lastRoomsList.find((x) => x.id === roomId);
+      joinRoom(roomId, room ? room.name : roomId, undefined, thread.thread_id);
+    }
   } catch (err) {
     showToast('Could not create thread: ' + (err.message || err), { kind: 'error' });
     if (roomId === currentRoom) renderThreadList();
@@ -2211,7 +2216,7 @@ function cssEscape(s) {
 }
 
 let pendingJumpMessageId = null;
-function joinRoom(roomId, roomName, jumpMessageId) {
+function joinRoom(roomId, roomName, jumpMessageId, initialThread) {
   // When set (e.g. from a search-result click), the `history` handler lands on
   // this message instead of scrolling to the bottom.
   pendingJumpMessageId = jumpMessageId || null;
@@ -2247,7 +2252,11 @@ function joinRoom(roomId, roomName, jumpMessageId) {
   // No "Main" thread row — the room itself IS the regular chat. Entering a room
   // always lands in that regular chat ('main' keys the room's shared session);
   // threads are opened explicitly from the sidebar.
-  currentThread = 'main';
+  // Normally land in the regular chat ('main'); `initialThread` lets a caller
+  // (e.g. just-created a thread) enter that thread directly in a SINGLE join —
+  // avoiding the join('main')+join(thread) race that bled main's transcript in.
+  currentThread = initialThread || 'main';
+  if (initialThread) sessionStorage.setItem('lastThread:' + roomId, initialThread);
   threadUnread.clear();
   roomThreads = [];
   updateThreadSyncControls();
