@@ -5201,7 +5201,7 @@ a.lightbox-btn {
   border-left: 2px solid var(--border);
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   cursor: pointer;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-base);
   color: var(--text-dim);
   position: relative;
 }
@@ -5273,7 +5273,7 @@ a.lightbox-btn {
   cursor: pointer;
   text-align: left;
   padding: 0.25rem 0.5rem;
-  font-size: var(--fs-sm);
+  font-size: var(--fs-base);
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 }
 .thread-add:hover {
@@ -5298,47 +5298,6 @@ a.lightbox-btn {
 }
 .thread-add-input::placeholder {
   color: var(--text-dim);
-}
-/* Engaged-agents chips, shown above the composer in a thread. @mention engages
-   (a chip appears); the × disengages. See docs/design/thread-engaged-agents.md. */
-.engaged-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 6px 12px 0;
-}
-.engaged-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 4px 2px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  background: var(--surface2);
-  font-size: var(--fs-xs);
-  color: var(--text);
-}
-.engaged-chip-name {
-  color: var(--accent);
-  font-weight: 600;
-}
-.engaged-chip-x {
-  display: inline-flex;
-  align-items: center;
-  border: none;
-  background: none;
-  color: var(--text-dim);
-  cursor: pointer;
-  padding: 2px;
-  border-radius: var(--radius-sm);
-}
-.engaged-chip-x:hover {
-  color: var(--danger);
-  background: var(--surface);
-}
-.engaged-chip-x .icon {
-  width: 12px;
-  height: 12px;
 }
 .thread-menu {
   position: absolute;

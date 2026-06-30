@@ -1236,14 +1236,6 @@ function connect() {
         // `main` — offer to continue in its own thread. Never moves anything.
         if (msg.room_id === currentRoom && msg.suggestion) showThreadSuggestion(msg.suggestion);
         break;
-      case 'engaged_set_changed':
-        // A thread's engaged-agent set changed — refresh the chips if it's the
-        // thread we're viewing (live across devices / from @mention auto-engage).
-        if (msg.room_id === currentRoom && msg.thread_id === currentThread) {
-          engagedAgents = msg.engaged || [];
-          renderEngagedChips();
-        }
-        break;
       case 'read_cleared': {
         // Another of this user's devices read the room — drop the stale badges.
         const cleared = (msg.room_id && unreadRooms.delete(msg.room_id)) | 0;
@@ -1696,7 +1688,6 @@ async function toggleRoomHide(roomId, hide) {
 // thread (server filters history). See docs/design/webchat-threads.md.
 let currentThread = 'main';
 let threadCreating = false; // true while the inline "new thread" input is open
-let engagedAgents = []; // [{id,name,folder}] engaged in the current thread (chips)
 let roomThreads = []; // threads of the open room (from GET /threads)
 const threadUnread = new Set(); // thread_ids with unread activity in the open room
 
@@ -1836,98 +1827,6 @@ function openThread(threadId) {
   // Re-join the room scoped to this thread; the server returns thread history.
   ws.send(JSON.stringify({ type: 'join', room_id: currentRoom, thread_id: threadId }));
   renderThreadList();
-  loadEngaged();
-}
-
-// ── Engaged agents (chips above the composer) ──
-// A thread's engaged agents listen to the thread and reply when addressed.
-// @mention engages; the × on a chip disengages. Never shown in the regular chat.
-function renderEngagedChips() {
-  const host = $('#engaged-chips');
-  if (!host) return;
-  if (!currentRoom || currentThread === 'main' || engagedAgents.length === 0) {
-    host.hidden = true;
-    host.innerHTML = '';
-    return;
-  }
-  host.innerHTML = '';
-  for (const a of engagedAgents) {
-    const chip = document.createElement('span');
-    chip.className = 'engaged-chip';
-    const name = document.createElement('span');
-    name.className = 'engaged-chip-name';
-    name.textContent = `@${a.folder}`;
-    chip.appendChild(name);
-    const x = document.createElement('button');
-    x.type = 'button';
-    x.className = 'engaged-chip-x';
-    x.setAttribute('aria-label', `Disengage ${a.name}`);
-    x.innerHTML = '<svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>';
-    x.addEventListener('click', () => disengageAgentInThread(a.id));
-    chip.appendChild(x);
-    host.appendChild(chip);
-  }
-  host.hidden = false;
-}
-
-async function loadEngaged() {
-  if (!currentRoom || currentThread === 'main') {
-    engagedAgents = [];
-    renderEngagedChips();
-    return;
-  }
-  const room = currentRoom;
-  const thread = currentThread;
-  try {
-    const res = await authFetch(
-      `/api/rooms/${encodeURIComponent(room)}/threads/${encodeURIComponent(thread)}/engaged`,
-    );
-    if (!res.ok) return;
-    const list = await res.json();
-    if (currentRoom === room && currentThread === thread) {
-      engagedAgents = list;
-      renderEngagedChips();
-    }
-  } catch {
-    /* network blip — leave stale chips */
-  }
-}
-
-async function engageAgentInThread(agentGroupId) {
-  if (!currentRoom || currentThread === 'main') return;
-  if (engagedAgents.some((a) => a.id === agentGroupId)) return; // already engaged
-  const room = currentRoom;
-  const thread = currentThread;
-  try {
-    const res = await authFetch(
-      `/api/rooms/${encodeURIComponent(room)}/threads/${encodeURIComponent(thread)}/engaged`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agentGroupId }) },
-    );
-    if (!res.ok) return;
-    const body = await res.json();
-    if (currentRoom === room && currentThread === thread && body.engaged) {
-      engagedAgents = body.engaged;
-      renderEngagedChips();
-    }
-  } catch {
-    /* ignore — the engaged_set_changed broadcast will reconcile */
-  }
-}
-
-async function disengageAgentInThread(agentGroupId) {
-  if (!currentRoom || currentThread === 'main') return;
-  const room = currentRoom;
-  const thread = currentThread;
-  engagedAgents = engagedAgents.filter((a) => a.id !== agentGroupId); // optimistic
-  renderEngagedChips();
-  try {
-    await authFetch(
-      `/api/rooms/${encodeURIComponent(room)}/threads/${encodeURIComponent(thread)}/engaged/${encodeURIComponent(agentGroupId)}`,
-      { method: 'DELETE' },
-    );
-  } catch {
-    /* the broadcast will reconcile if this failed */
-  }
 }
 
 async function createThread(title) {
@@ -2082,7 +1981,6 @@ function joinRoom(roomId, roomName, jumpMessageId) {
   // always lands in that regular chat ('main' keys the room's shared session);
   // threads are opened explicitly from the sidebar.
   currentThread = 'main';
-  loadEngaged(); // clears the chips row (regular chat never has engaged agents)
   threadUnread.clear();
   roomThreads = [];
   ws.send(JSON.stringify({ type: 'join', room_id: roomId, thread_id: currentThread }));
@@ -3744,11 +3642,6 @@ function acceptMention(input) {
   dismissMentionPopover();
   // Fire input so the textarea auto-resize logic (if any) catches up.
   input.dispatchEvent(new Event('input'));
-  // In a thread, @mentioning a wired agent engages it (chip appears). People
-  // (isUser) and the regular chat don't engage.
-  if (currentThread !== 'main' && agent && !agent.isUser && agent.id) {
-    engageAgentInThread(agent.id);
-  }
 }
 
 (() => {

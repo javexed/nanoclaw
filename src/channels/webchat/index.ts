@@ -46,8 +46,7 @@ import { registerContainerConfigAugmentor } from '../../container-runtime.js';
 import { registerChannelAdapter } from '../channel-registry.js';
 import type { AgentActivityStatus, ChannelAdapter, ChannelSetup, OutboundMessage } from '../adapter.js';
 import { redactSensitiveData } from './redact.js';
-import { startWebchatServer, stopWebchatServer, resolveEngagedDecision, type WebchatServer } from './server.js';
-import { setEngagedResolver } from '../../router.js';
+import { startWebchatServer, stopWebchatServer, type WebchatServer } from './server.js';
 import {
   APPROVAL_INBOX_PREFIX,
   deleteWebchatApprovalIndex,
@@ -385,10 +384,13 @@ registerChannelAdapter('webchat', {
   factory: () => (isEnabled() ? createAdapter() : null),
 });
 
-// Engaged-agents routing: in a webchat thread, route by the per-thread engaged
-// set (auto-engaging @mentioned agents) instead of per-wiring engage_mode. The
-// regular chat and non-webchat groups are untouched (resolver returns null).
-setEngagedResolver(resolveEngagedDecision);
+// Engaged-agents routing is DISABLED for now: the per-thread engaged set + the
+// chips UI were removed (the model didn't fit the "separate conversations per
+// thread" goal). Threads route like the regular chat — mention an agent to talk
+// to it. The backend (resolveEngagedDecision, webchat_thread_engaged table,
+// /engaged endpoints) is left dormant; re-wire it via setEngagedResolver to turn
+// it back on, or remove it when the future "separate conversations" model lands.
+// See docs/design/thread-engaged-agents.md.
 
 // Lenient output for ollama-backed groups: a small local model rarely emits the
 // <message to="..."> envelope the runner requires, so its replies would be
