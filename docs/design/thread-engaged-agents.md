@@ -214,30 +214,11 @@ channels-webchat's hooked copies on the new trunk → `verify-webchat-publish.sh
 `messages_in` column) deliberately keeps the schema/migration surface — and thus
 the hook surface — minimal.
 
-## 14. Later — thread seeding & promotion (NOT in phase 1/2)
+## 14. Thread context sync (pull / push) — moved to its own spec
 
-Two related, deferred features about moving conversation between the regular chat
-and a thread:
-
-- **Seed on create ("snapshot" / fork from main).** When a thread is created,
-  optionally take a **one-time copy** of the regular chat's recent history into
-  the new thread as starting context, so the thread doesn't begin cold. Naming
-  options: **seed from main** (verb: *seed*; the artifact is a *snapshot*), or the
-  git metaphor **fork from main**. Mechanics: copy a bounded slice of the room's
-  `thread_id='main'` `webchat_messages` into the new thread (marked as a seeded
-  snapshot, likely read-only / visually demarcated), and `syncSessionContext` the
-  thread session so engaged agents inherit it. Open questions: how much history
-  (last N / time window / all), whether seeded messages are visually distinct,
-  and whether they count for engaged-agent context vs display only.
-
-- **Promote back to main ("push up" / merge back).** An explicit action to copy a
-  thread's conversation (or a summary of it) back into the regular chat when its
-  outcome should rejoin the main timeline. Naming: **promote to main** /
-  **fold into main** (git metaphor: *merge back*). Open questions: copy verbatim
-  vs. a generated summary; one-shot vs. continuous; how to attribute/demarcate
-  the promoted block in main; and whether main's engaged/мmention rules re-apply.
-
-Both are **additive** to the engaged-agents model (they move *messages*, not
-engagement state). Recommended naming for the doc going forward: **seed/snapshot**
-(in) and **promote** (out) — plain, non-overloaded; mention the fork/merge
-metaphor only as a mental model. Build after phase 1/2 land.
+The "snapshot main → thread" and "push thread → main" idea is now fully specced in
+**[webchat-thread-context-sync.md](webchat-thread-context-sync.md)**: symmetric,
+verbatim, additive pull/push with per-direction high-water marks (incremental, no
+duplicates), origin-marked copies, demarcation dividers, header controls shown
+in-thread, and a phased build plan. It moves *messages* (transcript + agent
+session), independent of the engaged-agents model.
