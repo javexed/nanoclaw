@@ -476,17 +476,17 @@ async function deliverToAgent(
     effectiveSessionMode = 'per-thread';
   }
 
-  // An installed module (BYOK) may redirect this turn to a per-member session
+  // An installed module (UserCreds) may redirect this turn to a per-member session
   // keyed by the sender — so each person's turn runs in a container bearing
   // their own credential identity. Default (no resolver) leaves keying as-is.
   let sessionThreadId = event.threadId;
   const keyOverride = resolveSessionKeyOverride(mg, agent.agent_group_id, userId);
   if (keyOverride && 'block' in keyOverride) {
-    // e.g. a 'required' BYOK room where this member hasn't connected a key —
+    // e.g. a 'required' UserCreds room where this member hasn't connected a key —
     // decline the turn and tell them how to fix it (never bill the shared key).
     if (wake) {
       writeOutboundDirect(agent.agent_group_id, agent.agent_group_id, {
-        id: `byok-block-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        id: `user-creds-block-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         kind: 'chat',
         platformId: event.replyTo?.platformId ?? event.platformId,
         channelType: event.replyTo?.channelType ?? event.channelType,
@@ -499,7 +499,7 @@ async function deliverToAgent(
       platform_id: event.platformId,
       user_id: userId,
       sender_name: null,
-      reason: 'byok-required-no-key',
+      reason: 'user-creds-required-no-key',
       messaging_group_id: mg.id,
       agent_group_id: agent.agent_group_id,
     });
@@ -545,7 +545,7 @@ async function deliverToAgent(
     }
   }
 
-  // BYOK per-member shared-context: on a wake turn, let the module write the
+  // UserCreds per-member shared-context: on a wake turn, let the module write the
   // full room transcript into this member's session (current → trigger=1, the
   // rest → trigger=0). If it handles the write, skip the normal single-message
   // write below.

@@ -1,5 +1,5 @@
 /**
- * Phase 1: the session-key resolver. In a BYOK room a member who has CONNECTED a
+ * Phase 1: the session-key resolver. In a UserCreds room a member who has CONNECTED a
  * credential (user-level, applies to every same-provider room) gets a per-member
  * session keyed by userId; everyone else / every other room is unchanged
  * (null → shared session). Enrollment in a given room is then lazy.
@@ -12,7 +12,7 @@ import { resolveSessionKeyOverride } from '../../session-manager.js';
 import { resolveAgentIdentity } from '../../container-runtime.js';
 import { setRoomModeOverride, setCredentialsConfig } from '../../channels/webchat/db.js';
 import { upsertUserCredential, setUserCredentialStatus } from './db.js';
-import { byokAgentIdentifier } from './identity.js';
+import { userCredsAgentIdentifier } from './identity.js';
 import './index.js'; // registers the resolvers
 
 const webchatMg = (platformId: string) => ({
@@ -28,8 +28,8 @@ beforeEach(() => {
 });
 afterEach(() => closeDb());
 
-describe('byok session-key resolver', () => {
-  it('connected member in a BYOK room → per-member session keyed by userId', () => {
+describe('userCreds session-key resolver', () => {
+  it('connected member in a UserCreds room → per-member session keyed by userId', () => {
     setRoomModeOverride('room-1', 'required');
     upsertUserCredential('webchat:alice', 'claude', 'sec-1', 'api_key');
     expect(resolveSessionKeyOverride(webchatMg('room-1'), 'ag-1', 'webchat:alice')).toEqual({
@@ -56,7 +56,7 @@ describe('byok session-key resolver', () => {
   });
 
   it('disabled room does NOT route OAuth either — mode is the master gate over both methods', () => {
-    // Member credentials Off = no BYOK at all, even with workspace OAuth accepted
+    // User credentials Off = no UserCreds at all, even with workspace OAuth accepted
     // AND a connected subscription. (The mode gates OAuth, not just API keys.)
     setCredentialsConfig({ allowClaudeOauth: true });
     setRoomModeOverride('room-1', 'disabled');
@@ -103,10 +103,10 @@ describe('byok session-key resolver', () => {
   });
 });
 
-describe('byok agent-identity resolver (spawn)', () => {
-  it('per-member session of a connected member → the member BYOK identity', () => {
+describe('userCreds agent-identity resolver (spawn)', () => {
+  it('per-member session of a connected member → the member UserCreds identity', () => {
     upsertUserCredential('webchat:alice', 'claude', 'sec-1', 'api_key');
-    expect(resolveAgentIdentity('ag-1', 'webchat:alice')).toBe(byokAgentIdentifier('ag-1', 'webchat:alice'));
+    expect(resolveAgentIdentity('ag-1', 'webchat:alice')).toBe(userCredsAgentIdentifier('ag-1', 'webchat:alice'));
   });
   it('not connected / no thread → null (default agent-group identity)', () => {
     expect(resolveAgentIdentity('ag-1', 'webchat:bob')).toBeNull();

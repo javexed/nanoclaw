@@ -503,7 +503,7 @@ export const moduleWebchatRoomReads: Migration = {
 };
 
 /**
- * BYOK: per-room credential mode.
+ * UserCreds: per-room credential mode.
  *   disabled (default) — one shared session/agent; no per-member sessions.
  *   optional           — members with a connected key get their own per-member
  *                        session billed to them; others use the shared agent.
@@ -521,10 +521,10 @@ export const moduleWebchatRoomCredentialMode: Migration = {
 };
 
 /**
- * BYOK OAuth: per-room toggle allowing members to connect a Claude *subscription*
- * (OAuth) token, orthogonal to `credential_mode` (which governs API-key BYOK).
+ * UserCreds OAuth: per-room toggle allowing members to connect a Claude *subscription*
+ * (OAuth) token, orthogonal to `credential_mode` (which governs API-key UserCreds).
  * Off by default — a room never accepts OAuth tokens until an owner/admin opts
- * in. See docs/design/byok-oauth.md.
+ * in. See docs/design/user-creds-oauth.md.
  */
 export const moduleWebchatRoomOauthAllowed: Migration = {
   version: 109,
@@ -589,7 +589,7 @@ export const moduleWebchatRoomPins: Migration = {
 /**
  * Workspace-wide credentials policy + per-room mode inheritance.
  *
- * `webchat_settings` is a singleton (id=1) holding which member-credential TYPES
+ * `webchat_settings` is a singleton (id=1) holding which user-credential TYPES
  * the workspace accepts ({API key | OAuth} × {Claude | Codex}) and the default
  * room mode. Types are global so they're configured once, not per room. The
  * per-room control becomes an OVERRIDE: `credential_mode_override` is nullable —
