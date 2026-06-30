@@ -151,7 +151,67 @@ The **router barely affects this** — agentic capability is the **harness + mod
   function calls**, and set generous `request_timeout` (agentic turns are long).
   LiteLLM supports all three.
 
-## 9. Registering LiteLLM (concrete)
+## 9. Requirements & install
+
+### 9a. OpenCode — the Plane-A harness (installed *into* NanoClaw)
+
+Installed via `/add-opencode` (copies the payload from the `providers` branch,
+wires the barrels, rebuilds the image — idempotent). Requirements:
+
+- **Source**: `providers`-branch access (`git fetch origin providers`); additive,
+  never merged.
+- **Build toolchain**: Docker + ability to rebuild the agent image
+  (`./container/build.sh`; `docker builder prune -f` first if the COPY cache is
+  stale). **Bun** on the host — the agent-runner is a Bun package (`bun add`, not
+  pnpm).
+- **Two pinned versions, lock-step** (the sharp edge): `@opencode-ai/sdk@1.4.17`
+  (bun dep) **and** `opencode-ai@1.4.17` CLI (Dockerfile `ARG` + a pnpm-global
+  layer — *not* `bun install -g`, to respect the supply-chain policy). SDK and CLI
+  **must match**; `latest`/1.14.x has a breaking session-API change and won't work.
+- **3-barrel wiring** + registration-guard tests (host `src/providers/index.ts` and
+  container `container/agent-runner/src/providers/index.ts`).
+- **Existing-group overlay propagation**: copy the provider files into each
+  `data/v2-sessions/<group>/agent-runner-src/providers/` overlay — it overrides the
+  image, so old groups won't see OpenCode otherwise.
+- **To use** (config, not install): `agent_provider=opencode` + the
+  `OPENCODE_PROVIDER`/`OPENCODE_MODEL`/`OPENCODE_SMALL_MODEL`/`ANTHROPIC_BASE_URL`
+  env + the provider key in **OneCLI** by host-pattern.
+
+OpenCode connects to cloud (Anthropic, OpenAI, Google, DeepSeek, OpenRouter, Zen)
+**and** any endpoint (Ollama/vLLM/LiteLLM) directly — so it is required for a
+Plane-A agent at all, but does **not** itself require LiteLLM.
+
+### 9b. LiteLLM — the router (external container, optional)
+
+Only needed for the fleet-management tier (fallback/budgets/one-key/observability);
+OpenCode runs direct-to-provider without it. Requirements:
+
+- **Docker**; **no GPU** (it's a proxy, not an inference server).
+- **Pinned image** (e.g. `ghcr.io/berriai/litellm:<tag>`) — a separate container,
+  outside the pnpm supply-chain gate, so pin deliberately.
+- **`config.yaml`** = the model registry: a `model_list` mapping name →
+  `{ model, api_base, api_key }`, fallback/load-balance groups, `stream: true`, a
+  long `request_timeout`. The **real provider keys live here, behind LiteLLM**.
+- **Networking both ways**: reachable *from* agent containers (shared Docker network
+  / `host.docker.internal` / LAN) and *to* its backends (cloud + local Ollama/vLLM).
+- **One LiteLLM virtual key in OneCLI** (host-pattern = the LiteLLM host) — the
+  agent's single brokered credential (§7).
+- **Tier gate** — this decides the footprint:
+
+  | Want | Needs |
+  |------|-------|
+  | routing, **fallback**, load-balance, protocol-normalization | `config.yaml` only — no DB |
+  | **virtual keys, budgets, spend caps, per-key rate-limits** | a **Postgres** DB (`DATABASE_URL`) |
+  | **observability / logging** | a logging callback/sink (console/file or Postgres/Langfuse-style) |
+
+### 9c. Dependency order
+
+OneCLI (present) → **`/add-opencode`** (harness) → *optionally* stand up LiteLLM and
+point the harness at it. Stop after OpenCode for direct-to-provider; add the router
+only when the management benefits (fallback / budgets / observability) are
+worth a container (+ Postgres).
+
+## 10. Registering LiteLLM (concrete)
 
 1. Run LiteLLM as a container with a `config.yaml` `model_list` covering 1–2 local
    models (Ollama/vLLM) + ≥1 cloud model, a master/virtual key, and
@@ -162,7 +222,7 @@ The **router barely affects this** — agentic capability is the **harness + mod
 4. Wire an agent group: `provider=opencode` + that model. Prove a plain turn, then
    a tool-using (agentic) turn with a capable model.
 
-## 10. Build sequence (each phase ends provably green)
+## 11. Build sequence (each phase ends provably green)
 
 0. **Router up** — LiteLLM container + `config.yaml`; prove `/v1/models` and one
    chat completion (incl. a streamed, tool-calling request) from the host.
@@ -173,7 +233,7 @@ The **router barely affects this** — agentic capability is the **harness + mod
 4. **Hardening** — fallbacks, budgets, observability; virtual key in OneCLI vault.
 5. **(separate track)** — `/add-codex` for the Codex subscription plane.
 
-## 11. What this is explicitly NOT
+## 12. What this is explicitly NOT
 
 - **Not** pushing subscription OAuth (Claude Code / Codex) through LiteLLM.
 - **Not** replacing OneCLI — LiteLLM routes Plane-A models; OneCLI keeps brokering
@@ -181,7 +241,7 @@ The **router barely affects this** — agentic capability is the **harness + mod
 - **Not** OpenRouter — a hosted cloud SaaS that can't see localhost/LAN models
   (fails reqs 1–2).
 
-## 12. Open decisions
+## 13. Open decisions
 
 - **Hardware / where models run** — GPU on this host (vLLM), CPU Ollama, and/or a
   separate LAN/GPU box. Drives backend choice.
