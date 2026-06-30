@@ -107,16 +107,35 @@ Three hops, all already permitted by the SSRF policy:
 (Apple-container runtime resolves the host differently than Docker — verify the
 host alias there when not on Linux/Docker.)
 
-## 7. Credential ownership: OneCLI vs LiteLLM
+## 7. Credential ownership: OneCLI is mandatory for all agent egress
 
-Both can mint keys/budgets; avoid double-gating. Division of labor:
+**Invariant (non-negotiable): every agent's credentialed egress goes through
+OneCLI.** This is a deliberate security choice — *one* place to store, manage,
+monitor, rotate, approve, and rate-limit credentials. No agent ever holds a raw
+key, and nothing reaches a model provider outside the gateway:
+
+- Containers spawn with OneCLI's `HTTPS_PROXY` + certs (`container-runner.ts:550`);
+  provider keys are injected on the wire by host-pattern, never via `.env` or the
+  container environment. The `claude`, `opencode`, and `codex` providers all
+  already honor this (OpenCode registers provider keys in OneCLI; Codex/Claude use
+  vault-served OAuth / sentinel stubs).
+- **LiteLLM does NOT bypass this.** The router is just another upstream behind the
+  proxy: the agent → LiteLLM hop carries a **single LiteLLM virtual key injected by
+  OneCLI** (host-pattern matched, stored in the OneCLI vault). LiteLLM then holds the
+  many real provider keys *behind* it — so the agent side has exactly one
+  OneCLI-brokered credential and the single-pane invariant holds end to end.
+- The only sanctioned exception to "through the proxy" is a **local, plaintext
+  endpoint** (e.g. Ollama on `host.docker.internal`) reached via an explicit
+  `NO_PROXY` bypass — no credential is involved, so there is nothing to broker.
+  Routed/cloud models never qualify.
+
+Division of labor, given the invariant:
 
 - **Plane B (OAuth)** → **OneCLI only.** It already brokers `CLAUDE_CODE_OAUTH_TOKEN`
   and the BYOK-OAuth flow.
-- **Plane A** → **LiteLLM owns provider keys** in its own config; NanoClaw holds a
-  **single LiteLLM virtual key**, stored in the **OneCLI vault** and injected per
-  request like any other secret. One key for the agent side, many keys hidden
-  behind LiteLLM.
+- **Plane A** → **LiteLLM owns the many provider keys** in its own config; the
+  **agent holds one OneCLI-injected LiteLLM virtual key**. Don't double-gate —
+  budgets/approvals live on whichever side owns the key for that hop.
 
 ## 8. Long-running agentic flows
 
