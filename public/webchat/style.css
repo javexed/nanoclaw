@@ -5407,7 +5407,7 @@ a.lightbox-btn {
 .setting-option.is-unavailable {
   opacity: 0.5;
 }
-/* ── Threads (sidebar tree + suggestion banner) ─────────────────────────── */
+/* ── Threads (sidebar tree) ─────────────────────────────────────────────── */
 /* The thread tree wraps onto its own full-width line beneath the active room
    row: the row content stays a flex row, and :has + flex-basis:100% drops the
    tree below it (the room <li> name span is flex:1, so without this the tree
@@ -5430,8 +5430,6 @@ a.lightbox-btn {
 .thread-list:empty {
   display: none;
 }
-/* Inline new-thread "+" on the room row (no-threads case). The room name is
-   flex:1, so this sits at the right. Always visible for the active room. */
 /* Left disclosure chevron on room rows that have topic threads — expands the
    thread list inline without entering the room. */
 .room-thread-toggle {
