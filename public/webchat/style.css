@@ -3528,6 +3528,9 @@ a.lightbox-btn {
   color: var(--text-dim);
   line-height: 1.5;
 }
+.help-card p + p {
+  margin-top: 0.7em;
+}
 .matrix-body {
   flex: 1;
   min-height: 0;
