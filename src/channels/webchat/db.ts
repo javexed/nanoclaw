@@ -1189,7 +1189,16 @@ export function insertSyncedMessages(
   dividerText: string,
 ): WebchatMessage[] {
   const db = getDb();
-  const base = Date.now();
+  // Land strictly after the destination's current tail. Date.now() alone collides
+  // when two syncs fire inside the same millisecond (back-to-back pushes), which
+  // would interleave their dividers ahead of their messages; clamping to the
+  // existing max+1 keeps each batch contiguous and in order.
+  const tail = (
+    db
+      .prepare(`SELECT COALESCE(MAX(created_at), 0) AS m FROM webchat_messages WHERE room_id = ? AND thread_id = ?`)
+      .get(roomId, destThreadId) as { m: number }
+  ).m;
+  const base = Math.max(Date.now(), tail + 1);
   const insert = db.prepare(
     `INSERT INTO webchat_messages
        (id, room_id, thread_id, sender, sender_type, content, message_type, file_meta, created_at, origin)
@@ -1220,7 +1229,11 @@ export function insertSyncedMessages(
         sender_type: r.sender_type,
         content: r.content,
         message_type: r.message_type,
-        file_meta: r.file_meta ?? null,
+        // getSyncDelta returns raw rows (SELECT *), so file_meta is the stored
+        // JSON string. Parse it back to the object shape for the returned copy
+        // (broadcast expects parsed, like getWebchatMessages); the insert below
+        // re-stringifies it.
+        file_meta: r.file_meta ? (JSON.parse(r.file_meta as unknown as string) as FileMeta) : null,
         created_at: base + i + 1,
         origin,
       };

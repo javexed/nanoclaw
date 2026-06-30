@@ -8,6 +8,11 @@ design; where the implementation differs it is noted inline (notably §5, and
 inbound thread_id is bounded — only 'main', a wired-agent lane, or an existing
 topic thread routes; an unknown id falls back to main rather than spawning).
 
+A thread starts with no context (its own session). To move conversation between
+a thread and the room's regular chat, see
+**[webchat-thread-context-sync.md](webchat-thread-context-sync.md)** (verbatim,
+additive pull ↓ / push ↑ with per-thread high-water marks).
+
 ## 1. Goal & model
 
 Let one webchat room hold several **independent conversations** with its agent(s),

@@ -1852,6 +1852,15 @@ function openThread(threadId) {
   // Re-join the room scoped to this thread; the server returns thread history.
   ws.send(JSON.stringify({ type: 'join', room_id: currentRoom, thread_id: threadId }));
   renderThreadList();
+  updateThreadSyncControls();
+}
+
+// The pull/push controls only make sense inside a topic thread — the regular
+// chat ('main') is the trunk both directions sync against, so it has nothing of
+// its own to pull/push. See docs/design/webchat-thread-context-sync.md.
+function updateThreadSyncControls() {
+  const el = $('#thread-sync');
+  if (el) el.hidden = !(currentRoom && currentThread && currentThread !== 'main');
 }
 
 async function createThread(title) {
@@ -2014,6 +2023,7 @@ function joinRoom(roomId, roomName, jumpMessageId) {
   currentThread = 'main';
   threadUnread.clear();
   roomThreads = [];
+  updateThreadSyncControls();
   ws.send(JSON.stringify({ type: 'join', room_id: roomId, thread_id: currentThread }));
   loadThreadList(roomId);
   sessionStorage.setItem('lastRoom', roomId);
@@ -2254,6 +2264,20 @@ function appendMessage(msg, statusText, beforeNode) {
   if (msg.message_type === 'approval' || msg.message_type === 'approval_resolved') {
     appendApprovalCard(msg, beforeNode);
     return;
+  }
+  // Context-sync divider: a labelled rule marking where pulled/pushed messages
+  // begin. See docs/design/webchat-thread-context-sync.md.
+  if (msg.message_type === 'context-divider') {
+    const rule = document.createElement('div');
+    rule.className = 'context-divider';
+    const label = document.createElement('span');
+    label.textContent = msg.content || 'Synced context';
+    rule.appendChild(label);
+    const tb = $('#messages .thinking-bubble');
+    if (beforeNode) $('#messages').insertBefore(rule, beforeNode);
+    else if (tb) $('#messages').insertBefore(rule, tb);
+    else $('#messages').appendChild(rule);
+    return rule;
   }
   const div = document.createElement('div');
   const isMine = msg.sender === myIdentity;
@@ -6422,6 +6446,38 @@ $('#room-name').addEventListener('keydown', (e) => {
     toggleRoomSettings();
   }
 });
+// Thread context-sync: pull the regular chat into this thread / push this
+// thread back up. Confirm first (the copy is verbatim and additive), then
+// report the count — "nothing new" when the delta is empty.
+async function syncThread(direction) {
+  if (!currentRoom || currentThread === 'main') return;
+  const room = currentRoom;
+  const thread = currentThread;
+  const isPull = direction === 'pull';
+  const ok = await showConfirmModal({
+    title: isPull ? 'Pull regular chat in' : 'Push thread up',
+    body: isPull
+      ? 'Copy the regular chat into this thread as context. Only messages added since the last pull are copied; nothing is overwritten.'
+      : 'Copy this thread back into the regular chat. Only this thread’s own messages added since the last push are copied; nothing is overwritten.',
+    confirmLabel: isPull ? 'Pull in' : 'Push up',
+  });
+  if (!ok) return;
+  try {
+    const r = await authFetch(
+      `/api/rooms/${encodeURIComponent(room)}/threads/${encodeURIComponent(thread)}/${direction}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+    );
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    const { copied = 0 } = await r.json();
+    if (copied === 0) showToast('Nothing new to sync', { kind: 'info' });
+    else showToast(`Copied ${copied} message${copied === 1 ? '' : 's'}`, { kind: 'success' });
+  } catch (err) {
+    showToast('Sync failed: ' + (err.message || err), { kind: 'error' });
+  }
+}
+$('#thread-pull')?.addEventListener('click', () => syncThread('pull'));
+$('#thread-push')?.addEventListener('click', () => syncThread('push'));
+
 $('#room-detail-close').addEventListener('click', closeRoomDetail);
 $('#room-delete').addEventListener('click', deleteCurrentRoom);
 $('#room-credential-modes')?.addEventListener('click', async (e) => {

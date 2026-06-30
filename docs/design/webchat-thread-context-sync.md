@@ -1,7 +1,15 @@
 # Webchat thread context sync (pull / push)
 
-Status: **design / plan** — not built. Webchat-scoped (threads). Composes with
+Status: **built**. Webchat-scoped (threads). Composes with
 `webchat-threads.md`; supersedes the §14 stub in `thread-engaged-agents.md`.
+
+Implementation: db helpers (`getThreadSyncMarks`, `setThreadSyncMark`,
+`getSyncDelta`, `insertSyncedMessages`) + `origin` column / `webchat_thread_sync`
+table in `src/channels/webchat/db.ts`; `syncThreadContext` + the
+`POST /api/rooms/:id/threads/:tid/{pull,push}` endpoints in
+`src/channels/webchat/server.ts`; header controls + `context-divider` rendering
+in `public/webchat/{index.html,app.js,style.css}`. Tests:
+`src/channels/webchat/context-sync.test.ts`.
 
 ## 1. Goal & model
 

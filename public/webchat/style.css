@@ -2049,6 +2049,60 @@ a.lightbox-btn {
   align-items: center;
   gap: 8px;
 }
+/* Thread context-sync controls — sit just right of the room name, shown only
+   inside a topic thread. Icon-only siblings of the header chips. */
+.thread-sync {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+}
+.thread-sync[hidden] {
+  display: none;
+}
+.thread-sync-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition:
+    background var(--transition),
+    color var(--transition),
+    transform var(--transition);
+}
+.thread-sync-btn:hover {
+  background: var(--border);
+  color: var(--text);
+  transform: translateY(-1px);
+}
+.thread-sync-btn .icon {
+  font-size: var(--fs-sm);
+}
+/* Labelled rule marking where pulled/pushed context begins in the transcript. */
+.context-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 4px;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+.context-divider::before,
+.context-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.context-divider span {
+  white-space: nowrap;
+}
 /* The @handle chip — visual sibling of .members-toggle. */
 .handle-chip {
   background: var(--surface2);
