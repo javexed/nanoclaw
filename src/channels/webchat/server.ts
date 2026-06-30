@@ -96,6 +96,7 @@ import {
   updateAgentGroup,
 } from '../../db/agent-groups.js';
 import { createMessagingGroupAgent, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
+import { syncSessionContext, type ContextMessage } from '../../session-manager.js';
 import { getPendingApproval, getSessionsByAgentGroup } from '../../db/sessions.js';
 import { killContainer } from '../../container-runner.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
@@ -167,6 +168,12 @@ import {
   getWebchatThread,
   renameWebchatThread,
   deleteWebchatThread,
+  MAIN_THREAD,
+  threadToSessionKey,
+  getThreadSyncMarks,
+  setThreadSyncMark,
+  getSyncDelta,
+  insertSyncedMessages,
   engageAgent,
   disengageAgent,
   getEngagedAgents,
@@ -1181,6 +1188,46 @@ async function handleHttp(
     return deleteThreadHandler(res, roomId, threadId);
   }
 
+  // ── Thread context sync (pull main → thread / push thread → main) ──
+  // Both are verbatim + additive: copy the source's native message delta into
+  // the destination, seed the destination agent session(s) as silent context,
+  // broadcast the copies, and advance the per-thread high-water mark so repeat
+  // syncs only carry genuinely new messages. The 'main' regular chat is the
+  // shared trunk; only a topic thread can pull from / push to it.
+  // See docs/design/webchat-thread-context-sync.md.
+  const roomThreadPullMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads\/([^/]+)\/(pull|push)$/);
+  if (roomThreadPullMatch && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const roomId = decodeURIComponent(roomThreadPullMatch[1]);
+    const threadId = decodeURIComponent(roomThreadPullMatch[2]);
+    const dir = roomThreadPullMatch[3] as 'pull' | 'push';
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+    if (threadId === MAIN_THREAD) return json(res, 400, { error: 'The regular chat has no main to sync with' });
+    if (!getWebchatThread(roomId, threadId)) return json(res, 404, { error: 'Thread not found' });
+    const copied =
+      dir === 'pull'
+        ? syncThreadContext({
+            roomId,
+            srcThreadId: MAIN_THREAD,
+            destThreadId: threadId,
+            markThreadId: threadId,
+            direction: 'pulled',
+            dividerText: 'Pulled from regular chat',
+            freshLimit: FRESH_SYNC_LIMIT,
+          })
+        : syncThreadContext({
+            roomId,
+            srcThreadId: threadId,
+            destThreadId: MAIN_THREAD,
+            markThreadId: threadId,
+            direction: 'pushed',
+            dividerText: 'Pushed from thread',
+            freshLimit: FRESH_SYNC_LIMIT,
+          });
+    return json(res, 200, { copied });
+  }
+
   // ── Engaged agents (per-thread set) ──
   // GET lists, POST engages, DELETE disengages. The 'main' thread (regular chat)
   // can never engage. See docs/design/thread-engaged-agents.md.
@@ -1895,6 +1942,92 @@ function ensureA2aDestination(ownerAgentId: string, targetAgentId: string, targe
  * every wiring-change path: wireAgentToWebchatRoom, unwireAgentFromWebchatRoom,
  * and the prime PUT/DELETE handlers.
  */
+/**
+ * Cap on the *fresh* sync (high-water mark = 0): bounds the first pull/push so it
+ * can't dump an enormous backlog. Incremental syncs are naturally small (delta).
+ */
+const FRESH_SYNC_LIMIT = 50;
+
+/** Live agent sessions for a destination thread key (null = the room's main
+ * session). Existing sessions only — a thread with no session yet has no agent
+ * memory to seed; the copied transcript is still visible in chat and the agent
+ * picks it up when its session is first created through the normal inbound path. */
+function sessionsForThreadKey(messagingGroupId: string, sessionKey: string | null): TeardownTarget[] {
+  const rows = (
+    sessionKey === null
+      ? getDb()
+          .prepare(`SELECT id, agent_group_id FROM sessions WHERE messaging_group_id = ? AND thread_id IS NULL`)
+          .all(messagingGroupId)
+      : getDb()
+          .prepare(`SELECT id, agent_group_id FROM sessions WHERE messaging_group_id = ? AND thread_id = ?`)
+          .all(messagingGroupId, sessionKey)
+  ) as { id: string; agent_group_id: string }[];
+  return rows.map((r) => ({ sessionId: r.id, agentGroupId: r.agent_group_id }));
+}
+
+/**
+ * Copy the native message delta from one thread into another (verbatim, additive),
+ * seed the destination thread's agent session(s) with it as silent context
+ * (trigger=0 — never wakes a turn), broadcast the copies to connected clients, and
+ * advance the per-thread high-water mark so repeat syncs only carry genuinely new
+ * messages. `markThreadId` is always the topic thread the (main, topic) pair is
+ * keyed under — both directions track progress against that one row so a push and
+ * a pull on the same thread don't share a mark. Returns the number of messages
+ * copied (excluding the divider; 0 = nothing new). See
+ * docs/design/webchat-thread-context-sync.md.
+ */
+export function syncThreadContext(opts: {
+  roomId: string;
+  srcThreadId: string;
+  destThreadId: string;
+  markThreadId: string;
+  direction: 'pulled' | 'pushed';
+  dividerText: string;
+  freshLimit?: number;
+}): number {
+  const { roomId, srcThreadId, destThreadId, markThreadId, direction, dividerText, freshLimit = 0 } = opts;
+  const marks = getThreadSyncMarks(roomId, markThreadId);
+  const sinceTs = direction === 'pulled' ? marks.pulled : marks.pushed;
+  const delta = getSyncDelta(roomId, srcThreadId, sinceTs, sinceTs === 0 ? freshLimit : 0);
+  if (delta.length === 0) return 0;
+
+  const inserted = insertSyncedMessages(roomId, destThreadId, delta, direction, dividerText);
+
+  // Advance the high-water mark to the newest source row carried, so a repeat
+  // sync only picks up messages added after this batch (setThreadSyncMark is
+  // monotonic, so a concurrent larger mark never moves backwards).
+  const maxSrcTs = delta.reduce((mx, m) => Math.max(mx, m.created_at), sinceTs);
+  setThreadSyncMark(roomId, markThreadId, direction, maxSrcTs);
+
+  // Broadcast the copies (divider + messages) so the destination thread updates live.
+  for (const row of inserted) {
+    broadcast(roomId, { type: 'message', ...row });
+  }
+
+  // Seed the destination thread's agent session(s) with the copied transcript as
+  // silent context. Content matches the webchat inbound shape so the agent-runner
+  // formats it identically to a real message.
+  const copies = inserted.filter((m) => m.message_type !== 'context-divider');
+  const mg = getMessagingGroupByPlatform('webchat', roomId);
+  if (mg) {
+    const destKey = threadToSessionKey(destThreadId);
+    for (const s of sessionsForThreadKey(mg.id, destKey)) {
+      const ctx: ContextMessage[] = copies.map((m) => ({
+        id: `ctx-${direction}-${s.sessionId}-${m.id}`,
+        kind: 'chat',
+        timestamp: new Date(m.created_at).toISOString(),
+        platformId: roomId,
+        channelType: 'webchat',
+        threadId: destKey,
+        content: JSON.stringify({ text: m.content, sender: m.sender, senderName: m.sender, senderId: '' }),
+        trigger: 0,
+      }));
+      syncSessionContext(s.agentGroupId, s.sessionId, ctx);
+    }
+  }
+  return copies.length;
+}
+
 /** Engaged agents in a thread, resolved to {id, name, folder} for the UI. */
 function engagedAgentsForThread(roomId: string, threadId: string): Array<{ id: string; name: string; folder: string }> {
   const ids = new Set(getEngagedAgents(roomId, threadId));
