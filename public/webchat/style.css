@@ -1896,9 +1896,11 @@ a.lightbox-btn {
   background: var(--code-bg);
 }
 .msg .bubble hr {
+  /* Agents pepper replies with markdown `---`, which marked renders as <hr>. A
+     visible rule per section read as "lots of dividers"; collapse it to a quiet
+     gap (no line) so sections still separate without the clutter. */
   border: none;
-  border-top: 1px solid var(--border);
-  margin: 0.5em 0;
+  margin: 0.65em 0;
 }
 .msg .bubble strong {
   color: var(--text);
