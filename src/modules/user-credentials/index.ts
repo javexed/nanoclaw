@@ -1,5 +1,5 @@
 /**
- * BYOK module — secure shared-room bring-your-own-key.
+ * UserCreds module — secure shared-room bring-your-own-key.
  *
  * Self-registers a session-key resolver so that, in a webchat room opted into
  * a non-disabled credential mode, a member who has connected their own
@@ -20,13 +20,18 @@ import { getDb, hasTable } from '../../db/connection.js';
 import { getContainerConfig } from '../../db/container-configs.js';
 import { registerApprovalAgentGroupFallback } from '../approvals/onecli-approvals.js';
 import { getEffectiveRoomMode, getCredentialsConfig } from '../../channels/webchat/db.js';
-import { userHasConnectedCredential, getUserCredential, agentGroupForByokAgent, type ByokProvider } from './db.js';
+import {
+  userHasConnectedCredential,
+  getUserCredential,
+  agentGroupForUserCredsAgent,
+  type UserCredsProvider,
+} from './db.js';
 import { ensureGroupEnrollment } from './onboard.js';
 import { realOnecliAdmin } from './onecli-admin.js';
-import { byokAgentIdentifier } from './identity.js';
+import { userCredsAgentIdentifier } from './identity.js';
 
-/** The agent group's provider, mapped to the two BYOK-supported families. */
-function groupProvider(agentGroupId: string): ByokProvider {
+/** The agent group's provider, mapped to the two UserCreds-supported families. */
+function groupProvider(agentGroupId: string): UserCredsProvider {
   return getContainerConfig(agentGroupId)?.provider === 'codex' ? 'codex' : 'claude';
 }
 
@@ -38,7 +43,7 @@ function groupProvider(agentGroupId: string): ByokProvider {
 const OAUTH_SENTINEL = 'placeholder';
 
 registerSessionKeyResolver((mg, agentGroupId, userId) => {
-  // BYOK is webchat-only and opt-in per room. Fail safe to no override.
+  // UserCreds is webchat-only and opt-in per room. Fail safe to no override.
   if (mg.channel_type !== 'webchat' || !userId) return null;
   if (!hasTable(getDb(), 'webchat_room_settings')) return null;
   // Effective mode = the room's override, else the global default. Which
@@ -47,12 +52,12 @@ registerSessionKeyResolver((mg, agentGroupId, userId) => {
   const provider = groupProvider(agentGroupId);
   const cfg = getCredentialsConfig();
   const mode = getEffectiveRoomMode(mg.platform_id);
-  // 'disabled' (Member credentials: Off) means no BYOK at all — neither key nor
+  // 'disabled' (User credentials: Off) means no UserCreds at all — neither key nor
   // OAuth — regardless of what the workspace accepts. Otherwise each method
   // applies if the workspace accepts it for this provider.
   const apiOffered = mode !== 'disabled' && (provider === 'codex' ? cfg.allowOpenaiKey : cfg.allowAnthropicKey);
   const oauthOffered = mode !== 'disabled' && (provider === 'codex' ? cfg.allowCodexOauth : cfg.allowClaudeOauth);
-  if (!apiOffered && !oauthOffered) return null; // BYOK entirely off here.
+  if (!apiOffered && !oauthOffered) return null; // UserCreds entirely off here.
 
   // A member gets their own per-member session ONLY if their connected credential
   // is still PERMITTED by current policy — so flipping an allowance off (or a
@@ -78,7 +83,7 @@ registerSessionKeyResolver((mg, agentGroupId, userId) => {
 // the prepare hook below (which runs first), so this just names it.
 registerAgentIdentityResolver((agentGroupId, threadId) => {
   if (threadId && userHasConnectedCredential(threadId, groupProvider(agentGroupId))) {
-    return byokAgentIdentifier(agentGroupId, threadId);
+    return userCredsAgentIdentifier(agentGroupId, threadId);
   }
   return null;
 });
@@ -115,10 +120,10 @@ registerContainerEnvResolver((agentGroupId, threadId): Record<string, string> =>
   return { CLAUDE_CODE_OAUTH_TOKEN: OAUTH_SENTINEL, ANTHROPIC_API_KEY: '' };
 });
 
-// Approval routing: reverse a BYOK per-member identity back to its agent group
+// Approval routing: reverse a UserCreds per-member identity back to its agent group
 // so credentialed-action approvals from a member's container reach the group's
 // approvers.
-registerApprovalAgentGroupFallback((externalId) => agentGroupForByokAgent(externalId));
+registerApprovalAgentGroupFallback((externalId) => agentGroupForUserCredsAgent(externalId));
 
 // Shared context: on a per-member wake, write the full room transcript into the
 // member's session (current → trigger=1, rest → trigger=0).

@@ -1,10 +1,10 @@
 /**
- * BYOK onboarding orchestration — lazy / just-in-time.
+ * UserCreds onboarding orchestration — lazy / just-in-time.
  *
  * Two phases, so a member connects ONCE and it applies to every room:
  *
  *  1. storeUserCredential (at connect) — stash the member's credential as a
- *     single OneCLI vault secret + a user-level `byok_user_credentials` row.
+ *     single OneCLI vault secret + a user-level `user_credentials` row.
  *     No per-room work. The host never holds the credential.
  *
  *  2. ensureGroupEnrollment (lazy, at first session spawn in a given room) —
@@ -24,27 +24,27 @@
  */
 import { log } from '../../log.js';
 import { getContainerConfig } from '../../db/container-configs.js';
-import { byokAgentIdentifier, userSlug } from './identity.js';
+import { userCredsAgentIdentifier, userSlug } from './identity.js';
 import {
-  getByokCredential,
+  getUserCredsCredential,
   getUserCredential,
-  setByokStatus,
+  setUserCredsStatus,
   setUserCredentialStatus,
-  upsertByokCredential,
+  upsertUserCredsCredential,
   upsertUserCredential,
   listEnrolledGroups,
-  type ByokCredType,
-  type ByokProvider,
+  type UserCredsCredType,
+  type UserCredsProvider,
 } from './db.js';
 import type { OnecliAdmin } from './onecli-admin.js';
 
-/** The agent group's provider, mapped to the two BYOK-supported families. */
-function groupProvider(agentGroupId: string): ByokProvider {
+/** The agent group's provider, mapped to the two UserCreds-supported families. */
+function groupProvider(agentGroupId: string): UserCredsProvider {
   return getContainerConfig(agentGroupId)?.provider === 'codex' ? 'codex' : 'claude';
 }
 
 /** The vault secret type that holds a member's credential for a provider. */
-function secretTypeFor(provider: ByokProvider): 'anthropic' | 'openai' {
+function secretTypeFor(provider: UserCredsProvider): 'anthropic' | 'openai' {
   return provider === 'codex' ? 'openai' : 'anthropic';
 }
 
@@ -75,11 +75,11 @@ async function groupToolSecretIds(admin: OnecliAdmin, agentGroupId: string, cred
 async function createCredentialSecret(
   admin: OnecliAdmin,
   userId: string,
-  provider: ByokProvider,
-  credType: ByokCredType,
+  provider: UserCredsProvider,
+  credType: UserCredsCredType,
   credential: string,
 ): Promise<string> {
-  const name = provider === 'codex' ? `BYOK ${userSlug(userId)} (codex)` : `BYOK ${userSlug(userId)}`;
+  const name = provider === 'codex' ? `UserCreds ${userSlug(userId)} (codex)` : `UserCreds ${userSlug(userId)}`;
   if (provider === 'codex') return admin.createOpenAISecret(name, credential, credType);
   return admin.createAnthropicSecret(name, credential);
 }
@@ -89,7 +89,7 @@ async function createCredentialSecret(
  * enrolled on (for this provider) and mark those enrollments revoked. They
  * rebuild lazily on next use. Shared by disconnect and re-connect.
  */
-async function unenrollGroups(admin: OnecliAdmin, userId: string, provider: ByokProvider): Promise<void> {
+async function unenrollGroups(admin: OnecliAdmin, userId: string, provider: UserCredsProvider): Promise<void> {
   for (const row of listEnrolledGroups(userId, provider)) {
     const agentUuid = await admin.findAgentId(row.onecli_agent_id);
     if (agentUuid && row.secret_id) {
@@ -98,7 +98,7 @@ async function unenrollGroups(admin: OnecliAdmin, userId: string, provider: Byok
       // per-member session resolving regardless of a lingering assignment.
       if (remaining.length > 0) await admin.setSecrets(agentUuid, remaining);
     }
-    setByokStatus(userId, row.agent_group_id, 'revoked');
+    setUserCredsStatus(userId, row.agent_group_id, 'revoked');
   }
 }
 
@@ -116,9 +116,9 @@ async function unenrollGroups(admin: OnecliAdmin, userId: string, provider: Byok
 export async function storeUserCredential(
   admin: OnecliAdmin,
   userId: string,
-  provider: ByokProvider,
+  provider: UserCredsProvider,
   credential: string,
-  credType: ByokCredType,
+  credType: UserCredsCredType,
 ): Promise<void> {
   const prior = getUserCredential(userId, provider);
   if (prior?.secret_id) {
@@ -127,7 +127,7 @@ export async function storeUserCredential(
   }
   const secretId = await createCredentialSecret(admin, userId, provider, credType, credential);
   upsertUserCredential(userId, provider, secretId, credType);
-  log.info('BYOK credential stored', { userId, provider, credType });
+  log.info('UserCreds credential stored', { userId, provider, credType });
 }
 
 /**
@@ -141,20 +141,20 @@ export async function ensureGroupEnrollment(admin: OnecliAdmin, userId: string, 
   // Already enrolled — but only skip when the enrollment is for THIS group's
   // CURRENT provider. If the group's provider was switched after enrollment, the
   // stale row would otherwise pin the wrong secret; fall through to re-enroll.
-  const existing = getByokCredential(userId, agentGroupId);
+  const existing = getUserCredsCredential(userId, agentGroupId);
   if (existing?.status === 'active' && existing.provider === provider) return;
   const userCred = getUserCredential(userId, provider);
   if (userCred?.status !== 'active' || !userCred.secret_id) return; // not connected — nothing to enroll
   const secretId = userCred.secret_id;
 
-  const identifier = byokAgentIdentifier(agentGroupId, userId);
-  const agentUuid = await admin.ensureAgent(`${userSlug(userId)} (BYOK)`, identifier);
+  const identifier = userCredsAgentIdentifier(agentGroupId, userId);
+  const agentUuid = await admin.ensureAgent(`${userSlug(userId)} (UserCreds)`, identifier);
   await admin.setSecretMode(agentUuid, 'selective');
   const toolSecretIds = await groupToolSecretIds(admin, agentGroupId, secretTypeFor(provider));
   const merged = Array.from(new Set([secretId, ...toolSecretIds]));
   await admin.setSecrets(agentUuid, merged);
-  upsertByokCredential(userId, agentGroupId, identifier, secretId, userCred.cred_type, provider);
-  log.info('BYOK group enrolled (lazy)', { userId, agentGroupId, provider, toolSecrets: toolSecretIds.length });
+  upsertUserCredsCredential(userId, agentGroupId, identifier, secretId, userCred.cred_type, provider);
+  log.info('UserCreds group enrolled (lazy)', { userId, agentGroupId, provider, toolSecrets: toolSecretIds.length });
 }
 
 /**
@@ -164,10 +164,14 @@ export async function ensureGroupEnrollment(admin: OnecliAdmin, userId: string, 
  * neutralizes any lingering assignment OneCLI couldn't clear via an empty
  * set-secrets), then mark the rows revoked.
  */
-export async function revokeUserCredential(admin: OnecliAdmin, userId: string, provider: ByokProvider): Promise<void> {
+export async function revokeUserCredential(
+  admin: OnecliAdmin,
+  userId: string,
+  provider: UserCredsProvider,
+): Promise<void> {
   await unenrollGroups(admin, userId, provider);
   const secretId = getUserCredential(userId, provider)?.secret_id ?? null;
   if (secretId) await admin.deleteSecret(secretId).catch(() => {}); // best-effort; row revoke below is the gate
   setUserCredentialStatus(userId, provider, 'revoked');
-  log.info('BYOK credential revoked', { userId, provider });
+  log.info('UserCreds credential revoked', { userId, provider });
 }

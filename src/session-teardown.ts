@@ -41,6 +41,15 @@ export function findSessionsByMessagingGroup(messagingGroupId: string): Teardown
   return findSessionsBy('messaging_group_id', messagingGroupId);
 }
 
+/** Sessions for one (messaging group, thread) — used to tear down a webchat
+ * thread's per-thread session when the thread is deleted. */
+export function findSessionsByMessagingGroupThread(messagingGroupId: string, threadId: string): TeardownTarget[] {
+  const rows = getDb()
+    .prepare(`SELECT id, agent_group_id FROM sessions WHERE messaging_group_id = ? AND thread_id = ?`)
+    .all(messagingGroupId, threadId) as { id: string; agent_group_id: string }[];
+  return rows.map((r) => ({ sessionId: r.id, agentGroupId: r.agent_group_id }));
+}
+
 export function findSessionsByAgentGroup(agentGroupId: string): TeardownTarget[] {
   return findSessionsBy('agent_group_id', agentGroupId);
 }

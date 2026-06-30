@@ -36,6 +36,10 @@ import {
   getWebchatMessages,
   getWebchatRoom,
   storeWebchatMessage,
+  MAIN_THREAD,
+  threadToSessionKey,
+  markThreadRead,
+  resolveBoundedThread,
 } from './db.js';
 import { canAccessRoom } from './access.js';
 import { redactSensitiveData } from './redact.js';
@@ -87,8 +91,9 @@ interface AuthedUpgradeRequest extends http.IncomingMessage {
 }
 
 export interface WSHooks {
-  /** Inbound chat from a connected client → router. */
-  onInbound: (roomId: string, message: InboundMessage) => void;
+  /** Inbound chat from a connected client → router. `threadId` is the session
+   * key (null = the room's main/default thread). */
+  onInbound: (roomId: string, message: InboundMessage, threadId: string | null) => void;
 }
 
 export interface AuthForUpgrade {
@@ -245,13 +250,19 @@ export function setupWebSocket(
           return;
         }
         client.room_id = room.id;
-        // Opening a room reads it: advance the marker and clear any stale dot
-        // on this user's other devices.
+        // Thread being opened (default 'main'). History is filtered to it; live
+        // messages still arrive room-wide and the client routes them by thread.
+        const joinThread = typeof msg.thread_id === 'string' && msg.thread_id ? msg.thread_id : MAIN_THREAD;
+        client.thread_id = joinThread;
+        // Opening reads it: advance the room marker (clears the room dot + syncs
+        // devices) and the per-thread marker.
         markRoomReadForUser(client.userId, room.id, Date.now(), clientId);
+        markThreadRead(client.userId, room.id, joinThread);
         send({
           type: 'history',
           room_id: room.id,
-          messages: getWebchatMessages(room.id, 50).map((m) => ({
+          thread_id: joinThread,
+          messages: getWebchatMessages(room.id, 50, joinThread).map((m) => ({
             ...m,
             content: redactSensitiveData(m.content),
           })),
@@ -292,6 +303,9 @@ export function setupWebSocket(
         const room = getWebchatRoom(roomId);
         if (!room || !canAccessRoom(client.userId, room.id)) return;
         markRoomReadForUser(client.userId, room.id, Date.now(), clientId);
+        // Per-thread marker (default 'main') so thread badges clear too.
+        const readThread = typeof msg.thread_id === 'string' && msg.thread_id ? msg.thread_id : MAIN_THREAD;
+        markThreadRead(client.userId, room.id, readThread);
         return;
       }
 
@@ -317,7 +331,13 @@ export function setupWebSocket(
           return;
         }
 
-        const stored = storeWebchatMessage(client.room_id, client.identity, client.identity_type, text);
+        // Resolve the thread this message belongs to, BOUNDED so an arbitrary
+        // client-supplied thread_id can't lazily spawn unbounded threads/sessions
+        // (the spawn-amplification vector). See resolveBoundedThread in db.ts —
+        // shared with the file-upload handlers so both enforce the same bound.
+        const storeThread = resolveBoundedThread(client.room_id, msg.thread_id);
+
+        const stored = storeWebchatMessage(client.room_id, client.identity, client.identity_type, text, storeThread);
         // The sender has by definition read their own message — advance their
         // marker (and sync their other devices) so it never self-unreads.
         markRoomReadForUser(client.userId, client.room_id, stored.created_at, clientId);
@@ -327,18 +347,24 @@ export function setupWebSocket(
 
         // Pipe the inbound to the router so the agent sees it. content carries
         // senderId (namespaced for the v2 permissions module's senderResolver).
-        hooks.onInbound(client.room_id, {
-          id: stored.id,
-          kind: 'chat',
-          timestamp: new Date(stored.created_at).toISOString(),
-          isGroup: true,
-          content: {
-            text,
-            sender: client.identity,
-            senderId: client.userId,
-            senderName: client.identity,
+        // threadId is the SESSION key (null for main) so per-thread routing keys
+        // the right session.
+        hooks.onInbound(
+          client.room_id,
+          {
+            id: stored.id,
+            kind: 'chat',
+            timestamp: new Date(stored.created_at).toISOString(),
+            isGroup: true,
+            content: {
+              text,
+              sender: client.identity,
+              senderId: client.userId,
+              senderName: client.identity,
+            },
           },
-        });
+          threadToSessionKey(storeThread),
+        );
 
         send({ ...outgoing, content: redactSensitiveData(stored.content) });
         return;

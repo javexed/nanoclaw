@@ -74,19 +74,19 @@ function patternsForRoom(roomId: string): Record<string, string> {
 }
 
 describe('engage_default setting', () => {
-  it('defaults to broadcast for rooms without a settings row', () => {
-    expect(getRoomEngageDefault('room-1')).toBe('broadcast');
+  it('defaults to mention-only for rooms without a settings row (broadcast retired)', () => {
+    expect(getRoomEngageDefault('room-1')).toBe('mention-only');
   });
 
-  it('broadcast + no prime → every wiring gets "." (legacy behavior preserved)', () => {
+  it('no prime (default) → every wiring gets \\B@<folder>\\b (mention-only)', () => {
     recomputeEngagePatterns('room-1');
     const p = patternsForRoom('room-1');
-    expect(p.alice).toBe('.');
-    expect(p.bob).toBe('.');
-    expect(p.carol).toBe('.');
+    expect(p.alice).toBe('\\B@[aA][lL][iI][cC][eE]\\b');
+    expect(p.bob).toBe('\\B@[bB][oO][bB]\\b');
+    expect(p.carol).toBe('\\B@[cC][aA][rR][oO][lL]\\b');
   });
 
-  it('mention-only + no prime → every wiring gets \\B@<folder>\\b', () => {
+  it('explicit mention-only + no prime → every wiring gets \\B@<folder>\\b', () => {
     setRoomEngageDefault('room-1', 'mention-only');
     recomputeEngagePatterns('room-1');
     const p = patternsForRoom('room-1');
@@ -95,11 +95,10 @@ describe('engage_default setting', () => {
     expect(p.carol).toBe('\\B@[cC][aA][rR][oO][lL]\\b');
   });
 
-  it('mention-only is persisted and readable', () => {
+  it('always reads mention-only — legacy broadcast is coerced away', () => {
+    expect(getRoomEngageDefault('room-1')).toBe('mention-only');
     setRoomEngageDefault('room-1', 'mention-only');
     expect(getRoomEngageDefault('room-1')).toBe('mention-only');
-    setRoomEngageDefault('room-1', 'broadcast');
-    expect(getRoomEngageDefault('room-1')).toBe('broadcast');
   });
 
   it('mention-only is ignored when a prime is configured (prime branch wins)', () => {

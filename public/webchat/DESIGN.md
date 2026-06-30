@@ -132,24 +132,83 @@ is `.btn-ghost`.
 
 ---
 
-## 3. Dismissal contract
+## 3. Surfaces, cards & icons
+
+### Surface cards
+
+The standard way to group a block of content is a **surface card**:
+
+```css
+background: var(--surface2);
+border: 1px solid var(--border);
+border-radius: var(--radius-md);   /* 8px */
+padding: 14px 16px;                /* tighter for dense rows */
+```
+
+This is the app's primary container language — agent/model rows, wired-agent
+rows, the Help topics. A content view should read as a **left-aligned stack of
+these cards on the app's surfaces**, not as a centred column of prose. (Cautionary
+example: the Help page first shipped as a centred `60ch` column of tiny dim
+`--fs-xs` text — it read like a pasted-in document. Re-casting each topic as a
+surface card made it feel native.)
+
+### Card header — icon + title
+
+A card's header is a flex row (`align-items: center; gap: 8px`): a small icon
+(~18px, `color: var(--accent)`, `flex-shrink: 0`) followed by a title at
+`--fs-base` / `font-weight: 600` / `var(--text)`. The accent icon ties each card
+into the app's iconography.
+
+### Icons — one sprite, `<use>` everywhere
+
+Icons are inline SVG sprites. Each is a `<symbol id="i-name" viewBox="0 0 24 24">`
+in the single `<svg>` block at the top of `index.html`, rendered with
+`<svg class="icon" aria-hidden="true"><use href="#i-name"></use></svg>`. They're
+Lucide-style 24px **stroke** icons that inherit `currentColor`. **Define once,
+`<use>` everywhere** — never paste a raw `<svg>` per call site. To add one, add a
+new `<symbol>` to that block; reuse existing ids where they map (`i-bot` = agent,
+`i-cpu` = model, `i-pin` = pin, `i-key` = credentials, `i-user` = person/room,
+`i-layout-dashboard` = wiring/topology, `i-help`, …).
+
+### Body vs hint type (reinforces §1 Type)
+
+`--fs-base` + `var(--text)` is for **readable body content** — anything someone
+sits and reads (messages, card/Help body). The `--fs-xs` + `var(--text-dim)`
+pairing (the `.setting-help` / `.setting-label` styles) is for **terse hints and
+labels only** — a one-line field hint, an uppercased group label. Don't set
+paragraphs in `--fs-xs`; it reads as fine print. Secondary body copy is
+`var(--text-dim)` at `--fs-base`, never `--fs-xs`.
+
+---
+
+## 4. Dismissal contract
 
 Every dismissable surface should answer "how do I make this go away" the same
 way. Target: a shared helper `dismissable(el, { onClose })` that wires all three:
 
-- **Escape** closes the topmost surface.
+- **Escape** closes the topmost surface — exactly one layer per press.
 - **Backdrop tap** closes it (desktop too, not mobile-only).
 - **History entry** (`pushState` + `popstate`) so the OS/Android back gesture
   closes it instead of leaving the PWA.
 
-Current state to converge: ESC already closes settings, lightbox, confirm modal,
-model picker, mention popup, overflow menu; full-views use a `viewStack` +
-`popstate`. The gap is the **detail asides + members panel on desktop** (× only,
-no ESC / no backdrop). Wire them through the same helper.
+**Full-screen views** (dashboard, topology, wiring, agents, models, permissions)
+are tracked in a `viewStack` and each pushes a history entry, so the Back button,
+the OS back gesture, **and Escape** all close them. The ESC handler for these runs
+in the **capture phase** and yields (`blockingOverlayOpen()`) when a modal /
+popover / menu is open, so that higher layer's own ESC handler takes the keypress
+first — one Escape, one layer. Any new full-screen view must register through
+`openView(name, teardown)` to inherit all three dismissals; do not show/hide a
+full surface by toggling its `hidden` attribute alone.
+
+Current state to converge: ESC closes settings, lightbox, confirm modal, model
+picker, mention popup, overflow menu, and all full-screen views (`viewStack` +
+`popstate` + capture-phase ESC). The remaining gap is the **detail asides +
+members panel on desktop** (× only, no ESC / no backdrop). Wire them through the
+same helper.
 
 ---
 
-## 4. Feedback channels — three, with a rule
+## 5. Feedback channels — three, with a rule
 
 | Channel | API | Fires for |
 |---------|-----|-----------|
@@ -168,7 +227,7 @@ at all 8 destructive sites).
 
 ---
 
-## 5. Microcopy
+## 6. Microcopy
 
 - **Sentence case everywhere** — headings included ("Agent details", not "Agent
   Details").
@@ -181,10 +240,79 @@ at all 8 destructive sites).
   "+ New agent" to create one.)
 - **Empty states:** one sentence, sentence case, no trailing period
   (e.g. "No unwired agents — switch to New to create one").
+- **Term — "user credentials":** the bring-your-own-key feature is **"user
+  credentials"** in the UI. Never "member credentials" (the old label) or "BYOK"
+  (internal jargon — `byok` no longer appears anywhere). The per-room states are
+  *off* / *optional* / *required*.
 
 ---
 
-## 6. Enforcing this
+## 7. Lists & navigation
+
+The sidebar is the canonical list surface — flat room rows plus the nested
+thread tree under the active room. These rules keep any list (rooms, threads,
+agents, models) reading the same.
+
+**Row anatomy.** A row is a flex line: an optional leading glyph/identity mark, a
+`flex: 1` label that truncates with ellipsis (`overflow:hidden;
+text-overflow:ellipsis; white-space:nowrap`), then trailing markers (unread dot /
+mention badge / kebab). The kebab is **hover/focus-revealed** (`opacity: 0` →
+`1` on `:hover, :focus-within`), never always-on.
+
+**Three row states — three distinct treatments.** They must never collapse into
+each other (the bug the thread tree had: active and hover were both plain
+`--surface2`, indistinguishable, and active also matched the active *room*):
+
+| State | Treatment |
+|-------|-----------|
+| Hover | `background: var(--surface2)` (+ brighten text to `--text`) |
+| Active / selected | accent — `background: color-mix(in srgb, var(--accent) 12%, transparent)` + `color: var(--accent-strong)` + an accent left bar. **Never** reuse the hover background for active. |
+| Unread | a 7–8px `--accent` dot (`--radius-pill`), trailing. A mention escalates to the warning-colored `@` badge (higher signal). |
+
+**Identity vs selection color.** A room carries its **own hue** on the row's
+left border (`roomColor`) — that's identity and is independent of selection. The
+accent bar/tint above signals *selected*. Don't conflate the two.
+
+**Nesting via a per-row spine.** A nested list (the thread tree) drops onto its
+**own full-width line** beneath its parent row — `#room-list li:has(.thread-list)
+{ flex-wrap: wrap }` + `.thread-list { flex-basis: 100% }` — then indents with a
+left margin. Draw the tree spine as **each child row's `border-left`**, not a
+container border: that way the active child's accent bar simply recolors the
+spine segment with no layout shift, and the "+ New …" footer aligns by carrying a
+transparent spine slot (`border-left: 2px solid transparent`).
+
+**Glyphs.** List-row glyphs (`#` topic, `@` agent) live in their own
+fixed-width span tinted `--text-dim`, brightening on hover/active — a quiet
+prefix, `aria-hidden`, kept **out of the label string** (so truncation and
+styling are independent).
+
+**Create affordance.** The "+ New …" row sits at the end of the list, aligned
+with the rows, `--text-dim` → `--accent` on hover. Microcopy follows §5: reserve
+*new* for creation ("+ New agent", "+ New model"). The **thread** list is the
+exception: it uses a bare inline "+" button placed on the room row (or the last
+thread row), not a footer "+ New thread" row.
+
+---
+
+## 8. Views
+
+The PWA has one chat surface plus a set of **full-views** — full-screen sections
+(siblings of `#chat`) opened from the header **overflow menu** (⋯): **Manage**
+(Agents / Models), **Topology**, **Wiring**, **Permissions**, **Settings**, and
+**Help**. Each is a `<section id="…" hidden>` with a `.dash-header` (a
+`.mobile-back` chevron + title) and a scrollable `.dash-body`.
+
+Open/close is uniform — copy an existing trio (e.g. `openMatrix` /
+`teardownMatrix` / `toggleMatrix`): `hideOtherFullViews('<name>')`, toggle the
+section's `hidden`, flip the `in-dashboard` body class, and route history through
+`openView('<name>', teardown)` / `closeView('<name>')` so the OS/browser back
+gesture works. A new view MUST also add its `keep !== '<name>'` branch to
+`hideOtherFullViews` or it will stack on top of the others. Settings is the
+exception — a `.modal-overlay`, not a full-view.
+
+---
+
+## 9. Enforcing this
 
 Once code is migrated onto the tokens, add a stylelint
 `declaration-property-value-allowed-list` for `border-radius`, `font-size`, and
