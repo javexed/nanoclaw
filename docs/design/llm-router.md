@@ -252,3 +252,32 @@ worth a container (+ Postgres).
   model picking (the webchat already has a models UI to build on).
 - **Where LiteLLM runs** — alongside NanoClaw vs on the GPU box (affects the
   networking hop in §6).
+- **Model-management UX** — see §14 (decided in principle: link to LiteLLM's UI
+  first, optional webchat passthrough later).
+
+## 14. Model-management UX (decision)
+
+Requirement (operator): manage LiteLLM's `model_list` **from the webchat GUI**, or —
+at minimum — a **link to LiteLLM's own admin UI**. LiteLLM already ships an admin UI
+at **`/ui`** (models, virtual keys, budgets, logs), so both levels are viable;
+recommend phased:
+
+- **v1 — Link out (low effort, full capability).** A link/button in webchat (Models
+  area / settings) that opens LiteLLM's `/ui`. LiteLLM stays the source of truth for
+  its own `model_list`/keys/budgets; webchat reimplements nothing.
+- **v2 — In-webchat passthrough (more work).** A thin webchat surface that calls
+  LiteLLM's management API (`POST /model/new`, `/model/delete`, `/model/info`) so a
+  router model is added without leaving webchat. Needs LiteLLM's admin/master key —
+  brokered through OneCLI like any other secret.
+
+**Credential tension (ties to §7).** LiteLLM holding the **real provider keys behind
+it** is a *second* credential store, which rubs against the single-pane invariant.
+Proposed boundary: **agent-side = one OneCLI virtual key (invariant holds end to
+end); provider-side keys = managed in LiteLLM** (its UI/API) as a deliberate,
+monitored store behind the router. Stricter alternative: have OneCLI inject even
+LiteLLM's backend keys at config time (more complex). A §7-strictness call.
+
+**Not the same as today's webchat Models UI,** which registers a *webchat* model
+pointing at an endpoint (the agent-selection side). v1/v2 here manage *LiteLLM's*
+backends. They can converge later into one Models surface that both registers the
+agent's endpoint and manages the router behind it.
