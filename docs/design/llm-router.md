@@ -255,6 +255,9 @@ worth a container (+ Postgres).
   cleanly OpenAI-shaped.)
 - **Selection granularity** — per-agent-group model (today) vs per-user/per-room
   model picking (the webchat already has a models UI to build on).
+- **Routing approach** — **decided: N-way capability routing (Arch-Router) + Claude
+  escalation, with a self-improvement feedback loop as a later phase (§16).** Not
+  binary strong/weak.
 - **Where LiteLLM runs** — **decided: same host as NanoClaw.** Agent containers
   reach it at `host.docker.internal:<port>`; LiteLLM reaches local Ollama/vLLM on the
   host's `localhost` (§15 networking).
@@ -317,3 +320,108 @@ it.
 agent containers reach it at `host.docker.internal:<port>` (the `--add-host` alias is
 already wired), with the virtual key injected by OneCLI's proxy via host-pattern;
 LiteLLM reaches Ollama/vLLM on the host's `localhost`. No new networking primitives.
+
+## 16. Routing & fallback
+
+Three layers, cheapest first. The first two keep work in Plane A; the third crosses
+to Claude (Plane B). Routing is **pre-flight** (score the prompt, then run); a
+**post-flight** quality judge is a later opt-in (§16d).
+
+### 16a. Plane-A routing (LiteLLM, native)
+
+Name-based routing + load-balance (`simple-shuffle`/`least-busy`/`usage`/`latency`),
+retries, `fallbacks` / `context_window_fallbacks` / `content_policy_fallbacks`, and
+cooldowns for unhealthy deployments. Handles "this Plane-A model errored → try
+another" with **config only** — no custom code.
+
+### 16b. Classifier — N-way capability routing (custom, alongside LiteLLM)
+
+Operator requirement: **rank the prompt against model capability profiles**, not
+binary strong/weak (RouteLLM is rejected for being binary).
+
+- **Arch-Router (~1.5B, open weights, Katanemo)** as the route-classifier, self-hosted
+  **alongside LiteLLM** (a LiteLLM custom routing strategy / pre-call hook). It maps a
+  prompt to a **capability route** you define (code / vision / long-context /
+  hard-reasoning / …); each route is **bound to a model**. Decoupled from model
+  identity (swap the model behind a route), transparent (human-defined routes), small/
+  cheap per turn. Verify the current model/version before building.
+- **Benchmark-seeded capability table** (HF Open LLM Leaderboard, LMArena Elo,
+  Artificial Analysis, MMLU/HumanEval/MMMU, context window, $/tok) informs the
+  **route→model bindings** and the confidence floor — *not* consumed live by the router.
+- **No single model ingests arbitrary leaderboard numbers + a prompt and ranks** —
+  trained routers learn a fixed roster. So this is realized as *route-classifier +
+  curated bindings* (above), or a *trained per-model predictor* on your roster (heavier).
+- Alternatives: **semantic-router** (embedding buckets, nothing to host — lighter);
+  **trained predictor** (RouterDC / ZOOTER / GraphRouter / Routoo — needs
+  `(prompt→per-model outcome)` data; later/heavier); **commercial** (NotDiamond /
+  Unify / Martian — capability routing as a service, but can't drive Claude OAuth, so
+  **decision-only**, which is why self-hosted Arch-Router is cleaner here).
+
+### 16c. Cross-plane escalation (→ Claude, Plane B)
+
+- The router includes a **`claude` route** and/or a **confidence floor**: if the top
+  Plane-A route scores below the bar, the plugin **raises a distinct
+  `no_adequate_model` error**.
+- Arch-Router/LiteLLM **cannot call Claude OAuth**, so escalation surfaces to
+  **NanoClaw**, which switches `provider=claude` for the turn (a per-agent-group
+  **`fallback_provider`**). The **same seam** also fires on **hard failure** (provider
+  exchange status `error`/`undelivered`, timeout, LiteLLM down).
+- **The escalation Claude model is GUI-selectable today**: assign an `anthropic`-kind
+  model in the webchat Models UI ("Anthropic (custom model id)") → it sets
+  `ANTHROPIC_MODEL` for the group. Caveats: validated against `KNOWN_ANTHROPIC_MODELS`
+  (a new model needs a one-line add); the model must be on the credential's plan.
+- Mechanics: **fresh Claude session** (OpenCode's continuation can't transfer;
+  optionally seed context via `syncSessionContext`); **one-shot guard** (no ping-pong);
+  double-latency + Claude-quota cost on escalation — a **backstop, not a routine path**.
+  Trigger on **hard failure / below-threshold only**, never on a content-quality
+  judgment (that's §16d).
+
+### 16d. Post-flight quality judge (later, opt-in)
+
+Judge the *answer* (not the prompt) and escalate if inadequate. Needs a judge call →
+expensive and unreliable. Keep conservative, opt-in; **not in the first build**.
+
+### 16e. Self-improvement (feedback loop) — later phase
+
+**Not automatic.** A loop you build: log decisions + outcomes → **offline/batch**
+recalibrate/retrain → redeploy (live per-request learning is unstable, avoided). Two
+tiers, very different cost:
+
+- **Threshold recalibration** (cheap, frequent, no training) — adjust the confidence
+  floor / escalation rate from observed behavior ("escalating 45% but quality
+  plateaued at 30% → raise the floor"). A nightly script over logs. The early win.
+- **Router retraining** (periodic) — fine-tune Arch-Router / retrain the predictor on
+  accumulated `(prompt → outcome)` labels for your domain + roster.
+
+**Label sources** (best → noisiest):
+
+- explicit 👍/👎, "regenerate", "that's wrong";
+- **the free Claude-escalation outcomes** — when NanoClaw fell back to Claude, was it
+  accepted / clearly better? → "this prompt needed strong"; local accepted →
+  "adequate". *Your fallback path generates training data for free.*
+- implicit signals (re-ask, edit, abandon);
+- offline **LLM-judge** comparing local vs Claude on sampled prompts.
+
+**Counterfactual / bandit problem (the hard part):** you observe the outcome only for
+the route you *took* — not how the unchosen models would have done. To learn about
+alternatives, add **ε-exploration** (occasionally route off-top) or **shadow runs**
+(send a sampled %, through two models and compare), or off-policy correction. Without
+it the router just reinforces its current habits.
+
+**Sequence:** static routing → log decisions+outcomes → recalibrate threshold first →
+add ε-exploration → only then periodic router retrain.
+
+**Caveats:** noisy/biased signal; model + benchmark **drift** (keep the loop running);
+**selection bias** without exploration; **prompt-logging privacy/retention** — decide
+up front, it touches the single-pane/monitoring stance (§7).
+
+### 16f. Build order (within this section)
+
+0. Static Arch-Router routes + fixed floor; LiteLLM Plane-A fallback (16a).
+1. `no_adequate_model` error + NanoClaw `fallback_provider` escalation (16c); also the
+   hard-failure path.
+2. GUI-selectable Claude escalation model — *already exists* (anthropic kind, §16c).
+3. Log decisions + outcomes (esp. the free escalation labels).
+4. Threshold recalibration (16e tier-1).
+5. ε-exploration, then periodic router retrain (16e tier-2).
+6. *(opt-in, later)* post-flight quality judge (16d).
