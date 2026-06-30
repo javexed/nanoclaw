@@ -23,7 +23,14 @@ import Busboy from 'busboy';
 import { DATA_DIR } from '../../config.js';
 import { log } from '../../log.js';
 import type { InboundMessage } from '../adapter.js';
-import { storeWebchatFileMessage, getWebchatRoom, MAIN_THREAD, threadToSessionKey, type FileMeta } from './db.js';
+import {
+  storeWebchatFileMessage,
+  getWebchatRoom,
+  MAIN_THREAD,
+  threadToSessionKey,
+  resolveBoundedThread,
+  type FileMeta,
+} from './db.js';
 import { broadcast } from './state.js';
 
 const MAX_UPLOAD_SIZE = 1024 * 1024 * 1024; // 1GB
@@ -266,6 +273,9 @@ export function handleMultipartUpload(
     log.warn('Webchat upload rejected: room not found', { roomId });
     return json(res, 404, { error: 'Room not found' });
   }
+  // Bound the client-supplied thread_id exactly like the WS send path, so an
+  // arbitrary ?thread_id= can't lazily spawn unbounded per-thread sessions.
+  threadId = resolveBoundedThread(roomId, threadId);
 
   const dir = uploadsDir(roomId);
   fs.mkdirSync(dir, { recursive: true });
@@ -585,6 +595,9 @@ export async function handleChunkedUpload(
     size: totalSize,
   };
   const caption = parsed.caption || '';
+  // Bound the client-supplied thread_id (same rule as the WS path) before it
+  // keys a session — applied at finalize so it runs once, not per chunk.
+  threadId = resolveBoundedThread(roomId, threadId);
   const stored = storeWebchatFileMessage(roomId, upload.sender, 'user', caption, fileMeta, threadId);
   broadcast(roomId, { type: 'message', ...stored });
   hooks.onInbound(

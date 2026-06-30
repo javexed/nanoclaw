@@ -42,8 +42,7 @@ import {
   getAgentsForWebchatRoom,
   getRoomAutoThread,
   markThreadRead,
-  getWebchatThread,
-  ensureAgentThread,
+  resolveBoundedThread,
 } from './db.js';
 import { canAccessRoom } from './access.js';
 import { redactSensitiveData } from './redact.js';
@@ -337,28 +336,9 @@ export function setupWebSocket(
 
         // Resolve the thread this message belongs to, BOUNDED so an arbitrary
         // client-supplied thread_id can't lazily spawn unbounded threads/sessions
-        // (each named thread keys its own per-thread session → container). Only
-        // three sources are honored; anything else falls back to 'main':
-        //   • 'main' / absent — the room's default thread (session key → null).
-        //   • 'agent:<folder>' — an auto-spawn lane for a WIRED agent only
-        //     (bounded by the room's agent count); created on first use.
-        //   • an already-existing topic thread (created via POST /threads).
-        // An unknown topic id is NOT lazily created here — that was the spawn-
-        // amplification vector; topic threads must exist before they route.
-        const requested = typeof msg.thread_id === 'string' && msg.thread_id ? msg.thread_id : MAIN_THREAD;
-        let storeThread = MAIN_THREAD;
-        if (requested !== MAIN_THREAD) {
-          if (requested.startsWith('agent:')) {
-            const folder = requested.slice('agent:'.length);
-            const agent = getAgentsForWebchatRoom(client.room_id).find((a) => a.folder === folder);
-            if (agent) {
-              ensureAgentThread(client.room_id, folder, agent.name ?? folder);
-              storeThread = requested;
-            } // unknown agent folder → stay in main (don't spawn)
-          } else if (getWebchatThread(client.room_id, requested)) {
-            storeThread = requested; // existing topic thread
-          } // unknown topic id → stay in main (no lazy create)
-        }
+        // (the spawn-amplification vector). See resolveBoundedThread in db.ts —
+        // shared with the file-upload handlers so both enforce the same bound.
+        const storeThread = resolveBoundedThread(client.room_id, msg.thread_id);
 
         const stored = storeWebchatMessage(client.room_id, client.identity, client.identity_type, text, storeThread);
         // The sender has by definition read their own message — advance their

@@ -1092,6 +1092,34 @@ export function getWebchatThread(roomId: string, threadId: string): WebchatThrea
     | undefined;
 }
 
+/**
+ * Bound a client-supplied thread_id to one that is allowed to route, so an
+ * arbitrary id can't lazily spawn unbounded per-thread sessions/containers (the
+ * spawn-amplification vector). Only three sources are honored; anything else
+ * falls back to 'main':
+ *   • 'main' / absent — the room's default thread.
+ *   • 'agent:<folder>' — an auto-spawn lane for a WIRED agent only; created on
+ *     first use (bounded by the room's agent count).
+ *   • an already-existing topic thread (created via POST /threads).
+ * An unknown topic id is NOT lazily created — topic threads must exist before
+ * they route. Shared by the WS send path (ws.ts) and the file-upload handlers
+ * (files.ts) so both enforce the identical bound.
+ */
+export function resolveBoundedThread(roomId: string, requested: unknown): string {
+  const want = typeof requested === 'string' && requested ? requested : MAIN_THREAD;
+  if (want === MAIN_THREAD) return MAIN_THREAD;
+  if (want.startsWith('agent:')) {
+    const folder = want.slice('agent:'.length);
+    const agent = getAgentsForWebchatRoom(roomId).find((a) => a.folder === folder);
+    if (agent) {
+      ensureAgentThread(roomId, folder, agent.name ?? folder);
+      return want;
+    }
+    return MAIN_THREAD; // unknown agent folder → main (don't spawn)
+  }
+  return getWebchatThread(roomId, want) ? want : MAIN_THREAD; // unknown topic id → main (no lazy create)
+}
+
 export function renameWebchatThread(roomId: string, threadId: string, title: string): void {
   getDb()
     .prepare(`UPDATE webchat_threads SET title = ?, updated_at = ? WHERE room_id = ? AND thread_id = ?`)
@@ -1718,9 +1746,10 @@ export function getPinnedRoomIdsForUser(userId: string): Set<string> {
 
 /** Per-user pinned room → manual sort position (lower = higher in the list). */
 export function getPinnedPositionsForUser(userId: string): Map<string, number> {
-  const rows = getDb()
-    .prepare(`SELECT room_id, position FROM webchat_room_pins WHERE user_id = ?`)
-    .all(userId) as { room_id: string; position: number }[];
+  const rows = getDb().prepare(`SELECT room_id, position FROM webchat_room_pins WHERE user_id = ?`).all(userId) as {
+    room_id: string;
+    position: number;
+  }[];
   return new Map(rows.map((r) => [r.room_id, r.position]));
 }
 
