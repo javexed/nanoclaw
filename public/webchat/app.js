@@ -1559,6 +1559,29 @@ function renderRooms(rooms) {
     });
     li.appendChild(kebab);
 
+    // A "+" on every OTHER room row so a new thread can be started in any room
+    // straight from the list (the active room's "+" comes from its thread tree
+    // below, via renderThreadList). Clicking opens an inline name input on the row.
+    if (room.id !== currentRoom) {
+      if (threadAddRoom === room.id) {
+        appendRoomThreadInput(li, room);
+      } else {
+        const add = document.createElement('button');
+        add.className = 'thread-add-inline';
+        add.type = 'button';
+        add.textContent = '+';
+        add.title = 'New thread';
+        add.setAttribute('aria-label', `New thread in #${room.id}`);
+        add.addEventListener('click', (e) => {
+          e.stopPropagation();
+          threadAddRoom = room.id;
+          threadCreating = false;
+          renderRooms(lastRoomsList);
+        });
+        li.appendChild(add);
+      }
+    }
+
     if (room.id === currentRoom) li.classList.add('active');
     li.setAttribute('role', 'button');
     li.setAttribute('tabindex', '0');
@@ -1694,6 +1717,7 @@ async function toggleRoomHide(roomId, hide) {
 // thread (server filters history). See docs/design/webchat-threads.md.
 let currentThread = 'main';
 let threadCreating = false; // true while the inline "new thread" input is open
+let threadAddRoom = null; // room id whose row is showing the inline new-thread input
 let threadRenaming = null; // thread_id whose row is showing the inline rename input
 let roomThreads = []; // threads of the open room (from GET /threads)
 const threadUnread = new Set(); // thread_ids with unread activity in the open room
@@ -1908,21 +1932,71 @@ function updateThreadSyncControls() {
   }
 }
 
-async function createThread(title) {
+async function createThread(title, roomId = currentRoom) {
   try {
-    const r = await authFetch(`/api/rooms/${encodeURIComponent(currentRoom)}/threads`, {
+    const r = await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/threads`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title }),
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
     const thread = await r.json();
-    await loadThreadList(currentRoom);
+    // Created in another room from the list → switch into that room first.
+    if (roomId !== currentRoom) {
+      const room = lastRoomsList.find((x) => x.id === roomId);
+      joinRoom(roomId, room ? room.name : roomId);
+    }
+    await loadThreadList(roomId);
     openThread(thread.thread_id);
   } catch (err) {
     showToast('Could not create thread: ' + (err.message || err), { kind: 'error' });
     renderThreadList();
   }
+}
+
+// Inline "new thread" input on a NON-active room's row — dropped onto its own
+// full-width line via the reused .thread-list wrap, so it's reachable from the
+// room list on both desktop and mobile. Submit creates the thread in that room
+// and switches into it.
+function appendRoomThreadInput(li, room) {
+  const host = document.createElement('div');
+  host.className = 'thread-list';
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'thread-add-input';
+  input.placeholder = 'Thread name…';
+  input.maxLength = 80;
+  input.setAttribute('aria-label', `New thread in #${room.id}`);
+  let settled = false;
+  const cancel = () => {
+    if (settled) return;
+    settled = true;
+    threadAddRoom = null;
+    renderRooms(lastRoomsList);
+  };
+  const submit = () => {
+    if (settled) return;
+    const title = input.value.trim();
+    if (!title) return cancel();
+    settled = true;
+    threadAddRoom = null;
+    createThread(title, room.id);
+  };
+  input.addEventListener('click', (e) => e.stopPropagation());
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      submit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancel();
+    }
+  });
+  input.addEventListener('blur', cancel);
+  host.appendChild(input);
+  li.appendChild(host);
+  setTimeout(() => input.focus(), 0);
 }
 
 function openThreadMenu(thread, anchor) {
@@ -2154,6 +2228,7 @@ function joinRoom(roomId, roomName, jumpMessageId) {
   // elapsed timer / reasoning traces can't leak into the new room.
   endAllAgentTurns();
   currentRoom = roomId;
+  threadAddRoom = null; // clear any other room's pending inline new-thread input
   unreadRooms.delete(roomId);
   mentionedRooms.delete(roomId);
   updateUnreadDots();
