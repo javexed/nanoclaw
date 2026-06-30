@@ -6,7 +6,7 @@ unit-tested. Run on a **dev/throwaway instance**, not the live install.
 
 ## Setup
 - Pull `feat/webchat-threads`, `pnpm install && pnpm run build`, `./container/build.sh`, restart the host. Open the webchat PWA.
-- Have a room wired to **two agents** (Sarah + Max) for the auto-spawn checks, and one room with a **single agent** for the no-regression check. Be signed in as **owner** (delete is owner-only).
+- Have a room wired to **two agents** (Sarah + Max) for the multi-agent checks, and one room with a **single agent** for the no-regression check. Be signed in as **owner** (delete is owner-only).
 
 ## 1. No regression (thread-less room)
 1. Open the single-agent room. Send a message; get a reply.
@@ -39,21 +39,7 @@ unit-tested. Run on a **dev/throwaway instance**, not the live install.
 3. (Non-owner) Sign in as a non-owner member.
    - ✓ Create/rename are available; **Delete is absent**. (Server also rejects a forced delete with 403.)
 
-## 5. Auto-spawn (confirm-first, multi-agent room)
-1. In `main` of the Sarah+Max room, send "@sarah draft the roadmap".
-   - ✓ Message posts to main, AND a banner appears above the composer: **"Continue with @Sarah in its own thread?"** with **Open thread / Dismiss**.
-2. Click **Open thread**.
-   - ✓ A `@ Sarah` lane opens; continue chatting there (its first stored message registers the lane in the tree).
-3. Back in `main`, send "@sarah @max reconcile the numbers" (two mentions).
-   - ✓ **No** banner — stays in main, both agents engage.
-4. Send "what's the status?" (no mention).
-   - ✓ **No** banner.
-5. Room settings → turn **auto-thread off** → send a single-mention again.
-   - ✓ **No** banner.
-6. In the **single-agent** room, single-mention the agent.
-   - ✓ **No** banner (auto-spawn never fires for single-agent/DMs).
-
-## 6. Persistence / reconnect
+## 5. Persistence / reconnect
 1. Open a thread, reload the page.
    - ✓ The room reopens on the **same thread** (per-room last-open thread is remembered).
 2. Kill + restore network (or restart the host) while a thread is open.
@@ -61,8 +47,7 @@ unit-tested. Run on a **dev/throwaway instance**, not the live install.
 
 ## Known v1 limits — confirm these are acceptable, not bugs
 - Only the **active room's** thread tree is shown (no per-room expand/collapse of other rooms' threads yet).
-- The single-mention message that triggers a suggestion **stays in main**; the conversation continues in the lane (confirm-first-after-send).
 - Rapid thread switching has **no history-race guard** — switching very fast could briefly show the prior thread's history before the new one loads.
 
 ## Pass criteria
-Sections 1–6 behave as described, and the §"known limits" items match expectations. Anything else (especially: a thread click that re-opens the room instead of switching, messages leaking across threads, or the agent showing cross-thread memory) is a bug — capture the steps.
+Sections 1–5 behave as described, and the §"known limits" items match expectations. Anything else (especially: a thread click that re-opens the room instead of switching, messages leaking across threads, or the agent showing cross-thread memory) is a bug — capture the steps.

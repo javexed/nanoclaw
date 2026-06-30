@@ -26,9 +26,6 @@ import {
   threadToSessionKey,
   sessionKeyToThread,
   sanitizeThreadTitle,
-  suggestAgentThread,
-  getRoomAutoThread,
-  setRoomAutoThread,
 } from './db.js';
 import { createSession } from '../../db/sessions.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
@@ -103,54 +100,6 @@ describe('per-thread session teardown lookup (slice 2)', () => {
     createSession(sess('s-main', null, mg.id));
     expect(findSessionsByMessagingGroupThread(mg.id, 'u_q3').map((f) => f.sessionId)).toEqual(['s-q3']);
     expect(findSessionsByMessagingGroupThread(mg.id, 'nope')).toEqual([]);
-  });
-});
-
-describe('auto-spawn suggestion (slice 3, confirm-first)', () => {
-  const sarah = { id: 'a1', name: 'Sarah', folder: 'sarah' };
-  const max = { id: 'a2', name: 'Max', folder: 'max' };
-  const agents = [sarah, max];
-  const base = { agents, currentThread: MAIN_THREAD, autoThread: 1 as number | null };
-
-  it('suggests a lane for exactly one mention in main (multi-agent, on)', () => {
-    expect(suggestAgentThread({ ...base, text: '@sarah draft the roadmap' })).toEqual({
-      threadId: 'agent:sarah',
-      folder: 'sarah',
-      title: 'Sarah',
-    });
-  });
-  it('no suggestion for zero mentions', () => {
-    expect(suggestAgentThread({ ...base, text: 'what is the deploy status?' })).toBeNull();
-  });
-  it('no suggestion for two+ mentions (keep them together in main)', () => {
-    expect(suggestAgentThread({ ...base, text: '@sarah @max reconcile please' })).toBeNull();
-  });
-  it('no suggestion when not in main', () => {
-    expect(suggestAgentThread({ ...base, text: '@sarah hi', currentThread: 'agent:sarah' })).toBeNull();
-  });
-  it('no suggestion in a single-agent room', () => {
-    expect(suggestAgentThread({ ...base, text: '@sarah hi', agents: [sarah] })).toBeNull();
-  });
-  it('no suggestion when auto_thread is off (0)', () => {
-    expect(suggestAgentThread({ ...base, text: '@sarah hi', autoThread: 0 })).toBeNull();
-  });
-  it('suggests when unset (null) — default on for multi-agent', () => {
-    expect(suggestAgentThread({ ...base, text: '@max check logs', autoThread: null })?.threadId).toBe('agent:max');
-  });
-  it('mention match respects word boundary (@max not @maxwell)', () => {
-    const agents2 = [max, { id: 'a3', name: 'Maxwell', folder: 'maxwell' }];
-    expect(suggestAgentThread({ ...base, agents: agents2, text: '@maxwell ping' })?.folder).toBe('maxwell');
-    expect(suggestAgentThread({ ...base, agents: agents2, text: '@max ping' })?.folder).toBe('max');
-  });
-});
-
-describe('auto_thread setting storage (slice 3)', () => {
-  it('defaults to null (unset), round-trips on/off', () => {
-    expect(getRoomAutoThread('room-1')).toBeNull();
-    setRoomAutoThread('room-1', true);
-    expect(getRoomAutoThread('room-1')).toBe(1);
-    setRoomAutoThread('room-1', false);
-    expect(getRoomAutoThread('room-1')).toBe(0);
   });
 });
 

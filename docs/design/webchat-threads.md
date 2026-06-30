@@ -2,8 +2,8 @@
 
 Status: **built** — shipped on `channels-webchat`, delivered by
 `install-webchat.sh` like the rest of the webchat skill. Decisions taken:
-**sidebar-nested** thread UI, and per-agent lanes via **confirm-first
-suggestion** (NOT silent auto-spawn — see §5). The sections below are the
+**sidebar-nested** thread UI, and **manual-only** thread creation via an inline
+"+" affordance (auto-spawn was cut from v1 — see §5). The sections below are the
 design; where the implementation differs it is noted inline (notably §5, and
 inbound thread_id is bounded — only 'main', a wired-agent lane, or an existing
 topic thread routes; an unknown id falls back to main rather than spawning).
@@ -102,8 +102,9 @@ CREATE TABLE webchat_thread_reads (
 
 `thread_id` namespacing:
 - **`main`** — every room's implicit default thread (see §7). Created lazily.
-- **`agent:<folder>`** — an auto-spawned per-agent lane (§5). Deterministic id so
-  repeated mentions of the same agent reuse the same thread/session.
+- **`agent:<folder>`** — a per-agent lane. Deterministic id so repeated use of
+  the same agent reuses the same thread/session. This id shape still exists and
+  can be created/used; it just isn't auto-suggested (auto-spawn was cut — §5).
 - **`<uuid>`** — a manually-created topic thread.
 
 ## 4. Routing flow (the round trip)
@@ -131,48 +132,21 @@ A second thread (*Incident #4821*, `thread_id=u_c3d4`) keys a **different**
 session S2 with zero knowledge of S1 — the agent works both in parallel, each
 reply routed to its own thread.
 
-## 5. Auto-spawn (per-agent lanes)
+## 5. Auto-spawn — REMOVED (deferred)
 
-> **Shipped as confirm-first, not silent auto-spawn.** Rather than redirecting a
-> single-mention `main` message into a lane automatically (the surprise risk
-> noted in §11), the server emits a `thread_suggestion` and the member opts in
-> ("Continue with @X in its own thread?"). The trigger rule below (exactly one
-> mention, from main, multi-agent room, `auto_thread` on) governs *when the
-> suggestion appears*; the redirect only happens on confirm. Everything else
-> below still holds.
+Auto-spawn (per-agent lanes via a confirm-first suggestion) was **cut from v1**.
+It does **not** ship.
 
-**Decision: auto-spawn on.** Multi-agent rooms self-organize into per-agent
-threads so several agents never get dumped into one shared context.
+What was removed: the frontend suggestion banner ("Continue with @X in its own
+thread?"), the `thread_suggestion` WS emit, the `suggestAgentThread` /
+`getRoomAutoThread` / `setRoomAutoThread` backend, and the
+`GET/PUT /api/rooms/:id/auto-thread` endpoints. The only residue is a **dormant
+`auto_thread` column** left in the migration — additive, unused, harmless.
 
-**Rule (deterministic, v1):**
-- Each room has an `auto_thread` flag (in `webchat_room_settings`).
-  **Default: on for multi-agent rooms, off for single-agent rooms and DMs**
-  (one agent = no benefit).
-- When `auto_thread` is on, a **chat message sent in the `main` thread that
-  @mentions exactly one wired agent** is routed to that agent's lane
-  `thread_id='agent:<folder>'`, auto-creating the `webchat_threads` row
-  (kind=`agent`, title = agent's display name) on first use.
-- Messages in `main` that mention **zero** agents (human chatter) or **two+**
-  agents (a deliberate cross-agent discussion) **stay in `main`**.
-- Messages already sent *inside* a thread stay in that thread — auto-spawn only
-  acts from `main`.
-- Manual topic threads (§6) are unaffected and can be created anytime.
-- Per-room opt-out in room settings; never fires for DMs/single-agent rooms.
-
-**Why these bounds:** the trigger is unambiguous (exactly-one-mention, from main),
-it degrades to today's behavior when off or single-agent, and "mention two agents
-= keep them together in main" is a natural escape hatch.
-
-**Example** — room `#eng` wired to Sarah + Max, `auto_thread` on:
-- You (in main): "what's the deploy status?" → no mention → stays in **main**;
-  mention-routing in main behaves exactly as today.
-- "@sarah draft the Q3 roadmap" → auto-creates/reuses **`agent:sarah`**
-  (title *Sarah*), routes there. S_sarah is keyed to that lane.
-- "@max check the staging logs" → **`agent:max`** lane, separate session.
-- "@sarah @max can you two reconcile the numbers?" → two mentions → **main**;
-  both engage together.
-- Inside the *Sarah* lane you type "and the headcount section?" → stays in the
-  Sarah lane (no re-routing); Sarah continues with her context.
+Threads are created **manually only** — via the inline "+" affordance in the
+sidebar (§6). The `agent:<folder>` thread *id shape* still exists and a lane can
+be created and used by hand; it just isn't auto-suggested. Auto-spawn may be
+revisited in a later release.
 
 ## 6. Sidebar-nested UI (decision)
 
@@ -196,8 +170,8 @@ multi-thread scaling of the reference implementation), not as a top tab strip.
   `POST …/threads` → opens the new (empty) topic thread.
 - **Rename / delete** via the thread's row context menu (owner/member rules
   mirror room settings; reuse the room-rename pattern just shipped).
-- Auto-spawned `agent:*` threads appear with the agent glyph + name; `main` is
-  pinned first and not deletable; topic threads sort by last activity.
+- `agent:*` lane threads (created manually) appear with the agent glyph + name;
+  `main` is pinned first and not deletable; topic threads sort by last activity.
 - **Unread** is per-thread (`webchat_thread_reads`); the room row shows the sum.
 - Active-thread state persists per session (like `lastRoom`).
 
@@ -210,14 +184,14 @@ Follows `public/webchat/DESIGN.md` — tokens, `showToast`, sentence-case microc
   is just the room.
 - Migration backfills `webchat_messages.thread_id='main'` (column default), so
   **all existing history lands in `main`** with no data loss and no visible
-  change until someone creates/auto-spawns a thread.
+  change until someone creates a thread.
 - Existing `webchat_room_reads` rows copy into `webchat_thread_reads` as
   `(user_id, room_id, 'main', last_read_at)`.
 
 ## 8. Edge cases & decisions
 
-- **DMs** (`dm:<folder>` rooms): single agent → `auto_thread` off; they stay
-  single-threaded. Manual topic threads still allowed if wanted.
+- **DMs** (`dm:<folder>` rooms): single agent, so they stay single-threaded by
+  default. Manual topic threads still allowed if wanted.
 - **Engage / mention-sticky** is unchanged — it resolves *within the thread's
   session*, so an engaged agent stays engaged **in that thread**, not across the
   room (matches the reference's per-thread engaged state).
@@ -263,7 +237,6 @@ Follows `public/webchat/DESIGN.md` — tokens, `showToast`, sentence-case microc
   threadId → client renders in-thread.
 - **History filter**: `?thread_id=` returns only that thread; `main` holds
   migrated history.
-- **Auto-spawn matrix**: the five §5 cases.
 - **Unread**: per-thread marker monotonic; room row = sum; cascades on delete.
 - **Migration**: existing rooms/messages/reads land in `main` unchanged.
 - **Round-trip install/uninstall** on a fresh `channels-webchat` checkout.
@@ -273,9 +246,6 @@ Follows `public/webchat/DESIGN.md` — tokens, `showToast`, sentence-case microc
 - **Client is the riskiest slice** — correctly routing *live* WS messages into
   the right thread node + per-thread unread, without leaking a turn's bubbles
   across threads (reuse `endAllAgentTurns` per-thread).
-- **Auto-spawn surprise** — redirecting a `main` mention into a lane is the one
-  behavior users might not expect; the per-room opt-out + "two mentions stay in
-  main" escape hatch mitigate. Revisit defaults after dogfooding.
 - **Session sprawl** — many threads = many sessions/containers. Existing idle
   teardown applies per session, so cold threads cost nothing while idle; worth
   watching on busy multi-agent rooms.
