@@ -750,6 +750,40 @@ window.addEventListener('popstate', (e) => {
   }
 });
 
+// True when a modal / popover / menu is open that should consume Escape before a
+// full-screen view does. These each have their own ESC handler (bubble phase);
+// the view-close handler below runs in the CAPTURE phase, so it sees the overlay
+// still open and yields to it — one Escape closes exactly one layer.
+function blockingOverlayOpen() {
+  // `.modal-overlay` covers the settings, user-creds, and (dynamically mounted)
+  // confirm modals; the rest are listed explicitly. Visible = present and not
+  // [hidden].
+  if (document.querySelector('.modal-overlay:not([hidden])')) return true;
+  const others = ['model-picker', 'lightbox', 'members-overlay', 'handle-popover', 'overflow-menu', 'search-results'];
+  return others.some((id) => {
+    const el = document.getElementById(id);
+    return el && !el.hidden;
+  });
+}
+
+// Escape closes the topmost full-screen view (dashboard, topology, wiring,
+// permissions, agents/models) — the same path as its Back button, so history
+// and the OS back gesture stay in sync. Capture phase so it can defer to any
+// open modal/menu (which closes on its own bubble-phase handler instead).
+document.addEventListener(
+  'keydown',
+  (e) => {
+    if (e.key !== 'Escape' || viewStack.length === 0) return;
+    if (blockingOverlayOpen()) return; // a higher layer owns this Escape
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    closeView(viewStack[viewStack.length - 1].name);
+  },
+  true,
+);
+
 // Pinch-zoom + drag-to-pan on the image. Native pinch-zoom on a fixed-position
 // overlay doesn't work reliably on iOS Safari, so we handle touches ourselves.
 function getTouchDist(touches) {
