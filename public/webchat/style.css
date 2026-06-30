@@ -1339,6 +1339,13 @@ button:focus-visible {
   .thread-crumb-name {
     max-width: 12ch;
   }
+  /* The sidebar thread tree is hidden in-room on mobile, so surface the thread
+     switcher button here (it's the only in-room way to switch/create threads).
+     :not([hidden]) out-specifies the base .thread-switch{display:none} (which
+     sits later in source) while still honoring the JS hidden toggle. */
+  .thread-switch:not([hidden]) {
+    display: inline-flex;
+  }
   .thread-sync {
     margin-left: 4px;
     gap: 2px;
@@ -2071,6 +2078,87 @@ a.lightbox-btn {
   align-items: center;
   gap: 10px;
   min-width: 0;
+  position: relative; /* anchors the thread-switcher popup */
+}
+/* In-room thread switcher button (the '#'): desktop has the sidebar tree, so
+   this is shown on mobile only (see the @media block). */
+.thread-switch {
+  display: none;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-dim);
+  font-weight: 700;
+  font-size: var(--fs-base);
+  cursor: pointer;
+}
+.thread-switch[hidden] {
+  display: none;
+}
+/* Popup listing Main + topic threads (tap to switch) with a "+ New thread" row,
+   dropped under the title group. */
+.thread-switcher {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  min-width: 11rem;
+  max-width: 16rem;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 12px var(--shadow, rgba(0, 0, 0, 0.25));
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+}
+.thread-switcher-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: none;
+  color: var(--text);
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+}
+.thread-switcher-item:hover {
+  background: var(--surface2);
+}
+.thread-switcher-item.active {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent-strong);
+}
+.thread-switcher-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.thread-switcher-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+}
+.thread-switcher-new {
+  color: var(--text-dim);
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  margin-top: 2px;
+}
+.thread-switcher-new:hover {
+  color: var(--accent);
 }
 /* Active-thread breadcrumb — room name › thread name, the thread tinted with
    its sidebar color. Shown only inside a topic thread. */

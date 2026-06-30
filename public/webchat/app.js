@@ -1888,6 +1888,10 @@ function openThread(threadId) {
 // it has nothing of its own to pull/push. See webchat-thread-context-sync.md.
 function updateThreadSyncControls() {
   const inThread = !!(currentRoom && currentThread && currentThread !== 'main');
+  // The header thread switcher shows whenever a room is open (CSS gates it to
+  // mobile, where the sidebar thread tree is hidden in-room).
+  const sw = $('#thread-switch');
+  if (sw) sw.hidden = !currentRoom;
   const sync = $('#thread-sync');
   if (sync) sync.hidden = !inThread;
   const crumb = $('#thread-crumb');
@@ -1948,6 +1952,94 @@ function openThreadMenu(thread, anchor) {
 
 function closeThreadMenus() {
   document.querySelectorAll('.thread-menu').forEach((m) => m.remove());
+}
+
+// In-room thread switcher (the chat-header '#' button). The sidebar thread tree
+// is hidden on mobile while a room is open, so this is the mobile way to switch
+// between Main/topic threads and create a new one without backing out.
+function closeThreadSwitcher() {
+  document.querySelectorAll('.thread-switcher').forEach((m) => m.remove());
+}
+
+function openThreadSwitcher() {
+  closeThreadSwitcher();
+  if (!currentRoom) return;
+  const btn = $('#thread-switch');
+  if (!btn) return;
+  const pop = document.createElement('div');
+  pop.className = 'thread-switcher';
+  pop.setAttribute('role', 'menu');
+
+  const addRow = (label, threadId, tinted) => {
+    const b = document.createElement('button');
+    b.className = 'thread-switcher-item' + (threadId === currentThread ? ' active' : '');
+    b.type = 'button';
+    b.setAttribute('role', 'menuitem');
+    if (tinted) {
+      const dot = document.createElement('span');
+      dot.className = 'thread-switcher-dot';
+      dot.style.background = roomColor(threadId);
+      b.appendChild(dot);
+    }
+    const name = document.createElement('span');
+    name.className = 'thread-switcher-label';
+    name.textContent = label;
+    b.appendChild(name);
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeThreadSwitcher();
+      openThread(threadId); // openThread handles 'main' too (no-op if already there)
+    });
+    pop.appendChild(b);
+  };
+
+  addRow('Main chat', 'main', false);
+  for (const t of roomThreads.filter((t) => t.kind !== 'main')) addRow(t.title, t.thread_id, true);
+
+  const add = document.createElement('button');
+  add.className = 'thread-switcher-item thread-switcher-new';
+  add.type = 'button';
+  add.textContent = '+ New thread';
+  add.addEventListener('click', (e) => {
+    e.stopPropagation();
+    switcherCreate(pop, add);
+  });
+  pop.appendChild(add);
+
+  btn.parentElement.appendChild(pop);
+  setTimeout(() => document.addEventListener('click', closeThreadSwitcher, { once: true }), 0);
+}
+
+// Replace the "+ New thread" row with an inline name input (no native prompt).
+function switcherCreate(pop, addBtn) {
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'thread-add-input';
+  input.placeholder = 'Thread name…';
+  input.maxLength = 80;
+  input.setAttribute('aria-label', 'New thread name');
+  let settled = false;
+  const finish = (create) => {
+    if (settled) return;
+    settled = true;
+    const title = input.value.trim();
+    closeThreadSwitcher();
+    if (create && title) createThread(title);
+  };
+  input.addEventListener('click', (e) => e.stopPropagation());
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      finish(true);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener('blur', () => finish(true));
+  addBtn.replaceWith(input);
+  setTimeout(() => input.focus(), 0);
 }
 
 // Open the inline rename input on a thread row (no native prompt() — DESIGN.md §4).
@@ -6565,6 +6657,10 @@ async function syncThread(direction) {
     showToast('Sync failed: ' + (err.message || err), { kind: 'error' });
   }
 }
+$('#thread-switch')?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  openThreadSwitcher();
+});
 $('#thread-pull')?.addEventListener('click', () => syncThread('pull'));
 $('#thread-push')?.addEventListener('click', () => syncThread('push'));
 $('#thread-delete')?.addEventListener('click', () => {
