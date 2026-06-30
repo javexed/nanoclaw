@@ -3,7 +3,7 @@ import { describe, it, expect, vi } from 'vitest';
 // Mimic execFile's real non-zero-exit rejection: the Error's message + cmd embed
 // the FULL argv (including `--value <secret>`). The onecli() wrapper must scrub
 // this so a member's plaintext key can never reach the host log via err.message.
-// Regression guard for the byok-adversarial-review (cred-storage) finding.
+// Regression guard for the user-creds-adversarial-review (cred-storage) finding.
 vi.mock('child_process', () => ({
   execFile: (
     _cmd: string,
@@ -31,7 +31,7 @@ describe('onecli() wrapper scrubs credentials from errors', () => {
   it('createAnthropicSecret rejection never exposes the plaintext key, and names only resource/verb', async () => {
     let caught: unknown;
     try {
-      await realOnecliAdmin.createAnthropicSecret('BYOK test', SECRET);
+      await realOnecliAdmin.createAnthropicSecret('UserCreds test', SECRET);
     } catch (e) {
       caught = e;
     }

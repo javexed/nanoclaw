@@ -18,6 +18,7 @@ import { migration020 } from './020-byok-credentials.js';
 import { migration021 } from './021-byok-oauth.js';
 import { migration022 } from './022-byok-provider.js';
 import { migration023 } from './023-byok-user-credentials.js';
+import { migration024 } from './024-rename-user-credentials.js';
 import { moduleApprovalsPendingApprovals } from './module-approvals-pending-approvals.js';
 import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js';
 import { migration018 } from './018-approvals-approver-user-id.js';
@@ -40,6 +41,7 @@ import {
   moduleWebchatRoomCredentialMode,
   moduleWebchatRoomOauthAllowed,
   moduleWebchatCredentialsConfig,
+  moduleWebchatRoomPinOrder,
   moduleWebchatThreads,
   moduleWebchatThreadEngaged,
 } from '../../channels/webchat/migration.js';
@@ -93,10 +95,12 @@ export const migrations: Migration[] = [
   moduleWebchatRoomCredentialMode,
   moduleWebchatRoomOauthAllowed,
   moduleWebchatCredentialsConfig,
+  moduleWebchatRoomPinOrder,
   migration020,
   migration021,
   migration022,
   migration023,
+  migration024,
   moduleWebchatThreads,
   moduleWebchatThreadEngaged,
 ];

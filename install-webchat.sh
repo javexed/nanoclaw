@@ -175,16 +175,18 @@ NEW_PATHS=(
   container/agent-runner/src/providers/summarize-thinking.test.ts
   src/onecli-preflight.ts
   src/onecli-preflight.test.ts
-  src/modules/byok
+  src/modules/user-credentials
   src/db/migrations/020-byok-credentials.ts
   src/db/migrations/021-byok-oauth.ts
   src/db/migrations/022-byok-provider.ts
   src/db/migrations/023-byok-user-credentials.ts
+  src/db/migrations/024-rename-user-credentials.ts
   setup/get-oauth-token.sh
-  docs/design/byok.md
-  docs/design/byok-oauth.md
+  docs/design/user-credentials.md
+  docs/design/user-credentials-oauth.md
   docs/design/webchat-threads.md
   docs/design/webchat-threads-qa.md
+  docs/design/thread-engaged-agents.md
 )
 echo "→ Copying webchat-owned files …"
 git checkout "$BR" -- "${NEW_PATHS[@]}"
@@ -455,7 +457,7 @@ Next: configure environment + auth.
 Or set the .env vars by hand — see .claude/skills/add-webchat/SKILL.md
 under "Configure" for the full menu (auth methods, TLS, VAPID).
 
-Optional add-on: secure shared-room BYOK — several people in one room, each
+Built in: secure shared-room user credentials — several people in one room, each
 billing their own turns to their own Anthropic API key or Claude subscription.
-Opt-in, off by default; run /add-byok (needs OneCLI: /init-onecli).
+Off by default; enable it per room from room settings (needs OneCLI: /init-onecli).
 DONE

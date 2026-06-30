@@ -333,6 +333,12 @@ export async function performAgentRoute(
     from: session.agent_group_id,
     to: targetAgentGroupId,
     targetSession: targetSession.id,
+    // Diagnostic for the a2a self-loop flood: the session guard above only
+    // drops target===source SESSION. A route where selfAgentGroup is true but
+    // sourceSession !== targetSession is the cross-session same-agent-group loop
+    // the guard does NOT catch — log it so a recurrence shows the exact topology.
+    sourceSession: session.id,
+    selfAgentGroup: targetAgentGroupId === session.agent_group_id,
     a2aMsgId,
     forwardedFileCount: countForwardedFiles(forwardedContent),
   });

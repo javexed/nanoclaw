@@ -317,7 +317,7 @@ function renderSettingsModal() {
   $('#notif-toggle').checked = settings.notifications;
 }
 
-// ── Workspace credentials policy (Settings → Member credentials, owner-only) ──
+// ── Workspace credentials policy (Settings → User credentials, owner-only) ──
 let credConfigWired = false;
 async function renderCredentialsSettings() {
   const section = $('#settings-credentials');
@@ -465,12 +465,12 @@ function renderHandleChip() {
   // When the member has connected their own credential, the handle chip doubles
   // as the credential indicator (a 🔑 prefix) — there's no separate key chip.
   // The connect/disconnect controls live in the chip's popover (#handle-creds).
-  chip.textContent = byokConnected ? `🔑 ${label}` : label;
+  chip.textContent = userCredsConnected ? `🔑 ${label}` : label;
   chip.classList.toggle('is-unset', !myHandle);
-  chip.classList.toggle('has-cred', byokConnected);
-  chip.title = byokConnected ? 'Billing your own account — click to manage' : 'Edit your handle';
+  chip.classList.toggle('has-cred', userCredsConnected);
+  chip.title = userCredsConnected ? 'Billing your own account — click to manage' : 'Edit your handle';
   // Accessible name tracks the connected state (the 🔑/title are visual-only).
-  chip.setAttribute('aria-label', byokConnected ? 'Billing your own account — manage credentials' : 'Edit your handle');
+  chip.setAttribute('aria-label', userCredsConnected ? 'Billing your own account — manage credentials' : 'Edit your handle');
 }
 
 function openHandlePopover() {
@@ -1340,6 +1340,24 @@ const ROOM_DIVIDER = Symbol('room-divider');
 
 function renderRooms(rooms) {
   const list = $('#room-list');
+  // Drag-to-pin: wire the list as a drop target once (survives innerHTML reset).
+  // Dropping a dragged room anywhere on the list pins it; pinned rooms sort to
+  // the top automatically. Unpin lives in the kebab.
+  if (!list.dataset.dropWired) {
+    list.dataset.dropWired = '1';
+    list.addEventListener('dragover', (e) => {
+      if (!list.classList.contains('room-list-dragging')) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    });
+    list.addEventListener('drop', async (e) => {
+      if (!list.classList.contains('room-list-dragging')) return;
+      e.preventDefault();
+      const id = e.dataTransfer ? e.dataTransfer.getData('text/plain') : '';
+      list.classList.remove('room-list-dragging');
+      if (id) await toggleRoomPin(id, true);
+    });
+  }
   list.innerHTML = '';
 
   // Recent-first: newest activity (last message) at the top. Pinned rooms are
@@ -1356,7 +1374,11 @@ function renderRooms(rooms) {
   const visibleRooms = showHidden ? [...rooms] : rooms.filter((r) => !r.hidden);
   const active = visibleRooms.filter((r) => !r.archived);
   const archived = visibleRooms.filter((r) => r.archived).sort(byActivity);
-  const pinned = active.filter((r) => r.pinned).sort(byActivity);
+  // Pinned rooms hold the user's MANUAL drag order (pin_position); the rest stay
+  // activity-sorted. Fall back to activity when positions are absent/equal.
+  const pinned = active
+    .filter((r) => r.pinned)
+    .sort((a, b) => (a.pin_position ?? 0) - (b.pin_position ?? 0) || byActivity(a, b));
   const unpinned = active.filter((r) => !r.pinned).sort(byActivity);
   const toggleBtn = $('#archived-toggle');
   if (archived.length === 0) {
@@ -1413,6 +1435,63 @@ function renderRooms(rooms) {
       li.appendChild(pin);
     }
 
+    // Drag behavior (archived rooms are never draggable):
+    //   - unpinned room → drag onto the list to PIN it (list-level drop handler,
+    //     gated on the `room-list-dragging` class).
+    //   - pinned room   → drag over another pinned row to REORDER (row-level
+    //     handlers below, gated on `room-list-reordering` + draggedPinId).
+    // The two modes use different classes so the list's pin-drop never fires
+    // during a reorder and vice-versa.
+    if (!room.archived) {
+      li.draggable = true;
+      li.addEventListener('dragstart', (e) => {
+        if (e.dataTransfer) {
+          e.dataTransfer.setData('text/plain', room.id);
+          e.dataTransfer.effectAllowed = 'move';
+        }
+        if (room.pinned) {
+          draggedPinId = room.id;
+          list.classList.add('room-list-reordering');
+        } else {
+          draggedPinId = null;
+          list.classList.add('room-list-dragging');
+        }
+      });
+      li.addEventListener('dragend', () => {
+        draggedPinId = null;
+        list.classList.remove('room-list-dragging', 'room-list-reordering');
+        list.querySelectorAll('.drop-before, .drop-after').forEach((el) => el.classList.remove('drop-before', 'drop-after'));
+      });
+    }
+
+    // Reorder target: a pinned row accepts a dragged pinned room, inserting it
+    // above or below depending on which half of the row the cursor is over.
+    if (room.pinned) {
+      const clearMarkers = () => li.classList.remove('drop-before', 'drop-after');
+      li.addEventListener('dragover', (e) => {
+        if (!draggedPinId || draggedPinId === room.id) return;
+        e.preventDefault();
+        e.stopPropagation(); // don't bubble to the list-level pin-drop handler
+        const rect = li.getBoundingClientRect();
+        const after = e.clientY > rect.top + rect.height / 2;
+        li.classList.toggle('drop-after', after);
+        li.classList.toggle('drop-before', !after);
+      });
+      li.addEventListener('dragleave', clearMarkers);
+      li.addEventListener('drop', async (e) => {
+        if (!draggedPinId || draggedPinId === room.id) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const rect = li.getBoundingClientRect();
+        const after = e.clientY > rect.top + rect.height / 2;
+        const moved = draggedPinId;
+        draggedPinId = null;
+        clearMarkers();
+        list.classList.remove('room-list-reordering');
+        await reorderPinnedRoom(moved, room.id, after);
+      });
+    }
+
     // Kebab — opens a tiny menu with up to two actions:
     //   - Hide / Unhide (per-user sidebar preference) — always present
     //     for anyone with room access.
@@ -1435,15 +1514,21 @@ function renderRooms(rooms) {
       const menu = document.createElement('div');
       menu.className = 'room-menu';
 
-      const pinBtn = document.createElement('button');
-      pinBtn.type = 'button';
-      pinBtn.textContent = room.pinned ? 'Unpin' : 'Pin';
-      pinBtn.addEventListener('click', async (ev) => {
-        ev.stopPropagation();
-        menu.remove();
-        await toggleRoomPin(room.id, !room.pinned);
-      });
-      menu.appendChild(pinBtn);
+      // Pinning is now drag-and-drop; the kebab keeps Unpin for pinned rooms.
+      // On touch — where HTML5 drag is unreliable — also keep a Pin action so
+      // mobile can still pin.
+      const coarsePointer = window.matchMedia('(pointer: coarse)').matches;
+      if (room.pinned || coarsePointer) {
+        const pinBtn = document.createElement('button');
+        pinBtn.type = 'button';
+        pinBtn.textContent = room.pinned ? 'Unpin' : 'Pin';
+        pinBtn.addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          menu.remove();
+          await toggleRoomPin(room.id, !room.pinned);
+        });
+        menu.appendChild(pinBtn);
+      }
 
       const hideBtn = document.createElement('button');
       hideBtn.type = 'button';
@@ -1522,6 +1607,46 @@ async function toggleRoomArchive(roomId, archive) {
     console.error('toggleRoomArchive failed:', err);
     if (target) target.archived = !archive; // roll back
     renderRooms(lastRoomsList);
+  }
+}
+
+// Id of the pinned room currently being dragged for reorder (null while
+// dragging an unpinned room to pin it, or when nothing is dragging).
+let draggedPinId = null;
+
+// Move a pinned room before/after another within the pinned group and persist
+// the new order. Optimistic: reindex pin_position locally and re-render, then
+// POST; the server's broadcastRooms re-syncs authoritative order to every device.
+async function reorderPinnedRoom(movedId, targetId, after) {
+  const order = lastRoomsList
+    .filter((r) => r.pinned && !r.archived)
+    .sort((a, b) => (a.pin_position ?? 0) - (b.pin_position ?? 0))
+    .map((r) => r.id);
+  const from = order.indexOf(movedId);
+  if (from === -1) return;
+  order.splice(from, 1);
+  let to = order.indexOf(targetId);
+  if (to === -1) return;
+  if (after) to += 1;
+  order.splice(to, 0, movedId);
+
+  order.forEach((id, i) => {
+    const r = lastRoomsList.find((x) => x.id === id);
+    if (r) r.pin_position = i;
+  });
+  renderRooms(lastRoomsList);
+
+  try {
+    const res = await authFetch('/api/rooms/pins/order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+      body: JSON.stringify({ order }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    console.error('reorderPinnedRoom failed:', err);
+    // The next authoritative `rooms` broadcast (or a manual refresh) restores
+    // the server's order; no local rollback needed for a cosmetic reorder.
   }
 }
 
@@ -1938,7 +2063,7 @@ function joinRoom(roomId, roomName, jumpMessageId) {
   unreadRooms.delete(roomId);
   mentionedRooms.delete(roomId);
   updateUnreadDots();
-  updateByokBanner(roomId);
+  updateUserCredsBanner(roomId);
   // Set agent name for thinking bubble from the agent wired to this room.
   const roomAgent = allAgents.find((b) => b.room_id === roomId);
   if (roomAgent) agentName = roomAgent.name;
@@ -2294,10 +2419,18 @@ function appendMessage(msg, statusText, beforeNode) {
       bubble.appendChild(caption);
     }
   } else if (isMine) {
-    // User's own messages are rendered as plain text — preserves whitespace,
-    // tabs, and code indentation exactly as typed. Only agent replies need
-    // Markdown interpretation.
-    bubble.textContent = msg.content;
+    // Your own messages render as full Markdown too (bold/lists/links/code
+    // blocks + agent-tinted @mentions), same pipeline as agent replies. Markdown
+    // re-flows whitespace, so fenced ``` blocks keep code exact; falls back to
+    // plain text if marked/DOMPurify throws (escaped by the DOM, no XSS risk).
+    try {
+      bubble.innerHTML = DOMPurify.sanitize(marked.parse(msg.content));
+      decorateCodeBlocks(bubble);
+      decorateMentions(bubble);
+    } catch (err) {
+      console.error('Message render failed; falling back to plain text', err);
+      bubble.textContent = msg.content;
+    }
   } else {
     // Markdown render is best-effort: a malformed message must not crash the
     // whole render loop and leave #messages half-populated. Fall back to
@@ -2313,10 +2446,18 @@ function appendMessage(msg, statusText, beforeNode) {
     }
   }
 
-  if (isMine && msg.id) {
+  if (isMine) {
+    // Always wrap own messages in the .msg-body row — even the optimistic echo
+    // that has no server id yet. A bare bubble that's a direct flex child of
+    // .msg.mine (align-items:flex-end) shrink-collapses its block Markdown (<p>)
+    // to ~zero width and renders invisible; the row gives the bubble a proper
+    // width context (this is why a message only appeared after leaving and
+    // re-entering, where history re-renders it WITH an id and the row). The
+    // delete button is added now if we have an id, else by addDeleteButton when
+    // the server echo upgrades the pending element.
     const bodyRow = document.createElement('div');
     bodyRow.className = 'msg-body';
-    bodyRow.appendChild(createDeleteButton(msg.id));
+    if (msg.id) bodyRow.appendChild(createDeleteButton(msg.id));
     bodyRow.appendChild(bubble);
     div.appendChild(bodyRow);
   } else {
@@ -2520,54 +2661,56 @@ async function jumpToMessage(messageId) {
  * 'error'. Errors linger longer and must be dismissed-or-time-out; all toasts
  * are click-to-dismiss. Returns the element so callers can remove it early.
  */
-// ── BYOK: per-member key banner ───────────────────────────────────────────
+// ── UserCreds: per-member key banner ───────────────────────────────────────────
 // Shown in a room whose credential_mode is optional/required when the current
 // user hasn't connected their own Anthropic key. Connecting onboards the key
 // into the OneCLI vault (host-side) so the member's turns bill their account.
 // The room's model provider decides the connect vocabulary + which mint runs.
-let byokProvider = 'claude';
+let userCredsProvider = 'claude';
 // Latest banner state, so the @handle popover credentials shortcut can mirror it.
-let byokState = null;
+let userCredsState = null;
 // Whether the member has a connected credential for the open room — drives the
 // 🔑 indicator on the @handle chip (the standalone key chip was merged into it).
-let byokConnected = false;
+let userCredsConnected = false;
 
-function byokWords(provider) {
+function userCredsWords(provider) {
   return provider === 'codex'
     ? { name: 'Codex', subWord: 'ChatGPT subscription', keyWord: 'OpenAI key', keyPlaceholder: 'sk-…' }
     : { name: 'Claude', subWord: 'Claude subscription', keyWord: 'Anthropic key', keyPlaceholder: 'sk-ant-…' };
 }
 
-async function updateByokBanner(roomId) {
-  const banner = $('#byok-banner');
+async function updateUserCredsBanner(roomId) {
+  const banner = $('#user-creds-banner');
   if (!banner || !roomId) return;
   const hideAll = () => {
     banner.hidden = true;
-    byokState = null;
-    byokConnected = false;
+    userCredsState = null;
+    userCredsConnected = false;
     updateHandleCreds();
     renderHandleChip();
   };
   try {
-    const r = await authFetch(`/api/byok/credential?roomId=${encodeURIComponent(roomId)}`);
+    const r = await authFetch(`/api/user-credentials/credential?roomId=${encodeURIComponent(roomId)}`);
     if (!r.ok) {
       hideAll();
       return;
     }
     const { connected, mode, credType, oauthAllowed, apiKeyAllowed = true, provider = 'claude' } = await r.json();
-    byokProvider = provider;
-    const { name, subWord, keyWord, keyPlaceholder } = byokWords(provider);
-    // API keys are offered only when the room is on AND the workspace accepts them
-    // (for this room's provider). OAuth allowance is also workspace-wide.
+    userCredsProvider = provider;
+    const { name, subWord, keyWord, keyPlaceholder } = userCredsWords(provider);
+    // The room's mode is the master switch: 'disabled' (User credentials: Off)
+    // means no UserCreds at all — neither API keys NOR OAuth — regardless of what the
+    // workspace accepts. When the room is on, each method is offered if the
+    // workspace accepts it (credential types are workspace-wide).
     const apiOffered = mode !== 'disabled' && apiKeyAllowed;
-    // BYOK is surfaced when API keys are offered OR the workspace allows OAuth.
-    if (!apiOffered && !oauthAllowed) {
+    const oauthOffered = mode !== 'disabled' && oauthAllowed;
+    if (!apiOffered && !oauthOffered) {
       hideAll();
       return;
     }
 
-    byokState = { offered: true, connected, provider, oauthAllowed, apiOffered, subWord, keyWord };
-    byokConnected = connected;
+    userCredsState = { offered: true, connected, provider, oauthAllowed: oauthOffered, apiOffered, subWord, keyWord };
+    userCredsConnected = connected;
     updateHandleCreds();
     renderHandleChip();
 
@@ -2579,16 +2722,16 @@ async function updateByokBanner(roomId) {
     }
 
     // Not connected → show the actionable banner.
-    const connectBtn = $('#byok-connect-btn');
-    const oauthBtn = $('#byok-oauth-btn');
-    const input = $('#byok-key-input');
+    const connectBtn = $('#user-creds-connect-btn');
+    const oauthBtn = $('#user-creds-oauth-btn');
+    const input = $('#user-creds-key-input');
     banner.hidden = false;
     input.hidden = true;
     input.value = '';
     input.placeholder = keyPlaceholder;
     // Primary action: connect via subscription sign-in. Secondary: paste a key.
     if (oauthBtn) {
-      oauthBtn.hidden = !oauthAllowed;
+      oauthBtn.hidden = !oauthOffered;
       oauthBtn.textContent = `Connect to ${name}`;
     }
     connectBtn.hidden = !apiOffered;
@@ -2599,11 +2742,11 @@ async function updateByokBanner(roomId) {
 }
 
 // The @handle popover mirrors the in-room banner state as a credentials shortcut
-// (discoverability). Shown only when the open room offers BYOK; acts on that room.
+// (discoverability). Shown only when the open room offers UserCreds; acts on that room.
 function updateHandleCreds() {
   const wrap = $('#handle-creds');
   if (!wrap) return;
-  if (!byokState || !byokState.offered) {
+  if (!userCredsState || !userCredsState.offered) {
     wrap.hidden = true;
     return;
   }
@@ -2612,45 +2755,45 @@ function updateHandleCreds() {
   const actionBtn = $('#handle-creds-action');
   // Minimalist integrations-row style: a status dot + the provider name carry
   // the connected/not state; the action button does the rest.
-  const { name } = byokWords(byokState.provider);
+  const { name } = userCredsWords(userCredsState.provider);
   if (statusEl) {
     // Text carries the connected/not state too (not just the dot colour) — for
     // screen readers and colour-blind users.
-    statusEl.textContent = `${name} — ${byokState.connected ? 'connected' : 'not connected'}`;
-    statusEl.classList.toggle('is-connected', byokState.connected);
+    statusEl.textContent = `${name} — ${userCredsState.connected ? 'connected' : 'not connected'}`;
+    statusEl.classList.toggle('is-connected', userCredsState.connected);
   }
-  if (actionBtn) actionBtn.textContent = byokState.connected ? 'Disconnect' : 'Connect';
+  if (actionBtn) actionBtn.textContent = userCredsState.connected ? 'Disconnect' : 'Connect';
 }
 
 $('#handle-creds-action')?.addEventListener('click', async () => {
-  if (!byokState) return;
+  if (!userCredsState) return;
   closeHandlePopover();
-  if (byokState.connected) {
+  if (userCredsState.connected) {
     const confirmed = await showConfirmModal({
-      title: `Disconnect ${byokWords(byokState.provider).name}?`,
+      title: `Disconnect ${userCredsWords(userCredsState.provider).name}?`,
       confirmLabel: 'Disconnect',
       destructive: true,
     });
-    if (confirmed) await disconnectByok();
-  } else if (byokState.oauthAllowed) {
+    if (confirmed) await disconnectUserCreds();
+  } else if (userCredsState.oauthAllowed) {
     // Subscriptions allowed → open the sign-in helper directly (what users expect
     // from a "Connect" action), rather than just surfacing the banner.
-    $('#byok-oauth-btn')?.click();
+    $('#user-creds-oauth-btn')?.click();
   } else {
     // API-key-only room → reveal the banner and its key input.
-    const banner = $('#byok-banner');
+    const banner = $('#user-creds-banner');
     if (banner) {
       banner.hidden = false;
       banner.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-      banner.classList.add('byok-banner-flash');
-      setTimeout(() => banner.classList.remove('byok-banner-flash'), 1200);
+      banner.classList.add('user-creds-banner-flash');
+      setTimeout(() => banner.classList.remove('user-creds-banner-flash'), 1200);
     }
-    $('#byok-connect-btn')?.click(); // reveal the key input
+    $('#user-creds-connect-btn')?.click(); // reveal the key input
   }
 });
 
-$('#byok-connect-btn')?.addEventListener('click', async () => {
-  const input = $('#byok-key-input');
+$('#user-creds-connect-btn')?.addEventListener('click', async () => {
+  const input = $('#user-creds-key-input');
   // First click reveals the input; second (with a value) submits.
   if (input.hidden) {
     input.hidden = false;
@@ -2659,33 +2802,33 @@ $('#byok-connect-btn')?.addEventListener('click', async () => {
   }
   const apiKey = input.value.trim();
   if (!apiKey) return;
-  const r = await authFetch('/api/byok/credential', {
+  const r = await authFetch('/api/user-credentials/credential', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
     body: JSON.stringify({ roomId: currentRoom, apiKey }),
   });
   if (r.ok) {
-    showToast(`Connected your ${byokWords(byokProvider).keyWord}.`, { kind: 'success' });
-    await updateByokBanner(currentRoom);
+    showToast(`Connected your ${userCredsWords(userCredsProvider).keyWord}.`, { kind: 'success' });
+    await updateUserCredsBanner(currentRoom);
   } else {
     const err = await r.json().catch(() => ({}));
     showToast('Failed to connect key: ' + (err.error || r.statusText), { kind: 'error' });
   }
 });
 
-$('#byok-key-input')?.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') $('#byok-connect-btn').click();
+$('#user-creds-key-input')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('#user-creds-connect-btn').click();
 });
 
-async function disconnectByok() {
-  const r = await authFetch('/api/byok/credential', {
+async function disconnectUserCreds() {
+  const r = await authFetch('/api/user-credentials/credential', {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
     body: JSON.stringify({ roomId: currentRoom }),
   });
   if (r.ok) {
     showToast('Disconnected your account.', { kind: 'success' });
-    await updateByokBanner(currentRoom);
+    await updateUserCredsBanner(currentRoom);
   } else {
     const err = await r.json().catch(() => ({}));
     showToast('Failed to disconnect: ' + (err.error || r.statusText), { kind: 'error' });
@@ -2694,15 +2837,15 @@ async function disconnectByok() {
 
 // The connected state lives as a compact key chip in the header; clicking it
 // disconnects (after a confirm), so the full banner no longer sits over the chat.
-// ── BYOK OAuth: connect a Claude subscription token ────────────────────────
+// ── UserCreds OAuth: connect a Claude subscription token ────────────────────────
 // Browser-mint OAuth: no terminal. Opening the form starts a server-side mint
 // (a throwaway container runs `claude setup-token`), surfaces the sign-in URL,
 // takes the pasted code, and onboards the resulting token per-member.
-let byokOauthSessionId = null;
-let byokOauthReturnFocus = null; // element to restore focus to when the modal closes
+let userCredsOauthSessionId = null;
+let userCredsOauthReturnFocus = null; // element to restore focus to when the modal closes
 
-function byokOauthStatus(msg, kind) {
-  const el = $('#byok-oauth-status');
+function userCredsOauthStatus(msg, kind) {
+  const el = $('#user-creds-oauth-status');
   if (!el) return;
   if (!msg) {
     el.hidden = true;
@@ -2710,27 +2853,27 @@ function byokOauthStatus(msg, kind) {
   }
   el.hidden = false;
   el.textContent = msg;
-  el.className = 'byok-oauth-status' + (kind ? ' ' + kind : '');
+  el.className = 'user-creds-oauth-status' + (kind ? ' ' + kind : '');
 }
 
-$('#byok-oauth-btn')?.addEventListener('click', async () => {
-  const modal = $('#byok-oauth-modal');
+$('#user-creds-oauth-btn')?.addEventListener('click', async () => {
+  const modal = $('#user-creds-oauth-modal');
   if (!modal) return;
-  const isCodex = byokProvider === 'codex';
-  const title = $('#byok-oauth-title');
-  if (title) title.textContent = `Connect to ${byokWords(byokProvider).name}`;
-  $('#byok-oauth-step2').hidden = true;
-  $('#byok-oauth-submit').hidden = true;
-  $('#byok-oauth-spinner').hidden = false; // spinner while the mint warms up
-  const code = $('#byok-oauth-code');
+  const isCodex = userCredsProvider === 'codex';
+  const title = $('#user-creds-oauth-title');
+  if (title) title.textContent = `Connect to ${userCredsWords(userCredsProvider).name}`;
+  $('#user-creds-oauth-step2').hidden = true;
+  $('#user-creds-oauth-submit').hidden = true;
+  $('#user-creds-oauth-spinner').hidden = false; // spinner while the mint warms up
+  const code = $('#user-creds-oauth-code');
   if (code) code.value = '';
-  const codexCode = $('#byok-oauth-codex-code');
-  byokOauthReturnFocus = document.activeElement; // restore focus here on close
+  const codexCode = $('#user-creds-oauth-codex-code');
+  userCredsOauthReturnFocus = document.activeElement; // restore focus here on close
   modal.hidden = false;
-  $('#byok-oauth-close')?.focus(); // move focus into the dialog
-  byokOauthStatus('Preparing sign-in…', '');
+  $('#user-creds-oauth-close')?.focus(); // move focus into the dialog
+  userCredsOauthStatus('Preparing sign-in…', '');
   try {
-    const startUrl = isCodex ? '/api/byok/codex/start' : '/api/byok/oauth/start';
+    const startUrl = isCodex ? '/api/user-credentials/codex/start' : '/api/user-credentials/oauth/start';
     const r = await authFetch(startUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
@@ -2738,15 +2881,15 @@ $('#byok-oauth-btn')?.addEventListener('click', async () => {
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.statusText);
-    byokOauthSessionId = data.sessionId;
-    const link = $('#byok-oauth-link');
+    userCredsOauthSessionId = data.sessionId;
+    const link = $('#user-creds-oauth-link');
     if (link) {
       link.href = data.url;
-      link.textContent = `Open ${byokWords(byokProvider).name} sign-in ↗`;
+      link.textContent = `Open ${userCredsWords(userCredsProvider).name} sign-in ↗`;
     }
     // Claude: paste a code back. Codex: enter a pairing code at the site, then approve.
     if (code) code.hidden = isCodex;
-    const codeLabel = $('#byok-oauth-code-label');
+    const codeLabel = $('#user-creds-oauth-code-label');
     if (codeLabel) codeLabel.hidden = isCodex;
     if (codexCode) {
       codexCode.hidden = !isCodex;
@@ -2756,48 +2899,48 @@ $('#byok-oauth-btn')?.addEventListener('click', async () => {
           : 'Open the link, then approve the sign-in.'
         : '';
     }
-    const submit = $('#byok-oauth-submit');
+    const submit = $('#user-creds-oauth-submit');
     if (submit) submit.textContent = isCodex ? 'I’ve approved — connect' : 'Connect';
-    $('#byok-oauth-spinner').hidden = true;
-    $('#byok-oauth-step2').hidden = false;
-    $('#byok-oauth-submit').hidden = false;
-    byokOauthStatus(isCodex ? 'Open the link, enter the code, and approve — then click connect.' : '', '');
-    $('#byok-oauth-link').focus();
+    $('#user-creds-oauth-spinner').hidden = true;
+    $('#user-creds-oauth-step2').hidden = false;
+    $('#user-creds-oauth-submit').hidden = false;
+    userCredsOauthStatus(isCodex ? 'Open the link, enter the code, and approve — then click connect.' : '', '');
+    $('#user-creds-oauth-link').focus();
   } catch (err) {
-    $('#byok-oauth-spinner').hidden = true;
-    byokOauthStatus(err.message || 'Could not start sign-in.', 'error');
+    $('#user-creds-oauth-spinner').hidden = true;
+    userCredsOauthStatus(err.message || 'Could not start sign-in.', 'error');
   }
 });
 
-function closeByokOauthModal() {
-  if (byokOauthSessionId) {
-    const cancelUrl = byokProvider === 'codex' ? '/api/byok/codex/cancel' : '/api/byok/oauth/cancel';
+function closeUserCredsOauthModal() {
+  if (userCredsOauthSessionId) {
+    const cancelUrl = userCredsProvider === 'codex' ? '/api/user-credentials/codex/cancel' : '/api/user-credentials/oauth/cancel';
     authFetch(cancelUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
-      body: JSON.stringify({ sessionId: byokOauthSessionId }),
+      body: JSON.stringify({ sessionId: userCredsOauthSessionId }),
     }).catch(() => {});
-    byokOauthSessionId = null;
+    userCredsOauthSessionId = null;
   }
-  const modal = $('#byok-oauth-modal');
+  const modal = $('#user-creds-oauth-modal');
   if (modal) modal.hidden = true;
   // Return focus to whatever opened the dialog (a11y dismissal contract).
-  if (byokOauthReturnFocus && typeof byokOauthReturnFocus.focus === 'function') byokOauthReturnFocus.focus();
-  byokOauthReturnFocus = null;
+  if (userCredsOauthReturnFocus && typeof userCredsOauthReturnFocus.focus === 'function') userCredsOauthReturnFocus.focus();
+  userCredsOauthReturnFocus = null;
 }
-$('#byok-oauth-cancel')?.addEventListener('click', closeByokOauthModal);
-$('#byok-oauth-close')?.addEventListener('click', closeByokOauthModal);
+$('#user-creds-oauth-cancel')?.addEventListener('click', closeUserCredsOauthModal);
+$('#user-creds-oauth-close')?.addEventListener('click', closeUserCredsOauthModal);
 // Click the backdrop (outside the modal card) to close.
-$('#byok-oauth-modal')?.addEventListener('click', (e) => {
-  if (e.target === $('#byok-oauth-modal')) closeByokOauthModal();
+$('#user-creds-oauth-modal')?.addEventListener('click', (e) => {
+  if (e.target === $('#user-creds-oauth-modal')) closeUserCredsOauthModal();
 });
 // Escape closes; Tab is trapped within the dialog (a11y, matches other modals).
 document.addEventListener('keydown', (e) => {
-  const modal = $('#byok-oauth-modal');
+  const modal = $('#user-creds-oauth-modal');
   if (!modal || modal.hidden) return;
   if (e.key === 'Escape') {
     e.preventDefault();
-    closeByokOauthModal();
+    closeUserCredsOauthModal();
     return;
   }
   if (e.key !== 'Tab') return;
@@ -2816,29 +2959,29 @@ document.addEventListener('keydown', (e) => {
   }
 });
 // Auto-submit once a code is pasted (Claude path) — no separate Connect click.
-$('#byok-oauth-code')?.addEventListener('paste', () => {
+$('#user-creds-oauth-code')?.addEventListener('paste', () => {
   setTimeout(() => {
-    const submit = $('#byok-oauth-submit');
-    if (submit && !submit.hidden && ($('#byok-oauth-code')?.value || '').trim()) submit.click();
+    const submit = $('#user-creds-oauth-submit');
+    if (submit && !submit.hidden && ($('#user-creds-oauth-code')?.value || '').trim()) submit.click();
   }, 0);
 });
 
-$('#byok-oauth-submit')?.addEventListener('click', async () => {
-  const isCodex = byokProvider === 'codex';
-  const code = ($('#byok-oauth-code')?.value || '').trim();
-  if (!byokOauthSessionId) return;
+$('#user-creds-oauth-submit')?.addEventListener('click', async () => {
+  const isCodex = userCredsProvider === 'codex';
+  const code = ($('#user-creds-oauth-code')?.value || '').trim();
+  if (!userCredsOauthSessionId) return;
   if (!isCodex && !code) return; // Claude needs the pasted code; Codex needs none.
-  const btn = $('#byok-oauth-submit');
+  const btn = $('#user-creds-oauth-submit');
   btn.disabled = true;
-  $('#byok-oauth-step2').hidden = true;
-  $('#byok-oauth-spinner').hidden = false; // spinner while connecting
-  const { subWord } = byokWords(byokProvider);
-  byokOauthStatus('Connecting…', '');
+  $('#user-creds-oauth-step2').hidden = true;
+  $('#user-creds-oauth-spinner').hidden = false; // spinner while connecting
+  const { subWord } = userCredsWords(userCredsProvider);
+  userCredsOauthStatus('Connecting…', '');
   try {
-    const finishUrl = isCodex ? '/api/byok/codex/finish' : '/api/byok/oauth/code';
+    const finishUrl = isCodex ? '/api/user-credentials/codex/finish' : '/api/user-credentials/oauth/code';
     const body = isCodex
-      ? { roomId: currentRoom, sessionId: byokOauthSessionId }
-      : { roomId: currentRoom, sessionId: byokOauthSessionId, code };
+      ? { roomId: currentRoom, sessionId: userCredsOauthSessionId }
+      : { roomId: currentRoom, sessionId: userCredsOauthSessionId, code };
     const r = await authFetch(finishUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
@@ -2846,14 +2989,14 @@ $('#byok-oauth-submit')?.addEventListener('click', async () => {
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.statusText);
-    byokOauthSessionId = null;
+    userCredsOauthSessionId = null;
     showToast(`Connected your ${subWord}.`, { kind: 'success' });
-    $('#byok-oauth-modal').hidden = true;
-    await updateByokBanner(currentRoom);
+    $('#user-creds-oauth-modal').hidden = true;
+    await updateUserCredsBanner(currentRoom);
   } catch (err) {
-    $('#byok-oauth-spinner').hidden = true;
-    $('#byok-oauth-step2').hidden = false; // restore so they can retry
-    byokOauthStatus(err.message || 'Could not connect.', 'error');
+    $('#user-creds-oauth-spinner').hidden = true;
+    $('#user-creds-oauth-step2').hidden = false; // restore so they can retry
+    userCredsOauthStatus(err.message || 'Could not connect.', 'error');
   } finally {
     btn.disabled = false;
   }
@@ -3646,6 +3789,13 @@ function acceptMention(input) {
  * styling tells the user "this looks like a mention." Server-side matching
  * is what actually decides routing.
  */
+// Map a mention handle (folder/slug) to its wired agent's colour, matching the
+// per-name tint used on a2a labels. Humans / unknown handles → null (default chip).
+function mentionAgentColor(handle) {
+  const a = (wiredAgentsForCurrentRoom || []).find((x) => (x.folder || '').toLowerCase() === handle);
+  return a && a.name ? agentColor(a.name) : null;
+}
+
 function decorateMentions(bubble) {
   const walker = document.createTreeWalker(bubble, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
@@ -3676,7 +3826,16 @@ function decorateMentions(bubble) {
       if (fullStart > last) frag.appendChild(document.createTextNode(txt.slice(last, fullStart)));
       const span = document.createElement('span');
       span.className = 'mention';
-      if (myHandle && m[2].toLowerCase() === myHandle) span.classList.add('mention-me');
+      const handle = m[2].toLowerCase();
+      if (myHandle && handle === myHandle) {
+        // A mention of me keeps the distinct self-highlight (warning tint).
+        span.classList.add('mention-me');
+      } else {
+        // A mention of a wired agent is tinted in that agent's colour (the same
+        // hash palette as a2a labels), so @code-reviewer reads in its colour.
+        const color = mentionAgentColor(handle);
+        if (color) span.style.background = color;
+      }
       span.textContent = `@${m[2]}`;
       frag.appendChild(span);
       last = fullStart + 1 + m[2].length;
@@ -4265,6 +4424,19 @@ function renderTopology(data) {
   const drawNode = (x, yMap, item, kind, degree, stroke) => {
     const y = yPx(yMap, item.id);
     const g = svgEl('g', { class: `topo-node topo-${kind}${degree === 0 ? ' topo-orphan' : ''}` });
+    // Click a node to open that item's settings drawer (overlays the graph;
+    // closing it returns here). Keyboard-accessible too.
+    g.style.cursor = 'pointer';
+    g.setAttribute('role', 'button');
+    g.setAttribute('tabindex', '0');
+    g.setAttribute('aria-label', `Open ${kind} settings: ${item.name}`);
+    g.addEventListener('click', () => openTopologyItem(kind, item.id));
+    g.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        openTopologyItem(kind, item.id);
+      }
+    });
     const c = svgEl('circle', { cx: x, cy: y, r: NODE_X });
     // Match the room node to its edge color (skip orphans — they keep the
     // red-dashed "unused" treatment).
@@ -4280,6 +4452,26 @@ function renderTopology(data) {
   for (const m of models) drawNode(cols.model, modelY, m, 'model', (modelAgents.get(m.id) || []).length);
 
   canvas.appendChild(svg);
+}
+
+// Open the settings drawer for a clicked topology node. The detail drawers are
+// fixed overlays (z-index 110), so they layer over the graph and closing one
+// returns here. fetchAgents/fetchModels are lazy so the lookup data exists even
+// when the user jumped straight to the topology view.
+async function openTopologyItem(kind, id) {
+  try {
+    if (kind === 'room') {
+      await openRoomDetail(id);
+    } else if (kind === 'agent') {
+      if (!allAgents.length) await fetchAgents();
+      await openAgentDetail(id);
+    } else if (kind === 'model') {
+      if (!allModels.length) await fetchModels();
+      await openModelDetail(id);
+    }
+  } catch (err) {
+    showToast('Couldn’t open settings: ' + (err?.message || err), { kind: 'error' });
+  }
 }
 
 // ── Wiring matrix (rooms × agents management console) ──────────────────────
@@ -5910,7 +6102,7 @@ async function openRoomDetail(roomId) {
 
   await refreshRoomWiredAgents(roomId);
 
-  // BYOK credential-mode selector — admin/owner only (canArchive implies that).
+  // UserCreds credential-mode selector — admin/owner only (canArchive implies that).
   const credSection = $('#room-credential-mode-section');
   if (credSection) {
     if (room && room.canArchive) {
@@ -5918,8 +6110,8 @@ async function openRoomDetail(roomId) {
       // Clear any prior room's selection FIRST so a failed/mismatched fetch can't
       // leave the previous room's mode showing as this room's policy.
       document
-        .querySelectorAll('input[name="room-credential-mode"]')
-        .forEach((el) => ((el).checked = false));
+        .querySelectorAll('#room-credential-modes .setting-option')
+        .forEach((b) => b.classList.remove('active'));
       const hintEl = $('#room-cred-default-hint');
       if (hintEl) hintEl.textContent = '';
       authFetch(`/api/rooms/${encodeURIComponent(roomId)}/credential-mode`)
@@ -5929,11 +6121,15 @@ async function openRoomDetail(roomId) {
             if (hintEl) hintEl.textContent = '(couldn’t load — try reopening)';
             return;
           }
-          // d.mode is the per-room override ('inherit' when unset); d.defaultMode
-          // is the workspace default shown on the Default option.
-          const radio = document.querySelector(`input[name="room-credential-mode"][value="${d.mode}"]`);
-          if (radio) radio.checked = true;
-          if (hintEl) hintEl.textContent = d.defaultMode ? `(${d.defaultMode})` : '';
+          // No explicit override → the room follows the workspace default: highlight
+          // that value and note the inheritance. An explicit pick highlights itself.
+          const effective = d.mode === 'inherit' ? d.defaultMode : d.mode;
+          document
+            .querySelectorAll('#room-credential-modes .setting-option')
+            .forEach((b) => b.classList.toggle('active', b.dataset.value === effective));
+          if (hintEl)
+            hintEl.textContent =
+              d.mode === 'inherit' ? `Following the workspace default (${d.defaultMode ?? 'off'}).` : '';
         })
         .catch(() => {
           if (hintEl) hintEl.textContent = '(couldn’t load — try reopening)';
@@ -6302,25 +6498,31 @@ $('#room-name').addEventListener('keydown', (e) => {
 });
 $('#room-detail-close').addEventListener('click', closeRoomDetail);
 $('#room-delete').addEventListener('click', deleteCurrentRoom);
-$('#room-credential-modes')?.addEventListener('change', async (e) => {
-  if (!selectedRoomId || e.target.name !== 'room-credential-mode') return;
-  const mode = e.target.value;
+$('#room-credential-modes')?.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.setting-option');
+  if (!btn || !selectedRoomId) return;
+  const mode = btn.dataset.value; // disabled | optional | required (explicit override)
   const r = await authFetch(`/api/rooms/${encodeURIComponent(selectedRoomId)}/credential-mode`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
     body: JSON.stringify({ mode }),
   });
   if (r.ok) {
-    const label =
-      { inherit: 'workspace default', disabled: 'off', optional: 'optional', required: 'required' }[mode] ?? mode;
-    showToast(`Member credentials: ${label}.`, { kind: 'success' });
-    if (selectedRoomId === currentRoom) updateByokBanner(currentRoom);
+    document
+      .querySelectorAll('#room-credential-modes .setting-option')
+      .forEach((b) => b.classList.toggle('active', b === btn));
+    // Picking a pill sets an explicit override, so it's no longer inheriting.
+    const hintEl = $('#room-cred-default-hint');
+    if (hintEl) hintEl.textContent = '';
+    const label = { disabled: 'off', optional: 'optional', required: 'required' }[mode] ?? mode;
+    showToast(`User credentials: ${label}.`, { kind: 'success' });
+    if (selectedRoomId === currentRoom) updateUserCredsBanner(currentRoom);
   } else {
     const err = await r.json().catch(() => ({}));
     showToast('Failed to set mode: ' + (err.error || r.statusText), { kind: 'error' });
   }
 });
-// Per-room credential TYPES moved to Settings → Member credentials (global); the
+// Per-room credential TYPES moved to Settings → User credentials (global); the
 // room only sets the mode override above.
 $('#room-rename-save')?.addEventListener('click', saveRoomName);
 $('#room-rename-input')?.addEventListener('keydown', (e) => {

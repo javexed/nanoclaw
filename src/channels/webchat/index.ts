@@ -42,6 +42,7 @@ import { randomUUID } from 'crypto';
 import { log } from '../../log.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { createMessagingGroup, getMessagingGroup, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
+import { registerContainerConfigAugmentor } from '../../container-runtime.js';
 import { registerChannelAdapter } from '../channel-registry.js';
 import type { AgentActivityStatus, ChannelAdapter, ChannelSetup, OutboundMessage } from '../adapter.js';
 import { redactSensitiveData } from './redact.js';
@@ -51,6 +52,7 @@ import {
   APPROVAL_INBOX_PREFIX,
   deleteWebchatApprovalIndex,
   findActiveAgentForWebchatRoom,
+  getAssignedModelForAgent,
   getWebchatApprovalInboxes,
   getWebchatRoom,
   isApprovalInbox,
@@ -385,6 +387,15 @@ registerChannelAdapter('webchat', {
 // set (auto-engaging @mentioned agents) instead of per-wiring engage_mode. The
 // regular chat and non-webchat groups are untouched (resolver returns null).
 setEngagedResolver(resolveEngagedDecision);
+
+// Lenient output for ollama-backed groups: a small local model rarely emits the
+// <message to="..."> envelope the runner requires, so its replies would be
+// dropped as scratchpad and the room would stay silent. Flag the group's
+// container.json so the runner delivers unwrapped prose to the origin room
+// instead. Claude/anthropic groups are unaffected (strict protocol preserved).
+registerContainerConfigAugmentor((agentGroupId) =>
+  getAssignedModelForAgent(agentGroupId)?.kind === 'ollama' ? { lenientOutput: true } : {},
+);
 
 // Fan-out cleanup: when an approval resolves (first responder approves/rejects),
 // push an `approval_resolved` event to every other admin whose inbox got a copy

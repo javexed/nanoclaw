@@ -25,6 +25,19 @@ vi.mock('../../session-manager.js', () => ({
   openOutboundDb: () => new Database(OUT_PATH, { readonly: true }),
 }));
 
+// Controls reconcileStaleBubble: true = a live container (real bubble, no clear).
+let containerRunning = true;
+vi.mock('../../container-runner.js', () => ({
+  isContainerRunning: () => containerRunning,
+}));
+
+// Agent-name lookup is incidental to status forwarding; stub it so the test
+// needs no central DB (otherwise getAgentGroup throws "Database not initialized"
+// when this file runs in isolation).
+vi.mock('../../db/agent-groups.js', () => ({
+  getAgentGroup: () => ({ id: 'ag-1', name: 'TestAgent' }),
+}));
+
 import { forwardSessionStatus, notifySessionStopped, setStatusAdapter, stopSessionStatus } from './index.js';
 
 function seedDb(): void {
@@ -74,6 +87,7 @@ function stubAdapter() {
 
 beforeEach(() => {
   messagingGroup = mgRow;
+  containerRunning = true; // default: a live container, so reconcile stays quiet
   seedDb();
   stubAdapter();
   stopSessionStatus('sess-1'); // reset watermark between tests
@@ -170,6 +184,44 @@ describe('notifySessionStopped (mid-turn death)', () => {
     await forwardSessionStatus(session); // seed, no start
     captured.length = 0;
     await notifySessionStopped(session);
+    expect(captured).toHaveLength(0);
+  });
+});
+
+describe('reconcileStaleBubble (stuck/orphaned bubble)', () => {
+  it('clears an orphaned bubble when the last event is not done and the container is gone', async () => {
+    append('tool', 'Read', 'a.ts');
+    await forwardSessionStatus(session); // first sight → seed; container running → no clear
+    expect(captured).toHaveLength(0);
+
+    containerRunning = false; // container died mid-turn — 'done' never written
+    await forwardSessionStatus(session); // no new events, but reconcile fires a synthetic done
+    expect(captured.map((c) => c.status.kind)).toEqual(['done']);
+  });
+
+  it('stays quiet while the container is still running (a real in-flight bubble)', async () => {
+    append('tool', 'Read');
+    await forwardSessionStatus(session); // seed
+    append('reasoning', 'thinking');
+    await forwardSessionStatus(session); // forwards reasoning; running → no synthetic done
+    expect(captured.map((c) => c.status.kind)).toEqual(['reasoning']);
+  });
+
+  it('clears at most once until a new turn starts', async () => {
+    append('tool', 'Read');
+    await forwardSessionStatus(session); // seed
+    containerRunning = false;
+    await forwardSessionStatus(session); // → done
+    await forwardSessionStatus(session); // already cleared → nothing more
+    expect(captured.filter((c) => c.status.kind === 'done')).toHaveLength(1);
+  });
+
+  it('does not clear a cleanly-finished turn (last event is done)', async () => {
+    append('start', null);
+    append('done', null);
+    await forwardSessionStatus(session); // seed (forwards nothing)
+    containerRunning = false;
+    await forwardSessionStatus(session); // last event is done → no synthetic done
     expect(captured).toHaveLength(0);
   });
 });

@@ -131,16 +131,18 @@ rm -rf \
   container/agent-runner/src/providers/summarize-thinking.test.ts \
   src/onecli-preflight.ts \
   src/onecli-preflight.test.ts \
-  src/modules/byok \
+  src/modules/user-credentials \
   src/db/migrations/020-byok-credentials.ts \
   src/db/migrations/021-byok-oauth.ts \
   src/db/migrations/022-byok-provider.ts \
   src/db/migrations/023-byok-user-credentials.ts \
+  src/db/migrations/024-rename-user-credentials.ts \
   setup/get-oauth-token.sh \
-  docs/design/byok.md \
-  docs/design/byok-oauth.md \
+  docs/design/user-credentials.md \
+  docs/design/user-credentials-oauth.md \
   docs/design/webchat-threads.md \
-  docs/design/webchat-threads-qa.md
+  docs/design/webchat-threads-qa.md \
+  docs/design/thread-engaged-agents.md
 
 # ── 4. Unwire the channels barrel ────────────────────────────────────────
 if grep -qF "'./webchat/index.js'" src/channels/index.ts; then

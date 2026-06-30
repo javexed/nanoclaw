@@ -1,5 +1,5 @@
 /**
- * Phase 1: the session-key resolver. In a BYOK room a member who has CONNECTED a
+ * Phase 1: the session-key resolver. In a UserCreds room a member who has CONNECTED a
  * credential (user-level, applies to every same-provider room) gets a per-member
  * session keyed by userId; everyone else / every other room is unchanged
  * (null → shared session). Enrollment in a given room is then lazy.
@@ -10,9 +10,9 @@ import { initTestDb, closeDb, getDb } from '../../db/connection.js';
 import { runMigrations } from '../../db/migrations/index.js';
 import { resolveSessionKeyOverride } from '../../session-manager.js';
 import { resolveAgentIdentity } from '../../container-runtime.js';
-import { setRoomModeOverride, setCredentialsConfig, setRoomOauthAllowed } from '../../channels/webchat/db.js';
+import { setRoomModeOverride, setCredentialsConfig } from '../../channels/webchat/db.js';
 import { upsertUserCredential, setUserCredentialStatus } from './db.js';
-import { byokAgentIdentifier } from './identity.js';
+import { userCredsAgentIdentifier } from './identity.js';
 import './index.js'; // registers the resolvers
 
 const webchatMg = (platformId: string) => ({
@@ -28,8 +28,8 @@ beforeEach(() => {
 });
 afterEach(() => closeDb());
 
-describe('byok session-key resolver', () => {
-  it('connected member in a BYOK room → per-member session keyed by userId', () => {
+describe('userCreds session-key resolver', () => {
+  it('connected member in a UserCreds room → per-member session keyed by userId', () => {
     setRoomModeOverride('room-1', 'required');
     upsertUserCredential('webchat:alice', 'claude', 'sec-1', 'api_key');
     expect(resolveSessionKeyOverride(webchatMg('room-1'), 'ag-1', 'webchat:alice')).toEqual({
@@ -55,29 +55,15 @@ describe('byok session-key resolver', () => {
     expect(resolveSessionKeyOverride(webchatMg('room-x'), 'ag-1', 'webchat:alice')).toBeNull(); // room-x has no row → disabled
   });
 
-  it('OAuth-only room (mode disabled, oauth_allowed) + connected member → per-member session', () => {
-    // The load-bearing case: oauth must route even though credential_mode is 'disabled'.
-    // Requires BOTH gates: workspace accepts OAuth AND the room opted in.
-    setCredentialsConfig({ allowClaudeOauth: true }); // workspace accepts OAuth; room mode stays 'disabled'
-    setRoomOauthAllowed('room-1', true); // per-room gate 1
-    upsertUserCredential('webchat:alice', 'claude', 'sec-oat', 'oauth_token');
-    expect(resolveSessionKeyOverride(webchatMg('room-1'), 'ag-1', 'webchat:alice')).toEqual({
-      sessionMode: 'per-thread',
-      threadId: 'webchat:alice',
-    });
-    // A different member who hasn't connected, in an OAuth-only room → shared (no block).
-    expect(resolveSessionKeyOverride(webchatMg('room-1'), 'ag-1', 'webchat:bob')).toBeNull();
-  });
-
-  it('workspace allows OAuth but the room did NOT opt in (oauth_allowed=0) → no override', () => {
-    // The per-room gate: a disabled room that never enabled OAuth must not route a
-    // connected member, even though the workspace accepts Claude subscriptions.
-    setCredentialsConfig({ allowClaudeOauth: true }); // workspace-wide ON
-    // room-1 has no oauth_allowed row → defaults to 0 (not opted in)
+  it('disabled room does NOT route OAuth either — mode is the master gate over both methods', () => {
+    // User credentials Off = no UserCreds at all, even with workspace OAuth accepted
+    // AND a connected subscription. (The mode gates OAuth, not just API keys.)
+    setCredentialsConfig({ allowClaudeOauth: true });
+    setRoomModeOverride('room-1', 'disabled');
     upsertUserCredential('webchat:alice', 'claude', 'sec-oat', 'oauth_token');
     expect(resolveSessionKeyOverride(webchatMg('room-1'), 'ag-1', 'webchat:alice')).toBeNull();
-    // Opting the room in flips it on.
-    setRoomOauthAllowed('room-1', true);
+    // Turn the room on → the same connected OAuth member now routes per-member.
+    setRoomModeOverride('room-1', 'optional');
     expect(resolveSessionKeyOverride(webchatMg('room-1'), 'ag-1', 'webchat:alice')).toEqual({
       sessionMode: 'per-thread',
       threadId: 'webchat:alice',
@@ -93,7 +79,6 @@ describe('byok session-key resolver', () => {
 
   it('connected OAuth member stops routing when the workspace disables OAuth', () => {
     setRoomModeOverride('room-1', 'optional');
-    setRoomOauthAllowed('room-1', true); // room opted in
     upsertUserCredential('webchat:alice', 'claude', 'sec-oat', 'oauth_token');
     setCredentialsConfig({ allowClaudeOauth: true });
     expect(resolveSessionKeyOverride(webchatMg('room-1'), 'ag-1', 'webchat:alice')).toEqual({
@@ -118,10 +103,10 @@ describe('byok session-key resolver', () => {
   });
 });
 
-describe('byok agent-identity resolver (spawn)', () => {
-  it('per-member session of a connected member → the member BYOK identity', () => {
+describe('userCreds agent-identity resolver (spawn)', () => {
+  it('per-member session of a connected member → the member UserCreds identity', () => {
     upsertUserCredential('webchat:alice', 'claude', 'sec-1', 'api_key');
-    expect(resolveAgentIdentity('ag-1', 'webchat:alice')).toBe(byokAgentIdentifier('ag-1', 'webchat:alice'));
+    expect(resolveAgentIdentity('ag-1', 'webchat:alice')).toBe(userCredsAgentIdentifier('ag-1', 'webchat:alice'));
   });
   it('not connected / no thread → null (default agent-group identity)', () => {
     expect(resolveAgentIdentity('ag-1', 'webchat:bob')).toBeNull();

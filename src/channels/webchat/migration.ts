@@ -503,7 +503,7 @@ export const moduleWebchatRoomReads: Migration = {
 };
 
 /**
- * BYOK: per-room credential mode.
+ * UserCreds: per-room credential mode.
  *   disabled (default) — one shared session/agent; no per-member sessions.
  *   optional           — members with a connected key get their own per-member
  *                        session billed to them; others use the shared agent.
@@ -521,10 +521,10 @@ export const moduleWebchatRoomCredentialMode: Migration = {
 };
 
 /**
- * BYOK OAuth: per-room toggle allowing members to connect a Claude *subscription*
- * (OAuth) token, orthogonal to `credential_mode` (which governs API-key BYOK).
+ * UserCreds OAuth: per-room toggle allowing members to connect a Claude *subscription*
+ * (OAuth) token, orthogonal to `credential_mode` (which governs API-key UserCreds).
  * Off by default — a room never accepts OAuth tokens until an owner/admin opts
- * in. See docs/design/byok-oauth.md.
+ * in. See docs/design/user-creds-oauth.md.
  */
 export const moduleWebchatRoomOauthAllowed: Migration = {
   version: 109,
@@ -589,7 +589,7 @@ export const moduleWebchatRoomPins: Migration = {
 /**
  * Workspace-wide credentials policy + per-room mode inheritance.
  *
- * `webchat_settings` is a singleton (id=1) holding which member-credential TYPES
+ * `webchat_settings` is a singleton (id=1) holding which user-credential TYPES
  * the workspace accepts ({API key | OAuth} × {Claude | Codex}) and the default
  * room mode. Types are global so they're configured once, not per room. The
  * per-room control becomes an OVERRIDE: `credential_mode_override` is nullable —
@@ -714,6 +714,31 @@ export const moduleWebchatThreadEngaged: Migration = {
       );
       CREATE INDEX IF NOT EXISTS idx_webchat_engaged_thread
         ON webchat_thread_engaged(room_id, thread_id);
+    `);
+  },
+};
+
+/**
+ * Manual ordering for pinned rooms. Adds a per-user `position` to
+ * webchat_room_pins so the operator can drag pinned rooms into a fixed order
+ * (previously the pinned group auto-sorted by recent activity). Existing pins
+ * are backfilled 0-indexed by pinned_at (oldest pin at the top), a stable
+ * starting order; the room_id tiebreaker keeps it deterministic.
+ */
+export const moduleWebchatRoomPinOrder: Migration = {
+  version: 116,
+  name: 'webchat-room-pin-order',
+  up(db: Database.Database) {
+    db.exec(`
+      ALTER TABLE webchat_room_pins ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+      UPDATE webchat_room_pins
+         SET position = (
+           SELECT COUNT(*) FROM webchat_room_pins p2
+            WHERE p2.user_id = webchat_room_pins.user_id
+              AND (p2.pinned_at < webchat_room_pins.pinned_at
+                   OR (p2.pinned_at = webchat_room_pins.pinned_at
+                       AND p2.room_id < webchat_room_pins.room_id))
+         );
     `);
   },
 };

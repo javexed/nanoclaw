@@ -1,5 +1,5 @@
 /**
- * BYOK module — secure shared-room bring-your-own-key.
+ * UserCreds module — secure shared-room bring-your-own-key.
  *
  * Self-registers a session-key resolver so that, in a webchat room opted into
  * a non-disabled credential mode, a member who has connected their own
@@ -19,14 +19,14 @@ import { writeMemberTranscript } from './fanout.js';
 import { getDb, hasTable } from '../../db/connection.js';
 import { getContainerConfig } from '../../db/container-configs.js';
 import { registerApprovalAgentGroupFallback } from '../approvals/onecli-approvals.js';
-import { getEffectiveRoomMode, getCredentialsConfig, getEffectiveRoomOauthAllowed } from '../../channels/webchat/db.js';
-import { userHasConnectedCredential, getUserCredential, agentGroupForByokAgent, type ByokProvider } from './db.js';
+import { getEffectiveRoomMode, getCredentialsConfig } from '../../channels/webchat/db.js';
+import { userHasConnectedCredential, getUserCredential, agentGroupForUserCredsAgent, type UserCredsProvider } from './db.js';
 import { ensureGroupEnrollment } from './onboard.js';
 import { realOnecliAdmin } from './onecli-admin.js';
-import { byokAgentIdentifier } from './identity.js';
+import { userCredsAgentIdentifier } from './identity.js';
 
-/** The agent group's provider, mapped to the two BYOK-supported families. */
-function groupProvider(agentGroupId: string): ByokProvider {
+/** The agent group's provider, mapped to the two UserCreds-supported families. */
+function groupProvider(agentGroupId: string): UserCredsProvider {
   return getContainerConfig(agentGroupId)?.provider === 'codex' ? 'codex' : 'claude';
 }
 
@@ -38,23 +38,21 @@ function groupProvider(agentGroupId: string): ByokProvider {
 const OAUTH_SENTINEL = 'placeholder';
 
 registerSessionKeyResolver((mg, agentGroupId, userId) => {
-  // BYOK is webchat-only and opt-in per room. Fail safe to no override.
+  // UserCreds is webchat-only and opt-in per room. Fail safe to no override.
   if (mg.channel_type !== 'webchat' || !userId) return null;
   if (!hasTable(getDb(), 'webchat_room_settings')) return null;
-  // Effective mode = the room's override, else the global default. The API-key
-  // allowance is workspace-wide (Credentials admin page); the OAuth allowance is
-  // BOTH workspace-wide AND a per-room opt-in (gate 1) — see
-  // getEffectiveRoomOauthAllowed. All provider-scoped (Claude vs Codex).
+  // Effective mode = the room's override, else the global default. Which
+  // credential TYPES the workspace accepts (key / OAuth, per provider) is set on
+  // the Credentials admin page; the room's mode is the master switch over both.
   const provider = groupProvider(agentGroupId);
   const cfg = getCredentialsConfig();
   const mode = getEffectiveRoomMode(mg.platform_id);
-  const oauthAllowed = getEffectiveRoomOauthAllowed(mg.platform_id, provider);
-  const apiKeyAllowed = provider === 'codex' ? cfg.allowOpenaiKey : cfg.allowAnthropicKey;
-  // API keys apply only when the room is on AND the workspace accepts them;
-  // OAuth subscriptions apply in an OAuth-only room (mode='disabled') ONLY when
-  // that room has opted into OAuth (oauthAllowed already encodes the room gate).
-  const apiOffered = mode !== 'disabled' && apiKeyAllowed;
-  if (!apiOffered && !oauthAllowed) return null; // BYOK entirely off here.
+  // 'disabled' (User credentials: Off) means no UserCreds at all — neither key nor
+  // OAuth — regardless of what the workspace accepts. Otherwise each method
+  // applies if the workspace accepts it for this provider.
+  const apiOffered = mode !== 'disabled' && (provider === 'codex' ? cfg.allowOpenaiKey : cfg.allowAnthropicKey);
+  const oauthOffered = mode !== 'disabled' && (provider === 'codex' ? cfg.allowCodexOauth : cfg.allowClaudeOauth);
+  if (!apiOffered && !oauthOffered) return null; // UserCreds entirely off here.
 
   // A member gets their own per-member session ONLY if their connected credential
   // is still PERMITTED by current policy — so flipping an allowance off (or a
@@ -62,7 +60,7 @@ registerSessionKeyResolver((mg, agentGroupId, userId) => {
   // The per-(user,group) OneCLI agent is created lazily at spawn (prepare hook).
   const cred = getUserCredential(userId, provider);
   if (cred?.status === 'active') {
-    const permitted = cred.cred_type === 'oauth_token' ? oauthAllowed : apiOffered;
+    const permitted = cred.cred_type === 'oauth_token' ? oauthOffered : apiOffered;
     if (permitted) return { sessionMode: 'per-thread', threadId: userId };
   }
   // No permitted credential: API-key 'required' rooms decline with guidance;
@@ -80,7 +78,7 @@ registerSessionKeyResolver((mg, agentGroupId, userId) => {
 // the prepare hook below (which runs first), so this just names it.
 registerAgentIdentityResolver((agentGroupId, threadId) => {
   if (threadId && userHasConnectedCredential(threadId, groupProvider(agentGroupId))) {
-    return byokAgentIdentifier(agentGroupId, threadId);
+    return userCredsAgentIdentifier(agentGroupId, threadId);
   }
   return null;
 });
@@ -117,10 +115,10 @@ registerContainerEnvResolver((agentGroupId, threadId): Record<string, string> =>
   return { CLAUDE_CODE_OAUTH_TOKEN: OAUTH_SENTINEL, ANTHROPIC_API_KEY: '' };
 });
 
-// Approval routing: reverse a BYOK per-member identity back to its agent group
+// Approval routing: reverse a UserCreds per-member identity back to its agent group
 // so credentialed-action approvals from a member's container reach the group's
 // approvers.
-registerApprovalAgentGroupFallback((externalId) => agentGroupForByokAgent(externalId));
+registerApprovalAgentGroupFallback((externalId) => agentGroupForUserCredsAgent(externalId));
 
 // Shared context: on a per-member wake, write the full room transcript into the
 // member's session (current → trigger=1, rest → trigger=0).

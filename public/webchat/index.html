@@ -279,29 +279,29 @@
             <button id="handle-save" type="button" class="btn btn-secondary">Save</button>
           </div>
           <p id="handle-status" class="handle-status" hidden></p>
-          <!-- Member credentials shortcut — shown only when the open room offers BYOK.
+          <!-- User credentials shortcut — shown only when the open room offers UserCreds.
                A discoverability surface for the connect flow that also lives in the
                in-room banner; acts on the currently open room. -->
           <div id="handle-creds" class="handle-creds" hidden>
             <div class="handle-creds-divider"></div>
             <div class="handle-creds-row">
-              <span id="handle-creds-status" class="handle-creds-status">Member credentials</span>
+              <span id="handle-creds-status" class="handle-creds-status">User credentials</span>
               <button id="handle-creds-action" type="button" class="btn btn-secondary">Connect</button>
             </div>
           </div>
         </div>
         <div id="connection-banner" class="connection-banner">Connection lost. Reconnecting…</div>
-        <div id="byok-banner" class="byok-banner" hidden>
+        <div id="user-creds-banner" class="user-creds-banner" hidden>
           <input
-            id="byok-key-input"
+            id="user-creds-key-input"
             type="password"
             placeholder="sk-ant-…"
             autocomplete="off"
             spellcheck="false"
             hidden
           />
-          <button id="byok-oauth-btn" type="button" hidden>Connect to Claude</button>
-          <button id="byok-connect-btn" type="button" class="secondary">API key</button>
+          <button id="user-creds-oauth-btn" type="button" hidden>Connect to Claude</button>
+          <button id="user-creds-connect-btn" type="button" class="secondary">API key</button>
         </div>
         <div id="chat-body">
           <div id="chat-content">
@@ -501,31 +501,24 @@
                     <button type="button" id="room-rename-save" class="btn btn-secondary">Save</button>
                   </span>
                 </label>
-                <!-- BYOK enablement (owner/admin only; shown by openRoomDetail when room.canArchive). -->
+                <!-- In-room user credentials (owner/admin only; shown by openRoomDetail when
+                     room.canArchive). Mirrors Settings → User credentials, but only the mode
+                     (Off/Optional/Required). Credential TYPES (Claude/Codex, key vs OAuth) are
+                     workspace-admin-only in Settings and inherited by every room. -->
                 <div id="room-credential-mode-section" class="room-cred-section" hidden>
-                  <h4 class="room-cred-title">Member credentials</h4>
-                  <div
-                    id="room-credential-modes"
-                    class="room-cred-modes"
-                    role="radiogroup"
-                    aria-label="Member credential mode"
-                  >
-                    <label class="room-cred-opt">
-                      <input type="radio" name="room-credential-mode" value="inherit" />
-                      <span>Default <span id="room-cred-default-hint" class="cred-hint"></span></span>
-                    </label>
-                    <label class="room-cred-opt">
-                      <input type="radio" name="room-credential-mode" value="disabled" />
-                      <span>Off</span>
-                    </label>
-                    <label class="room-cred-opt">
-                      <input type="radio" name="room-credential-mode" value="optional" />
-                      <span>Optional</span>
-                    </label>
-                    <label class="room-cred-opt">
-                      <input type="radio" name="room-credential-mode" value="required" />
-                      <span>Required</span>
-                    </label>
+                  <div class="setting-group">
+                    <span class="setting-label">User credentials</span>
+                    <div
+                      id="room-credential-modes"
+                      class="setting-options"
+                      role="group"
+                      aria-label="Member credential mode"
+                    >
+                      <button class="setting-option" type="button" data-value="disabled">Off</button>
+                      <button class="setting-option" type="button" data-value="optional">Optional</button>
+                      <button class="setting-option" type="button" data-value="required">Required</button>
+                    </div>
+                    <p class="setting-help" id="room-cred-default-hint"></p>
                   </div>
                 </div>
                 <div>
@@ -1040,7 +1033,7 @@
             </div>
             <!-- Workspace credentials policy — owner only (shown when canEdit). -->
             <div id="settings-credentials" class="settings-credentials" hidden>
-              <h3 class="settings-section-title">Member credentials</h3>
+              <h3 class="settings-section-title">User credentials</h3>
               <div class="setting-group">
                 <span class="setting-label">Default for new rooms</span>
                 <div class="setting-options" id="cred-default-mode">
@@ -1091,45 +1084,45 @@
       </div>
     </div>
     <!-- Member-credential sign-in (subscription OAuth browser-mint) — modal popup. -->
-    <div id="byok-oauth-modal" class="modal-overlay" hidden>
-      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="byok-oauth-title">
+    <div id="user-creds-oauth-modal" class="modal-overlay" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="user-creds-oauth-title">
         <div class="modal-header">
-          <span id="byok-oauth-title">Connect to Claude</span>
-          <button id="byok-oauth-close" class="members-close" type="button" aria-label="Close">
+          <span id="user-creds-oauth-title">Connect to Claude</span>
+          <button id="user-creds-oauth-close" class="members-close" type="button" aria-label="Close">
             <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
           </button>
         </div>
         <div class="modal-body">
-          <div class="byok-oauth-form">
-            <div id="byok-oauth-spinner" class="spinner" hidden aria-hidden="true"></div>
+          <div class="user-creds-oauth-form">
+            <div id="user-creds-oauth-spinner" class="spinner" hidden aria-hidden="true"></div>
             <!-- Revealed once the sign-in URL is ready (server mints the credential). -->
-            <div id="byok-oauth-step2" hidden>
+            <div id="user-creds-oauth-step2" hidden>
               <a
-                id="byok-oauth-link"
+                id="user-creds-oauth-link"
                 href="#"
                 target="_blank"
                 rel="noopener noreferrer"
-                class="btn btn-primary byok-oauth-open"
+                class="btn btn-primary user-creds-oauth-open"
                 >Open Claude sign-in ↗</a
               >
               <!-- Codex: enter this pairing code on the sign-in page, then approve. -->
-              <p id="byok-oauth-codex-code" class="byok-oauth-codex-code" hidden></p>
+              <p id="user-creds-oauth-codex-code" class="user-creds-oauth-codex-code" hidden></p>
               <!-- Claude: paste the code shown on the sign-in page. -->
-              <label id="byok-oauth-code-label" class="byok-oauth-code-label" for="byok-oauth-code"
+              <label id="user-creds-oauth-code-label" class="user-creds-oauth-code-label" for="user-creds-oauth-code"
                 >Then paste the code here</label
               >
               <input
-                id="byok-oauth-code"
+                id="user-creds-oauth-code"
                 type="text"
                 placeholder="Paste the code"
                 autocomplete="off"
                 spellcheck="false"
               />
             </div>
-            <div id="byok-oauth-status" class="byok-oauth-status" role="status" aria-live="polite" hidden></div>
-            <div class="byok-oauth-actions">
-              <button id="byok-oauth-submit" type="button" class="btn btn-primary" hidden>Connect</button>
-              <button id="byok-oauth-cancel" type="button" class="btn-cancel">Cancel</button>
+            <div id="user-creds-oauth-status" class="user-creds-oauth-status" role="status" aria-live="polite" hidden></div>
+            <div class="user-creds-oauth-actions">
+              <button id="user-creds-oauth-submit" type="button" class="btn btn-primary" hidden>Connect</button>
+              <button id="user-creds-oauth-cancel" type="button" class="btn-cancel">Cancel</button>
             </div>
           </div>
         </div>

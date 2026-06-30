@@ -13,7 +13,7 @@ export const CONTAINER_RUNTIME_BIN = 'docker';
 
 /**
  * Optional override for a session's OneCLI agent identity, registered by an
- * installed module (BYOK). Lets a per-member session spawn under the member's
+ * installed module (UserCreds). Lets a per-member session spawn under the member's
  * own OneCLI agent (so the gateway injects THEIR key) instead of the agent
  * group's default identity. Core ships with no resolver → identity stays
  * `agentGroup.id`. (threadId is the per-member session's key = the userId.)
@@ -33,7 +33,7 @@ export function resolveAgentIdentity(agentGroupId: string, threadId: string | nu
 
 /**
  * Extra container env vars contributed by an installed module for a specific
- * (agent group, session) — e.g. for a Claude-OAuth BYOK member, BYOK sets a
+ * (agent group, session) — e.g. for a Claude-OAuth UserCreds member, UserCreds sets a
  * sentinel CLAUDE_CODE_OAUTH_TOKEN (flips Claude Code into OAuth mode) and
  * BLANKS ANTHROPIC_API_KEY (so no stale x-api-key is sent). Anthropic traffic
  * still routes THROUGH the OneCLI gateway, which swaps the sentinel bearer for
@@ -55,8 +55,34 @@ export function resolveContainerEnv(agentGroupId: string, threadId: string | nul
 }
 
 /**
+ * Extra `container.json` fields contributed by installed modules for an agent
+ * group, merged into the materialized config at spawn (e.g. webchat sets
+ * `lenientOutput: true` when the group is wired to an ollama model). Following
+ * the architecture rule that all NanoClaw-specific config travels in
+ * container.json (read by the runner) rather than as `-e` env vars. Augmentors
+ * are composed (later registrations merge over earlier ones); core ships with
+ * none, so the result is `{}` and container.json is unchanged.
+ */
+type ContainerConfigAugmentor = (agentGroupId: string) => Record<string, unknown>;
+const containerConfigAugmentors: ContainerConfigAugmentor[] = [];
+export function registerContainerConfigAugmentor(fn: ContainerConfigAugmentor): void {
+  containerConfigAugmentors.push(fn);
+}
+export function resolveContainerConfigAugmentation(agentGroupId: string): Record<string, unknown> {
+  const merged: Record<string, unknown> = {};
+  for (const fn of containerConfigAugmentors) {
+    try {
+      Object.assign(merged, fn(agentGroupId));
+    } catch {
+      // An augmentor bug must never break spawning — skip its contribution.
+    }
+  }
+  return merged;
+}
+
+/**
  * Async pre-spawn hooks contributed by an installed module, run once just before
- * a session's container is spawned. BYOK uses this for lazy / just-in-time
+ * a session's container is spawned. UserCreds uses this for lazy / just-in-time
  * enrollment: the first time a connected member uses a room, the hook creates
  * the per-(member, group) OneCLI agent and assigns secrets, so identity/env
  * resolution below sees a ready agent. Must complete before identity resolution.

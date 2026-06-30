@@ -159,6 +159,11 @@ async function pollSweep(): Promise<void> {
     const sessions = getActiveSessions();
     for (const session of sessions) {
       await deliverSessionMessages(session);
+      // Also forward status here: pollActive only covers RUNNING sessions, so a
+      // session whose container exited mid-turn would never have its orphaned
+      // "thinking" bubble reconciled. The sweep (all active sessions) is where
+      // reconcileStaleBubble actually clears those ghosts.
+      await forwardSessionStatus(session);
     }
   } catch (err) {
     log.error('Sweep delivery poll error', { err });

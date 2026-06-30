@@ -23,9 +23,11 @@ import { annotateRoomsForUser } from './state.js';
 import {
   clearPinsForRoom,
   deleteWebchatRoom,
+  getPinnedPositionsForUser,
   getPinnedRoomIdsForUser,
   getRoomLastActivity,
   pinRoomForUser,
+  setPinnedOrderForUser,
   unpinRoomForUser,
 } from './db.js';
 
@@ -119,6 +121,62 @@ describe('pin/unpin', () => {
     pinRoomForUser('webchat:alice', 'room-1');
     expect(getPinnedRoomIdsForUser('webchat:alice').has('room-1')).toBe(true);
     expect(getPinnedRoomIdsForUser('webchat:bob').has('room-1')).toBe(false);
+  });
+});
+
+describe('pin ordering (manual drag order)', () => {
+  it('assigns each new pin the next position (appends to the bottom)', () => {
+    pinRoomForUser('webchat:alice', 'room-1');
+    pinRoomForUser('webchat:alice', 'room-2');
+    pinRoomForUser('webchat:alice', 'room-3');
+    const pos = getPinnedPositionsForUser('webchat:alice');
+    expect(pos.get('room-1')).toBe(0);
+    expect(pos.get('room-2')).toBe(1);
+    expect(pos.get('room-3')).toBe(2);
+  });
+
+  it('positions are per-user (each user starts at 0)', () => {
+    pinRoomForUser('webchat:alice', 'room-1');
+    pinRoomForUser('webchat:bob', 'room-9');
+    expect(getPinnedPositionsForUser('webchat:alice').get('room-1')).toBe(0);
+    expect(getPinnedPositionsForUser('webchat:bob').get('room-9')).toBe(0);
+  });
+
+  it('setPinnedOrderForUser rewrites positions to the given order', () => {
+    pinRoomForUser('webchat:alice', 'room-1'); // 0
+    pinRoomForUser('webchat:alice', 'room-2'); // 1
+    pinRoomForUser('webchat:alice', 'room-3'); // 2
+    setPinnedOrderForUser('webchat:alice', ['room-3', 'room-1', 'room-2']);
+    const pos = getPinnedPositionsForUser('webchat:alice');
+    expect(pos.get('room-3')).toBe(0);
+    expect(pos.get('room-1')).toBe(1);
+    expect(pos.get('room-2')).toBe(2);
+  });
+
+  it('reordering ignores ids the user has not pinned (no cross-user write)', () => {
+    pinRoomForUser('webchat:alice', 'room-1');
+    pinRoomForUser('webchat:bob', 'room-2');
+    // alice tries to order a room she hasn't pinned (bob's) — it's a no-op for it.
+    setPinnedOrderForUser('webchat:alice', ['room-2', 'room-1']);
+    expect(getPinnedPositionsForUser('webchat:alice').has('room-2')).toBe(false);
+    expect(getPinnedPositionsForUser('webchat:alice').get('room-1')).toBe(1);
+    // bob's pin is untouched.
+    expect(getPinnedPositionsForUser('webchat:bob').get('room-2')).toBe(0);
+  });
+
+  it('surfaces pin_position via annotateRoomsForUser, sortable client-side', () => {
+    accessibleRoom('room-1');
+    accessibleRoom('room-2');
+    grantOwner('webchat:owner');
+    pinRoomForUser('webchat:owner', 'room-1');
+    pinRoomForUser('webchat:owner', 'room-2');
+    setPinnedOrderForUser('webchat:owner', ['room-2', 'room-1']);
+    const rooms = annotateRoomsForUser('webchat:owner');
+    expect(rooms.find((r) => r.id === 'room-2')?.pin_position).toBe(0);
+    expect(rooms.find((r) => r.id === 'room-1')?.pin_position).toBe(1);
+    // Unpinned rooms report null.
+    accessibleRoom('room-3');
+    expect(annotateRoomsForUser('webchat:owner').find((r) => r.id === 'room-3')?.pin_position).toBeNull();
   });
 });
 

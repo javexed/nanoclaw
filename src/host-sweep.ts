@@ -38,6 +38,7 @@ import {
   getContainerState,
   getMessageForRetry,
   getProcessingClaims,
+  getStuckProcessingIds,
   markMessageFailed,
   retryWithBackoff,
   syncProcessingAcks,
@@ -333,9 +334,18 @@ function resetStuckProcessingRows(
   let useDb: Database.Database | null = writableOutDb ?? null;
   try {
     if (!useDb) useDb = openOutboundDbRw(session.agent_group_id, session.id);
+    // Capture the ids BEFORE clearing: these claims re-appear in
+    // getPendingMessages if their inbound status never advanced past 'pending',
+    // which is the double-answer path (a re-processed message id shows here first).
+    const orphanIds = getStuckProcessingIds(useDb);
     const cleared = deleteOrphanProcessingClaims(useDb);
     if (cleared > 0) {
-      log.info('Cleared orphan processing claims', { sessionId: session.id, cleared, reason });
+      log.info('Cleared orphan processing claims', {
+        sessionId: session.id,
+        cleared,
+        reason,
+        messageIds: orphanIds,
+      });
     }
   } catch (err) {
     log.warn('Failed to clear orphan processing claims', { sessionId: session.id, err });

@@ -519,7 +519,7 @@ export function setRoomEngageDefault(roomId: string, mode: EngageDefault): void 
     .run(roomId, mode, Date.now());
 }
 
-// ── BYOK: per-room credential mode ──
+// ── UserCreds: per-room credential mode ──
 export type CredentialMode = 'disabled' | 'optional' | 'required';
 
 /** Secure by default: rooms with no settings row read as 'disabled'. */
@@ -541,7 +541,7 @@ export function setRoomCredentialMode(roomId: string, mode: CredentialMode): voi
 }
 
 /**
- * BYOK OAuth per-room toggle (subscription tokens). Off by default; orthogonal
+ * UserCreds OAuth per-room toggle (subscription tokens). Off by default; orthogonal
  * to credential_mode. The column is absent until its migration runs, so read
  * defensively and treat any error/missing value as not-allowed.
  */
@@ -566,22 +566,8 @@ export function setRoomOauthAllowed(roomId: string, allowed: boolean): void {
     .run(roomId, allowed ? 1 : 0, Date.now());
 }
 
-/**
- * Effective OAuth allowance for a room — BOTH gates of the byok OAuth design must
- * hold: the workspace must accept this provider's subscription connections
- * (Credentials admin page) AND the room must have opted in (`oauth_allowed`,
- * default 0). The single source of truth shared by the in-room banner, the
- * session resolver, and the connect endpoints, so they can never diverge (the
- * room gate was previously checked in none of them).
- */
-export function getEffectiveRoomOauthAllowed(roomId: string, provider: 'claude' | 'codex'): boolean {
-  const cfg = getCredentialsConfig();
-  const workspaceAccepts = provider === 'codex' ? cfg.allowCodexOauth : cfg.allowClaudeOauth;
-  return workspaceAccepts && getRoomOauthAllowed(roomId);
-}
-
-// ── BYOK: workspace-wide credentials policy (singleton webchat_settings) ──
-// Which member-credential TYPES the workspace accepts + the default room mode.
+// ── UserCreds: workspace-wide credentials policy (singleton webchat_settings) ──
+// Which user-credential TYPES the workspace accepts + the default room mode.
 // Types live here (configured once) rather than per room.
 export interface CredentialsConfig {
   defaultMode: CredentialMode;
@@ -1565,15 +1551,24 @@ export function clearReadsForRoom(roomId: string): void {
 // Pins are per-(user, room), keyed on the trusted webchat user_id, so a pin
 // follows the user across devices (same model as read markers/hides).
 
-/** Pin a room for a user. Idempotent — re-pinning keeps the original pinned_at. */
+/**
+ * Pin a room for a user. Idempotent — re-pinning keeps the original pinned_at.
+ * A fresh pin lands at the BOTTOM of the user's pinned group (max position + 1)
+ * so it doesn't disturb an order the user has arranged.
+ */
 export function pinRoomForUser(userId: string, roomId: string, ts: number = Date.now()): void {
+  const next = (
+    getDb()
+      .prepare(`SELECT COALESCE(MAX(position) + 1, 0) AS n FROM webchat_room_pins WHERE user_id = ?`)
+      .get(userId) as { n: number }
+  ).n;
   getDb()
     .prepare(
-      `INSERT INTO webchat_room_pins (user_id, room_id, pinned_at)
-       VALUES (?, ?, ?)
+      `INSERT INTO webchat_room_pins (user_id, room_id, pinned_at, position)
+       VALUES (?, ?, ?, ?)
        ON CONFLICT(user_id, room_id) DO NOTHING`,
     )
-    .run(userId, roomId, ts);
+    .run(userId, roomId, ts, next);
 }
 
 export function unpinRoomForUser(userId: string, roomId: string): void {
@@ -1585,6 +1580,29 @@ export function getPinnedRoomIdsForUser(userId: string): Set<string> {
     room_id: string;
   }[];
   return new Set(rows.map((r) => r.room_id));
+}
+
+/** Per-user pinned room → manual sort position (lower = higher in the list). */
+export function getPinnedPositionsForUser(userId: string): Map<string, number> {
+  const rows = getDb()
+    .prepare(`SELECT room_id, position FROM webchat_room_pins WHERE user_id = ?`)
+    .all(userId) as { room_id: string; position: number }[];
+  return new Map(rows.map((r) => [r.room_id, r.position]));
+}
+
+/**
+ * Persist a user's pinned-room order. `orderedRoomIds` is the desired top-to-
+ * bottom order; each row's position is set to its index. Rows the user hasn't
+ * pinned are silently ignored (the UPDATE matches nothing), so a stale or
+ * hostile id can't create or reorder anyone else's pins.
+ */
+export function setPinnedOrderForUser(userId: string, orderedRoomIds: string[]): void {
+  const db = getDb();
+  const upd = db.prepare(`UPDATE webchat_room_pins SET position = ? WHERE user_id = ? AND room_id = ?`);
+  const tx = db.transaction((ids: string[]) => {
+    ids.forEach((roomId, i) => upd.run(i, userId, roomId));
+  });
+  tx(orderedRoomIds);
 }
 
 /** Drop a room's pins — called from deleteWebchatRoom's cascade. */
