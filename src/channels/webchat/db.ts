@@ -1410,13 +1410,6 @@ export function suggestAgentThread(params: {
   return { threadId: `agent:${a.folder}`, folder: a.folder, title: a.name };
 }
 
-/** Drop a room's thread registry + per-thread read markers (delete cascade). */
-export function clearThreadsForRoom(roomId: string): void {
-  const db = getDb();
-  db.prepare(`DELETE FROM webchat_thread_reads WHERE room_id = ?`).run(roomId);
-  db.prepare(`DELETE FROM webchat_threads WHERE room_id = ?`).run(roomId);
-}
-
 // ── Push subscriptions ──
 
 export function upsertWebchatPushSubscription(sub: Omit<WebchatPushSubscription, 'created_at'>): void {

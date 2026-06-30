@@ -1,6 +1,13 @@
 # Thread engaged agents (webchat)
 
-Status: **design / plan** — building on `integ/threads`. Webchat-scoped, but the
+Status: **built but DORMANT.** The subsystem (the `webchat_thread_engaged` table,
+`resolveEngagedDecision`, the `/engaged` routes, the `setEngagedResolver` router
+hook) is implemented and unit-tested but shipped OFF: `setEngagedResolver` is
+never called, so the engaged set has no routing effect, and the `/engaged` HTTP
+routes are gated behind `ENGAGED_AGENTS_ENABLED = false` (they fall through to
+404). Threads route mention-only, like the regular chat. To re-enable: flip
+`ENGAGED_AGENTS_ENABLED` AND add the `setEngagedResolver` wiring. The design
+below is the intended model for that future re-enable. Webchat-scoped, but the
 routing changes land in core host files that the webchat skill already hooks
 (see §13).
 
