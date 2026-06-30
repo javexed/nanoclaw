@@ -1815,7 +1815,9 @@ function renderThreadList() {
     const add = document.createElement('button');
     add.className = 'thread-add';
     add.type = 'button';
-    add.textContent = '+ New thread';
+    add.textContent = '+';
+    add.title = 'New thread';
+    add.setAttribute('aria-label', 'New thread');
     add.addEventListener('click', (e) => {
       e.stopPropagation();
       threadCreating = true;
