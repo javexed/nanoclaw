@@ -260,6 +260,13 @@
                one breadcrumb unit (the header itself is space-between). -->
           <div class="chat-title-group">
             <span id="room-name" role="button" tabindex="0" title="Room settings">Select a room</span>
+            <!-- Threads switcher — the in-room way to switch/create threads.
+                 The sidebar thread tree is hidden on mobile while in a room, so
+                 this header control is the mobile entry point (shown on mobile
+                 only; desktop has the sidebar tree). -->
+            <button id="thread-switch" class="thread-switch" type="button" hidden aria-label="Threads" title="Threads">
+              #
+            </button>
             <!-- Active-thread breadcrumb — shown only inside a topic thread. The
                  name is tinted with the thread's sidebar color. -->
             <span id="thread-crumb" class="thread-crumb" hidden>
