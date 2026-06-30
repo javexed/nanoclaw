@@ -1704,6 +1704,7 @@ async function loadThreadList(roomId) {
     roomThreads = Array.isArray(threads) ? threads : [];
     for (const t of roomThreads) if (t.unread && t.thread_id !== currentThread) threadUnread.add(t.thread_id);
     renderThreadList();
+    updateThreadSyncControls(); // refresh the breadcrumb title (covers rename + late load)
   } catch {
     roomThreads = [];
     renderThreadList();
@@ -1855,12 +1856,25 @@ function openThread(threadId) {
   updateThreadSyncControls();
 }
 
-// The pull/push controls only make sense inside a topic thread — the regular
-// chat ('main') is the trunk both directions sync against, so it has nothing of
-// its own to pull/push. See docs/design/webchat-thread-context-sync.md.
+// The breadcrumb + pull/push/delete controls only make sense inside a topic
+// thread — the main chat ('main') is the trunk both directions sync against, so
+// it has nothing of its own to pull/push. See webchat-thread-context-sync.md.
 function updateThreadSyncControls() {
-  const el = $('#thread-sync');
-  if (el) el.hidden = !(currentRoom && currentThread && currentThread !== 'main');
+  const inThread = !!(currentRoom && currentThread && currentThread !== 'main');
+  const sync = $('#thread-sync');
+  if (sync) sync.hidden = !inThread;
+  const crumb = $('#thread-crumb');
+  if (crumb) {
+    crumb.hidden = !inThread;
+    if (inThread) {
+      const thread = roomThreads.find((t) => t.thread_id === currentThread);
+      const nameEl = $('#thread-crumb-name');
+      if (nameEl) {
+        nameEl.textContent = thread ? thread.title : currentThread;
+        nameEl.style.setProperty('--thread-color', roomColor(currentThread));
+      }
+    }
+  }
 }
 
 async function createThread(title) {

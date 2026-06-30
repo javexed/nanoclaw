@@ -2049,6 +2049,37 @@ a.lightbox-btn {
   align-items: center;
   gap: 8px;
 }
+/* Room name › active-thread crumb › sync controls, kept together on the left
+   (the header is space-between, so without this group they'd splay apart). */
+.chat-title-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+/* Active-thread breadcrumb — room name › thread name, the thread tinted with
+   its sidebar color. Shown only inside a topic thread. */
+.thread-crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.thread-crumb[hidden] {
+  display: none;
+}
+.thread-crumb-sep {
+  color: var(--text-dim);
+  flex: none;
+}
+.thread-crumb-name {
+  color: var(--thread-color, var(--text));
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 28ch;
+}
 /* Thread context-sync controls — sit just right of the room name, shown only
    inside a topic thread. Icon-only siblings of the header chips. */
 .thread-sync {

@@ -250,26 +250,37 @@
           <button id="mobile-back" class="mobile-back" aria-label="Back to rooms">
             <svg class="icon" aria-hidden="true"><use href="#i-chevron-left"></use></svg>
           </button>
-          <span id="room-name" role="button" tabindex="0" title="Room settings">Select a room</span>
-          <!-- Thread context-sync + delete controls — shown only inside a topic
-               thread. Pull copies the main chat into this thread; push copies
-               this thread's messages up; delete removes the thread. See
-               webchat-thread-context-sync.md. -->
-          <div id="thread-sync" class="thread-sync" hidden>
-            <button id="thread-pull" class="thread-sync-btn" type="button" title="Pull main chat into this thread">
-              <svg class="icon" aria-hidden="true"><use href="#i-arrow-down"></use></svg>
-            </button>
-            <button id="thread-push" class="thread-sync-btn" type="button" title="Push this thread into main chat">
-              <svg class="icon" aria-hidden="true"><use href="#i-arrow-up"></use></svg>
-            </button>
-            <button
-              id="thread-delete"
-              class="thread-sync-btn thread-sync-btn--danger"
-              type="button"
-              title="Delete this thread"
-            >
-              <svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg>
-            </button>
+          <!-- Title group: room name › active-thread crumb, then the in-thread
+               sync/delete controls — kept together on the left so they read as
+               one breadcrumb unit (the header itself is space-between). -->
+          <div class="chat-title-group">
+            <span id="room-name" role="button" tabindex="0" title="Room settings">Select a room</span>
+            <!-- Active-thread breadcrumb — shown only inside a topic thread. The
+                 name is tinted with the thread's sidebar color. -->
+            <span id="thread-crumb" class="thread-crumb" hidden>
+              <svg class="icon thread-crumb-sep" aria-hidden="true"><use href="#i-chevron-right"></use></svg>
+              <span id="thread-crumb-name" class="thread-crumb-name"></span>
+            </span>
+            <!-- Thread context-sync + delete controls — shown only inside a topic
+                 thread. Pull copies the main chat into this thread; push copies
+                 this thread's messages up; delete removes the thread. See
+                 webchat-thread-context-sync.md. -->
+            <div id="thread-sync" class="thread-sync" hidden>
+              <button id="thread-pull" class="thread-sync-btn" type="button" title="Pull main chat into this thread">
+                <svg class="icon" aria-hidden="true"><use href="#i-arrow-down"></use></svg>
+              </button>
+              <button id="thread-push" class="thread-sync-btn" type="button" title="Push this thread into main chat">
+                <svg class="icon" aria-hidden="true"><use href="#i-arrow-up"></use></svg>
+              </button>
+              <button
+                id="thread-delete"
+                class="thread-sync-btn thread-sync-btn--danger"
+                type="button"
+                title="Delete this thread"
+              >
+                <svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg>
+              </button>
+            </div>
           </div>
           <div class="header-controls">
             <button id="members-toggle" class="members-toggle" hidden aria-label="Show room members">0</button>
