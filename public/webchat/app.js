@@ -1823,9 +1823,11 @@ function renderThreadList() {
     });
     li.appendChild(add);
   } else {
-    // Has threads → "+" sits at the bottom of the nested tree.
+    // Has threads → the "+" goes inline on the LAST thread row (right of its
+    // name), mirroring the no-threads case where it sits on the room row. No
+    // separate "+" line.
     const add = document.createElement('button');
-    add.className = 'thread-add';
+    add.className = 'thread-add-inline';
     add.type = 'button';
     add.textContent = '+';
     add.title = 'New thread';
@@ -1835,7 +1837,9 @@ function renderThreadList() {
       threadCreating = true;
       renderThreadList();
     });
-    host.appendChild(add);
+    const lastRow = host.lastElementChild;
+    if (lastRow) lastRow.appendChild(add);
+    else li.appendChild(add);
   }
 }
 
@@ -1913,7 +1917,13 @@ async function renameThreadPrompt(thread) {
 }
 
 async function deleteThreadConfirm(thread) {
-  if (!confirm(`Delete thread "${thread.title}"? Its messages and the agent's context for it are removed.`)) return;
+  const confirmed = await showConfirmModal({
+    title: 'Delete thread',
+    body: `Delete "${thread.title}"? Its messages and the agent's context for it are removed.`,
+    confirmLabel: 'Delete',
+    destructive: true,
+  });
+  if (!confirmed) return;
   try {
     const r = await authFetch(`/api/rooms/${encodeURIComponent(currentRoom)}/threads/${encodeURIComponent(thread.thread_id)}`, {
       method: 'DELETE',
