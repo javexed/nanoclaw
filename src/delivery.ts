@@ -65,7 +65,13 @@ export interface ChannelDeliveryAdapter {
      *  senderSessionId/senderAgentGroupId for a2a loop-back attribution. */
     source?: { sessionId: string; agentGroupId: string },
   ): Promise<string | undefined>;
-  setTyping?(channelType: string, platformId: string, threadId: string | null, instance?: string): Promise<void>;
+  setTyping?(
+    channelType: string,
+    platformId: string,
+    threadId: string | null,
+    instance?: string,
+    agentName?: string,
+  ): Promise<void>;
   sendStatus?(
     channelType: string,
     platformId: string,

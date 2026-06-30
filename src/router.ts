@@ -672,6 +672,7 @@ async function deliverToAgent(
     startTypingRefresh(
       session.id,
       session.agent_group_id,
+      agentGroup.name,
       event.channelType,
       event.platformId,
       event.threadId,

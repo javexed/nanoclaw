@@ -194,8 +194,10 @@ export interface ChannelAdapter {
   // Outbound delivery — returns the platform message ID if available
   deliver(platformId: string, threadId: string | null, message: OutboundMessage): Promise<string | undefined>;
 
-  // Optional
-  setTyping?(platformId: string, threadId: string | null): Promise<void>;
+  // Optional. `agentName` (when provided) is the display name of the agent that's
+  // actually typing — so multi-agent rooms can label the indicator with the real
+  // responder instead of the room's default agent.
+  setTyping?(platformId: string, threadId: string | null, agentName?: string): Promise<void>;
 
   /**
    * Push a fine-grained activity status for the agent's current turn (tool in

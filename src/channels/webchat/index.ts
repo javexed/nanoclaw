@@ -267,12 +267,14 @@ function createAdapter(): ChannelAdapter {
       return undefined;
     },
 
-    async setTyping(platformId): Promise<void> {
+    async setTyping(platformId, _threadId, agentName): Promise<void> {
       if (!server) return;
       server.broadcast(platformId, {
         type: 'typing',
         room_id: platformId,
-        identity: senderForRoom(platformId),
+        // Prefer the actual typing agent's name (multi-agent rooms); fall back to
+        // the room's default agent for older callers that don't pass it.
+        identity: agentName || senderForRoom(platformId),
         identity_type: 'agent',
         is_typing: true,
       });
