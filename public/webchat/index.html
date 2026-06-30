@@ -1028,53 +1028,83 @@
         </div>
         <div class="dash-body">
           <div class="help-content">
-            <p class="setting-help">How the pieces fit together.</p>
+            <p class="help-intro">How the pieces fit together.</p>
 
-            <h3 class="settings-section-title">Rooms</h3>
-            <p class="setting-help">
-              A room is a chat space. Each room is its own conversation — what you say in one room
-              doesn't show up in another. Pick a room from the sidebar to open it.
-            </p>
+            <div class="help-card">
+              <div class="help-card-head">
+                <svg class="icon" aria-hidden="true"><use href="#i-user"></use></svg>
+                <span class="help-card-title">Rooms</span>
+              </div>
+              <p>
+                A room is a chat space. Each room is its own conversation — what you say in one room
+                doesn't show up in another. Pick a room from the sidebar to open it.
+              </p>
+            </div>
 
-            <h3 class="settings-section-title">Agents</h3>
-            <p class="setting-help">
-              An agent is the assistant you're talking to — it has its own personality, workspace, and
-              memory. The same agent can be in several rooms at once: it keeps one shared memory across
-              them (tell it something in one room and it can recall it in another), but each room stays a
-              separate conversation.
-            </p>
+            <div class="help-card">
+              <div class="help-card-head">
+                <svg class="icon" aria-hidden="true"><use href="#i-bot"></use></svg>
+                <span class="help-card-title">Agents</span>
+              </div>
+              <p>
+                An agent is the assistant you're talking to — it has its own personality, workspace, and
+                memory. The same agent can be in several rooms at once: it keeps one shared memory across
+                them (tell it something in one room and it can recall it in another), but each room stays
+                a separate conversation.
+              </p>
+            </div>
 
-            <h3 class="settings-section-title">Models</h3>
-            <p class="setting-help">
-              Every agent runs on a model. By default that's Claude. From Models you can assign a
-              different model to an agent — including a local one running on your own hardware via Ollama.
-              The model only changes how the agent thinks; its memory and rooms stay the same.
-            </p>
+            <div class="help-card">
+              <div class="help-card-head">
+                <svg class="icon" aria-hidden="true"><use href="#i-cpu"></use></svg>
+                <span class="help-card-title">Models</span>
+              </div>
+              <p>
+                Every agent runs on a model. By default that's Claude. From Models you can assign a
+                different model to an agent — including a local one running on your own hardware via
+                Ollama. The model only changes how the agent thinks; its memory and rooms stay the same.
+              </p>
+            </div>
 
-            <h3 class="settings-section-title">Wiring rooms and agents</h3>
-            <p class="setting-help">
-              Wiring is the link between a room and an agent. A room can have one agent or several. With
-              one agent, it replies to everything. With several, star one in the room's settings to make
-              it the default that replies to every message; the others reply only when you @-mention them.
-            </p>
+            <div class="help-card">
+              <div class="help-card-head">
+                <svg class="icon" aria-hidden="true"><use href="#i-layout-dashboard"></use></svg>
+                <span class="help-card-title">Wiring rooms and agents</span>
+              </div>
+              <p>
+                Wiring is the link between a room and an agent. A room can have one agent or several. With
+                one agent, it replies to everything. With several, star one in the room's settings to make
+                it the default that replies to every message; the others reply only when you @-mention them.
+              </p>
+            </div>
 
-            <h3 class="settings-section-title">Pinning &amp; hiding rooms</h3>
-            <p class="setting-help">
-              Drag a room to the top of the sidebar to pin it; drag pinned rooms to reorder them. To tuck
-              a room away, choose Hide from its … menu — hidden rooms reappear with the "Show hidden"
-              toggle at the bottom of the list. Admins can also Archive a room, which removes it for
-              everyone.
-            </p>
+            <div class="help-card">
+              <div class="help-card-head">
+                <svg class="icon" aria-hidden="true"><use href="#i-pin"></use></svg>
+                <span class="help-card-title">Pinning &amp; hiding rooms</span>
+              </div>
+              <p>
+                Drag a room to the top of the sidebar to pin it; drag pinned rooms to reorder them (or use
+                Move up / Move down in a pinned room's … menu). To tuck a room away, choose Hide from its
+                … menu — hidden rooms reappear with the "Show hidden" toggle at the bottom of the list.
+                Admins can also Archive a room, which removes it for everyone.
+              </p>
+            </div>
 
-            <h3 class="settings-section-title">User credentials</h3>
-            <p class="setting-help">
-              By default an agent bills its work to the workspace's own account. A room owner can turn on
-              user credentials so each person connects their own Anthropic API key or Claude subscription
-              and their turns bill to their own account. Per room it's one of three modes: <b>off</b> (no
-              one connects a key), <b>optional</b> (connect one if you want), or <b>required</b> (you must
-              connect one to chat). When a room offers it, use the key icon in the room to connect or
-              disconnect — your key is never shown to the agent.
-            </p>
+            <div class="help-card">
+              <div class="help-card-head">
+                <svg class="icon" aria-hidden="true"><use href="#i-key"></use></svg>
+                <span class="help-card-title">User credentials</span>
+              </div>
+              <p>
+                By default an agent bills its work to the workspace's own account. A room owner can turn on
+                user credentials so each person connects their own Anthropic API key or Claude subscription
+                and their turns bill to their own account. Per room it's one of three modes: <b>off</b> (no
+                one connects a key), <b>optional</b> (connect one if you want), or <b>required</b> (you must
+                connect one to chat). When a room offers it, use the key icon in the room to connect or
+                disconnect — your key is never shown to the agent.
+              </p>
+            </div>
           </div>
         </div>
       </section>

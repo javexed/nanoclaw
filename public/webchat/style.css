@@ -775,7 +775,8 @@ body {
 #dash-back,
 #perms-exit,
 #topology-back,
-#matrix-back {
+#matrix-back,
+#help-back {
   display: inline-flex;
   align-items: center;
   background: none;
@@ -3485,15 +3486,46 @@ a.lightbox-btn {
 #help[hidden] {
   display: none;
 }
-/* Readable measure for the Help prose, centred in the full-view body. */
+/* Help reads as a stack of topic cards — the app's surface-card language (same
+   as agent/model rows) so it feels native, not like a pasted-in doc. */
 .help-content {
-  max-width: 60ch;
-  margin: 0 auto;
+  max-width: 640px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
-.help-content .settings-section-title {
-  margin-top: 22px;
+.help-intro {
+  margin: 0 0 2px;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
 }
-.help-content .setting-help {
+.help-card {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 8px);
+  padding: 14px 16px;
+}
+.help-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.help-card-head .icon {
+  width: 18px;
+  height: 18px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.help-card-title {
+  font-size: var(--fs-base);
+  font-weight: 600;
+  color: var(--text);
+}
+.help-card p {
+  margin: 0;
+  font-size: var(--fs-base);
+  color: var(--text-dim);
   line-height: 1.5;
 }
 .matrix-body {
