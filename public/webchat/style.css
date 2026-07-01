@@ -568,12 +568,74 @@ body {
   padding: 0 4px;
   font-size: 1.2rem;
   line-height: 1;
-  opacity: 0;
+  opacity: 1;
   transition: opacity 0.15s;
 }
-#room-list li:hover .room-kebab,
-#room-list li:focus-within .room-kebab {
-  opacity: 1;
+/* Row actions (kebab + new-thread "+") grouped in a right-anchored overlay.
+   On touch it stays in normal flow, always visible. On a hover-capable desktop
+   it's absolutely positioned so it takes NO flex space — the room name keeps its
+   full width and never reflows — and it fades in OVER the row's right edge on
+   hover/focus (or while its menu is open). The left-fading backdrop keeps the
+   name from showing through the buttons. */
+.room-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+@media (hover: hover) and (pointer: fine) {
+  .room-actions {
+    position: absolute;
+    right: 6px;
+    /* Anchor to the room-name line (= li padding-top), not the vertical centre
+       of the li — which grows tall when the thread tree expands below the row. */
+    top: 10px;
+    height: 1.2rem;
+    padding-left: 14px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s;
+    background: linear-gradient(to right, transparent, var(--surface2) 55%);
+  }
+  #room-list li:hover .room-actions,
+  #room-list li:focus-within .room-actions,
+  #room-list li:has(.room-menu) .room-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+/* Pinned rooms show a pin at rest. On desktop, anchor it on the right (out of
+   flex flow) so — like the hover actions — it never shifts the room name; hide
+   it on hover where the actions overlay takes that spot (its kebab offers
+   Unpin). On touch it stays in flow. */
+@media (hover: hover) and (pointer: fine) {
+  #room-list li .room-pin-indicator {
+    position: absolute;
+    right: 8px;
+    top: 10px;
+    height: 1.2rem;
+    margin-left: 0;
+    transition: opacity 0.15s;
+  }
+  #room-list li:hover .room-pin-indicator,
+  #room-list li:focus-within .room-pin-indicator,
+  #room-list li:has(.room-menu) .room-pin-indicator {
+    opacity: 0;
+    pointer-events: none;
+  }
+}
+/* The active room's in-tree "+" (on the last thread row when a room has threads)
+   sits below the row, clear of the actions overlay, so a plain opacity hide-
+   until-hover keeps it consistent with the row actions without covering it. */
+@media (hover: hover) and (pointer: fine) {
+  #room-list li .thread-list .thread-add-inline {
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  #room-list li:hover .thread-list .thread-add-inline,
+  #room-list li:focus-within .thread-list .thread-add-inline {
+    opacity: 1;
+  }
 }
 #room-list li .room-menu {
   position: absolute;
@@ -5507,9 +5569,22 @@ a.lightbox-btn {
 /* Left disclosure chevron on room rows that have topic threads — expands the
    thread list inline without entering the room. */
 .room-thread-toggle {
-  flex: 0 0 auto;
-  width: 16px;
-  margin-right: 4px;
+  /* Absolutely positioned in the row's left padding gutter so it never
+     participates in the flex layout — the room name stays at the same x whether
+     a room has threads or not, and it doesn't jump when a room becomes active
+     (#room-list li is position: relative). */
+  position: absolute;
+  left: 1px;
+  /* Anchor to the room-name line (= li padding-top), NOT the vertical centre of
+     the whole li — the li grows tall when its thread tree expands below the row,
+     which would otherwise drop the chevron down toward the threads. Height is one
+     name line so the glyph stays centred on the room name at any font size. */
+  top: 10px;
+  height: 1.2rem;
+  width: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   border: none;
   background: none;
   color: var(--text-dim);
@@ -5544,7 +5619,9 @@ a.lightbox-btn {
 .thread-row {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  /* No gap: the "#" glyph hugs the thread name exactly like a room row's
+     "#name" (trailing unread dot / kebab carry their own spacing). */
+  gap: 0;
   padding: 0.25rem 0.5rem;
   /* Spine carries the thread's identity hue (set inline via --thread-color,
      mirrors rooms' colored left bar); the active thread overrides to accent. */
@@ -5571,8 +5648,6 @@ a.lightbox-btn {
 }
 .thread-glyph {
   flex: 0 0 auto;
-  width: 0.85rem;
-  text-align: center;
   color: var(--text-dim);
 }
 .thread-row:hover .thread-glyph {
@@ -5593,9 +5668,11 @@ a.lightbox-btn {
   border-radius: var(--radius-pill);
   background: var(--accent);
   flex: 0 0 auto;
+  margin-left: 0.4rem;
 }
 .thread-kebab {
   flex: 0 0 auto;
+  margin-left: 0.25rem;
   border: none;
   background: none;
   color: var(--text-dim);
