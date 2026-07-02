@@ -6067,6 +6067,10 @@ async function openAgentDetail(id) {
   // Rooms this agent is wired to (assign / unassign).
   await loadAgentRooms(id);
 
+  // MCP servers wired to this agent (external tool servers).
+  resetAgentMcpForm();
+  renderAgentMcp(id);
+
   $('#agent-detail').hidden = false;
   $('#members-panel').hidden = true;
 }
@@ -6297,6 +6301,143 @@ $('#agent-add-room-toggle').addEventListener('click', async () => {
 });
 $('#agent-add-room-search').addEventListener('input', (e) => filterAssignRoomList(e.target.value));
 $('#agent-add-room-submit').addEventListener('click', assignSelectedRooms);
+
+// ── Per-agent MCP servers ───────────────────────────────────────────────────
+// Edits the agent group's mcp_servers config (external tool servers). The server
+// is admin-gated and never returns env/headers, so we only show name + target.
+
+function resetAgentMcpForm() {
+  $('#agent-mcp-add-form').hidden = true;
+  $('#agent-mcp-name').value = '';
+  $('#agent-mcp-command').value = '';
+  $('#agent-mcp-args').value = '';
+  $('#agent-mcp-url').value = '';
+  $('#agent-mcp-transport').value = 'stdio';
+  const err = $('#agent-mcp-error');
+  err.hidden = true;
+  err.textContent = '';
+  syncAgentMcpTransportFields();
+}
+
+// Swap the form fields: local process (command/args) vs remote server (url).
+function syncAgentMcpTransportFields() {
+  const remote = $('#agent-mcp-transport').value !== 'stdio';
+  $('#agent-mcp-command-label').hidden = remote;
+  $('#agent-mcp-args-label').hidden = remote;
+  $('#agent-mcp-url-label').hidden = !remote;
+}
+
+async function renderAgentMcp(agentId) {
+  const list = $('#agent-mcp-list');
+  list.innerHTML = '';
+  let servers = [];
+  try {
+    const res = await authFetch(`/api/agents/${encodeURIComponent(agentId)}/mcp`);
+    if (res.ok) servers = (await res.json()).servers || [];
+  } catch (err) {
+    console.error('Failed to load MCP servers:', err);
+  }
+  if (servers.length === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'agent-mcp-empty';
+    empty.textContent = 'No MCP servers — add one to give this agent extra tools';
+    list.appendChild(empty);
+    return;
+  }
+  for (const s of servers) {
+    const li = document.createElement('li');
+    li.className = 'agent-mcp-row';
+    const info = document.createElement('div');
+    info.className = 'agent-mcp-info';
+    const name = document.createElement('span');
+    name.className = 'agent-mcp-name';
+    name.textContent = s.name;
+    const meta = document.createElement('span');
+    meta.className = 'agent-mcp-meta';
+    meta.textContent = `${s.transport} · ${s.target}`;
+    info.append(name, meta);
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'agent-mcp-remove';
+    remove.setAttribute('aria-label', `Remove ${s.name}`);
+    remove.innerHTML = lucide('trash');
+    remove.addEventListener('click', () => removeAgentMcp(agentId, s.name));
+    li.append(info, remove);
+    list.appendChild(li);
+  }
+}
+
+async function removeAgentMcp(agentId, name) {
+  const ok = await showConfirmModal({
+    title: `Remove ${name}?`,
+    body: 'The agent loses these tools on its next message.',
+    confirmLabel: 'Remove',
+    destructive: true,
+  });
+  if (!ok) return;
+  try {
+    const res = await authFetch(`/api/agents/${encodeURIComponent(agentId)}/mcp/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    showToast(`Removed ${name}`, { kind: 'success' });
+    renderAgentMcp(agentId);
+  } catch (err) {
+    showToast('Remove failed: ' + (err.message || err), { kind: 'error' });
+  }
+}
+
+async function submitAgentMcp() {
+  const agentId = selectedAgentId;
+  if (!agentId) return;
+  const err = $('#agent-mcp-error');
+  err.hidden = true;
+  const showErr = (m) => {
+    err.textContent = m;
+    err.hidden = false;
+  };
+  const name = $('#agent-mcp-name').value.trim();
+  const transport = $('#agent-mcp-transport').value;
+  const body = { name };
+  if (transport === 'stdio') {
+    body.command = $('#agent-mcp-command').value.trim();
+    body.args = $('#agent-mcp-args')
+      .value.split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+  } else {
+    body.type = transport;
+    body.url = $('#agent-mcp-url').value.trim();
+  }
+  if (!name) return showErr('Name is required');
+  if (transport === 'stdio' && !body.command) return showErr('Command is required');
+  if (transport !== 'stdio' && !body.url) return showErr('URL is required');
+  const btn = $('#agent-mcp-add-submit');
+  btn.disabled = true;
+  try {
+    const res = await authFetch(`/api/agents/${encodeURIComponent(agentId)}/mcp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    showToast(`Added ${name}`, { kind: 'success' });
+    resetAgentMcpForm();
+    renderAgentMcp(agentId);
+  } catch (e) {
+    showErr(e.message || String(e));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$('#agent-mcp-add-toggle').addEventListener('click', () => {
+  const form = $('#agent-mcp-add-form');
+  form.hidden = !form.hidden;
+  if (!form.hidden) $('#agent-mcp-name').focus();
+});
+$('#agent-mcp-transport').addEventListener('change', syncAgentMcpTransportFields);
+$('#agent-mcp-add-submit').addEventListener('click', submitAgentMcp);
 
 // Save existing agent
 $('#agent-detail-form').addEventListener('submit', async (e) => {
