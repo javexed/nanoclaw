@@ -482,6 +482,61 @@
                   </button>
                 </div>
               </div>
+              <!-- MCP servers wired to this agent (external tool servers). A list
+                   plus an inline add form; the transport select swaps the fields
+                   between a local process (stdio) and a remote server (sse/http). -->
+              <div id="agent-mcp-section" class="agent-mcp-section">
+                <span class="form-label">MCP servers</span>
+                <ul id="agent-mcp-list" class="agent-mcp-list"></ul>
+                <button type="button" id="agent-mcp-add-toggle" class="btn btn-secondary">+ Add server</button>
+                <div id="agent-mcp-add-form" class="agent-mcp-add-form" hidden>
+                  <label>
+                    <span class="form-label">Name</span>
+                    <input
+                      type="text"
+                      id="agent-mcp-name"
+                      class="model-picker-search"
+                      placeholder="e.g. windows"
+                      autocomplete="off"
+                    />
+                  </label>
+                  <label>
+                    <span class="form-label">Transport</span>
+                    <select id="agent-mcp-transport" class="agent-mcp-select">
+                      <option value="stdio">Local process (stdio)</option>
+                      <option value="sse">Remote (SSE)</option>
+                      <option value="http">Remote (HTTP)</option>
+                    </select>
+                  </label>
+                  <label id="agent-mcp-command-label">
+                    <span class="form-label">Command</span>
+                    <input
+                      type="text"
+                      id="agent-mcp-command"
+                      class="model-picker-search"
+                      placeholder="e.g. mcp-remote"
+                      autocomplete="off"
+                    />
+                  </label>
+                  <label id="agent-mcp-args-label">
+                    <span class="form-label">Arguments (one per line)</span>
+                    <textarea id="agent-mcp-args" rows="2" placeholder="--flag&#10;value"></textarea>
+                  </label>
+                  <label id="agent-mcp-url-label" hidden>
+                    <span class="form-label">URL</span>
+                    <input
+                      type="text"
+                      id="agent-mcp-url"
+                      class="model-picker-search"
+                      placeholder="http://host:8000/sse"
+                      autocomplete="off"
+                    />
+                  </label>
+                  <p class="form-hint">Credentials go through the gateway — don't put keys here.</p>
+                  <p class="form-hint agent-mcp-error" id="agent-mcp-error" hidden></p>
+                  <button type="button" id="agent-mcp-add-submit" class="btn btn-primary">Add server</button>
+                </div>
+              </div>
             </div>
             <!-- Create mode (form) -->
             <div id="agent-create-view" hidden>

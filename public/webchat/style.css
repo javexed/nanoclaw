@@ -2774,6 +2774,86 @@ a.lightbox-btn {
   padding-top: 14px;
   border-top: 1px solid var(--border, rgba(255, 255, 255, 0.1));
 }
+.agent-mcp-section {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.agent-mcp-list {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.agent-mcp-empty {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  padding: 4px 2px;
+}
+.agent-mcp-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.agent-mcp-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.agent-mcp-name {
+  font-size: var(--fs-sm);
+  color: var(--text);
+  font-weight: 600;
+}
+.agent-mcp-meta {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-mcp-remove {
+  flex: 0 0 auto;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 2px;
+  display: flex;
+  align-items: center;
+}
+.agent-mcp-remove:hover {
+  color: var(--danger);
+}
+.agent-mcp-remove .icon {
+  width: 16px;
+  height: 16px;
+}
+.agent-mcp-add-form {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.agent-mcp-select {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--surface2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+}
+.agent-mcp-error {
+  color: var(--danger);
+}
 .room-wired-agents li {
   display: flex;
   align-items: center;

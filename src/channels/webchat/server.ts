@@ -265,7 +265,9 @@ import {
   getUserCredential,
   listEnrolledGroups,
 } from '../../modules/user-credentials/db.js';
-import { getContainerConfig } from '../../db/container-configs.js';
+import { getContainerConfig, updateContainerConfigJson } from '../../db/container-configs.js';
+import type { McpServerConfig } from '../../container-config.js';
+import { buildMcpServerConfig, validateMcpServerName } from '../../mcp-server-config.js';
 import { broadcast, broadcastRooms } from './state.js';
 import { setupWebSocket } from './ws.js';
 
@@ -1450,6 +1452,29 @@ async function handleHttp(
     if (!group) return json(res, 404, { error: 'Agent not found' });
     if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
     return assignAgentModelHandler(req, res, group.id);
+  }
+
+  // ── Per-agent MCP servers (list / add / remove) ────────────────────────
+  // Edits the agent group's container_configs.mcp_servers directly — the same
+  // field `ncl groups config add-mcp-server` writes and the container reads.
+  // Admin-gated (headers/env may hold credentials); the list response omits
+  // them. A change restarts the group's containers so the new config takes.
+  const agentMcpMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/mcp$/);
+  if (agentMcpMatch && (method === 'GET' || method === 'POST')) {
+    const group = resolveAgent(decodeURIComponent(agentMcpMatch[1]));
+    if (!group) return json(res, 404, { error: 'Agent not found' });
+    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+    if (method === 'GET') return listAgentMcpHandler(res, group.id);
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    return addAgentMcpHandler(req, res, group.id);
+  }
+  const agentMcpDeleteMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/mcp\/([^/]+)$/);
+  if (agentMcpDeleteMatch && method === 'DELETE') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const group = resolveAgent(decodeURIComponent(agentMcpDeleteMatch[1]));
+    if (!group) return json(res, 404, { error: 'Agent not found' });
+    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+    return removeAgentMcpHandler(res, group.id, decodeURIComponent(agentMcpDeleteMatch[2]));
   }
 
   // ── Lifecycle status (active | paused | archived) ──────────────────────
@@ -3511,6 +3536,73 @@ function reloadAgentModelEnv(agentGroupId: string, reason: string): void {
   } catch (err) {
     log.warn('Webchat: container restart after model change failed', { agentGroupId, reason, err });
   }
+}
+
+/** Restart a group's containers so an mcp_servers change is picked up at spawn. */
+function reloadAgentMcpServers(agentGroupId: string): void {
+  try {
+    const restarted = restartAgentGroupContainers(agentGroupId, 'Webchat MCP servers changed');
+    if (restarted > 0) log.info('Webchat: restarted containers after MCP change', { agentGroupId, restarted });
+  } catch (err) {
+    log.warn('Webchat: container restart after MCP change failed', { agentGroupId, err });
+  }
+}
+
+/** Summarise the group's configured MCP servers for the UI (no secrets). */
+function listAgentMcpHandler(res: ServerResponse, agentGroupId: string): void {
+  const row = getContainerConfig(agentGroupId);
+  const servers = row ? (JSON.parse(row.mcp_servers) as Record<string, McpServerConfig>) : {};
+  const list = Object.entries(servers).map(([name, cfg]) => ({
+    name,
+    transport: 'url' in cfg ? (cfg.type ?? 'sse') : 'stdio',
+    // Endpoint summary only — env/headers (which may hold credentials) are never returned.
+    target: 'url' in cfg ? cfg.url : cfg.command,
+  }));
+  return json(res, 200, { servers: list });
+}
+
+async function addAgentMcpHandler(req: IncomingMessage, res: ServerResponse, agentGroupId: string): Promise<void> {
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: Record<string, unknown>;
+  try {
+    body = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  let name: string;
+  let config: McpServerConfig;
+  try {
+    name = validateMcpServerName(body.name);
+    config = buildMcpServerConfig({
+      command: typeof body.command === 'string' ? body.command : undefined,
+      args: Array.isArray(body.args) ? body.args.map(String) : undefined,
+      env: body.env && typeof body.env === 'object' ? (body.env as Record<string, string>) : undefined,
+      url: typeof body.url === 'string' ? body.url : undefined,
+      type: typeof body.type === 'string' ? body.type : undefined,
+      headers: body.headers && typeof body.headers === 'object' ? (body.headers as Record<string, string>) : undefined,
+    });
+  } catch (err) {
+    return json(res, 400, { error: err instanceof Error ? err.message : 'Invalid MCP server' });
+  }
+  const row = getContainerConfig(agentGroupId);
+  if (!row) return json(res, 404, { error: 'Agent config not found' });
+  const servers = JSON.parse(row.mcp_servers) as Record<string, McpServerConfig>;
+  servers[name] = config;
+  updateContainerConfigJson(agentGroupId, 'mcp_servers', servers);
+  reloadAgentMcpServers(agentGroupId);
+  return json(res, 200, { ok: true, name });
+}
+
+function removeAgentMcpHandler(res: ServerResponse, agentGroupId: string, name: string): void {
+  const row = getContainerConfig(agentGroupId);
+  if (!row) return json(res, 404, { error: 'Agent config not found' });
+  const servers = JSON.parse(row.mcp_servers) as Record<string, McpServerConfig>;
+  if (!servers[name]) return json(res, 404, { error: 'MCP server not found' });
+  delete servers[name];
+  updateContainerConfigJson(agentGroupId, 'mcp_servers', servers);
+  reloadAgentMcpServers(agentGroupId);
+  return json(res, 200, { ok: true });
 }
 
 // ── Push subscriptions ──
