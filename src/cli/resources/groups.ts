@@ -1,4 +1,5 @@
 import type { McpServerConfig } from '../../container-config.js';
+import { buildMcpServerConfig, validateMcpServerName } from '../../mcp-server-config.js';
 import { buildAgentGroupImage, killContainer, wakeContainer } from '../../container-runner.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { getDb, hasTable } from '../../db/connection.js';
@@ -262,33 +263,20 @@ registerResource({
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
-        const name = args.name as string;
-        if (!name) throw new Error('--name is required');
-
-        const url = args.url as string | undefined;
-        const command = args.command as string | undefined;
-        if (url && command) throw new Error('pass either --url (remote) or --command (stdio), not both');
-        if (!url && !command) throw new Error('either --url (remote) or --command (stdio) is required');
+        const name = validateMcpServerName(args.name);
 
         const row = getContainerConfig(id);
         if (!row) throw new Error(`No container config for group: ${id}`);
 
         const servers = JSON.parse(row.mcp_servers) as Record<string, McpServerConfig>;
-        if (url) {
-          const type = (args.type as string) || 'sse';
-          if (type !== 'sse' && type !== 'http') throw new Error('--type must be sse or http');
-          servers[name] = {
-            type,
-            url,
-            headers: args.headers ? (JSON.parse(args.headers as string) as Record<string, string>) : {},
-          };
-        } else {
-          servers[name] = {
-            command: command as string,
-            args: args.args ? (JSON.parse(args.args as string) as string[]) : [],
-            env: args.env ? (JSON.parse(args.env as string) as Record<string, string>) : {},
-          };
-        }
+        servers[name] = buildMcpServerConfig({
+          command: args.command as string | undefined,
+          args: args.args ? (JSON.parse(args.args as string) as string[]) : undefined,
+          env: args.env ? (JSON.parse(args.env as string) as Record<string, string>) : undefined,
+          url: args.url as string | undefined,
+          type: args.type as string | undefined,
+          headers: args.headers ? (JSON.parse(args.headers as string) as Record<string, string>) : undefined,
+        });
         updateContainerConfigJson(id, 'mcp_servers', servers);
 
         return { added: name, servers };
