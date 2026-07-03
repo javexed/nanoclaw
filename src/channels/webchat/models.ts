@@ -19,6 +19,8 @@ import path from 'path';
 import dns from 'node:dns/promises';
 
 import { DATA_DIR } from '../../config.js';
+import { ensureContainerConfig, updateContainerConfigScalars } from '../../db/container-configs.js';
+import { getProviderContainerConfig } from '../../providers/provider-container-registry.js';
 import { log } from '../../log.js';
 import { getAssignedModelForAgent, type WebchatModel } from './db.js';
 
@@ -165,13 +167,38 @@ export async function assertSafeOutboundUrl(rawUrl: string): Promise<void> {
 }
 
 /**
+ * URL translation between the two perspectives an endpoint is used from.
+ *
+ * Operators register endpoints as reachable FROM THE HOST (that's where the
+ * probe and save-validation run); agent containers consume them FROM INSIDE
+ * DOCKER. `localhost`/`127.0.0.1` means a different machine in each place,
+ * and `host.docker.internal` only resolves inside containers (via the
+ * --add-host host-gateway alias every agent container gets).
+ */
+
+/** Container-facing form: loopback → host.docker.internal. For env writes. */
+export function containerReachableUrl(url: string): string {
+  return url.replace(/^(https?:\/\/)(localhost|127\.0\.0\.1)(?=[:/]|$)/, '$1host.docker.internal');
+}
+
+/** Host-facing form: host.docker.internal → 127.0.0.1. For host-side fetches. */
+export function hostReachableUrl(url: string): string {
+  return url.replace(/^(https?:\/\/)host\.docker\.internal(?=[:/]|$)/, '$1127.0.0.1');
+}
+
+/**
  * Drop-in fetch wrapper that runs assertSafeOutboundUrl first. Throws the
  * same errors fetch would for unreachable hosts plus our SSRF rejections.
  * Use this for ANY fetch where the URL came from operator input.
+ *
+ * Fetches run on the host, so the container-only alias is translated to
+ * loopback first — an operator can paste either form and both probe and
+ * save-validation just work.
  */
 export async function safeFetch(url: string, init?: RequestInit): Promise<Response> {
-  await assertSafeOutboundUrl(url);
-  return fetch(url, init);
+  const hostUrl = hostReachableUrl(url);
+  await assertSafeOutboundUrl(hostUrl);
+  return fetch(hostUrl, init);
 }
 
 // Curated list of currently-supported Anthropic model ids — used both as a
@@ -210,7 +237,7 @@ export function envForModel(model: WebchatModel | null): Record<string, string> 
     // `<endpoint>/v1/v1/messages` → 404, surfaced to the agent as
     // "issue with the selected model … may not exist". Verified against Ollama
     // 0.17 (qwen3-coder, llama3.2): bare → 200, `/v1` → 404.
-    const base = model.endpoint.replace(/\/+$/, '');
+    const base = containerReachableUrl(model.endpoint.replace(/\/+$/, ''));
     return {
       ANTHROPIC_BASE_URL: base,
       ANTHROPIC_MODEL: model.model_id,
@@ -222,7 +249,10 @@ export function envForModel(model: WebchatModel | null): Record<string, string> 
     // `agent_provider` to 'opencode'. With the default Claude SDK these
     // env vars are no-ops — the assignment is registered for later use.
     if (!model.endpoint) return {};
-    const base = model.endpoint.replace(/\/+$/, '');
+    // The env block is container-facing — a loopback endpoint (the operator's
+    // host-side view, e.g. a local LiteLLM router) must become the in-container
+    // alias or the container would call itself.
+    const base = containerReachableUrl(model.endpoint.replace(/\/+$/, ''));
     return {
       OPENAI_BASE_URL: base,
       OPENAI_MODEL: model.model_id,
@@ -282,6 +312,38 @@ export function writeAgentSettingsForAssignedModel(agentGroupId: string): void {
 
   const merged = { ...existing, env: { ...cleaned, ...overrides } };
   fs.writeFileSync(settingsPath, JSON.stringify(merged, null, 2) + '\n');
+}
+
+/**
+ * The agent provider a model kind requires. `openai-compatible` models are
+ * consumed by the OpenCode harness (installed via /add-opencode); every other
+ * kind (and no assignment) runs the default Claude provider.
+ */
+export function providerForModelKind(kind: string | null | undefined): 'opencode' | null {
+  return kind === 'openai-compatible' ? 'opencode' : null;
+}
+
+/** True when the OpenCode provider is installed (self-registered on import). */
+export function opencodeProviderInstalled(): boolean {
+  return getProviderContainerConfig('opencode') !== undefined;
+}
+
+/**
+ * Keep the agent group's provider in lockstep with its assigned model's kind.
+ *
+ * Assigning an `openai-compatible` model switches the group to the OpenCode
+ * provider; unassigning (or switching to an anthropic/ollama kind) reverts to
+ * the default Claude provider. Only `container_configs.provider` is written —
+ * it drives both spawn-time resolution and the host-side provider
+ * contribution (sessions are created with agent_provider=null, and
+ * agent_groups.agent_provider is deprecated). Takes effect on the next
+ * container spawn; the caller's restart handles that.
+ */
+export function syncAgentProviderForAssignedModel(agentGroupId: string): void {
+  const model = getAssignedModelForAgent(agentGroupId);
+  const provider = providerForModelKind(model?.kind);
+  ensureContainerConfig(agentGroupId);
+  updateContainerConfigScalars(agentGroupId, { provider });
 }
 
 /**
