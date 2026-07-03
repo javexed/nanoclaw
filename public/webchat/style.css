@@ -2928,24 +2928,6 @@ a.lightbox-btn {
   width: 16px;
   height: 16px;
 }
-.agent-mcp-add-form {
-  margin-top: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.agent-mcp-select {
-  width: 100%;
-  padding: 8px 10px;
-  background: var(--surface2);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  font-size: var(--fs-sm);
-}
-.agent-mcp-error {
-  color: var(--danger);
-}
 .room-wired-agents li {
   display: flex;
   align-items: center;
@@ -4237,14 +4219,16 @@ a.lightbox-btn {
   color: var(--danger);
 }
 
-/* Models tab — list rows mirror agent list */
-#model-list {
+/* Models + MCP tabs — list rows mirror agent list (shared row anatomy) */
+#model-list,
+#mcp-list {
   list-style: none;
   padding: 8px 0;
   flex: 1;
   overflow-y: auto;
 }
-#model-list li {
+#model-list li,
+#mcp-list li {
   padding: 8px 12px;
   cursor: pointer;
   border-radius: 4px;
@@ -4255,14 +4239,17 @@ a.lightbox-btn {
   gap: 6px;
   transition: background 0.15s;
 }
-#model-list li:hover {
+#model-list li:hover,
+#mcp-list li:hover {
   background: var(--surface2);
 }
-#model-list li.active {
+#model-list li.active,
+#mcp-list li.active {
   background: var(--surface2);
   box-shadow: inset 0 0 8px color-mix(in srgb, var(--accent) 15%, transparent);
 }
-#model-list .model-kind-badge {
+#model-list .model-kind-badge,
+#mcp-list .model-kind-badge {
   font-size: 0.6rem;
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -4275,13 +4262,25 @@ a.lightbox-btn {
 #model-list .model-kind-badge.kind-ollama {
   background: var(--accent2);
 }
-#model-list .model-row-name {
+/* MCP transport badges: remote transports take the secondary brand hue,
+   stdio the agent hue — matching the model badges' two-tone scheme. */
+#mcp-list .model-kind-badge.kind-sse,
+#mcp-list .model-kind-badge.kind-http {
+  background: var(--accent2);
+}
+#mcp-list .model-kind-badge.kind-stdio {
+  background: var(--agent);
+  color: var(--bg);
+}
+#model-list .model-row-name,
+#mcp-list .model-row-name {
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-#model-list .model-row-uses {
+#model-list .model-row-uses,
+#mcp-list .model-row-uses {
   font-size: 0.667rem;
   color: var(--text-dim, var(--text));
   opacity: 0.7;
@@ -4384,6 +4383,11 @@ a.lightbox-btn {
 .model-probe-kind.kind-openai-compatible {
   background: var(--agent);
   color: var(--bg);
+}
+/* MCP probe result badges (transport instead of provider kind). */
+.model-probe-kind.kind-sse,
+.model-probe-kind.kind-http {
+  background: var(--accent2);
 }
 .model-probe-notes {
   font-size: 0.733rem;

@@ -482,59 +482,18 @@
                   </button>
                 </div>
               </div>
-              <!-- MCP servers wired to this agent (external tool servers). A list
-                   plus an inline add form; the transport select swaps the fields
-                   between a local process (stdio) and a remote server (sse/http). -->
+              <!-- MCP servers attached to this agent — a compact list + picker over
+                   the shared registry (the MCP tab defines servers; this only
+                   attaches/detaches them). Mirrors the Rooms wiring block above. -->
               <div id="agent-mcp-section" class="agent-mcp-section">
                 <span class="form-label">MCP servers</span>
                 <ul id="agent-mcp-list" class="agent-mcp-list"></ul>
-                <button type="button" id="agent-mcp-add-toggle" class="btn btn-secondary">+ Add server</button>
-                <div id="agent-mcp-add-form" class="agent-mcp-add-form" hidden>
-                  <label>
-                    <span class="form-label">Name</span>
-                    <input
-                      type="text"
-                      id="agent-mcp-name"
-                      class="model-picker-search"
-                      placeholder="e.g. windows"
-                      autocomplete="off"
-                    />
-                  </label>
-                  <label>
-                    <span class="form-label">Transport</span>
-                    <select id="agent-mcp-transport" class="agent-mcp-select">
-                      <option value="stdio">Local process (stdio)</option>
-                      <option value="sse">Remote (SSE)</option>
-                      <option value="http">Remote (HTTP)</option>
-                    </select>
-                  </label>
-                  <label id="agent-mcp-command-label">
-                    <span class="form-label">Command</span>
-                    <input
-                      type="text"
-                      id="agent-mcp-command"
-                      class="model-picker-search"
-                      placeholder="e.g. mcp-remote"
-                      autocomplete="off"
-                    />
-                  </label>
-                  <label id="agent-mcp-args-label">
-                    <span class="form-label">Arguments (one per line)</span>
-                    <textarea id="agent-mcp-args" rows="2" placeholder="--flag&#10;value"></textarea>
-                  </label>
-                  <label id="agent-mcp-url-label" hidden>
-                    <span class="form-label">URL</span>
-                    <input
-                      type="text"
-                      id="agent-mcp-url"
-                      class="model-picker-search"
-                      placeholder="http://host:8000/sse"
-                      autocomplete="off"
-                    />
-                  </label>
-                  <p class="form-hint">Credentials go through the gateway — don't put keys here.</p>
-                  <p class="form-hint agent-mcp-error" id="agent-mcp-error" hidden></p>
-                  <button type="button" id="agent-mcp-add-submit" class="btn btn-primary">Add server</button>
+                <button type="button" id="agent-mcp-attach-toggle" class="btn btn-secondary">+ Attach server</button>
+                <div id="agent-mcp-attach-form" class="room-add-agent-form" hidden>
+                  <ul id="agent-mcp-attach-list" class="room-create-agent-checklist"></ul>
+                  <button type="button" id="agent-mcp-attach-submit" class="btn btn-primary" disabled>
+                    Attach selected
+                  </button>
                 </div>
               </div>
             </div>
@@ -851,6 +810,122 @@
               </div>
             </div>
           </aside>
+          <aside id="mcp-detail" class="agent-detail" hidden>
+            <!-- Edit mode -->
+            <div id="mcp-edit-view">
+              <div class="agent-detail-header">
+                <span id="mcp-detail-title">MCP server</span>
+                <button id="mcp-detail-close" class="members-close">
+                  <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+                </button>
+              </div>
+              <form id="mcp-detail-form" class="agent-detail-form">
+                <label>
+                  <span class="form-label">Name</span>
+                  <input id="mcp-name" type="text" required autocomplete="off" />
+                </label>
+                <label>
+                  <span class="form-label">Transport</span>
+                  <input id="mcp-transport" type="text" readonly class="readonly" />
+                </label>
+                <label id="mcp-url-label">
+                  <span class="form-label">URL</span>
+                  <input id="mcp-url" type="text" placeholder="http://host:8000/mcp" autocomplete="off" />
+                </label>
+                <label id="mcp-command-label" hidden>
+                  <span class="form-label">Command</span>
+                  <input id="mcp-command" type="text" autocomplete="off" />
+                </label>
+                <p id="mcp-detail-usage" class="room-prime-note"></p>
+                <div class="agent-detail-actions">
+                  <button type="submit" class="btn btn-primary">Save</button>
+                </div>
+                <div class="agent-detail-danger">
+                  <button type="button" id="mcp-delete" class="btn btn-danger">Delete this server</button>
+                </div>
+              </form>
+            </div>
+            <!-- Create mode -->
+            <div id="mcp-create-view" hidden>
+              <div class="agent-detail-header">
+                <span>Add MCP server</span>
+                <button id="mcp-create-close" class="members-close">
+                  <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+                </button>
+              </div>
+              <div class="agent-detail-form">
+                <!-- Probe section: paste a URL, connect as an MCP client, list the
+                     server's tools before saving (mirrors the model probe). -->
+                <div class="model-probe-block">
+                  <label>
+                    <span class="form-label">Server URL</span>
+                    <div class="model-id-row">
+                      <input
+                        id="mcp-probe-url"
+                        type="text"
+                        placeholder="host:8000/sse, https://…/mcp (scheme optional)"
+                        autocomplete="off"
+                      />
+                      <button type="button" id="mcp-probe-btn" class="btn btn-secondary">Probe</button>
+                    </div>
+                  </label>
+                  <p id="mcp-probe-status" class="model-probe-status" hidden></p>
+                  <div id="mcp-probe-results" class="model-probe-results" hidden>
+                    <div class="model-probe-summary">
+                      <span class="model-probe-kind" id="mcp-probe-kind"></span>
+                      <span class="model-probe-notes" id="mcp-probe-notes"></span>
+                    </div>
+                    <ul id="mcp-probe-tools" class="model-probe-list"></ul>
+                    <label>
+                      <span class="form-label">Name</span>
+                      <input
+                        id="mcp-probe-name"
+                        type="text"
+                        placeholder="e.g. windows (becomes the tool prefix)"
+                        autocomplete="off"
+                      />
+                    </label>
+                    <div class="model-probe-actions">
+                      <button type="button" id="mcp-probe-add" class="btn btn-primary">Add server</button>
+                    </div>
+                  </div>
+                </div>
+                <details class="model-advanced">
+                  <summary>Advanced — manual entry</summary>
+                  <form id="mcp-create-form" class="agent-detail-form" style="margin-top: 8px">
+                    <label>
+                      <span class="form-label">Name</span>
+                      <input id="mcp-create-name" type="text" placeholder="e.g. windows" required autocomplete="off" />
+                    </label>
+                    <label>
+                      <span class="form-label">Transport</span>
+                      <select id="mcp-create-transport">
+                        <option value="sse">Remote (SSE)</option>
+                        <option value="http">Remote (HTTP)</option>
+                        <option value="stdio">Local process (stdio)</option>
+                      </select>
+                    </label>
+                    <label id="mcp-create-url-label">
+                      <span class="form-label">URL</span>
+                      <input id="mcp-create-url" type="text" placeholder="http://host:8000/sse" autocomplete="off" />
+                    </label>
+                    <label id="mcp-create-command-label" hidden>
+                      <span class="form-label">Command</span>
+                      <input id="mcp-create-command" type="text" placeholder="e.g. mcp-remote" autocomplete="off" />
+                    </label>
+                    <label id="mcp-create-args-label" hidden>
+                      <span class="form-label">Arguments (one per line)</span>
+                      <textarea id="mcp-create-args" rows="2" placeholder="--flag&#10;value"></textarea>
+                    </label>
+                    <p class="form-hint">Credentials go through the gateway — don't put keys here.</p>
+                    <div class="agent-detail-actions">
+                      <button type="submit" class="btn btn-primary">Create</button>
+                    </div>
+                  </form>
+                </details>
+              </div>
+            </div>
+          </aside>
         </div>
         <button id="scroll-bottom" class="scroll-bottom" hidden aria-label="Jump to bottom">
           <svg class="icon" aria-hidden="true"><use href="#i-arrow-down"></use></svg
@@ -875,6 +950,9 @@
             <button class="manage-tab" data-mtab="models" role="tab" aria-selected="false" aria-controls="mtab-models">
               Models
             </button>
+            <button class="manage-tab" data-mtab="mcp" role="tab" aria-selected="false" aria-controls="mtab-mcp">
+              MCP
+            </button>
           </div>
           <button id="manage-sort-az" class="sort-icon-btn" type="button" aria-pressed="false" title="Sort A–Z" aria-label="Sort A–Z">
             <svg class="icon" aria-hidden="true"><use href="#i-sort"></use></svg>
@@ -889,6 +967,10 @@
           <div id="mtab-models" class="manage-pane" role="tabpanel" hidden>
             <ul id="model-list"></ul>
             <button id="create-model-btn" class="btn btn-secondary btn-list-footer">+ New model</button>
+          </div>
+          <div id="mtab-mcp" class="manage-pane" role="tabpanel" hidden>
+            <ul id="mcp-list"></ul>
+            <button id="create-mcp-btn" class="btn btn-secondary btn-list-footer">+ New server</button>
           </div>
         </div>
       </section>

@@ -31,6 +31,7 @@
   "dependencies": {
     "@clack/core": "^1.2.0",
     "@clack/prompts": "^1.2.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
     "@onecli-sh/sdk": "2.2.1",
     "better-sqlite3": "11.10.0",
     "busboy": "1.6.0",
