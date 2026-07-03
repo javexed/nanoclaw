@@ -196,6 +196,8 @@ WEBCHAT_HOOK_ALLOWLIST=(
   container/agent-runner/src/index.ts
   src/container-runtime.test.ts
   src/host-sweep.ts
+  src/cli/resources/groups.ts
+  src/cli/resources/groups.test.ts
 )
 DECLARED=$(git show "$CHANNEL:install-webchat.sh" 2>/dev/null \
   | awk '/^HOOK_FILES=\(/{f=1;next} f&&/^\)/{f=0} f{gsub(/^[ \t]+/,"");print}')
