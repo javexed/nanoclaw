@@ -18,6 +18,16 @@ The two branches that get published:
 Both should be rebased on current upstream so the skill stays installable on a
 clean `nanoco/nanoclaw` checkout.
 
+> **Secure shared-room BYOK is folded into webchat** (the former standalone
+> `/add-byok` skill is retired). Its code rides `channels-webchat`
+> (`src/modules/byok/`, migrations 020–023, the credentials UI, `oauth-mint.ts`,
+> `get-oauth-token.sh`) and its docs ride `skill/webchat`. So it publishes as
+> part of this one pair — there is no separate byok publish. Because byok
+> handles live credentials, review the byok delta and run the byok tests as part
+> of step 3, and confirm `verify-webchat-publish.sh` covers the byok files
+> (they're in `install-webchat.sh`'s `NEW_PATHS`/`HOOK_FILES` and the hook
+> allowlist).
+
 ## The flow
 
 ### 1. Review + merge (review gate)

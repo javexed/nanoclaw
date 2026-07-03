@@ -311,16 +311,23 @@ pnpm run dev
 
 The underlying single-instance guard in v2 trunk is tracked separately — when it lands, the second `pnpm run dev` will refuse to start at all instead of half-starting.
 
-## Optional add-on: secure shared-room BYOK
+## Built-in: secure shared-room BYOK
 
-Webchat supports **bring-your-own-key (BYOK)** — several people in one room and conversation, each billing *their own turns* to *their own* account: an Anthropic **API key** or their Claude **subscription** (OAuth). Each member's turn runs in its own container under their own OneCLI identity, so a compromised agent can't spend anyone else's key; the agent still sees the full shared conversation. It's a separate, opt-in skill and is **off by default** (rooms start with BYOK disabled).
+Webchat includes **bring-your-own-key (BYOK)** — several people in one room and conversation, each billing *their own turns* to *their own* account: an Anthropic/OpenAI **API key** or their Claude/Codex **subscription** (OAuth). It ships with webchat (no separate install) and is **off by default**: rooms start with BYOK `disabled`, and nothing about it runs until an operator enables it for a room and a member connects a credential.
 
-**Offer it now — ask the operator** whether they want secure shared-room BYOK:
+**Why it's secure.** A shared container can't be told "whose turn this is" in a way a compromised/prompt-injected agent couldn't forge. So each member's turn runs in **its own container under that member's own OneCLI identity**, and OneCLI injects that member's credential based on the identity it already trusts at spawn — no per-turn token, no shared secret, nothing to replay. The agent still has full context because every member's session is fed the shared room transcript. Keys live in the **OneCLI vault** (we persist only ids/status, never the key).
 
-- If **yes**: run `/add-byok`. It requires **OneCLI** (the credential vault) — if that's not set up yet, run `/init-onecli` first. After install, BYOK is enabled per-room from Room settings.
-- If **no / unsure**: skip it — they can run `/add-byok` any time later. No webchat reconfiguration is needed to add it.
+**Requirement:** BYOK uses OneCLI (the credential vault) only **when actually used**. If a room enables it but OneCLI isn't set up, run `/init-onecli`. Non-BYOK rooms need nothing.
 
-Don't auto-install it; only proceed when the operator opts in.
+**Enable + use:**
+1. **Workspace policy** (owner) → Settings → *Member credentials*: the default mode for new rooms and which credential types/providers the workspace accepts.
+2. **Per room** (owner/admin) → Room settings → *Member credentials*:
+   - `disabled` — one shared agent for the room (default; unchanged behavior)
+   - `optional` — members may connect their own credential; those who don't use the shared key
+   - `required` — every member must connect their own (no shared fallback; a member without one is declined with guidance)
+3. **Each member** → the in-room banner (or the @handle menu) → *Connect* (subscription sign-in, or paste an API key). Their turns then bill their account; *Disconnect* removes it everywhere.
+
+To remove BYOK behavior, set rooms back to `disabled` — there's no separate uninstall (it's part of webchat).
 
 ## Next Steps
 

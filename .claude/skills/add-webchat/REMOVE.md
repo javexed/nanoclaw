@@ -4,6 +4,11 @@ The install ships a matching `uninstall-webchat.sh` on the `channels-webchat`
 branch. It is the exact reverse of `install-webchat.sh` and is idempotent —
 safe to run even on a partially-installed tree.
 
+> Secure shared-room BYOK is **built into webchat** (no separate skill), so
+> `uninstall-webchat.sh` removes it too. To keep webchat but turn BYOK off, you
+> don't need to uninstall — set each room's *Member credentials* back to
+> `disabled` (the default) instead.
+
 ## 1. Stop the host
 
 ```bash
