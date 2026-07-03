@@ -16,8 +16,10 @@
 #
 set -euo pipefail
 
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+# Repo root is derived from THIS SCRIPT's location, not the invoker's cwd —
+# running the installer from another checkout must not write data/ there.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$(git -C "$HERE" rev-parse --show-toplevel)"
 
 PORT=4000
 # Pinned per docs/skill-guidelines.md ("pin the version; reject latest").

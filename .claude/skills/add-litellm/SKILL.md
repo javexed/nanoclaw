@@ -43,9 +43,13 @@ Idempotent — re-run whenever the Ollama roster changes. What it does:
 
 ```bash
 curl -s http://127.0.0.1:4000/v1/models | head -c 400
-curl -sN http://127.0.0.1:4000/v1/chat/completions -H 'Content-Type: application/json' \
+curl -sN --max-time 90 http://127.0.0.1:4000/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model": "<a-roster-tag>", "stream": true, "messages": [{"role":"user","content":"say hi"}]}' | head -5
 ```
+
+The first token can take 10–30s+ while Ollama cold-loads the model — a slow
+first completion is normal, not a failure. `/api/ps` on the Ollama host shows
+the model once loaded.
 
 ## Wire an agent group (config, not code)
 
