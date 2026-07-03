@@ -81,6 +81,8 @@ HOOK_FILES=(
   container/agent-runner/src/index.ts
   src/container-runtime.test.ts
   src/host-sweep.ts
+  src/cli/resources/groups.ts
+  src/cli/resources/groups.test.ts
 )
 echo "→ Reversing webchat core-file hooks …"
 for f in "${HOOK_FILES[@]}"; do
@@ -138,6 +140,8 @@ rm -rf \
   container/agent-runner/src/providers/summarize-thinking.test.ts \
   src/onecli-preflight.ts \
   src/onecli-preflight.test.ts \
+  src/mcp-server-config.ts \
+  src/mcp-server-config.test.ts \
   src/modules/user-credentials \
   src/db/migrations/020-byok-credentials.ts \
   src/db/migrations/021-byok-oauth.ts \
