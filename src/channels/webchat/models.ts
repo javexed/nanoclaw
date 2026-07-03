@@ -167,13 +167,38 @@ export async function assertSafeOutboundUrl(rawUrl: string): Promise<void> {
 }
 
 /**
+ * URL translation between the two perspectives an endpoint is used from.
+ *
+ * Operators register endpoints as reachable FROM THE HOST (that's where the
+ * probe and save-validation run); agent containers consume them FROM INSIDE
+ * DOCKER. `localhost`/`127.0.0.1` means a different machine in each place,
+ * and `host.docker.internal` only resolves inside containers (via the
+ * --add-host host-gateway alias every agent container gets).
+ */
+
+/** Container-facing form: loopback → host.docker.internal. For env writes. */
+export function containerReachableUrl(url: string): string {
+  return url.replace(/^(https?:\/\/)(localhost|127\.0\.0\.1)(?=[:/]|$)/, '$1host.docker.internal');
+}
+
+/** Host-facing form: host.docker.internal → 127.0.0.1. For host-side fetches. */
+export function hostReachableUrl(url: string): string {
+  return url.replace(/^(https?:\/\/)host\.docker\.internal(?=[:/]|$)/, '$1127.0.0.1');
+}
+
+/**
  * Drop-in fetch wrapper that runs assertSafeOutboundUrl first. Throws the
  * same errors fetch would for unreachable hosts plus our SSRF rejections.
  * Use this for ANY fetch where the URL came from operator input.
+ *
+ * Fetches run on the host, so the container-only alias is translated to
+ * loopback first — an operator can paste either form and both probe and
+ * save-validation just work.
  */
 export async function safeFetch(url: string, init?: RequestInit): Promise<Response> {
-  await assertSafeOutboundUrl(url);
-  return fetch(url, init);
+  const hostUrl = hostReachableUrl(url);
+  await assertSafeOutboundUrl(hostUrl);
+  return fetch(hostUrl, init);
 }
 
 // Curated list of currently-supported Anthropic model ids — used both as a
@@ -212,7 +237,7 @@ export function envForModel(model: WebchatModel | null): Record<string, string> 
     // `<endpoint>/v1/v1/messages` → 404, surfaced to the agent as
     // "issue with the selected model … may not exist". Verified against Ollama
     // 0.17 (qwen3-coder, llama3.2): bare → 200, `/v1` → 404.
-    const base = model.endpoint.replace(/\/+$/, '');
+    const base = containerReachableUrl(model.endpoint.replace(/\/+$/, ''));
     return {
       ANTHROPIC_BASE_URL: base,
       ANTHROPIC_MODEL: model.model_id,
@@ -224,7 +249,10 @@ export function envForModel(model: WebchatModel | null): Record<string, string> 
     // `agent_provider` to 'opencode'. With the default Claude SDK these
     // env vars are no-ops — the assignment is registered for later use.
     if (!model.endpoint) return {};
-    const base = model.endpoint.replace(/\/+$/, '');
+    // The env block is container-facing — a loopback endpoint (the operator's
+    // host-side view, e.g. a local LiteLLM router) must become the in-container
+    // alias or the container would call itself.
+    const base = containerReachableUrl(model.endpoint.replace(/\/+$/, ''));
     return {
       OPENAI_BASE_URL: base,
       OPENAI_MODEL: model.model_id,
