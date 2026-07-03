@@ -870,6 +870,12 @@ body {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  transition: opacity 0.12s ease;
+}
+/* During a room/thread switch the transcript is dimmed (not blanked) until the
+   new history swaps in, then it fades back — see beginTranscriptSwitch(). */
+#messages.room-switching {
+  opacity: 0.45;
 }
 .msg {
   max-width: 80%;
@@ -1221,15 +1227,23 @@ button:focus-visible {
 
 /* Connection banner */
 .connection-banner {
-  padding: 6px 20px;
+  /* Collapsed via max-height (not display:none) so a reconnect blip eases the
+     banner in/out instead of snapping the chat pane below it up/down — an
+     abrupt display toggle here reflows the whole transcript + input bar. */
+  max-height: 0;
+  padding: 0 20px;
+  overflow: hidden;
   background: var(--delete-color);
   color: #fff;
   font-size: 0.8rem;
   text-align: center;
-  display: none;
+  transition:
+    max-height 0.15s ease,
+    padding 0.15s ease;
 }
 .connection-banner.visible {
-  display: block;
+  max-height: 40px;
+  padding: 6px 20px;
 }
 
 /* UserCreds per-member key banner + room credential-mode selector */
@@ -1634,6 +1648,13 @@ button:focus-visible {
 .file-image-preview {
   max-width: 280px;
   max-height: 200px;
+  /* Reserve space before the image decodes — without this the bubble collapses
+     to ~0px height and pops open once the image loads, shifting anything below
+     it (and, if the user's scrolled up reading history, jumping the viewport
+     when an off-screen image resolves late). No real dimensions are known
+     ahead of load, so this is a fixed placeholder, not the final aspect ratio. */
+  min-height: 120px;
+  background: var(--surface2);
   border-radius: 8px;
   object-fit: cover;
   cursor: pointer;
@@ -1827,12 +1848,21 @@ a.lightbox-btn {
 
 /* Typing indicator bar (user typing) */
 .typing-indicator {
-  padding: 4px 20px;
+  /* Collapsed by default (max-height, not display:none) so showing/hiding it
+     eases the message viewport open/shut instead of snapping — an abrupt
+     flex-basis change here shifts the whole transcript + input bar. */
+  max-height: 0;
+  padding: 0 20px;
+  overflow: hidden;
   font-size: 0.8em;
   color: var(--text-dim);
+  transition:
+    max-height 0.15s ease,
+    padding 0.15s ease;
 }
-.typing-indicator[hidden] {
-  display: none;
+.typing-indicator.is-visible {
+  max-height: 24px;
+  padding: 4px 20px;
 }
 
 /* Shared animated dots */
@@ -5719,12 +5749,13 @@ a.lightbox-btn {
   color: var(--text);
 }
 .thread-row.active {
-  /* Distinct from hover (plain surface2): accent tint + accent text + accent
-     spine bar, so selection and hover never read the same. */
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  color: var(--accent-strong);
-  border-left-color: var(--accent);
-  font-weight: 600;
+  /* Match the room rows' selection treatment: neutral bright text on surface2
+     with an inset accent glow — NOT an accent-colored label. The identity spine
+     (--thread-color) stays, like rooms keep their hue border. The glow is what
+     distinguishes active from a plain-surface2 hover. */
+  background: var(--surface2);
+  color: var(--text);
+  box-shadow: inset 0 0 8px color-mix(in srgb, var(--accent) 15%, transparent);
 }
 .thread-glyph {
   flex: 0 0 auto;
@@ -5734,7 +5765,7 @@ a.lightbox-btn {
   color: var(--text);
 }
 .thread-row.active .thread-glyph {
-  color: var(--accent-strong);
+  color: var(--text);
 }
 .thread-label {
   flex: 1;

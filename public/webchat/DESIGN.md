@@ -266,7 +266,7 @@ each other (the bug the thread tree had: active and hover were both plain
 | State | Treatment |
 |-------|-----------|
 | Hover | `background: var(--surface2)` (+ brighten text to `--text`) |
-| Active / selected | accent — `background: color-mix(in srgb, var(--accent) 12%, transparent)` + `color: var(--accent-strong)` + an accent left bar. **Never** reuse the hover background for active. |
+| Active / selected | `background: var(--surface2)` **plus an inset accent glow** (`box-shadow: inset 0 0 8px color-mix(in srgb, var(--accent) 15%, transparent)`) — the glow is what separates active from a plain-surface2 hover. Text stays neutral (`--text`), **not** an accent-colored label, and the row keeps its **identity** left border (room hue / thread `--thread-color`), which is independent of selection. Don't tint the label or the border with accent. |
 | Unread | a 7–8px `--accent` dot (`--radius-pill`), trailing. A mention escalates to the warning-colored `@` badge (higher signal). |
 
 **Identity vs selection color.** A room carries its **own hue** on the row's
