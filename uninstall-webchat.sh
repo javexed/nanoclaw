@@ -204,7 +204,7 @@ rm -f "$TMPFILE"
 # These were added by install. `pnpm remove` is a no-op if they're already
 # gone. If another customization depends on one of them, re-add it after.
 echo "→ Removing webchat dependencies …"
-pnpm remove ws busboy web-push undici @types/ws @types/busboy @types/web-push 2>/dev/null \
+pnpm remove ws busboy web-push undici @modelcontextprotocol/sdk @types/ws @types/busboy @types/web-push 2>/dev/null \
   || echo "= Some packages already absent (skip)"
 
 # ── 7. Rebuild host + container ──────────────────────────────────────────
