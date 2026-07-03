@@ -1,6 +1,6 @@
 ---
 name: add-litellm
-description: Add a minimal LiteLLM router container exposing one OpenAI-compatible endpoint over the models of one or more local model servers — Ollama (default) or any keyless OpenAI-compatible server (vLLM, LM Studio, llama.cpp, TGI). Keyless, local-only. The dependency base for classifier routing and other LLM-fleet skills. Use when the user wants local models behind a single endpoint for NanoClaw agents.
+description: Add a minimal LiteLLM router container exposing one OpenAI-compatible endpoint over local model servers — Ollama (default) or any keyless OpenAI-compatible server (vLLM, LM Studio, llama.cpp, TGI) — plus opt-in keyed cloud backends (OpenAI, Anthropic, …) with proxy auth. Local-only binding. The dependency base for classifier routing and other LLM-fleet skills. Use when the user wants many models behind a single endpoint for NanoClaw agents.
 ---
 
 # Add LiteLLM (minimal local model router)
@@ -10,8 +10,9 @@ container: **one OpenAI-compatible endpoint over every model your local
 server(s) serve**. Ollama is the default backend; any keyless
 OpenAI-compatible server (vLLM, LM Studio, llama.cpp server, TGI, …) works
 the same way — hosts are probed and their rosters discovered automatically.
-Deliberately minimal — no classifier, no routing policy, no keys. Dependent
-skills (classifier routing, escalation) layer on top of this.
+Keyed cloud backends are an explicit opt-in (below). Deliberately minimal —
+no classifier, no routing policy. Dependent skills (classifier routing,
+escalation) layer on top of this.
 
 Design: [docs/design/add-litellm.md](../../../docs/design/add-litellm.md).
 
@@ -30,7 +31,8 @@ bash "${CLAUDE_SKILL_DIR}/resources/install-litellm.sh" \
   [--port 4000] [--tag <litellm-image-tag>] [--dry-run]
 ```
 
-Idempotent — re-run whenever a roster changes. What it does:
+Idempotent — re-run whenever a roster or the backends file changes. What it
+does:
 
 1. **Discovers** models on every `--hosts` entry — Ollama hosts via
    `GET /api/tags`, OpenAI-compatible hosts via `GET /v1/models` (probed
@@ -44,8 +46,8 @@ Idempotent — re-run whenever a roster changes. What it does:
    `--tag`; the default pin lives in the installer) bound to
    `127.0.0.1:<port>` **and** the docker bridge IP — reachable from agent
    containers at `http://host.docker.internal:<port>/v1`, from nowhere else.
-   **Keyless — never expose this port publicly.**
-4. **Health-checks** `/v1/models`.
+   **Never expose this port publicly.**
+4. **Health-checks** `/v1/models` (with auth, in keyed mode).
 
 ## Verify
 
@@ -74,22 +76,56 @@ logic, not integration legs.
 
 ## Operations
 
-- **Roster changed** → re-run the installer.
+- **Roster or backends changed** → re-run the installer.
 - **Admin UI**: `http://127.0.0.1:4000/ui` (localhost only).
 - **Logs**: `docker logs nanoclaw-litellm`.
 - **Tests**: `node --test "${CLAUDE_SKILL_DIR}/resources/generators.test.mjs"`.
 
-## Scope: local and keyless only
+## Keyed backends (opt-in)
 
-Backends that need an API key (OpenAI, Anthropic, Bedrock, …) are **out of
-scope** for this skill and must not be added to the generated config — the
-router is keyless and its config is plaintext on disk. The deferred cloud
-tier (docs/design/add-litellm.md, non-goals) owns keyed backends, bringing
-proxy auth (`master_key`), TLS, and OneCLI-brokered credentials with it.
+Cloud/keyed models (OpenAI, Anthropic, a token-guarded vLLM, …) can sit
+behind the same endpoint. They can't be discovered, so declare them in
+`data/litellm/backends.json`:
+
+```json
+[
+  { "model_name": "gpt-4o", "model": "openai/gpt-4o", "api_key_env": "OPENAI_API_KEY" },
+  { "model_name": "claude-sonnet", "model": "anthropic/claude-sonnet-4-6", "api_key_env": "ANTHROPIC_API_KEY" }
+]
+```
+
+`api_key_env` is an env-var **NAME** — a literal `api_key` field is a hard
+error, so a key value can never end up in the (plaintext) generated config.
+Put the values in `data/litellm/env` (one `NAME=value` line each; mode 600,
+gitignored via `data/`), then re-run the installer. It then automatically:
+
+- generates `data/litellm/master.key` and turns on **proxy auth**
+  (`master_key`) — mandatory once a paid key sits behind the endpoint, since
+  an open port would be a free credential proxy;
+- passes the env file to the container (`--env-file`) and health-checks with
+  auth.
+
+Agents authenticate the sanctioned way — register the master key in OneCLI
+so the gateway injects it per request (no restarts, no key in agent env):
+
+```bash
+onecli secrets create --name "LiteLLM router" --type generic \
+  --value "$(cat data/litellm/master.key)" --host-pattern "host.docker.internal" \
+  --header-name "Authorization" --value-format "Bearer {value}"
+```
+
+Trust boundary, stated honestly: backend key values live on the host disk
+(mode 600) and in the LiteLLM container's environment (visible to anyone who
+can `docker inspect`) — the same trust domain as the host itself. Binding
+stays localhost + bridge; **TLS is owed before this endpoint ever leaves the
+machine**. Keyed-only installs (no local servers) are supported:
+`--hosts ''`.
 
 ## For dependent skills
 
 Import `generate()` from `resources/gen-config.mjs` and post-process, then
 re-run the container with extra mounts/env (superseding this one). Keep the
-invariants: keyless, local-only binding, `data/litellm/` as the config home.
-Restoring the base state is always: re-run this installer.
+invariants: local-only binding, key values only ever in `data/litellm/env`
+(never in generated config), proxy auth on whenever a keyed backend exists,
+and `data/litellm/` as the config home. Restoring the base state is always:
+re-run this installer.

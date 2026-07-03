@@ -2,15 +2,22 @@
 
 Reverses everything `/add-litellm` applied. The skill makes **no core-code
 edits** — removal is the container + generated files + (optionally) the
-webchat registration.
+webchat registration and OneCLI secrets.
 
 ```bash
 # 1. Stop and remove the router container
 docker rm -f nanoclaw-litellm 2>/dev/null || true
 
-# 2. Remove generated runtime files
+# 2. Remove generated runtime files — includes master.key, the env file
+#    (backend key values), and backends.json in keyed installs
 rm -rf data/litellm
 ```
+
+2b. Keyed installs only: delete the "LiteLLM router" master-key secret from
+    OneCLI (`onecli secrets list`, then delete by id) — it authenticates
+    against an endpoint that no longer exists. The backend keys themselves
+    (OpenAI, Anthropic, …) were never in OneCLI via this skill; they lived
+    only in `data/litellm/env`, already removed above.
 
 3. If a webchat model was registered pointing at the router
    (`openai-compatible`, endpoint `http://host.docker.internal:<port>/v1`),

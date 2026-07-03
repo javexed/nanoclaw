@@ -78,3 +78,57 @@ test('unrecognizable roster shape is a hard error naming the host', async () => 
     /neither Ollama nor OpenAI/,
   );
 });
+
+// ── keyed backends (opt-in) ────────────────────────────────────────────────
+
+const KEYED = [
+  { model_name: 'gpt-4o', model: 'openai/gpt-4o', api_key_env: 'OPENAI_API_KEY' },
+  { model_name: 'claude-sonnet', model: 'anthropic/claude-sonnet-4-6', api_key_env: 'ANTHROPIC_API_KEY' },
+];
+
+test('keyed backends: os.environ refs only, and master_key turns on', async () => {
+  const yaml = await genConfig({ hosts: OLLAMA_HOSTS, fixtures, backends: KEYED });
+  assert.match(yaml, /model: openai\/gpt-4o/);
+  assert.match(yaml, /api_key: os\.environ\/OPENAI_API_KEY/);
+  assert.match(yaml, /api_key: os\.environ\/ANTHROPIC_API_KEY/);
+  // proxy auth is mandatory once a paid key sits behind the endpoint
+  assert.match(yaml, /^general_settings:$/m);
+  assert.match(yaml, /^\s*master_key: os\.environ\/LITELLM_MASTER_KEY$/m);
+  // discovered local deployments are unaffected
+  assert.match(yaml, /model: "?ollama_chat\/qwen2\.5-coder:14b"?/);
+});
+
+test('keyed backends: a literal api_key value is a hard error', async () => {
+  await assert.rejects(
+    () =>
+      genConfig({
+        hosts: [],
+        backends: [{ model_name: 'x', model: 'openai/x', api_key: 'sk-oops-a-real-key' }],
+      }),
+    /literal api_key values are forbidden/,
+  );
+});
+
+test('keyed backends: api_key_env must be an env-var NAME; fields required', async () => {
+  await assert.rejects(
+    () => genConfig({ hosts: [], backends: [{ model_name: 'x', model: 'openai/x', api_key_env: 'sk-value-here' }] }),
+    /must be an ENV_VAR_NAME/,
+  );
+  await assert.rejects(
+    () => genConfig({ hosts: [], backends: [{ model_name: 'x', api_key_env: 'K' }] }),
+    /missing required field model/,
+  );
+});
+
+test('keyed-only config (no local hosts) is valid', async () => {
+  const yaml = await genConfig({ hosts: [], backends: KEYED });
+  assert.match(yaml, /model_name: gpt-4o/);
+  assert.doesNotMatch(yaml, /ollama_chat\//);
+});
+
+test('keyless path is byte-identical with backends absent vs empty', async () => {
+  const a = await genConfig({ hosts: OLLAMA_HOSTS, fixtures });
+  const b = await genConfig({ hosts: OLLAMA_HOSTS, fixtures, backends: [] });
+  assert.equal(a, b);
+  assert.doesNotMatch(a, /general_settings/);
+});
