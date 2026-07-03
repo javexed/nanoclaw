@@ -46,9 +46,12 @@ agent container ──► LiteLLM (:4000, keyless, local-only) ──┬─► O
   is satisfied trivially (the sanctioned local-plaintext `NO_PROXY` case).
   When a dependent tier adds paid backends, *that* tier owns bringing TLS + an
   OneCLI-brokered virtual key.
-- **Image**: `ghcr.io/berriai/litellm:latest` by default — no pin required
-  (operator decision); `--tag` / `LITELLM_TAG` for a deliberate pin. The image
-  is outside the pnpm supply-chain gate either way.
+- **Image**: `ghcr.io/berriai/litellm` pinned to an exact version in the
+  installer (docs/skill-guidelines.md: pin the version; reject `latest`);
+  `--tag` / `LITELLM_TAG` to override. The image is outside the pnpm
+  supply-chain gate, so the pin is the only version control it gets. Note
+  LiteLLM stopped publishing `main-stable` tags on 2026-06-30 — `latest` is
+  their rolling-stable pointer now; we still pin.
 
 ## NanoClaw integration: config, not code
 

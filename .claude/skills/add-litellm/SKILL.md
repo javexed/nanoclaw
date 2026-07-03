@@ -21,7 +21,7 @@ Design: [docs/design/add-litellm.md](../../../docs/design/add-litellm.md).
 ## Install
 
 ```bash
-bash .claude/skills/add-litellm/resources/install-litellm.sh \
+bash "${CLAUDE_SKILL_DIR}/resources/install-litellm.sh" \
   [--hosts http://localhost:11434,http://<lan-ip>:11434] \
   [--port 4000] [--tag <litellm-image-tag>] [--dry-run]
 ```
@@ -32,7 +32,8 @@ Idempotent — re-run whenever the Ollama roster changes. What it does:
 2. **Generates `data/litellm/config.yaml`** — one `ollama_chat/<tag>`
    deployment per (host, tag); the same tag on several hosts load-balances
    under one name; streaming-safe agentic timeouts.
-3. **Runs** `ghcr.io/berriai/litellm:latest` (override with `--tag`) bound to
+3. **Runs** `ghcr.io/berriai/litellm` at a pinned version (override with
+   `--tag`; the default pin lives in the installer) bound to
    `127.0.0.1:<port>` **and** the docker bridge IP — reachable from agent
    containers at `http://host.docker.internal:<port>/v1`, from nowhere else.
    **Keyless — never expose this port publicly.**
@@ -53,12 +54,18 @@ Register a webchat model — kind **`openai-compatible`**, `endpoint` =
 and assign it to an agent group in the webchat Models UI. Zero core-code
 edits; the SSRF policy and host-gateway alias already permit the address.
 
+This registration is a runtime operator action with no source footprint, so
+there is no in-tree integration point for a test to guard
+(docs/skill-guidelines.md, "when there is genuinely nothing to test in-tree").
+The generator tests below are optional unit coverage of this skill's own
+logic, not integration legs.
+
 ## Operations
 
 - **Roster changed** → re-run the installer.
 - **Admin UI**: `http://127.0.0.1:4000/ui` (localhost only).
 - **Logs**: `docker logs nanoclaw-litellm`.
-- **Tests**: `node --test .claude/skills/add-litellm/resources/generators.test.mjs`.
+- **Tests**: `node --test "${CLAUDE_SKILL_DIR}/resources/generators.test.mjs"`.
 
 ## For dependent skills
 

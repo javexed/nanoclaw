@@ -10,7 +10,7 @@
 # Flags / env:
 #   --dry-run          print what would happen, change nothing
 #   --port <n>         listen port                          (default 4000)
-#   --tag <t>          LiteLLM image tag (LITELLM_TAG env)  (default latest — no pin required)
+#   --tag <t>          LiteLLM image tag (LITELLM_TAG env)  (default: pinned, see below)
 #   --hosts <csv>      Ollama hosts (OLLAMA_HOSTS env)      (default http://localhost:11434)
 #   --skip-run         generate config only, don't (re)start the container
 #
@@ -20,7 +20,9 @@ cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PORT=4000
-TAG="${LITELLM_TAG:-latest}"
+# Pinned per docs/skill-guidelines.md ("pin the version; reject latest").
+# Bump deliberately: check https://github.com/BerriAI/litellm/releases first.
+TAG="${LITELLM_TAG:-v1.90.0}"
 HOSTS="${OLLAMA_HOSTS:-http://localhost:11434}"
 DRY=0
 SKIP_RUN=0
