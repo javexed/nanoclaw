@@ -7961,6 +7961,14 @@ async function fetchModels() {
   }
 }
 
+// Display label for a model kind. The STORED kind stays 'openai-compatible'
+// (it names the endpoint's protocol — what the probe detects); the UI says
+// "opencode" because that's the harness such models run on, which is what the
+// operator actually needs to know. CSS class hooks keep the raw kind.
+function modelKindLabel(kind) {
+  return kind === 'openai-compatible' ? 'opencode' : kind;
+}
+
 function renderModels() {
   const list = $('#model-list');
   list.innerHTML = '';
@@ -7985,7 +7993,7 @@ function renderModels() {
 
     const badge = document.createElement('span');
     badge.className = `model-kind-badge kind-${model.kind}`;
-    badge.textContent = model.kind;
+    badge.textContent = modelKindLabel(model.kind);
     li.appendChild(badge);
 
     const name = document.createElement('span');
@@ -8027,7 +8035,11 @@ async function openModelDetail(id) {
 
   $('#model-detail-title').textContent = model.name;
   $('#model-name').value = model.name;
-  $('#model-kind').value = model.kind;
+  // Display shows the harness-facing label; the RAW kind rides in a data
+  // attribute because the Browse (discover) button reads this field back as
+  // the API `kind` parameter.
+  $('#model-kind').value = modelKindLabel(model.kind);
+  $('#model-kind').dataset.kind = model.kind;
   $('#model-endpoint').value = model.endpoint || '';
   $('#model-endpoint-label').hidden = model.kind !== 'ollama';
   $('#model-model-id').value = model.model_id;
@@ -8160,7 +8172,7 @@ function renderProbeResults(probe) {
   const kindBadge = summary.querySelector('.model-probe-kind');
   const notesEl = summary.querySelector('.model-probe-notes');
   kindBadge.className = `model-probe-kind kind-${probe.kind}`;
-  kindBadge.textContent = probe.kind;
+  kindBadge.textContent = modelKindLabel(probe.kind);
   notesEl.textContent = probe.notes || '';
 
   const list = $('#model-probe-list');
@@ -8317,7 +8329,9 @@ bindDiscover(
 );
 bindDiscover(
   '#model-discover-btn',
-  () => $('#model-kind').value,
+  // Raw kind from the data attribute — the visible value is the display label
+  // ('opencode'), which the discover API wouldn't recognize.
+  () => $('#model-kind').dataset.kind || $('#model-kind').value,
   () => $('#model-endpoint').value.trim(),
   '#model-model-id',
   '#model-discover-select',
@@ -8829,7 +8843,9 @@ function refreshAgentModelTrigger() {
   }
   nameEl.textContent = m.name;
   const host = endpointHost(m.endpoint);
-  metaEl.textContent = host ? `${m.kind} · ${m.model_id} · ${host}` : `${m.kind} · ${m.model_id}`;
+  metaEl.textContent = host
+    ? `${modelKindLabel(m.kind)} · ${m.model_id} · ${host}`
+    : `${modelKindLabel(m.kind)} · ${m.model_id}`;
 }
 
 function endpointHost(endpoint) {
@@ -8939,7 +8955,7 @@ function createPickerRow(m, currentSelected) {
     badge.textContent = 'default';
   } else {
     badge.className = `model-kind-badge kind-${m.kind}`;
-    badge.textContent = m.kind;
+    badge.textContent = modelKindLabel(m.kind);
   }
   top.appendChild(badge);
   li.appendChild(top);
