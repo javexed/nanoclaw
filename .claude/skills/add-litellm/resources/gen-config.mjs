@@ -1,0 +1,188 @@
+#!/usr/bin/env node
+/**
+ * gen-config.mjs — generate the LiteLLM config.yaml from live local model
+ * server rosters, plus optional declared keyed backends.
+ *
+ * Minimal by design (docs/design/add-litellm.md): model_list only — one
+ * deployment per (host, model), shared model_name across hosts for load
+ * balancing, streaming-safe agentic timeouts. No routing/classifier
+ * coupling — dependent skills import generate() and post-process.
+ *
+ * Discovered backends: any keyless, local OpenAI-compatible server. Each
+ * host is probed: Ollama answers GET /api/tags (native roster, richer
+ * chat/tool handling via the ollama_chat/ prefix); anything else is
+ * expected to answer GET /v1/models (vLLM, LM Studio, llama.cpp server,
+ * TGI, …) and is addressed with the openai/ prefix.
+ *
+ * Keyed backends (opt-in): cloud/API-key models can't be discovered, so
+ * they are declared in a backends.json file. Key VALUES never enter the
+ * generated config — entries carry an env-var NAME and the config emits
+ * LiteLLM's os.environ/<NAME> indirection; the installer delivers values
+ * to the container via --env-file. Declaring any keyed backend makes the
+ * generator emit general_settings.master_key (proxy auth) — an
+ * unauthenticated endpoint fronting a paid key would be a free credential
+ * proxy.
+ *
+ * Usage:
+ *   node gen-config.mjs [--hosts http://localhost:11434,http://10.0.0.5:8000]
+ *                       [--backends data/litellm/backends.json]
+ *                       [--tags-file fixtures/rosters.json]  (offline/test)
+ *                       [--out config.yaml]
+ *
+ * With --tags-file, no network calls are made; the file maps host → roster
+ * response (either shape), letting tests and no-server environments run the
+ * generator.
+ */
+import { readFileSync, writeFileSync } from 'node:fs';
+
+const args = process.argv.slice(2);
+const opt = (name, dflt) => {
+  const i = args.indexOf(`--${name}`);
+  return i >= 0 && args[i + 1] ? args[i + 1] : dflt;
+};
+
+const HOSTS = opt('hosts', process.env.MODEL_HOSTS ?? 'http://localhost:11434')
+  .split(',')
+  .map((h) => h.trim().replace(/\/$/, ''))
+  .filter(Boolean);
+const TAGS_FILE = opt('tags-file', null);
+const BACKENDS_FILE = opt('backends', null);
+const OUT = opt('out', null);
+
+/**
+ * Discover a host's roster. Returns { kind: 'ollama'|'openai', names: [] }.
+ *
+ * Live mode probes /api/tags first (Ollama-only endpoint), then falls back
+ * to the standard /v1/models. Fixture mode detects by response shape:
+ * { models: [{ name }] } is Ollama, { data: [{ id }] } is OpenAI-compat.
+ */
+async function rosterFor(host, fixtures) {
+  if (fixtures) {
+    const entry = fixtures[host];
+    if (!entry) throw new Error(`--tags-file has no entry for host ${host}`);
+    if (Array.isArray(entry.models)) return { kind: 'ollama', names: entry.models.map((m) => m.name) };
+    if (Array.isArray(entry.data)) return { kind: 'openai', names: entry.data.map((m) => m.id) };
+    throw new Error(`--tags-file entry for ${host} matches neither Ollama nor OpenAI shape`);
+  }
+  const probe = async (path) => {
+    const res = await fetch(`${host}${path}`, { signal: AbortSignal.timeout(5000) });
+    return res.ok ? res.json() : null;
+  };
+  const tags = await probe('/api/tags');
+  if (tags) return { kind: 'ollama', names: (tags.models ?? []).map((m) => m.name) };
+  const models = await probe('/v1/models');
+  if (models) return { kind: 'openai', names: (models.data ?? []).map((m) => m.id) };
+  throw new Error(`${host} answers neither /api/tags (Ollama) nor /v1/models (OpenAI-compatible)`);
+}
+
+/**
+ * Validate one declared keyed-backend entry. Shape:
+ *   { model_name, model, api_key_env, api_base? }
+ * api_key_env is an env-var NAME; a literal `api_key` field is a hard error
+ * so a pasted key value can never end up committed or in the plaintext
+ * config.
+ */
+function validateBackend(b, i) {
+  const at = `backends[${i}]`;
+  if (b.api_key !== undefined)
+    throw new Error(`${at}: literal api_key values are forbidden — use api_key_env (an env-var NAME)`);
+  for (const field of ['model_name', 'model', 'api_key_env']) {
+    if (typeof b[field] !== 'string' || !b[field]) throw new Error(`${at}: missing required field ${field}`);
+  }
+  if (!/^[A-Z][A-Z0-9_]*$/.test(b.api_key_env))
+    throw new Error(`${at}: api_key_env must be an ENV_VAR_NAME, got ${JSON.stringify(b.api_key_env)}`);
+  return b;
+}
+
+/**
+ * A container-reachable api_base for a host. A server on the host's
+ * localhost must be addressed as host.docker.internal from inside the
+ * LiteLLM container; LAN/Tailscale hosts pass through unchanged.
+ */
+function containerReachable(host) {
+  return host.replace(/^(https?:\/\/)(localhost|127\.0\.0\.1)(?=[:/]|$)/, '$1host.docker.internal');
+}
+
+function yamlEscape(s) {
+  return /[:#{}[\],&*?|<>=!%@`"']/.test(s) ? JSON.stringify(s) : s;
+}
+
+export async function generate({ hosts = HOSTS, fixtures = null, backends = null } = {}) {
+  const keyed = (backends ?? []).map(validateBackend);
+
+  const modelList = [];
+  for (const host of hosts) {
+    const { kind, names } = await rosterFor(host, fixtures);
+    for (const name of names) {
+      // model_name is the served name itself; the same name on several hosts
+      // becomes multiple deployments under one model_name — exactly how
+      // LiteLLM load-balances, so the reuse is deliberate (and works across
+      // backend kinds).
+      const params =
+        kind === 'ollama'
+          ? { model: `ollama_chat/${name}`, api_base: containerReachable(host) }
+          : // openai/<name> + api_base is LiteLLM's OpenAI-compatible shape;
+            // api_key is a required placeholder — the server is keyless.
+            { model: `openai/${name}`, api_base: containerReachable(host), api_key: 'keyless' };
+      modelList.push({ model_name: name, litellm_params: params });
+    }
+  }
+  for (const b of keyed) {
+    // os.environ/<NAME> is LiteLLM's env indirection: the value is read from
+    // the proxy container's environment (installer --env-file), never from
+    // this file.
+    const params = { model: b.model, api_key: `os.environ/${b.api_key_env}` };
+    if (b.api_base) params.api_base = containerReachable(b.api_base);
+    modelList.push({ model_name: b.model_name, litellm_params: params });
+  }
+  if (modelList.length === 0) throw new Error('no models discovered on any host and no keyed backends declared');
+
+  const lines = [];
+  lines.push('# Generated by add-litellm/gen-config.mjs — regenerate, do not hand-edit.');
+  lines.push(`# hosts: ${hosts.join(', ') || '(none)'}`);
+  if (keyed.length) lines.push(`# keyed backends: ${keyed.map((b) => b.model_name).join(', ')}`);
+  lines.push('model_list:');
+  for (const m of modelList) {
+    lines.push(`  - model_name: ${yamlEscape(m.model_name)}`);
+    lines.push('    litellm_params:');
+    lines.push(`      model: ${yamlEscape(m.litellm_params.model)}`);
+    if (m.litellm_params.api_base) lines.push(`      api_base: ${yamlEscape(m.litellm_params.api_base)}`);
+    if (m.litellm_params.api_key) lines.push(`      api_key: ${yamlEscape(m.litellm_params.api_key)}`);
+  }
+  lines.push('');
+  lines.push('litellm_settings:');
+  lines.push('  # Agentic turns are long — generous end-to-end timeout.');
+  lines.push('  request_timeout: 600');
+  lines.push('  num_retries: 2');
+  lines.push('  drop_params: true');
+  lines.push('');
+  lines.push('router_settings:');
+  lines.push('  routing_strategy: simple-shuffle');
+  lines.push('');
+  if (keyed.length) {
+    lines.push('general_settings:');
+    lines.push('  # Auth is mandatory once a paid key sits behind the endpoint — an open');
+    lines.push('  # port would be a free credential proxy. Value comes from the env file.');
+    lines.push('  master_key: os.environ/LITELLM_MASTER_KEY');
+    lines.push('');
+    lines.push('# Keyed mode (docs/design/add-litellm.md): key VALUES live only in the');
+    lines.push("# installer's env file (mode 600) — never in this file. No DATABASE_URL.");
+  } else {
+    lines.push('# Keyless v1 (docs/design/add-litellm.md): no master_key, no DATABASE_URL.');
+  }
+  lines.push('# The installer binds the proxy to localhost + the docker bridge — never public.');
+  return lines.join('\n') + '\n';
+}
+
+// CLI entry
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const fixtures = TAGS_FILE ? JSON.parse(readFileSync(TAGS_FILE, 'utf8')) : null;
+  const backends = BACKENDS_FILE ? JSON.parse(readFileSync(BACKENDS_FILE, 'utf8')) : null;
+  const yaml = await generate({ hosts: HOSTS, fixtures, backends });
+  if (OUT) {
+    writeFileSync(OUT, yaml);
+    console.error(`wrote ${OUT}`);
+  } else {
+    process.stdout.write(yaml);
+  }
+}
