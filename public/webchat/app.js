@@ -1636,7 +1636,14 @@ function renderRooms(rooms) {
       };
       setTimeout(() => document.addEventListener('click', close), 0);
     });
-    li.appendChild(kebab);
+    // Right-anchored actions: the kebab + the new-thread "+". On a hover-capable
+    // desktop this group is absolutely positioned (see .room-actions) so it takes
+    // NO flex space and floats OVER the row's right edge — the room name keeps its
+    // full width and never reflows when the actions reveal on hover. On touch it
+    // stays in normal flow and always visible.
+    const actions = document.createElement('span');
+    actions.className = 'room-actions';
+    actions.appendChild(kebab);
 
     // A "+" on every OTHER room row so a new thread can be started in any room
     // straight from the list (the active room's "+" comes from its thread tree
@@ -1657,16 +1664,18 @@ function renderRooms(rooms) {
           threadCreating = false;
           renderRooms(lastRoomsList);
         });
-        li.appendChild(add);
+        actions.appendChild(add);
       }
     }
+    li.appendChild(actions);
 
-    // Thread expander: rooms that HAVE topic threads get a left chevron to
-    // expand/collapse their thread list inline — WITHOUT entering the room (the
-    // active room always shows its tree, so it needs no toggle). thread_count
+    // Thread expander: rooms that HAVE topic threads get a disclosure chevron to
+    // expand/collapse their thread list inline. It's absolutely positioned in the
+    // row's left gutter so it never shifts the room name (every room name aligns,
+    // thread or not) and it stays put when a room becomes active. thread_count
     // comes from the server's rooms payload.
     const threadCount = room.thread_count || 0;
-    if (threadCount > 0 && room.id !== currentRoom) {
+    if (threadCount > 0) {
       const open = expandedRooms.has(room.id);
       const chev = document.createElement('button');
       chev.className = 'room-thread-toggle';
@@ -1699,9 +1708,11 @@ function renderRooms(rooms) {
     // Nest a thread tree under the row: the active room's (populated by
     // renderThreadList below), or an EXPANDED non-active room's (its own tree).
     if (room.id === currentRoom) {
-      const threadHost = document.createElement('div');
-      threadHost.className = 'thread-list';
-      li.appendChild(threadHost);
+      if (expandedRooms.has(room.id)) {
+        const threadHost = document.createElement('div');
+        threadHost.className = 'thread-list';
+        li.appendChild(threadHost);
+      }
     } else if (expandedRooms.has(room.id)) {
       const threadHost = document.createElement('div');
       threadHost.className = 'thread-list';
@@ -1709,8 +1720,8 @@ function renderRooms(rooms) {
       renderRoomThreads(li, room.id);
     }
   }
-  // Populate the active room's thread tree (no-op if no room open).
-  if (currentRoom) renderThreadList();
+  // Populate the active room's thread tree when it's expanded (no-op otherwise).
+  if (currentRoom && expandedRooms.has(currentRoom)) renderThreadList();
 }
 
 let lastRoomsList = [];
@@ -1858,7 +1869,7 @@ let threadCreating = false; // true while the inline "new thread" input is open
 let threadAddRoom = null; // room id whose row is showing the inline new-thread input
 let threadRenaming = null; // thread_id whose row is showing the inline rename input
 const threadUnread = new Set(); // thread_ids with unread activity in the open room
-const expandedRooms = new Set(); // non-active rooms whose thread tree is expanded in the sidebar
+const expandedRooms = new Set(); // rooms whose thread tree is expanded in the sidebar (the active room is added on join)
 // Single source of truth for a room's threads (roomId → threads[]), keyed by
 // room. The active room's threads are just threadCache.get(currentRoom) — see
 // roomThreads(). loadThreadList/loadRoomThreads write it; render reads it. One
@@ -2070,7 +2081,10 @@ function renderThreadList() {
       threadCreating = true;
       renderThreadList();
     });
-    li.appendChild(add);
+    // Put it in the row's actions group (beside the kebab) so it hover-hides on
+    // desktop and is never left BEHIND the actions overlay — which would cover it
+    // and swallow the click on hover.
+    (li.querySelector('.room-actions') || li).appendChild(add);
   } else {
     // Has threads → the "+" goes inline on the LAST thread row (right of its
     // name), mirroring the no-threads case where it sits on the room row. No
@@ -2433,7 +2447,12 @@ function joinRoom(roomId, roomName, jumpMessageId, initialThread) {
   // Reset any in-progress turn state from the previous room so its bubbles /
   // elapsed timer / reasoning traces can't leak into the new room.
   endAllAgentTurns();
+  const prevRoom = currentRoom;
   currentRoom = roomId;
+  // The active room's thread tree is expanded by default; collapse the room we
+  // just left (its chevron re-opens it) so stale trees don't linger open.
+  if (prevRoom && prevRoom !== roomId) expandedRooms.delete(prevRoom);
+  expandedRooms.add(roomId);
   threadAddRoom = null; // clear any other room's pending inline new-thread input
   unreadRooms.delete(roomId);
   mentionedRooms.delete(roomId);
