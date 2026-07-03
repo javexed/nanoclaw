@@ -555,6 +555,7 @@ $('#overflow-menu')?.addEventListener('click', (e) => {
   const action = item.dataset.action;
   if (action === 'agents') openManage('agents');
   else if (action === 'models') openManage('models');
+  else if (action === 'mcp') openManage('mcp');
   else if (action === 'topology') toggleTopology();
   else if (action === 'matrix') toggleMatrix();
   else if (action === 'dashboard') toggleDashboard();

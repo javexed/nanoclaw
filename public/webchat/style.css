@@ -2557,16 +2557,18 @@ a.lightbox-btn {
 .agent-detail[hidden] {
   display: none;
 }
-/* Desktop only: the agent + model editors are opened FROM the Manage drawer,
-   so they slide in as a right-side drawer aligned over the list (z above
-   .manage's 60), giving a tidy master→detail in the right column with the chat
-   still visible to the left. #room-detail keeps the base left-over-chat
-   behavior (it opens from a room, not from Manage). On phones (max-width 600)
-   the shared `.agent-detail` rule below already makes all three full-screen at
-   z-110, so this override is scoped to desktop to avoid fighting it. */
+/* Desktop only: the agent + model + MCP editors are opened FROM the Manage
+   drawer, so they slide in as a right-side drawer aligned over the list (z
+   above .manage's 60), giving a tidy master→detail in the right column with
+   the chat still visible to the left. #room-detail keeps the base
+   left-over-chat behavior (it opens from a room, not from Manage). On phones
+   (max-width 600) the shared `.agent-detail` rule below already makes them all
+   full-screen at z-110, so this override is scoped to desktop to avoid
+   fighting it. */
 @media (min-width: 601px) {
   #agent-detail,
-  #model-detail {
+  #model-detail,
+  #mcp-detail {
     position: fixed;
     top: 0;
     right: 0;
