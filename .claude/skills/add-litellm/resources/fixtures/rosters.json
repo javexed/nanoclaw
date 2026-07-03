@@ -1,4 +1,15 @@
 {
+  "//": [
+    "TEST FIXTURE ONLY — never read at install time.",
+    "The installer discovers live rosters by probing each host; this file is",
+    "canned copies of those responses so generators.test.mjs (and gen-config's",
+    "--tags-file offline mode) run hermetically with no model server present.",
+    "It doubles as documentation of the two response shapes the generator",
+    "understands: { models: [{ name }] } = Ollama /api/tags,",
+    "{ data: [{ id }] } = OpenAI-compatible /v1/models.",
+    "qwen2.5-coder:14b appears on all three hosts deliberately — it exercises",
+    "the shared-model_name load-balancing dedup, across backend kinds."
+  ],
   "http://localhost:11434": {
     "models": [
       {
