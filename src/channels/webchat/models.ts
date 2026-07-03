@@ -19,6 +19,8 @@ import path from 'path';
 import dns from 'node:dns/promises';
 
 import { DATA_DIR } from '../../config.js';
+import { ensureContainerConfig, updateContainerConfigScalars } from '../../db/container-configs.js';
+import { getProviderContainerConfig } from '../../providers/provider-container-registry.js';
 import { log } from '../../log.js';
 import { getAssignedModelForAgent, type WebchatModel } from './db.js';
 
@@ -282,6 +284,38 @@ export function writeAgentSettingsForAssignedModel(agentGroupId: string): void {
 
   const merged = { ...existing, env: { ...cleaned, ...overrides } };
   fs.writeFileSync(settingsPath, JSON.stringify(merged, null, 2) + '\n');
+}
+
+/**
+ * The agent provider a model kind requires. `openai-compatible` models are
+ * consumed by the OpenCode harness (installed via /add-opencode); every other
+ * kind (and no assignment) runs the default Claude provider.
+ */
+export function providerForModelKind(kind: string | null | undefined): 'opencode' | null {
+  return kind === 'openai-compatible' ? 'opencode' : null;
+}
+
+/** True when the OpenCode provider is installed (self-registered on import). */
+export function opencodeProviderInstalled(): boolean {
+  return getProviderContainerConfig('opencode') !== undefined;
+}
+
+/**
+ * Keep the agent group's provider in lockstep with its assigned model's kind.
+ *
+ * Assigning an `openai-compatible` model switches the group to the OpenCode
+ * provider; unassigning (or switching to an anthropic/ollama kind) reverts to
+ * the default Claude provider. Only `container_configs.provider` is written —
+ * it drives both spawn-time resolution and the host-side provider
+ * contribution (sessions are created with agent_provider=null, and
+ * agent_groups.agent_provider is deprecated). Takes effect on the next
+ * container spawn; the caller's restart handles that.
+ */
+export function syncAgentProviderForAssignedModel(agentGroupId: string): void {
+  const model = getAssignedModelForAgent(agentGroupId);
+  const provider = providerForModelKind(model?.kind);
+  ensureContainerConfig(agentGroupId);
+  updateContainerConfigScalars(agentGroupId, { provider });
 }
 
 /**

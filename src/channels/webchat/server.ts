@@ -211,6 +211,9 @@ import {
   probeEndpoint,
   validateModel,
   writeAgentSettingsForAssignedModel,
+  syncAgentProviderForAssignedModel,
+  providerForModelKind,
+  opencodeProviderInstalled,
 } from './models.js';
 import { handleChunkedUpload, handleFileServe, handleMultipartUpload } from './files.js';
 import { initWebPush, isValidPushEndpoint } from './push.js';
@@ -3535,7 +3538,15 @@ async function assignAgentModelHandler(req: IncomingMessage, res: ServerResponse
     if (typeof body.modelId !== 'string' || !body.modelId.trim()) {
       return json(res, 400, { error: 'modelId must be a string or null' });
     }
-    if (!getWebchatModel(body.modelId.trim())) return json(res, 404, { error: 'Model not found' });
+    const model = getWebchatModel(body.modelId.trim());
+    if (!model) return json(res, 404, { error: 'Model not found' });
+    // The kind decides the agent provider; refuse an assignment the install
+    // can't run rather than leaving the group wedged on a dead provider.
+    if (providerForModelKind(model.kind) === 'opencode' && !opencodeProviderInstalled()) {
+      return json(res, 400, {
+        error: 'This model kind runs on the OpenCode provider — install it with /add-opencode first.',
+      });
+    }
     assignModelToAgent(agentGroupId, body.modelId.trim());
   }
   reloadAgentModelEnv(agentGroupId, 'Webchat model reassigned');
@@ -3561,6 +3572,14 @@ function reloadAgentModelEnv(agentGroupId: string, reason: string): void {
     writeAgentSettingsForAssignedModel(agentGroupId);
   } catch (err) {
     log.warn('Webchat: settings.json write after model change failed', { agentGroupId, reason, err });
+  }
+  try {
+    // Provider follows the assigned model's kind (openai-compatible ->
+    // opencode, everything else -> default). Same next-spawn timing as the
+    // env write; the restart below applies both.
+    syncAgentProviderForAssignedModel(agentGroupId);
+  } catch (err) {
+    log.warn('Webchat: provider sync after model change failed', { agentGroupId, reason, err });
   }
   try {
     const restarted = restartAgentGroupContainers(agentGroupId, reason);
