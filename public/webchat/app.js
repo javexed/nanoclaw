@@ -1137,6 +1137,9 @@ function connect() {
         if (msg.messages.length === 0) {
           $('#messages').innerHTML = '<div class="empty-state">No messages yet. Start the conversation!</div>';
         }
+        // New content is in place — fade the transcript back to full (it was
+        // dimmed during the switch instead of blanked).
+        endTranscriptSwitch();
         if (msg.messages.length > 0) {
           setLastSeenMessageId(msg.messages[msg.messages.length - 1].id);
         }
@@ -1178,7 +1181,13 @@ function connect() {
         if ((msg.room_id || currentRoom) === currentRoom && msgThread !== currentThread) {
           if (msg.sender !== myIdentity) {
             threadUnread.add(msgThread);
-            renderThreadList();
+            // Don't rebuild the thread list while the user is naming a new
+            // thread or renaming one — renderThreadList reseeds that inline
+            // input from scratch, so a message landing on some OTHER thread
+            // would silently discard whatever they'd already typed. The
+            // unread flag above is still recorded; the rebuild (and the dot)
+            // lands next time renderThreadList runs for another reason.
+            if (!threadCreating && !threadRenaming) renderThreadList();
           }
           break;
         }
@@ -1372,8 +1381,25 @@ function activityOf(room) {
 // Sentinel rendered as a horizontal rule between the pinned group and the rest.
 const ROOM_DIVIDER = Symbol('room-divider');
 
+// Deferred retry for renderRooms when it's skipped because a kebab menu is
+// open — see the guard at the top of renderRooms.
+let renderRoomsRetryTimer = null;
+
 function renderRooms(rooms) {
   const list = $('#room-list');
+  // A background event (a message landing in ANY room, an unread/mention/read
+  // update) calls this via updateUnreadDots — don't let that tear down an open
+  // kebab menu out from under the user mid-click. Retry shortly instead of
+  // dropping the update.
+  if (list.querySelector('.room-menu')) {
+    clearTimeout(renderRoomsRetryTimer);
+    renderRoomsRetryTimer = setTimeout(() => renderRooms(rooms), 400);
+    return;
+  }
+  // The rebuild below replaces every <li>, which resets scroll — restore it so
+  // a message landing elsewhere doesn't visibly snap the list back to the top
+  // while the user is scrolled down browsing rooms.
+  const prevScrollTop = list.scrollTop;
   // Drag-to-pin: wire the list as a drop target once (survives innerHTML reset).
   // Dropping a dragged room anywhere on the list pins it; pinned rooms sort to
   // the top automatically. Unpin lives in the kebab.
@@ -1722,6 +1748,7 @@ function renderRooms(rooms) {
   }
   // Populate the active room's thread tree when it's expanded (no-op otherwise).
   if (currentRoom && expandedRooms.has(currentRoom)) renderThreadList();
+  list.scrollTop = prevScrollTop;
 }
 
 let lastRoomsList = [];
@@ -2118,7 +2145,7 @@ function openThread(threadId) {
   currentThread = threadId;
   localStorage.setItem('lastThread:' + currentRoom, threadId);
   threadUnread.delete(threadId);
-  $('#messages').innerHTML = '<div class="empty-state">Loading…</div>';
+  beginTranscriptSwitch();
   // Re-join the room scoped to this thread; the server returns thread history.
   ws.send(JSON.stringify({ type: 'join', room_id: currentRoom, thread_id: threadId }));
   renderThreadList();
@@ -2432,6 +2459,24 @@ function cssEscape(s) {
 }
 
 let pendingJumpMessageId = null;
+
+// Smooth room/thread switches: instead of blanking the transcript to a
+// "Loading…" flash (a jarring gap while the async `history` message is in
+// flight), keep the previous messages visible but dimmed until the new history
+// arrives and swaps them in (the 'history' handler calls endTranscriptSwitch).
+// A fallback un-dims if history never lands (e.g. a socket hiccup).
+let roomSwitchDimTimer = null;
+function beginTranscriptSwitch() {
+  const el = $('#messages');
+  el.classList.add('room-switching');
+  clearTimeout(roomSwitchDimTimer);
+  roomSwitchDimTimer = setTimeout(() => el.classList.remove('room-switching'), 2000);
+}
+function endTranscriptSwitch() {
+  clearTimeout(roomSwitchDimTimer);
+  $('#messages').classList.remove('room-switching');
+}
+
 function joinRoom(roomId, roomName, jumpMessageId, initialThread) {
   // When set (e.g. from a search-result click), the `history` handler lands on
   // this message instead of scrolling to the bottom.
@@ -2469,7 +2514,7 @@ function joinRoom(roomId, roomName, jumpMessageId, initialThread) {
   $('#members-panel').hidden = true;
   $('#members-overlay').classList.remove('visible');
   renderMembers([]);
-  $('#messages').innerHTML = '<div class="empty-state">Loading…</div>';
+  beginTranscriptSwitch();
   // No "Main" thread row — the room itself IS the regular chat. Entering a room
   // always lands in that regular chat ('main' keys the room's shared session);
   // threads are opened explicitly from the sidebar.
@@ -7386,10 +7431,11 @@ function renderTypingIndicator() {
         ? `${names[0]} is typing`
         : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]} are typing`;
     el.innerHTML = `${label}<span class="dots"><span></span><span></span><span></span></span>`;
-    el.className = 'typing-indicator';
-    el.hidden = false;
+    el.className = 'typing-indicator is-visible';
+    el.removeAttribute('aria-hidden');
   } else {
-    el.hidden = true;
+    el.classList.remove('is-visible');
+    el.setAttribute('aria-hidden', 'true');
   }
 }
 
