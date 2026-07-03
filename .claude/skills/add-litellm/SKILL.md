@@ -63,13 +63,23 @@ host shows the model once loaded.)
 
 ## Wire an agent group (config, not code)
 
-Register a webchat model — kind **`openai-compatible`**, `endpoint` =
-`http://host.docker.internal:4000/v1`, `model_id` = a name from the roster —
-and assign it to an agent group in the webchat Models UI. Zero core-code
-edits; the SSRF policy and host-gateway alias already permit the address.
+The router is a standard OpenAI-compatible endpoint —
+`http://host.docker.internal:4000/v1` from agent containers — so any
+consumer that speaks the protocol can use it. Zero core-code edits either
+way; pick whichever your install has:
 
-This registration is a runtime operator action with no source footprint, so
-there is no in-tree integration point for a test to guard
+- **Webchat Models UI** (if the webchat channel is installed): register a
+  model — kind **`openai-compatible`**, `endpoint` as above, `model_id` = a
+  name from the roster — and assign it to an agent group. The SSRF policy
+  and host-gateway alias already permit the address.
+- **OpenCode provider** (if `/add-opencode` is installed): point the agent
+  group's `OPENCODE_*` env at the endpoint with a roster model — see that
+  skill's custom-endpoint examples.
+- **Any other OpenAI-compatible client**: base URL + a model name from the
+  roster.
+
+The wiring is a runtime operator action with no source footprint, so there
+is no in-tree integration point for a test to guard
 (docs/skill-guidelines.md, "when there is genuinely nothing to test in-tree").
 The generator tests below are optional unit coverage of this skill's own
 logic, not integration legs.

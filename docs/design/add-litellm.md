@@ -70,9 +70,9 @@ agent container ──► LiteLLM (:4000, keyless, local-only) ──┬─► O
   the master key is registered as a OneCLI secret with host-pattern
   `host.docker.internal`, injected per request by the gateway. The keyless
   local path stays the sanctioned local-plaintext `NO_PROXY` case. TLS is
-  owed before the endpoint ever leaves the machine (`webchat_models.
-  credential_ref` is reserved but unimplemented, so OneCLI injection is the
-  only wired path today).
+  owed before the endpoint ever leaves the machine. (On installs with the
+  webchat channel, `webchat_models.credential_ref` is reserved but
+  unimplemented — OneCLI injection is the only wired credential path today.)
 - **Image**: `ghcr.io/berriai/litellm` pinned to an exact version in the
   installer (docs/skill-guidelines.md: pin the version; reject `latest`);
   `--tag` / `LITELLM_TAG` to override. The image is outside the pnpm
@@ -82,8 +82,10 @@ agent container ──► LiteLLM (:4000, keyless, local-only) ──┬─► O
 
 ## NanoClaw integration: config, not code
 
-Zero core-code edits. NanoClaw consumes the router through the **existing**
-webchat model kind **`openai-compatible`** (`endpoint` =
+Zero core-code edits. The router is a standard OpenAI-compatible endpoint,
+so any consumer works: the OpenCode provider's custom-endpoint env, any
+OpenAI-compat client, or — on installs with the webchat channel — the
+**existing** webchat model kind **`openai-compatible`** (`endpoint` =
 `http://host.docker.internal:<port>/v1`, `model_id` = any tag from the
 `model_list`), assigned per agent group like any other model. The SSRF policy
 already allows the address; the host-gateway alias is already wired.
