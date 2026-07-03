@@ -103,10 +103,26 @@ export interface QueryInput {
   };
 }
 
-export interface McpServerConfig {
+/**
+ * An MCP server wired into an agent. Two transports:
+ *  - stdio (default): a subprocess spawned inside the container.
+ *  - remote (sse | http): a server reached over the network by URL — e.g. a
+ *    tool server running on another machine. Both are passed straight to the
+ *    Agent SDK's `mcpServers`, which accepts the same union.
+ */
+export type McpServerConfig = McpStdioServerConfig | McpRemoteServerConfig;
+
+export interface McpStdioServerConfig {
+  type?: 'stdio';
   command: string;
-  args: string[];
-  env: Record<string, string>;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
+export interface McpRemoteServerConfig {
+  type: 'sse' | 'http';
+  url: string;
+  headers?: Record<string, string>;
 }
 
 export interface AgentQuery {

@@ -568,12 +568,74 @@ body {
   padding: 0 4px;
   font-size: 1.2rem;
   line-height: 1;
-  opacity: 0;
+  opacity: 1;
   transition: opacity 0.15s;
 }
-#room-list li:hover .room-kebab,
-#room-list li:focus-within .room-kebab {
-  opacity: 1;
+/* Row actions (kebab + new-thread "+") grouped in a right-anchored overlay.
+   On touch it stays in normal flow, always visible. On a hover-capable desktop
+   it's absolutely positioned so it takes NO flex space — the room name keeps its
+   full width and never reflows — and it fades in OVER the row's right edge on
+   hover/focus (or while its menu is open). The left-fading backdrop keeps the
+   name from showing through the buttons. */
+.room-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+@media (hover: hover) and (pointer: fine) {
+  .room-actions {
+    position: absolute;
+    right: 6px;
+    /* Anchor to the room-name line (= li padding-top), not the vertical centre
+       of the li — which grows tall when the thread tree expands below the row. */
+    top: 10px;
+    height: 1.2rem;
+    padding-left: 14px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s;
+    background: linear-gradient(to right, transparent, var(--surface2) 55%);
+  }
+  #room-list li:hover .room-actions,
+  #room-list li:focus-within .room-actions,
+  #room-list li:has(.room-menu) .room-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+/* Pinned rooms show a pin at rest. On desktop, anchor it on the right (out of
+   flex flow) so — like the hover actions — it never shifts the room name; hide
+   it on hover where the actions overlay takes that spot (its kebab offers
+   Unpin). On touch it stays in flow. */
+@media (hover: hover) and (pointer: fine) {
+  #room-list li .room-pin-indicator {
+    position: absolute;
+    right: 8px;
+    top: 10px;
+    height: 1.2rem;
+    margin-left: 0;
+    transition: opacity 0.15s;
+  }
+  #room-list li:hover .room-pin-indicator,
+  #room-list li:focus-within .room-pin-indicator,
+  #room-list li:has(.room-menu) .room-pin-indicator {
+    opacity: 0;
+    pointer-events: none;
+  }
+}
+/* The active room's in-tree "+" (on the last thread row when a room has threads)
+   sits below the row, clear of the actions overlay, so a plain opacity hide-
+   until-hover keeps it consistent with the row actions without covering it. */
+@media (hover: hover) and (pointer: fine) {
+  #room-list li .thread-list .thread-add-inline {
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  #room-list li:hover .thread-list .thread-add-inline,
+  #room-list li:focus-within .thread-list .thread-add-inline {
+    opacity: 1;
+  }
 }
 #room-list li .room-menu {
   position: absolute;
@@ -808,6 +870,12 @@ body {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  transition: opacity 0.12s ease;
+}
+/* During a room/thread switch the transcript is dimmed (not blanked) until the
+   new history swaps in, then it fades back — see beginTranscriptSwitch(). */
+#messages.room-switching {
+  opacity: 0.45;
 }
 .msg {
   max-width: 80%;
@@ -1159,15 +1227,23 @@ button:focus-visible {
 
 /* Connection banner */
 .connection-banner {
-  padding: 6px 20px;
+  /* Collapsed via max-height (not display:none) so a reconnect blip eases the
+     banner in/out instead of snapping the chat pane below it up/down — an
+     abrupt display toggle here reflows the whole transcript + input bar. */
+  max-height: 0;
+  padding: 0 20px;
+  overflow: hidden;
   background: var(--delete-color);
   color: #fff;
   font-size: 0.8rem;
   text-align: center;
-  display: none;
+  transition:
+    max-height 0.15s ease,
+    padding 0.15s ease;
 }
 .connection-banner.visible {
-  display: block;
+  max-height: 40px;
+  padding: 6px 20px;
 }
 
 /* UserCreds per-member key banner + room credential-mode selector */
@@ -1572,6 +1648,13 @@ button:focus-visible {
 .file-image-preview {
   max-width: 280px;
   max-height: 200px;
+  /* Reserve space before the image decodes — without this the bubble collapses
+     to ~0px height and pops open once the image loads, shifting anything below
+     it (and, if the user's scrolled up reading history, jumping the viewport
+     when an off-screen image resolves late). No real dimensions are known
+     ahead of load, so this is a fixed placeholder, not the final aspect ratio. */
+  min-height: 120px;
+  background: var(--surface2);
   border-radius: 8px;
   object-fit: cover;
   cursor: pointer;
@@ -1765,12 +1848,21 @@ a.lightbox-btn {
 
 /* Typing indicator bar (user typing) */
 .typing-indicator {
-  padding: 4px 20px;
+  /* Collapsed by default (max-height, not display:none) so showing/hiding it
+     eases the message viewport open/shut instead of snapping — an abrupt
+     flex-basis change here shifts the whole transcript + input bar. */
+  max-height: 0;
+  padding: 0 20px;
+  overflow: hidden;
   font-size: 0.8em;
   color: var(--text-dim);
+  transition:
+    max-height 0.15s ease,
+    padding 0.15s ease;
 }
-.typing-indicator[hidden] {
-  display: none;
+.typing-indicator.is-visible {
+  max-height: 24px;
+  padding: 4px 20px;
 }
 
 /* Shared animated dots */
@@ -2465,16 +2557,18 @@ a.lightbox-btn {
 .agent-detail[hidden] {
   display: none;
 }
-/* Desktop only: the agent + model editors are opened FROM the Manage drawer,
-   so they slide in as a right-side drawer aligned over the list (z above
-   .manage's 60), giving a tidy master→detail in the right column with the chat
-   still visible to the left. #room-detail keeps the base left-over-chat
-   behavior (it opens from a room, not from Manage). On phones (max-width 600)
-   the shared `.agent-detail` rule below already makes all three full-screen at
-   z-110, so this override is scoped to desktop to avoid fighting it. */
+/* Desktop only: the agent + model + MCP editors are opened FROM the Manage
+   drawer, so they slide in as a right-side drawer aligned over the list (z
+   above .manage's 60), giving a tidy master→detail in the right column with
+   the chat still visible to the left. #room-detail keeps the base
+   left-over-chat behavior (it opens from a room, not from Manage). On phones
+   (max-width 600) the shared `.agent-detail` rule below already makes them all
+   full-screen at z-110, so this override is scoped to desktop to avoid
+   fighting it. */
 @media (min-width: 601px) {
   #agent-detail,
-  #model-detail {
+  #model-detail,
+  #mcp-detail {
     position: fixed;
     top: 0;
     right: 0;
@@ -2773,6 +2867,68 @@ a.lightbox-btn {
   margin-top: 16px;
   padding-top: 14px;
   border-top: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+}
+.agent-mcp-section {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.agent-mcp-list {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.agent-mcp-empty {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  padding: 4px 2px;
+}
+.agent-mcp-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.agent-mcp-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.agent-mcp-name {
+  font-size: var(--fs-sm);
+  color: var(--text);
+  font-weight: 600;
+}
+.agent-mcp-meta {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-mcp-remove {
+  flex: 0 0 auto;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 2px;
+  display: flex;
+  align-items: center;
+}
+.agent-mcp-remove:hover {
+  color: var(--danger);
+}
+.agent-mcp-remove .icon {
+  width: 16px;
+  height: 16px;
 }
 .room-wired-agents li {
   display: flex;
@@ -4065,14 +4221,16 @@ a.lightbox-btn {
   color: var(--danger);
 }
 
-/* Models tab — list rows mirror agent list */
-#model-list {
+/* Models + MCP tabs — list rows mirror agent list (shared row anatomy) */
+#model-list,
+#mcp-list {
   list-style: none;
   padding: 8px 0;
   flex: 1;
   overflow-y: auto;
 }
-#model-list li {
+#model-list li,
+#mcp-list li {
   padding: 8px 12px;
   cursor: pointer;
   border-radius: 4px;
@@ -4083,14 +4241,17 @@ a.lightbox-btn {
   gap: 6px;
   transition: background 0.15s;
 }
-#model-list li:hover {
+#model-list li:hover,
+#mcp-list li:hover {
   background: var(--surface2);
 }
-#model-list li.active {
+#model-list li.active,
+#mcp-list li.active {
   background: var(--surface2);
   box-shadow: inset 0 0 8px color-mix(in srgb, var(--accent) 15%, transparent);
 }
-#model-list .model-kind-badge {
+#model-list .model-kind-badge,
+#mcp-list .model-kind-badge {
   font-size: 0.6rem;
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -4103,13 +4264,25 @@ a.lightbox-btn {
 #model-list .model-kind-badge.kind-ollama {
   background: var(--accent2);
 }
-#model-list .model-row-name {
+/* MCP transport badges: remote transports take the secondary brand hue,
+   stdio the agent hue — matching the model badges' two-tone scheme. */
+#mcp-list .model-kind-badge.kind-sse,
+#mcp-list .model-kind-badge.kind-http {
+  background: var(--accent2);
+}
+#mcp-list .model-kind-badge.kind-stdio {
+  background: var(--agent);
+  color: var(--bg);
+}
+#model-list .model-row-name,
+#mcp-list .model-row-name {
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-#model-list .model-row-uses {
+#model-list .model-row-uses,
+#mcp-list .model-row-uses {
   font-size: 0.667rem;
   color: var(--text-dim, var(--text));
   opacity: 0.7;
@@ -4212,6 +4385,11 @@ a.lightbox-btn {
 .model-probe-kind.kind-openai-compatible {
   background: var(--agent);
   color: var(--bg);
+}
+/* MCP probe result badges (transport instead of provider kind). */
+.model-probe-kind.kind-sse,
+.model-probe-kind.kind-http {
+  background: var(--accent2);
 }
 .model-probe-notes {
   font-size: 0.733rem;
@@ -5507,9 +5685,22 @@ a.lightbox-btn {
 /* Left disclosure chevron on room rows that have topic threads — expands the
    thread list inline without entering the room. */
 .room-thread-toggle {
-  flex: 0 0 auto;
-  width: 16px;
-  margin-right: 4px;
+  /* Absolutely positioned in the row's left padding gutter so it never
+     participates in the flex layout — the room name stays at the same x whether
+     a room has threads or not, and it doesn't jump when a room becomes active
+     (#room-list li is position: relative). */
+  position: absolute;
+  left: 1px;
+  /* Anchor to the room-name line (= li padding-top), NOT the vertical centre of
+     the whole li — the li grows tall when its thread tree expands below the row,
+     which would otherwise drop the chevron down toward the threads. Height is one
+     name line so the glyph stays centred on the room name at any font size. */
+  top: 10px;
+  height: 1.2rem;
+  width: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   border: none;
   background: none;
   color: var(--text-dim);
@@ -5544,7 +5735,9 @@ a.lightbox-btn {
 .thread-row {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  /* No gap: the "#" glyph hugs the thread name exactly like a room row's
+     "#name" (trailing unread dot / kebab carry their own spacing). */
+  gap: 0;
   padding: 0.25rem 0.5rem;
   /* Spine carries the thread's identity hue (set inline via --thread-color,
      mirrors rooms' colored left bar); the active thread overrides to accent. */
@@ -5562,24 +5755,23 @@ a.lightbox-btn {
   color: var(--text);
 }
 .thread-row.active {
-  /* Distinct from hover (plain surface2): accent tint + accent text + accent
-     spine bar, so selection and hover never read the same. */
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  color: var(--accent-strong);
-  border-left-color: var(--accent);
-  font-weight: 600;
+  /* Match the room rows' selection treatment: neutral bright text on surface2
+     with an inset accent glow — NOT an accent-colored label. The identity spine
+     (--thread-color) stays, like rooms keep their hue border. The glow is what
+     distinguishes active from a plain-surface2 hover. */
+  background: var(--surface2);
+  color: var(--text);
+  box-shadow: inset 0 0 8px color-mix(in srgb, var(--accent) 15%, transparent);
 }
 .thread-glyph {
   flex: 0 0 auto;
-  width: 0.85rem;
-  text-align: center;
   color: var(--text-dim);
 }
 .thread-row:hover .thread-glyph {
   color: var(--text);
 }
 .thread-row.active .thread-glyph {
-  color: var(--accent-strong);
+  color: var(--text);
 }
 .thread-label {
   flex: 1;
@@ -5593,9 +5785,11 @@ a.lightbox-btn {
   border-radius: var(--radius-pill);
   background: var(--accent);
   flex: 0 0 auto;
+  margin-left: 0.4rem;
 }
 .thread-kebab {
   flex: 0 0 auto;
+  margin-left: 0.25rem;
   border: none;
   background: none;
   color: var(--text-dim);

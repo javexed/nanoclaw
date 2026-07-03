@@ -774,3 +774,62 @@ export const moduleWebchatThreadContextSync: Migration = {
     `);
   },
 };
+
+/**
+ * MCP server registry — mirrors webchat_models/webchat_agent_models (§103
+ * above), but the assignment is many-to-many (an agent can have several MCP
+ * servers; the same server can be wired to several agents), unlike a model's
+ * 1:1 assignment.
+ *
+ * `webchat_mcp_servers` is the registry. `transport` selects the shape:
+ *   - 'stdio': command/args/env — a subprocess spawned inside the agent's
+ *     container. Defined once here so the same server can be attached to
+ *     multiple agents without re-entering it.
+ *   - 'sse' | 'http': url/headers — a server reached over the network
+ *     (e.g. a tool server on another machine). These are the transports the
+ *     host-side probe (POST /api/mcp-servers/probe) can verify before save.
+ * `args`/`env`/`headers` are stored as JSON text (sqlite has no array/object
+ * column type), matching the mcp_servers JSON column on container_configs.
+ *
+ * `webchat_agent_mcp_servers` is the assignment join. PK on
+ * (agent_group_id, mcp_server_id) — many-to-many, no FK (mirrors
+ * webchat_agent_models: the delete-server handler cascades in JS after
+ * surfacing the impact list to the operator).
+ *
+ * Assign/unassign is an INCREMENTAL upsert/delete against a single key —
+ * container_configs.mcp_servers[server.name] — not a wholesale recompute.
+ * That matters because `ncl groups config add-mcp-server` writes into the
+ * same JSON column directly (a separate, still-supported entry point); a
+ * full recompute-from-registry on every assignment change would silently
+ * wipe any ncl-added server with a name outside the registry. Incremental
+ * writes only ever touch the one key they own.
+ */
+export const moduleWebchatMcpServers: Migration = {
+  version: 119,
+  name: 'webchat-mcp-servers',
+  up(db: Database.Database) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS webchat_mcp_servers (
+        id            TEXT PRIMARY KEY,
+        name          TEXT NOT NULL,
+        transport     TEXT NOT NULL,
+        command       TEXT,
+        args          TEXT,
+        env           TEXT,
+        url           TEXT,
+        headers       TEXT,
+        instructions  TEXT,
+        created_at    INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS webchat_agent_mcp_servers (
+        agent_group_id  TEXT NOT NULL,
+        mcp_server_id   TEXT NOT NULL,
+        assigned_at     INTEGER NOT NULL,
+        PRIMARY KEY (agent_group_id, mcp_server_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_webchat_agent_mcp_servers_server
+        ON webchat_agent_mcp_servers(mcp_server_id);
+    `);
+  },
+};

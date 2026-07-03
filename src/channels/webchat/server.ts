@@ -265,7 +265,26 @@ import {
   getUserCredential,
   listEnrolledGroups,
 } from '../../modules/user-credentials/db.js';
-import { getContainerConfig } from '../../db/container-configs.js';
+import { getContainerConfig, updateContainerConfigJson } from '../../db/container-configs.js';
+import type { McpServerConfig } from '../../container-config.js';
+import { validateMcpServerName } from '../../mcp-server-config.js';
+import {
+  assignMcpServerToAgent,
+  createWebchatMcpServer,
+  deleteWebchatMcpServer,
+  getAgentsAssignedToMcpServer,
+  getMcpServersForAgent,
+  getWebchatMcpServer,
+  getWebchatMcpServerByName,
+  listWebchatMcpServers,
+  syncAgentMcpConfig,
+  unassignMcpServerFromAgent,
+  updateWebchatMcpServer,
+  type WebchatMcpServer,
+  type WebchatMcpTransport,
+  type WebchatMcpServerInput,
+} from './mcp-registry.js';
+import { probeMcpEndpoint } from './mcp-probe.js';
 import { broadcast, broadcastRooms } from './state.js';
 import { setupWebSocket } from './ws.js';
 
@@ -1450,6 +1469,46 @@ async function handleHttp(
     if (!group) return json(res, 404, { error: 'Agent not found' });
     if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
     return assignAgentModelHandler(req, res, group.id);
+  }
+
+  // ── MCP servers (registry + per-agent assignment) ──────────────────────
+  // A registry of MCP tool servers (webchat_mcp_servers) mirroring the models
+  // registry: define a server once (owner-gated CRUD + a probe that connects
+  // as a real MCP client and lists the server's tools), then attach it to any
+  // number of agents. Assignment syncs container_configs.mcp_servers — the
+  // same field `ncl groups config add-mcp-server` writes and the container
+  // reads — and restarts the group's containers. List responses never include
+  // env/headers (they may hold credentials).
+  if (url.pathname === '/api/mcp-servers' && method === 'GET') {
+    return json(res, 200, listMcpServersForUI());
+  }
+  if (url.pathname === '/api/mcp-servers' && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    return createMcpServerHandler(req, res);
+  }
+  if (url.pathname === '/api/mcp-servers/probe' && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    return probeMcpServerHandler(req, res);
+  }
+  const mcpServerIdMatch = url.pathname.match(/^\/api\/mcp-servers\/([^/]+)$/);
+  if (mcpServerIdMatch && method === 'PUT') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    return updateMcpServerHandler(req, res, decodeURIComponent(mcpServerIdMatch[1]));
+  }
+  if (mcpServerIdMatch && method === 'DELETE') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    return deleteMcpServerHandler(res, decodeURIComponent(mcpServerIdMatch[1]), url.searchParams.get('force') === '1');
+  }
+  const agentMcpMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/mcp-servers$/);
+  if (agentMcpMatch && (method === 'GET' || method === 'PUT')) {
+    const group = resolveAgent(decodeURIComponent(agentMcpMatch[1]));
+    if (!group) return json(res, 404, { error: 'Agent not found' });
+    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+    if (method === 'GET') return listAgentMcpHandler(res, group.id);
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    return setAgentMcpHandler(req, res, group.id);
   }
 
   // ── Lifecycle status (active | paused | archived) ──────────────────────
@@ -3511,6 +3570,221 @@ function reloadAgentModelEnv(agentGroupId: string, reason: string): void {
   } catch (err) {
     log.warn('Webchat: container restart after model change failed', { agentGroupId, reason, err });
   }
+}
+
+/** Restart a group's containers so an mcp_servers change is picked up at spawn. */
+function reloadAgentMcpServers(agentGroupId: string): void {
+  try {
+    const restarted = restartAgentGroupContainers(agentGroupId, 'Webchat MCP servers changed');
+    if (restarted > 0) log.info('Webchat: restarted containers after MCP change', { agentGroupId, restarted });
+  } catch (err) {
+    log.warn('Webchat: container restart after MCP change failed', { agentGroupId, err });
+  }
+}
+
+// ── MCP server registry handlers ──
+//
+// The registry mirrors the models registry: owner-gated CRUD + probe, with a
+// per-agent assignment surface. Secrets discipline: env/headers are accepted
+// on create/update but NEVER returned by any list/read response.
+
+interface McpServerForUI {
+  id: string;
+  name: string;
+  transport: WebchatMcpTransport;
+  /** Endpoint summary — url (remote) or command (stdio). Never env/headers. */
+  target: string;
+  agents_assigned: number;
+}
+
+function mcpServerForUI(s: WebchatMcpServer): McpServerForUI {
+  return {
+    id: s.id,
+    name: s.name,
+    transport: s.transport,
+    target: (s.transport === 'stdio' ? s.command : s.url) ?? '',
+    agents_assigned: getAgentsAssignedToMcpServer(s.id).length,
+  };
+}
+
+function listMcpServersForUI(): McpServerForUI[] {
+  return listWebchatMcpServers().map(mcpServerForUI);
+}
+
+/** Parse + validate a registry create/update body into a WebchatMcpServerInput. */
+function parseMcpServerBody(body: Record<string, unknown>): WebchatMcpServerInput {
+  const name = validateMcpServerName(body.name);
+  const transport = body.transport;
+  if (transport !== 'stdio' && transport !== 'sse' && transport !== 'http') {
+    throw new Error('transport must be "stdio" | "sse" | "http"');
+  }
+  const input: WebchatMcpServerInput = { name, transport };
+  if (transport === 'stdio') {
+    if (typeof body.command !== 'string' || !body.command.trim()) throw new Error('command required for stdio');
+    input.command = body.command.trim();
+    if (Array.isArray(body.args)) input.args = body.args.map(String);
+    if (body.env && typeof body.env === 'object') input.env = body.env as Record<string, string>;
+  } else {
+    if (typeof body.url !== 'string' || !body.url.trim()) throw new Error('url required for a remote server');
+    input.url = body.url.trim().replace(/\/+$/, '');
+    if (body.headers && typeof body.headers === 'object') input.headers = body.headers as Record<string, string>;
+  }
+  if (typeof body.instructions === 'string' && body.instructions.trim()) input.instructions = body.instructions.trim();
+  return input;
+}
+
+async function createMcpServerHandler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: Record<string, unknown>;
+  try {
+    body = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  let input: WebchatMcpServerInput;
+  try {
+    input = parseMcpServerBody(body);
+  } catch (err) {
+    return json(res, 400, { error: err instanceof Error ? err.message : 'Invalid MCP server' });
+  }
+  // Names key container_configs.mcp_servers (and the SDK's mcp__<name>__* tool
+  // prefixes), so they must be unique across the registry.
+  if (getWebchatMcpServerByName(input.name)) {
+    return json(res, 409, { error: `An MCP server named "${input.name}" already exists` });
+  }
+  const server = createWebchatMcpServer(input);
+  return json(res, 200, { ok: true, server: mcpServerForUI(server) });
+}
+
+async function updateMcpServerHandler(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
+  const existing = getWebchatMcpServer(id);
+  if (!existing) return json(res, 404, { error: 'MCP server not found' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: Record<string, unknown>;
+  try {
+    body = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  let input: WebchatMcpServerInput;
+  try {
+    // Merge onto the existing row so a partial body (e.g. rename only) works.
+    input = parseMcpServerBody({
+      name: body.name ?? existing.name,
+      transport: body.transport ?? existing.transport,
+      command: body.command ?? existing.command ?? undefined,
+      args: body.args ?? (existing.args ? JSON.parse(existing.args) : undefined),
+      env: body.env ?? (existing.env ? JSON.parse(existing.env) : undefined),
+      url: body.url ?? existing.url ?? undefined,
+      headers: body.headers ?? (existing.headers ? JSON.parse(existing.headers) : undefined),
+      instructions: body.instructions ?? existing.instructions ?? undefined,
+    });
+  } catch (err) {
+    return json(res, 400, { error: err instanceof Error ? err.message : 'Invalid MCP server' });
+  }
+  const clash = getWebchatMcpServerByName(input.name);
+  if (clash && clash.id !== id) {
+    return json(res, 409, { error: `An MCP server named "${input.name}" already exists` });
+  }
+  const oldName = existing.name;
+  updateWebchatMcpServer(id, input);
+  // Re-sync every assigned agent: drop the old key when renamed, upsert the
+  // new config, and restart so live containers pick the change up.
+  const updated = getWebchatMcpServer(id);
+  for (const agentGroupId of getAgentsAssignedToMcpServer(id)) {
+    if (updated && oldName !== updated.name) syncAgentMcpConfig(agentGroupId, { ...updated, name: oldName }, false);
+    if (updated) syncAgentMcpConfig(agentGroupId, updated, true);
+    reloadAgentMcpServers(agentGroupId);
+  }
+  return json(res, 200, { ok: true });
+}
+
+function deleteMcpServerHandler(res: ServerResponse, id: string, force: boolean): void {
+  const existing = getWebchatMcpServer(id);
+  if (!existing) return json(res, 404, { error: 'MCP server not found' });
+  const assigned = getAgentsAssignedToMcpServer(id);
+  if (assigned.length > 0 && !force) {
+    // Cascade-with-confirmation (mirrors models): surface the impact list so
+    // the PWA can prompt before detaching the server from live agents.
+    return json(res, 409, {
+      error: 'MCP server is attached to agents. Re-request with ?force=1 to detach and delete.',
+      assigned_agent_group_ids: assigned,
+    });
+  }
+  for (const agentGroupId of assigned) {
+    syncAgentMcpConfig(agentGroupId, existing, false);
+  }
+  deleteWebchatMcpServer(id);
+  for (const agentGroupId of assigned) {
+    reloadAgentMcpServers(agentGroupId);
+  }
+  return json(res, 200, { ok: true, unassigned_count: assigned.length });
+}
+
+async function probeMcpServerHandler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { url?: unknown; headers?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  if (typeof body.url !== 'string' || !body.url.trim()) return json(res, 400, { error: 'url required' });
+  const url = body.url.trim();
+  if (/\s|[<>]/.test(url)) return json(res, 400, { error: 'url contains invalid characters' });
+  // Bare hosts are common ("winbox:8000") — default the scheme to http, the
+  // typical case for a LAN/tailnet tool server (https rides through as-is).
+  const withScheme = /^https?:\/\//i.test(url) ? url : `http://${url}`;
+  const headers = body.headers && typeof body.headers === 'object' ? (body.headers as Record<string, string>) : {};
+  try {
+    const result = await probeMcpEndpoint(withScheme, headers);
+    return json(res, 200, result);
+  } catch (err) {
+    // assertSafeOutboundUrl rejections land here — a 400, not a 500: the
+    // input was refused, the probe itself didn't break.
+    return json(res, 400, { error: err instanceof Error ? err.message : 'Probe failed' });
+  }
+}
+
+/** The agent panel's list: which registry servers are attached to this agent. */
+function listAgentMcpHandler(res: ServerResponse, agentGroupId: string): void {
+  const attached = getMcpServersForAgent(agentGroupId).map(mcpServerForUI);
+  return json(res, 200, { servers: attached });
+}
+
+/** Attach/detach registry servers: body { add: [ids], remove: [ids] }. */
+async function setAgentMcpHandler(req: IncomingMessage, res: ServerResponse, agentGroupId: string): Promise<void> {
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { add?: unknown; remove?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  const add = Array.isArray(body.add) ? body.add.map(String) : [];
+  const remove = Array.isArray(body.remove) ? body.remove.map(String) : [];
+  if (add.length === 0 && remove.length === 0) return json(res, 400, { error: 'add or remove required' });
+  let changed = 0;
+  for (const id of add) {
+    const server = getWebchatMcpServer(id);
+    if (!server) return json(res, 404, { error: `MCP server not found: ${id}` });
+    assignMcpServerToAgent(agentGroupId, id);
+    syncAgentMcpConfig(agentGroupId, server, true);
+    changed++;
+  }
+  for (const id of remove) {
+    const server = getWebchatMcpServer(id);
+    if (!server) return json(res, 404, { error: `MCP server not found: ${id}` });
+    unassignMcpServerFromAgent(agentGroupId, id);
+    syncAgentMcpConfig(agentGroupId, server, false);
+    changed++;
+  }
+  if (changed > 0) reloadAgentMcpServers(agentGroupId);
+  return json(res, 200, { ok: true, servers: getMcpServersForAgent(agentGroupId).map(mcpServerForUI) });
 }
 
 // ── Push subscriptions ──

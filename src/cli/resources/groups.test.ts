@@ -218,3 +218,72 @@ describe('groups CLI delete cascades dependent rows (#2525)', () => {
     expect((resp as { ok: false; error: { code: string; message: string } }).error.message).toMatch(/not found/i);
   });
 });
+
+describe('groups CLI config add-mcp-server — stdio + remote transports', () => {
+  const GID = 'ag-mcp';
+
+  beforeEach(() => {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    const db = initTestDb();
+    runMigrations(db);
+    createAgentGroup({ id: GID, name: 'mcp', folder: 'mcp', agent_provider: null, created_at: now() });
+    db.prepare(
+      `INSERT INTO container_configs
+         (agent_group_id, provider, model, effort, image_tag, assistant_name, max_messages_per_prompt,
+          skills, mcp_servers, packages_apt, packages_npm, additional_mounts, cli_scope, updated_at)
+       VALUES (?, NULL, NULL, NULL, NULL, NULL, NULL, '"all"', '{}', '[]', '[]', '[]', 'group', ?)`,
+    ).run(GID, now());
+  });
+
+  afterEach(() => {
+    closeDb();
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+  });
+
+  const addMcp = (args: Record<string, unknown>) =>
+    dispatch({ id: 'req', command: 'groups-config-add-mcp-server', args }, { caller: 'host' });
+
+  const servers = (): Record<string, unknown> =>
+    JSON.parse(
+      (
+        getDb().prepare('SELECT mcp_servers FROM container_configs WHERE agent_group_id = ?').get(GID) as {
+          mcp_servers: string;
+        }
+      ).mcp_servers,
+    );
+
+  it('adds a remote (sse) server from --url', async () => {
+    const resp = await addMcp({ id: GID, name: 'windows', url: 'http://100.1.2.3:8000/sse' });
+    expect(resp.ok).toBe(true);
+    expect(servers().windows).toEqual({ type: 'sse', url: 'http://100.1.2.3:8000/sse', headers: {} });
+  });
+
+  it('honours --type http and --headers', async () => {
+    const resp = await addMcp({
+      id: GID,
+      name: 'remote',
+      url: 'https://x/mcp',
+      type: 'http',
+      headers: '{"Authorization":"Bearer t"}',
+    });
+    expect(resp.ok).toBe(true);
+    expect(servers().remote).toEqual({ type: 'http', url: 'https://x/mcp', headers: { Authorization: 'Bearer t' } });
+  });
+
+  it('still adds a stdio server from --command', async () => {
+    const resp = await addMcp({ id: GID, name: 'local', command: 'mcp-thing', args: '["--flag"]' });
+    expect(resp.ok).toBe(true);
+    expect(servers().local).toEqual({ command: 'mcp-thing', args: ['--flag'], env: {} });
+  });
+
+  it('rejects --url and --command together', async () => {
+    const resp = await addMcp({ id: GID, name: 'bad', url: 'http://x', command: 'y' });
+    expect(resp.ok).toBe(false);
+  });
+
+  it('rejects an invalid --type', async () => {
+    const resp = await addMcp({ id: GID, name: 'bad2', url: 'http://x', type: 'ws' });
+    expect(resp.ok).toBe(false);
+  });
+});

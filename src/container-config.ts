@@ -17,10 +17,29 @@ import { getContainerConfig } from './db/container-configs.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import type { AgentGroup, ContainerConfigRow } from './types.js';
 
-export interface McpServerConfig {
+/**
+ * An MCP server wired into an agent group. Two transports:
+ *  - stdio (default): a subprocess spawned inside the container (`command`).
+ *  - remote (sse | http): a server reached over the network by `url` — e.g. a
+ *    tool server running on another machine. Both pass through container.json
+ *    verbatim into the Agent SDK's `mcpServers`, which accepts the same union.
+ * `instructions` (either transport) is materialized as an inline CLAUDE.md
+ * fragment for the server (see claude-md-compose.ts).
+ */
+export type McpServerConfig = McpStdioServerConfig | McpRemoteServerConfig;
+
+export interface McpStdioServerConfig {
+  type?: 'stdio';
   command: string;
   args?: string[];
   env?: Record<string, string>;
+  instructions?: string;
+}
+
+export interface McpRemoteServerConfig {
+  type: 'sse' | 'http';
+  url: string;
+  headers?: Record<string, string>;
   instructions?: string;
 }
 

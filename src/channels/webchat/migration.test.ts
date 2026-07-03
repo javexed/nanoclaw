@@ -32,8 +32,10 @@ describe('moduleWebchat migration', () => {
       .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'webchat_%' ORDER BY name`)
       .all() as { name: string }[];
     expect(tables.map((t) => t.name)).toEqual([
+      'webchat_agent_mcp_servers',
       'webchat_agent_models',
       'webchat_approvals_index',
+      'webchat_mcp_servers',
       'webchat_messages',
       'webchat_messages_fts',
       'webchat_messages_fts_config',
@@ -64,6 +66,7 @@ describe('moduleWebchat migration', () => {
       .all() as { name: string }[];
     expect(indexes.map((i) => i.name).sort()).toEqual(
       [
+        'idx_webchat_agent_mcp_servers_server',
         'idx_webchat_agent_models_model',
         'idx_webchat_approvals_platform',
         'idx_webchat_engaged_thread',
@@ -90,6 +93,7 @@ describe('moduleWebchat migration', () => {
       'webchat-credentials-config',
       'webchat-drop-rooms',
       'webchat-initial',
+      'webchat-mcp-servers',
       'webchat-message-fts',
       'webchat-models',
       'webchat-room-credential-mode',

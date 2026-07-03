@@ -81,6 +81,8 @@ HOOK_FILES=(
   container/agent-runner/src/index.ts
   src/container-runtime.test.ts
   src/host-sweep.ts
+  src/cli/resources/groups.ts
+  src/cli/resources/groups.test.ts
 )
 echo "→ Reversing webchat core-file hooks …"
 for f in "${HOOK_FILES[@]}"; do
@@ -138,6 +140,8 @@ rm -rf \
   container/agent-runner/src/providers/summarize-thinking.test.ts \
   src/onecli-preflight.ts \
   src/onecli-preflight.test.ts \
+  src/mcp-server-config.ts \
+  src/mcp-server-config.test.ts \
   src/modules/user-credentials \
   src/db/migrations/020-byok-credentials.ts \
   src/db/migrations/021-byok-oauth.ts \
@@ -200,7 +204,7 @@ rm -f "$TMPFILE"
 # These were added by install. `pnpm remove` is a no-op if they're already
 # gone. If another customization depends on one of them, re-add it after.
 echo "→ Removing webchat dependencies …"
-pnpm remove ws busboy web-push undici @types/ws @types/busboy @types/web-push 2>/dev/null \
+pnpm remove ws busboy web-push undici @modelcontextprotocol/sdk @types/ws @types/busboy @types/web-push 2>/dev/null \
   || echo "= Some packages already absent (skip)"
 
 # ── 7. Rebuild host + container ──────────────────────────────────────────

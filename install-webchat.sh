@@ -175,6 +175,8 @@ NEW_PATHS=(
   container/agent-runner/src/providers/summarize-thinking.test.ts
   src/onecli-preflight.ts
   src/onecli-preflight.test.ts
+  src/mcp-server-config.ts
+  src/mcp-server-config.test.ts
   src/modules/user-credentials
   src/db/migrations/020-byok-credentials.ts
   src/db/migrations/021-byok-oauth.ts
@@ -246,6 +248,8 @@ HOOK_FILES=(
   container/agent-runner/src/index.ts
   src/container-runtime.test.ts
   src/host-sweep.ts
+  src/cli/resources/groups.ts
+  src/cli/resources/groups.test.ts
 )
 CONFLICTS=()
 echo "→ Applying webchat core-file hooks …"
@@ -488,8 +492,10 @@ if [ "${#CONFLICTS[@]}" -gt 0 ]; then
 fi
 
 # ── 5. Install pinned packages ──────────────────────────────────────────
+# @modelcontextprotocol/sdk backs the MCP-server probe (mcp-probe.ts) — the
+# same version the agent container pins for its own MCP tooling.
 echo "→ Installing webchat dependencies …"
-pnpm add ws@8.20.0 busboy@1.6.0 web-push@3.6.7 undici@7.16.0
+pnpm add ws@8.20.0 busboy@1.6.0 web-push@3.6.7 undici@7.16.0 @modelcontextprotocol/sdk@1.29.0
 pnpm add -D @types/ws@8.18.1 @types/busboy@1.5.4 @types/web-push@3.6.4
 
 # ── 5b. Verify the native SQLite binding boots under the project Node ─────

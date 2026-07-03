@@ -555,6 +555,7 @@ $('#overflow-menu')?.addEventListener('click', (e) => {
   const action = item.dataset.action;
   if (action === 'agents') openManage('agents');
   else if (action === 'models') openManage('models');
+  else if (action === 'mcp') openManage('mcp');
   else if (action === 'topology') toggleTopology();
   else if (action === 'matrix') toggleMatrix();
   else if (action === 'dashboard') toggleDashboard();
@@ -1137,6 +1138,9 @@ function connect() {
         if (msg.messages.length === 0) {
           $('#messages').innerHTML = '<div class="empty-state">No messages yet. Start the conversation!</div>';
         }
+        // New content is in place — fade the transcript back to full (it was
+        // dimmed during the switch instead of blanked).
+        endTranscriptSwitch();
         if (msg.messages.length > 0) {
           setLastSeenMessageId(msg.messages[msg.messages.length - 1].id);
         }
@@ -1178,7 +1182,13 @@ function connect() {
         if ((msg.room_id || currentRoom) === currentRoom && msgThread !== currentThread) {
           if (msg.sender !== myIdentity) {
             threadUnread.add(msgThread);
-            renderThreadList();
+            // Don't rebuild the thread list while the user is naming a new
+            // thread or renaming one — renderThreadList reseeds that inline
+            // input from scratch, so a message landing on some OTHER thread
+            // would silently discard whatever they'd already typed. The
+            // unread flag above is still recorded; the rebuild (and the dot)
+            // lands next time renderThreadList runs for another reason.
+            if (!threadCreating && !threadRenaming) renderThreadList();
           }
           break;
         }
@@ -1372,8 +1382,25 @@ function activityOf(room) {
 // Sentinel rendered as a horizontal rule between the pinned group and the rest.
 const ROOM_DIVIDER = Symbol('room-divider');
 
+// Deferred retry for renderRooms when it's skipped because a kebab menu is
+// open — see the guard at the top of renderRooms.
+let renderRoomsRetryTimer = null;
+
 function renderRooms(rooms) {
   const list = $('#room-list');
+  // A background event (a message landing in ANY room, an unread/mention/read
+  // update) calls this via updateUnreadDots — don't let that tear down an open
+  // kebab menu out from under the user mid-click. Retry shortly instead of
+  // dropping the update.
+  if (list.querySelector('.room-menu')) {
+    clearTimeout(renderRoomsRetryTimer);
+    renderRoomsRetryTimer = setTimeout(() => renderRooms(rooms), 400);
+    return;
+  }
+  // The rebuild below replaces every <li>, which resets scroll — restore it so
+  // a message landing elsewhere doesn't visibly snap the list back to the top
+  // while the user is scrolled down browsing rooms.
+  const prevScrollTop = list.scrollTop;
   // Drag-to-pin: wire the list as a drop target once (survives innerHTML reset).
   // Dropping a dragged room anywhere on the list pins it; pinned rooms sort to
   // the top automatically. Unpin lives in the kebab.
@@ -1636,7 +1663,14 @@ function renderRooms(rooms) {
       };
       setTimeout(() => document.addEventListener('click', close), 0);
     });
-    li.appendChild(kebab);
+    // Right-anchored actions: the kebab + the new-thread "+". On a hover-capable
+    // desktop this group is absolutely positioned (see .room-actions) so it takes
+    // NO flex space and floats OVER the row's right edge — the room name keeps its
+    // full width and never reflows when the actions reveal on hover. On touch it
+    // stays in normal flow and always visible.
+    const actions = document.createElement('span');
+    actions.className = 'room-actions';
+    actions.appendChild(kebab);
 
     // A "+" on every OTHER room row so a new thread can be started in any room
     // straight from the list (the active room's "+" comes from its thread tree
@@ -1657,16 +1691,18 @@ function renderRooms(rooms) {
           threadCreating = false;
           renderRooms(lastRoomsList);
         });
-        li.appendChild(add);
+        actions.appendChild(add);
       }
     }
+    li.appendChild(actions);
 
-    // Thread expander: rooms that HAVE topic threads get a left chevron to
-    // expand/collapse their thread list inline — WITHOUT entering the room (the
-    // active room always shows its tree, so it needs no toggle). thread_count
+    // Thread expander: rooms that HAVE topic threads get a disclosure chevron to
+    // expand/collapse their thread list inline. It's absolutely positioned in the
+    // row's left gutter so it never shifts the room name (every room name aligns,
+    // thread or not) and it stays put when a room becomes active. thread_count
     // comes from the server's rooms payload.
     const threadCount = room.thread_count || 0;
-    if (threadCount > 0 && room.id !== currentRoom) {
+    if (threadCount > 0) {
       const open = expandedRooms.has(room.id);
       const chev = document.createElement('button');
       chev.className = 'room-thread-toggle';
@@ -1699,9 +1735,11 @@ function renderRooms(rooms) {
     // Nest a thread tree under the row: the active room's (populated by
     // renderThreadList below), or an EXPANDED non-active room's (its own tree).
     if (room.id === currentRoom) {
-      const threadHost = document.createElement('div');
-      threadHost.className = 'thread-list';
-      li.appendChild(threadHost);
+      if (expandedRooms.has(room.id)) {
+        const threadHost = document.createElement('div');
+        threadHost.className = 'thread-list';
+        li.appendChild(threadHost);
+      }
     } else if (expandedRooms.has(room.id)) {
       const threadHost = document.createElement('div');
       threadHost.className = 'thread-list';
@@ -1709,8 +1747,9 @@ function renderRooms(rooms) {
       renderRoomThreads(li, room.id);
     }
   }
-  // Populate the active room's thread tree (no-op if no room open).
-  if (currentRoom) renderThreadList();
+  // Populate the active room's thread tree when it's expanded (no-op otherwise).
+  if (currentRoom && expandedRooms.has(currentRoom)) renderThreadList();
+  list.scrollTop = prevScrollTop;
 }
 
 let lastRoomsList = [];
@@ -1858,7 +1897,7 @@ let threadCreating = false; // true while the inline "new thread" input is open
 let threadAddRoom = null; // room id whose row is showing the inline new-thread input
 let threadRenaming = null; // thread_id whose row is showing the inline rename input
 const threadUnread = new Set(); // thread_ids with unread activity in the open room
-const expandedRooms = new Set(); // non-active rooms whose thread tree is expanded in the sidebar
+const expandedRooms = new Set(); // rooms whose thread tree is expanded in the sidebar (the active room is added on join)
 // Single source of truth for a room's threads (roomId → threads[]), keyed by
 // room. The active room's threads are just threadCache.get(currentRoom) — see
 // roomThreads(). loadThreadList/loadRoomThreads write it; render reads it. One
@@ -2070,7 +2109,10 @@ function renderThreadList() {
       threadCreating = true;
       renderThreadList();
     });
-    li.appendChild(add);
+    // Put it in the row's actions group (beside the kebab) so it hover-hides on
+    // desktop and is never left BEHIND the actions overlay — which would cover it
+    // and swallow the click on hover.
+    (li.querySelector('.room-actions') || li).appendChild(add);
   } else {
     // Has threads → the "+" goes inline on the LAST thread row (right of its
     // name), mirroring the no-threads case where it sits on the room row. No
@@ -2104,7 +2146,7 @@ function openThread(threadId) {
   currentThread = threadId;
   localStorage.setItem('lastThread:' + currentRoom, threadId);
   threadUnread.delete(threadId);
-  $('#messages').innerHTML = '<div class="empty-state">Loading…</div>';
+  beginTranscriptSwitch();
   // Re-join the room scoped to this thread; the server returns thread history.
   ws.send(JSON.stringify({ type: 'join', room_id: currentRoom, thread_id: threadId }));
   renderThreadList();
@@ -2418,6 +2460,24 @@ function cssEscape(s) {
 }
 
 let pendingJumpMessageId = null;
+
+// Smooth room/thread switches: instead of blanking the transcript to a
+// "Loading…" flash (a jarring gap while the async `history` message is in
+// flight), keep the previous messages visible but dimmed until the new history
+// arrives and swaps them in (the 'history' handler calls endTranscriptSwitch).
+// A fallback un-dims if history never lands (e.g. a socket hiccup).
+let roomSwitchDimTimer = null;
+function beginTranscriptSwitch() {
+  const el = $('#messages');
+  el.classList.add('room-switching');
+  clearTimeout(roomSwitchDimTimer);
+  roomSwitchDimTimer = setTimeout(() => el.classList.remove('room-switching'), 2000);
+}
+function endTranscriptSwitch() {
+  clearTimeout(roomSwitchDimTimer);
+  $('#messages').classList.remove('room-switching');
+}
+
 function joinRoom(roomId, roomName, jumpMessageId, initialThread) {
   // When set (e.g. from a search-result click), the `history` handler lands on
   // this message instead of scrolling to the bottom.
@@ -2425,6 +2485,7 @@ function joinRoom(roomId, roomName, jumpMessageId, initialThread) {
   closeAgentDetail();
   closeRoomDetail();
   closeModelDetail();
+  closeMcpDetail();
   // Opening a room exits any full view (Agents/Models/Topology/Wiring/
   // Permissions/Dashboard) and restores the chat pane as the backdrop —
   // otherwise the room "opens" behind a still-visible full view.
@@ -2433,7 +2494,12 @@ function joinRoom(roomId, roomName, jumpMessageId, initialThread) {
   // Reset any in-progress turn state from the previous room so its bubbles /
   // elapsed timer / reasoning traces can't leak into the new room.
   endAllAgentTurns();
+  const prevRoom = currentRoom;
   currentRoom = roomId;
+  // The active room's thread tree is expanded by default; collapse the room we
+  // just left (its chevron re-opens it) so stale trees don't linger open.
+  if (prevRoom && prevRoom !== roomId) expandedRooms.delete(prevRoom);
+  expandedRooms.add(roomId);
   threadAddRoom = null; // clear any other room's pending inline new-thread input
   unreadRooms.delete(roomId);
   mentionedRooms.delete(roomId);
@@ -2450,7 +2516,7 @@ function joinRoom(roomId, roomName, jumpMessageId, initialThread) {
   $('#members-panel').hidden = true;
   $('#members-overlay').classList.remove('visible');
   renderMembers([]);
-  $('#messages').innerHTML = '<div class="empty-state">Loading…</div>';
+  beginTranscriptSwitch();
   // No "Main" thread row — the room itself IS the regular chat. Entering a room
   // always lands in that regular chat ('main' keys the room's shared session);
   // threads are opened explicitly from the sidebar.
@@ -4319,7 +4385,7 @@ $('#members-overlay').addEventListener('click', toggleMembersPanel);
 (function () {
   const overlay = $('#detail-overlay');
   if (!overlay) return; // index.html older than this build — graceful no-op
-  const panels = ['#agent-detail', '#room-detail', '#model-detail'].map((s) => $(s)).filter(Boolean);
+  const panels = ['#agent-detail', '#room-detail', '#model-detail', '#mcp-detail'].map((s) => $(s)).filter(Boolean);
   const app = $('#app');
   let detailViewSynced = false;
   const closeAllDetailPanels = () => {
@@ -4361,6 +4427,7 @@ $('#members-overlay').addEventListener('click', toggleMembersPanel);
     if (!$('#agent-detail').hidden) closeAgentDetail();
     if (!$('#room-detail').hidden) closeRoomDetail();
     if (!$('#model-detail').hidden) closeModelDetail();
+    if (!$('#mcp-detail').hidden) closeMcpDetail();
   });
 })();
 
@@ -4374,6 +4441,7 @@ function openManage(tab = 'agents') {
   closeAgentDetail();
   closeRoomDetail();
   closeModelDetail();
+  closeMcpDetail();
   // Close any other full view first; manage overlays the chat pane, so restore
   // chat as its backdrop (a prior full view had hidden it + set in-dashboard).
   hideOtherFullViews('manage');
@@ -4399,9 +4467,11 @@ function switchManageTab(tab) {
   });
   $('#mtab-agents').hidden = tab !== 'agents';
   $('#mtab-models').hidden = tab !== 'models';
+  $('#mtab-mcp').hidden = tab !== 'mcp';
   if (typeof syncManageSortIcon === 'function') syncManageSortIcon(); // reflect the active tab's sort
   if (tab === 'agents') fetchAgents();
   else if (tab === 'models') fetchModels();
+  else if (tab === 'mcp') fetchMcpServers();
 }
 $('#manage-back')?.addEventListener('click', () => closeView('manage'));
 document.querySelectorAll('.manage-tab').forEach((t) => {
@@ -4654,6 +4724,7 @@ function openDashboard() {
   closeAgentDetail();
   closeRoomDetail();
   closeModelDetail();
+  closeMcpDetail();
   hideOtherFullViews('dashboard');
   dashboardActive = true;
   $('#chat').hidden = true;
@@ -4689,6 +4760,7 @@ function openTopology() {
   closeAgentDetail();
   closeRoomDetail();
   closeModelDetail();
+  closeMcpDetail();
   hideOtherFullViews('topology');
   topologyActive = true;
   $('#chat').hidden = true;
@@ -4886,6 +4958,7 @@ function openMatrix() {
   closeAgentDetail();
   closeRoomDetail();
   closeModelDetail();
+  closeMcpDetail();
   hideOtherFullViews('matrix');
   matrixActive = true;
   $('#chat').hidden = true;
@@ -4915,6 +4988,7 @@ function openHelp() {
   closeAgentDetail();
   closeRoomDetail();
   closeModelDetail();
+  closeMcpDetail();
   hideOtherFullViews('help');
   helpActive = true;
   $('#chat').hidden = true;
@@ -5056,6 +5130,7 @@ function openPermissions() {
   closeAgentDetail();
   closeRoomDetail();
   closeModelDetail();
+  closeMcpDetail();
   hideOtherFullViews('permissions');
   permsActive = true;
   $('#chat').hidden = true;
@@ -6040,6 +6115,7 @@ async function openAgentDetail(id) {
   renderAgents();
   closeRoomDetail();
   closeModelDetail();
+  closeMcpDetail();
 
   // Show edit view, hide create view
   $('#agent-edit-view').hidden = false;
@@ -6066,6 +6142,10 @@ async function openAgentDetail(id) {
 
   // Rooms this agent is wired to (assign / unassign).
   await loadAgentRooms(id);
+
+  // MCP servers wired to this agent (external tool servers).
+  resetAgentMcpForm();
+  renderAgentMcp(id);
 
   $('#agent-detail').hidden = false;
   $('#members-panel').hidden = true;
@@ -6298,6 +6378,146 @@ $('#agent-add-room-toggle').addEventListener('click', async () => {
 $('#agent-add-room-search').addEventListener('input', (e) => filterAssignRoomList(e.target.value));
 $('#agent-add-room-submit').addEventListener('click', assignSelectedRooms);
 
+// ── Per-agent MCP servers (attach/detach over the registry) ─────────────────
+// Servers are DEFINED in the MCP tab (the registry); the agent panel only
+// attaches/detaches them — a compact list + checklist picker mirroring the
+// Rooms wiring block. GET/PUT /api/agents/:id/mcp-servers (admin-gated; the
+// server never returns env/headers).
+
+let agentMcpServers = []; // servers attached to the currently-open agent
+
+function resetAgentMcpForm() {
+  $('#agent-mcp-attach-form').hidden = true;
+}
+
+async function renderAgentMcp(agentId) {
+  const list = $('#agent-mcp-list');
+  list.innerHTML = '';
+  agentMcpServers = [];
+  try {
+    const res = await authFetch(`/api/agents/${encodeURIComponent(agentId)}/mcp-servers`);
+    if (res.ok) agentMcpServers = (await res.json()).servers || [];
+  } catch (err) {
+    console.error('Failed to load MCP servers:', err);
+  }
+  if (agentMcpServers.length === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'agent-mcp-empty';
+    empty.textContent = 'No MCP servers — attach one to give this agent extra tools';
+    list.appendChild(empty);
+    return;
+  }
+  for (const s of agentMcpServers) {
+    const li = document.createElement('li');
+    li.className = 'agent-mcp-row';
+    const info = document.createElement('div');
+    info.className = 'agent-mcp-info';
+    const name = document.createElement('span');
+    name.className = 'agent-mcp-name';
+    name.textContent = s.name;
+    const meta = document.createElement('span');
+    meta.className = 'agent-mcp-meta';
+    meta.textContent = `${s.transport} · ${s.target}`;
+    info.append(name, meta);
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'agent-mcp-remove';
+    remove.setAttribute('aria-label', `Detach ${s.name}`);
+    remove.innerHTML = lucide('x');
+    remove.addEventListener('click', () => detachAgentMcp(agentId, s));
+    li.append(info, remove);
+    list.appendChild(li);
+  }
+}
+
+async function setAgentMcp(agentId, body, okMsg) {
+  const res = await authFetch(`/api/agents/${encodeURIComponent(agentId)}/mcp-servers`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+  showToast(okMsg, { kind: 'success' });
+  await renderAgentMcp(agentId);
+}
+
+async function detachAgentMcp(agentId, server) {
+  const ok = await showConfirmModal({
+    title: `Detach ${server.name}?`,
+    body: 'The agent loses these tools on its next message.',
+    confirmLabel: 'Detach',
+    destructive: true,
+  });
+  if (!ok) return;
+  try {
+    await setAgentMcp(agentId, { remove: [server.id] }, `Detached ${server.name}`);
+  } catch (err) {
+    showToast('Detach failed: ' + (err.message || err), { kind: 'error' });
+  }
+}
+
+// Populate the attach checklist with registry servers not yet on this agent.
+async function populateAgentMcpAttachList() {
+  if (allMcpServers.length === 0) await fetchMcpServers();
+  const attached = new Set(agentMcpServers.map((s) => s.id));
+  const candidates = allMcpServers.filter((s) => !attached.has(s.id));
+  const list = $('#agent-mcp-attach-list');
+  list.innerHTML = '';
+  if (candidates.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'empty-note';
+    li.textContent =
+      allMcpServers.length === 0
+        ? 'No servers in the registry yet — add one from the MCP tab'
+        : 'Every registry server is already attached';
+    list.appendChild(li);
+    updateAgentMcpAttachSubmit();
+    return;
+  }
+  for (const s of candidates) {
+    const li = document.createElement('li');
+    li.className = 'room-add-agent-row';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = s.id;
+    cb.id = `agent-mcp-attach-${s.id}`;
+    cb.addEventListener('change', updateAgentMcpAttachSubmit);
+    const lbl = document.createElement('label');
+    lbl.htmlFor = cb.id;
+    lbl.textContent = `${s.name} — ${s.transport} · ${s.target}`;
+    li.appendChild(cb);
+    li.appendChild(lbl);
+    list.appendChild(li);
+  }
+  updateAgentMcpAttachSubmit();
+}
+
+function updateAgentMcpAttachSubmit() {
+  const n = $('#agent-mcp-attach-list').querySelectorAll('input[type=checkbox]:checked').length;
+  const btn = $('#agent-mcp-attach-submit');
+  btn.disabled = n === 0;
+  btn.textContent = n === 0 ? 'Attach selected' : `Attach ${n} server${n === 1 ? '' : 's'}`;
+}
+
+$('#agent-mcp-attach-toggle').addEventListener('click', async () => {
+  const form = $('#agent-mcp-attach-form');
+  form.hidden = !form.hidden;
+  if (!form.hidden) await populateAgentMcpAttachList();
+});
+$('#agent-mcp-attach-submit').addEventListener('click', async () => {
+  const agentId = selectedAgentId;
+  if (!agentId) return;
+  const ids = [...$('#agent-mcp-attach-list').querySelectorAll('input[type=checkbox]:checked')].map((c) => c.value);
+  if (ids.length === 0) return;
+  $('#agent-mcp-attach-submit').disabled = true;
+  try {
+    await setAgentMcp(agentId, { add: ids }, `Attached ${ids.length} server${ids.length === 1 ? '' : 's'}`);
+    $('#agent-mcp-attach-form').hidden = true;
+  } catch (err) {
+    showToast('Attach failed: ' + (err.message || err), { kind: 'error' });
+  }
+});
+
 // Save existing agent
 $('#agent-detail-form').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -6505,6 +6725,7 @@ function showRoomSettingsToggle(visible) {
 async function openRoomDetail(roomId) {
   selectedRoomId = roomId;
   closeAgentDetail();
+  closeMcpDetail();
   $('#room-create-view').hidden = true;
   $('#room-edit-view').hidden = false;
 
@@ -7226,10 +7447,11 @@ function renderTypingIndicator() {
         ? `${names[0]} is typing`
         : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]} are typing`;
     el.innerHTML = `${label}<span class="dots"><span></span><span></span><span></span></span>`;
-    el.className = 'typing-indicator';
-    el.hidden = false;
+    el.className = 'typing-indicator is-visible';
+    el.removeAttribute('aria-hidden');
   } else {
-    el.hidden = true;
+    el.classList.remove('is-visible');
+    el.setAttribute('aria-hidden', 'true');
   }
 }
 
@@ -7798,6 +8020,7 @@ async function openModelDetail(id) {
   renderModels();
   closeAgentDetail();
   closeRoomDetail();
+  closeMcpDetail();
 
   $('#model-edit-view').hidden = false;
   $('#model-create-view').hidden = true;
@@ -8214,6 +8437,355 @@ $('#model-delete').addEventListener('click', async () => {
     await fetchModels();
     // Refresh the agents list too — assigned_model_id may have changed for some.
     if (allAgents.length > 0) await fetchAgents();
+  } catch (err) {
+    showToast(`Failed to delete: ${err.message}`, { kind: 'error' });
+  }
+});
+
+// ── MCP server registry (the MCP tab) ───────────────────────────────────────
+//
+// Mirrors the models registry: a list pane, a detail/create aside, and a probe
+// that connects to a URL as a real MCP client and lists the server's tools
+// before saving. Servers defined here are attached to agents from the agent
+// panel (many-to-many, unlike a model's 1:1 assignment).
+
+let allMcpServers = [];
+let selectedMcpId = null;
+let lastMcpProbe = null;
+
+async function fetchMcpServers() {
+  try {
+    const res = await authFetch('/api/mcp-servers');
+    allMcpServers = await res.json();
+    renderMcpServers();
+  } catch (err) {
+    console.error('Failed to fetch MCP servers:', err);
+  }
+}
+
+function renderMcpServers() {
+  const list = $('#mcp-list');
+  list.innerHTML = '';
+  if (allMcpServers.length === 0) {
+    const li = document.createElement('li');
+    li.style.cursor = 'default';
+    li.style.opacity = '0.6';
+    li.textContent = 'No MCP servers registered. Click "+ New server" to add one.';
+    list.appendChild(li);
+    return;
+  }
+  const sorted = [...allMcpServers].sort((a, b) => a.name.localeCompare(b.name));
+  for (const server of sorted) {
+    const li = document.createElement('li');
+    li.dataset.mcpId = server.id;
+    if (server.id === selectedMcpId) li.classList.add('active');
+
+    const badge = document.createElement('span');
+    badge.className = `model-kind-badge kind-${server.transport}`;
+    badge.textContent = server.transport;
+    li.appendChild(badge);
+
+    const name = document.createElement('span');
+    name.className = 'model-row-name';
+    name.textContent = server.name;
+    li.appendChild(name);
+
+    if (server.agents_assigned > 0) {
+      const uses = document.createElement('span');
+      uses.className = 'model-row-uses';
+      uses.textContent = `${server.agents_assigned}×`;
+      li.appendChild(uses);
+    }
+
+    li.setAttribute('role', 'button');
+    li.setAttribute('tabindex', '0');
+    li.addEventListener('click', () => {
+      if (selectedMcpId === server.id && !$('#mcp-detail').hidden) {
+        closeMcpDetail();
+      } else {
+        openMcpDetail(server.id);
+      }
+    });
+    list.appendChild(li);
+  }
+}
+
+function openMcpDetail(id) {
+  const server = allMcpServers.find((s) => s.id === id);
+  if (!server) return;
+  // Close the sibling panels BEFORE claiming selection (a blanket
+  // closeMcpDetail() in that group would null a selection made earlier).
+  closeAgentDetail();
+  closeRoomDetail();
+  closeModelDetail();
+  closeMcpDetail();
+  selectedMcpId = id;
+  renderMcpServers();
+
+  $('#mcp-edit-view').hidden = false;
+  $('#mcp-create-view').hidden = true;
+
+  $('#mcp-detail-title').textContent = server.name;
+  $('#mcp-name').value = server.name;
+  $('#mcp-transport').value = server.transport;
+  const remote = server.transport !== 'stdio';
+  $('#mcp-url-label').hidden = !remote;
+  $('#mcp-command-label').hidden = remote;
+  if (remote) $('#mcp-url').value = server.target;
+  else $('#mcp-command').value = server.target;
+
+  const usage = $('#mcp-detail-usage');
+  usage.textContent =
+    server.agents_assigned > 0
+      ? `Attached to ${server.agents_assigned} agent${server.agents_assigned === 1 ? '' : 's'}.`
+      : 'Not attached to any agent yet.';
+
+  $('#mcp-detail').hidden = false;
+  $('#members-panel').hidden = true;
+}
+
+function closeMcpDetail() {
+  $('#mcp-detail').hidden = true;
+  $('#mcp-edit-view').hidden = false;
+  $('#mcp-create-view').hidden = true;
+  selectedMcpId = null;
+  if (manageActive && manageTab === 'mcp') renderMcpServers();
+}
+
+$('#mcp-detail-close').addEventListener('click', closeMcpDetail);
+$('#mcp-create-close').addEventListener('click', closeMcpDetail);
+
+$('#create-mcp-btn').addEventListener('click', () => {
+  selectedMcpId = null;
+  renderMcpServers();
+  closeAgentDetail();
+  closeRoomDetail();
+  closeModelDetail();
+  closeMcpDetail();
+  $('#mcp-edit-view').hidden = true;
+  $('#mcp-create-view').hidden = false;
+  // Reset the probe block + manual form between opens.
+  $('#mcp-probe-url').value = '';
+  $('#mcp-probe-status').hidden = true;
+  $('#mcp-probe-results').hidden = true;
+  $('#mcp-probe-name').value = '';
+  lastMcpProbe = null;
+  $('#mcp-create-name').value = '';
+  $('#mcp-create-url').value = '';
+  $('#mcp-create-command').value = '';
+  $('#mcp-create-args').value = '';
+  $('#mcp-create-transport').value = 'sse';
+  syncMcpCreateTransportFields();
+  $('#mcp-detail').hidden = false;
+  $('#members-panel').hidden = true;
+});
+
+// Manual-entry transport select swaps url vs command/args fields.
+function syncMcpCreateTransportFields() {
+  const remote = $('#mcp-create-transport').value !== 'stdio';
+  $('#mcp-create-url-label').hidden = !remote;
+  $('#mcp-create-command-label').hidden = remote;
+  $('#mcp-create-args-label').hidden = remote;
+}
+$('#mcp-create-transport').addEventListener('change', syncMcpCreateTransportFields);
+
+// ── MCP probe — connect to the URL as an MCP client, list its tools ──
+async function runMcpProbe() {
+  const url = $('#mcp-probe-url').value.trim();
+  if (!url) {
+    showToast('Enter a server URL first (e.g. host:8000/sse).', { kind: 'error' });
+    return;
+  }
+  if (/\s|[<>]/.test(url)) {
+    showToast('URL contains invalid characters.', { kind: 'error' });
+    return;
+  }
+  const status = $('#mcp-probe-status');
+  const results = $('#mcp-probe-results');
+  status.classList.remove('error');
+  status.textContent = 'Probing… (connects to the server and lists its tools)';
+  status.hidden = false;
+  results.hidden = true;
+  $('#mcp-probe-btn').disabled = true;
+  try {
+    const res = await authFetch('/api/mcp-servers/probe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      status.textContent = body.error || `Probe failed (${res.status})`;
+      status.classList.add('error');
+      return;
+    }
+    if (!body.transport) {
+      status.textContent = body.reason || 'No MCP server responded.';
+      status.classList.add('error');
+      return;
+    }
+    lastMcpProbe = body;
+    status.hidden = true;
+    renderMcpProbeResults(body);
+  } catch (err) {
+    status.textContent = 'Probe failed: ' + err.message;
+    status.classList.add('error');
+  } finally {
+    $('#mcp-probe-btn').disabled = false;
+  }
+}
+
+function renderMcpProbeResults(probe) {
+  $('#mcp-probe-kind').className = `model-probe-kind kind-${probe.transport}`;
+  $('#mcp-probe-kind').textContent = probe.transport;
+  const n = probe.tools.length;
+  $('#mcp-probe-notes').textContent =
+    `${probe.serverName || 'MCP server'}${probe.serverVersion ? ' v' + probe.serverVersion : ''} — ` +
+    `${n} tool${n === 1 ? '' : 's'}`;
+  const list = $('#mcp-probe-tools');
+  list.innerHTML = '';
+  if (n === 0) {
+    const li = document.createElement('li');
+    li.className = 'empty-note';
+    li.textContent = 'Connected, but the server advertises no tools.';
+    list.appendChild(li);
+  } else {
+    for (const tool of probe.tools) {
+      const li = document.createElement('li');
+      const name = document.createElement('b');
+      name.textContent = tool.name;
+      li.appendChild(name);
+      if (tool.description) {
+        const desc = document.createElement('span');
+        desc.textContent = ` — ${tool.description}`;
+        desc.style.opacity = '0.75';
+        li.appendChild(desc);
+      }
+      list.appendChild(li);
+    }
+  }
+  // Suggest a name from the server's self-reported identity.
+  if (!$('#mcp-probe-name').value && probe.serverName) {
+    $('#mcp-probe-name').value = probe.serverName.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
+  }
+  $('#mcp-probe-results').hidden = false;
+}
+
+$('#mcp-probe-btn').addEventListener('click', runMcpProbe);
+$('#mcp-probe-url').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    runMcpProbe();
+  }
+});
+
+// Add-from-probe: the URL + detected transport come from the probe result.
+$('#mcp-probe-add').addEventListener('click', async () => {
+  if (!lastMcpProbe) return;
+  const name = $('#mcp-probe-name').value.trim();
+  if (!name) {
+    showToast('Give the server a name first.', { kind: 'error' });
+    return;
+  }
+  await createMcpServer(
+    { name, transport: lastMcpProbe.transport, url: lastMcpProbe.endpoint },
+    $('#mcp-probe-add'),
+  );
+});
+
+// Manual entry (Advanced).
+$('#mcp-create-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const transport = $('#mcp-create-transport').value;
+  const body = { name: $('#mcp-create-name').value.trim(), transport };
+  if (transport === 'stdio') {
+    body.command = $('#mcp-create-command').value.trim();
+    body.args = $('#mcp-create-args')
+      .value.split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+  } else {
+    body.url = $('#mcp-create-url').value.trim();
+  }
+  await createMcpServer(body, $('#mcp-create-form button.btn-primary'));
+});
+
+async function createMcpServer(body, btn) {
+  btn.disabled = true;
+  try {
+    const res = await authFetch('/api/mcp-servers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    showToast(`Added ${body.name}`, { kind: 'success' });
+    closeMcpDetail();
+    await fetchMcpServers();
+  } catch (err) {
+    showToast('Add failed: ' + (err.message || err), { kind: 'error' });
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// Save (rename / retarget) from the edit view.
+$('#mcp-detail-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (!selectedMcpId) return;
+  const server = allMcpServers.find((s) => s.id === selectedMcpId);
+  if (!server) return;
+  const body = { name: $('#mcp-name').value.trim() };
+  if (server.transport === 'stdio') body.command = $('#mcp-command').value.trim();
+  else body.url = $('#mcp-url').value.trim();
+  try {
+    const res = await authFetch(`/api/mcp-servers/${encodeURIComponent(selectedMcpId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    showToast('Saved', { kind: 'success' });
+    closeMcpDetail();
+    await fetchMcpServers();
+  } catch (err) {
+    showToast('Save failed: ' + (err.message || err), { kind: 'error' });
+  }
+});
+
+// Delete with cascade-with-confirmation (409 → impact list → ?force=1).
+$('#mcp-delete').addEventListener('click', async () => {
+  if (!selectedMcpId) return;
+  const server = allMcpServers.find((s) => s.id === selectedMcpId);
+  if (!server) return;
+  try {
+    const res = await authFetch(`/api/mcp-servers/${encodeURIComponent(selectedMcpId)}`, { method: 'DELETE' });
+    if (res.status === 409) {
+      const impact = await res.json();
+      const n = (impact.assigned_agent_group_ids || []).length;
+      const confirmed = await showConfirmModal({
+        title: 'Delete MCP server',
+        body: `"${server.name}" is attached to ${n} agent${n === 1 ? '' : 's'}. They lose its tools on their next message.`,
+        confirmLabel: 'Delete anyway',
+        destructive: true,
+      });
+      if (!confirmed) return;
+      const force = await authFetch(`/api/mcp-servers/${encodeURIComponent(selectedMcpId)}?force=1`, {
+        method: 'DELETE',
+      });
+      if (!force.ok) {
+        const err = await force.json().catch(() => ({}));
+        showToast(`Failed to delete: ${err.error || force.statusText}`, { kind: 'error' });
+        return;
+      }
+    } else if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast(`Failed to delete: ${err.error || res.statusText}`, { kind: 'error' });
+      return;
+    }
+    showToast(`Deleted "${server.name}".`, { kind: 'success' });
+    closeMcpDetail();
+    await fetchMcpServers();
   } catch (err) {
     showToast(`Failed to delete: ${err.message}`, { kind: 'error' });
   }
