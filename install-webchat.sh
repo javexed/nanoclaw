@@ -492,8 +492,10 @@ if [ "${#CONFLICTS[@]}" -gt 0 ]; then
 fi
 
 # ── 5. Install pinned packages ──────────────────────────────────────────
+# @modelcontextprotocol/sdk backs the MCP-server probe (mcp-probe.ts) — the
+# same version the agent container pins for its own MCP tooling.
 echo "→ Installing webchat dependencies …"
-pnpm add ws@8.20.0 busboy@1.6.0 web-push@3.6.7 undici@7.16.0
+pnpm add ws@8.20.0 busboy@1.6.0 web-push@3.6.7 undici@7.16.0 @modelcontextprotocol/sdk@1.29.0
 pnpm add -D @types/ws@8.18.1 @types/busboy@1.5.4 @types/web-push@3.6.4
 
 # ── 5b. Verify the native SQLite binding boots under the project Node ─────
