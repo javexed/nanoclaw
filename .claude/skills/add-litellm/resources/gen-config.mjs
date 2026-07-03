@@ -1,21 +1,29 @@
 #!/usr/bin/env node
 /**
- * gen-config.mjs — generate the LiteLLM config.yaml from live Ollama rosters.
+ * gen-config.mjs — generate the LiteLLM config.yaml from live local model
+ * server rosters.
  *
  * Minimal by design (docs/design/add-litellm.md): model_list only — one
- * ollama_chat deployment per (host, tag), shared model_name across hosts for
- * load balancing, streaming-safe agentic timeouts. No routing/classifier
+ * deployment per (host, model), shared model_name across hosts for load
+ * balancing, streaming-safe agentic timeouts. No routing/classifier
  * coupling — dependent skills import generate() and post-process.
  *
- * Keyless v1: no master_key, no DATABASE_URL.
+ * Backends: any keyless, local OpenAI-compatible server. Each host is
+ * probed: Ollama answers GET /api/tags (native roster, richer chat/tool
+ * handling via the ollama_chat/ prefix); anything else is expected to
+ * answer GET /v1/models (vLLM, LM Studio, llama.cpp server, TGI, …) and is
+ * addressed with the openai/ prefix. Cloud/API-key backends are out of
+ * scope — the deferred cloud tier owns those (keyless v1: no master_key,
+ * no DATABASE_URL).
  *
  * Usage:
- *   node gen-config.mjs [--hosts http://localhost:11434,http://10.0.0.5:11434]
- *                       [--tags-file fixtures/ollama-tags.json]  (offline/test)
+ *   node gen-config.mjs [--hosts http://localhost:11434,http://10.0.0.5:8000]
+ *                       [--tags-file fixtures/rosters.json]  (offline/test)
  *                       [--out config.yaml]
  *
- * With --tags-file, no network calls are made; the file maps host → /api/tags
- * response, letting tests and no-Ollama environments run the generator.
+ * With --tags-file, no network calls are made; the file maps host → roster
+ * response (either shape), letting tests and no-server environments run the
+ * generator.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 
@@ -25,29 +33,43 @@ const opt = (name, dflt) => {
   return i >= 0 && args[i + 1] ? args[i + 1] : dflt;
 };
 
-const HOSTS = opt('hosts', process.env.OLLAMA_HOSTS ?? 'http://localhost:11434')
+const HOSTS = opt('hosts', process.env.MODEL_HOSTS ?? 'http://localhost:11434')
   .split(',')
   .map((h) => h.trim().replace(/\/$/, ''))
   .filter(Boolean);
 const TAGS_FILE = opt('tags-file', null);
 const OUT = opt('out', null);
 
-/** Fetch /api/tags for a host, or read from the fixture map in --tags-file. */
-async function tagsFor(host, fixtures) {
+/**
+ * Discover a host's roster. Returns { kind: 'ollama'|'openai', names: [] }.
+ *
+ * Live mode probes /api/tags first (Ollama-only endpoint), then falls back
+ * to the standard /v1/models. Fixture mode detects by response shape:
+ * { models: [{ name }] } is Ollama, { data: [{ id }] } is OpenAI-compat.
+ */
+async function rosterFor(host, fixtures) {
   if (fixtures) {
     const entry = fixtures[host];
     if (!entry) throw new Error(`--tags-file has no entry for host ${host}`);
-    return entry;
+    if (Array.isArray(entry.models)) return { kind: 'ollama', names: entry.models.map((m) => m.name) };
+    if (Array.isArray(entry.data)) return { kind: 'openai', names: entry.data.map((m) => m.id) };
+    throw new Error(`--tags-file entry for ${host} matches neither Ollama nor OpenAI shape`);
   }
-  const res = await fetch(`${host}/api/tags`, { signal: AbortSignal.timeout(5000) });
-  if (!res.ok) throw new Error(`GET ${host}/api/tags → HTTP ${res.status}`);
-  return res.json();
+  const probe = async (path) => {
+    const res = await fetch(`${host}${path}`, { signal: AbortSignal.timeout(5000) });
+    return res.ok ? res.json() : null;
+  };
+  const tags = await probe('/api/tags');
+  if (tags) return { kind: 'ollama', names: (tags.models ?? []).map((m) => m.name) };
+  const models = await probe('/v1/models');
+  if (models) return { kind: 'openai', names: (models.data ?? []).map((m) => m.id) };
+  throw new Error(`${host} answers neither /api/tags (Ollama) nor /v1/models (OpenAI-compatible)`);
 }
 
 /**
- * A container-reachable api_base for a host. Ollama on the host's localhost
- * must be addressed as host.docker.internal from inside the LiteLLM container;
- * LAN/Tailscale hosts pass through unchanged.
+ * A container-reachable api_base for a host. A server on the host's
+ * localhost must be addressed as host.docker.internal from inside the
+ * LiteLLM container; LAN/Tailscale hosts pass through unchanged.
  */
 function containerReachable(host) {
   return host.replace(/^(https?:\/\/)(localhost|127\.0\.0\.1)(?=[:/]|$)/, '$1host.docker.internal');
@@ -60,18 +82,19 @@ function yamlEscape(s) {
 export async function generate({ hosts = HOSTS, fixtures = null } = {}) {
   const modelList = [];
   for (const host of hosts) {
-    const tags = await tagsFor(host, fixtures);
-    for (const m of tags.models ?? []) {
-      // model_name is the tag itself; the same tag on several hosts becomes
-      // multiple deployments under one name — exactly how LiteLLM
-      // load-balances, so the reuse is deliberate.
-      modelList.push({
-        model_name: m.name,
-        litellm_params: {
-          model: `ollama_chat/${m.name}`,
-          api_base: containerReachable(host),
-        },
-      });
+    const { kind, names } = await rosterFor(host, fixtures);
+    for (const name of names) {
+      // model_name is the served name itself; the same name on several hosts
+      // becomes multiple deployments under one model_name — exactly how
+      // LiteLLM load-balances, so the reuse is deliberate (and works across
+      // backend kinds).
+      const params =
+        kind === 'ollama'
+          ? { model: `ollama_chat/${name}`, api_base: containerReachable(host) }
+          : // openai/<name> + api_base is LiteLLM's OpenAI-compatible shape;
+            // api_key is a required placeholder — the server is keyless.
+            { model: `openai/${name}`, api_base: containerReachable(host), api_key: 'keyless' };
+      modelList.push({ model_name: name, litellm_params: params });
     }
   }
   if (modelList.length === 0) throw new Error('no models discovered on any host');
@@ -85,6 +108,7 @@ export async function generate({ hosts = HOSTS, fixtures = null } = {}) {
     lines.push('    litellm_params:');
     lines.push(`      model: ${yamlEscape(m.litellm_params.model)}`);
     lines.push(`      api_base: ${yamlEscape(m.litellm_params.api_base)}`);
+    if (m.litellm_params.api_key) lines.push(`      api_key: ${yamlEscape(m.litellm_params.api_key)}`);
   }
   lines.push('');
   lines.push('litellm_settings:');

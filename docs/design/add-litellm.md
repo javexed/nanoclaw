@@ -2,7 +2,9 @@
 
 Status: **v1 scope — deliberately minimal.** This skill installs exactly one
 thing: a **LiteLLM proxy container** exposing one OpenAI-compatible endpoint
-over the models served by one or more **Ollama** hosts. Nothing else.
+over the models served by one or more **local model servers** — Ollama by
+default, or any keyless OpenAI-compatible server (vLLM, LM Studio,
+llama.cpp server, TGI, …). Nothing else.
 
 It is the **dependency base** for the broader LLM-routing work (classifier
 routing, capability score tables, Claude escalation) — those live in their own
@@ -15,14 +17,22 @@ One endpoint, many local models:
 
 ```
 agent container ──► LiteLLM (:4000, keyless, local-only) ──┬─► Ollama (localhost — default)
-                                                           └─► Ollama (LAN host 1..n)
+                                                           ├─► Ollama (LAN host …)
+                                                           └─► any keyless OpenAI-compat
+                                                               server (vLLM, LM Studio,
+                                                               llama.cpp, TGI — LAN host …)
 ```
 
-- **Discoverable**: the installer reads each host's `GET /api/tags` and
-  generates the `model_list` — no hand-maintained registry.
-- **Load-balancing for free**: the same model tag on two hosts becomes two
+- **Discoverable**: the installer probes each host — Ollama answers
+  `GET /api/tags` (deployments use the `ollama_chat/` prefix for its richer
+  chat/tool handling); anything else is expected to answer the standard
+  `GET /v1/models` (deployments use `openai/<id>` + `api_base`, with a
+  placeholder `api_key` since the server is keyless) — and generates the
+  `model_list`. No hand-maintained registry, no per-host kind configuration.
+- **Load-balancing for free**: the same model name on two hosts becomes two
   deployments under one `model_name`; LiteLLM balances between them
-  (`simple-shuffle`).
+  (`simple-shuffle`). This works across backend kinds — an Ollama host and a
+  vLLM host serving the same model share one name.
 - **Agentic-safe**: streaming and tool calls pass through; generous
   `request_timeout` (agentic turns are long).
 
@@ -31,9 +41,12 @@ agent container ──► LiteLLM (:4000, keyless, local-only) ──┬─► O
 - Classifier / capability routing (`model="auto"`), score tables, route
   bindings, fallback chains between *different* models.
 - Cross-plane escalation to Claude.
-- Cloud/API-key backends, budgets, virtual keys, Postgres — all deferred with
-  the cloud tier.
-- Managing Ollama itself (installing it, pulling models).
+- **Keyed backends of any kind** (OpenAI, Anthropic, Bedrock, a token-guarded
+  vLLM…) — the config is keyless plaintext and the proxy has no request
+  auth, so a credential must never enter this tier. Budgets, virtual keys,
+  Postgres — all deferred with the cloud tier, which owns proxy auth
+  (`master_key`), TLS, and OneCLI-brokered credentials when it lands.
+- Managing the model servers themselves (installing them, pulling models).
 
 ## Security posture
 
@@ -69,9 +82,9 @@ fixture-driven `node --test` tests, runnable with no Ollama present.
 
 | File | Role |
 |------|------|
-| `resources/install-litellm.sh` | Idempotent installer: preflight Ollama → generate config → run container (localhost + bridge bind) → health-check `/v1/models`. Re-run on roster changes. |
-| `resources/gen-config.mjs` | `GET /api/tags` per host (or `--tags-file` fixture) → `data/litellm/config.yaml`: `ollama_chat/<tag>` deployments, shared-name load balancing, `request_timeout: 600`, `num_retries: 2`, `drop_params: true`. Exports `generate()` for dependent skills to compose. |
-| `resources/fixtures/ollama-tags.json` | Two-host fixture for offline generation/tests. |
+| `resources/install-litellm.sh` | Idempotent installer: preflight the first host (either roster endpoint) → generate config → run container (localhost + bridge bind) → health-check `/v1/models`. Re-run on roster changes. |
+| `resources/gen-config.mjs` | Probes each host (`/api/tags` → Ollama, else `/v1/models` → OpenAI-compat; or `--tags-file` fixture, kind detected by shape) → `data/litellm/config.yaml`: `ollama_chat/<tag>` / `openai/<id>` deployments, shared-name load balancing across kinds, `request_timeout: 600`, `num_retries: 2`, `drop_params: true`. Exports `generate()` for dependent skills to compose. |
+| `resources/fixtures/rosters.json` | Three-host fixture (two Ollama, one OpenAI-compat) for offline generation/tests. |
 | `resources/generators.test.mjs` | `node --test` coverage of the generator. |
 
 Runtime artifacts land in `data/litellm/` (gitignored with the data dir);

@@ -1,0 +1,54 @@
+{
+  "http://localhost:11434": {
+    "models": [
+      {
+        "name": "qwen2.5-coder:14b",
+        "size": 8988124069
+      },
+      {
+        "name": "llama3.3:70b",
+        "size": 42520413916
+      },
+      {
+        "name": "deepseek-r1:14b",
+        "size": 8988124069
+      },
+      {
+        "name": "llava:13b",
+        "size": 8010691358
+      },
+      {
+        "name": "tinyllama:latest",
+        "size": 637700138
+      },
+      {
+        "name": "some-custom-finetune:latest",
+        "size": 4700000000
+      }
+    ]
+  },
+  "http://10.0.0.5:11434": {
+    "models": [
+      {
+        "name": "qwen2.5-coder:14b",
+        "size": 8988124069
+      },
+      {
+        "name": "phi4:14b",
+        "size": 9053114110
+      }
+    ]
+  },
+  "http://10.0.0.7:8000": {
+    "data": [
+      {
+        "id": "qwen2.5-coder:14b",
+        "object": "model"
+      },
+      {
+        "id": "mistral-7b-instruct",
+        "object": "model"
+      }
+    ]
+  }
+}
