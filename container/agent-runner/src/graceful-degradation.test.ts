@@ -33,7 +33,10 @@ function insertMessage(id: string, content: object) {
 async function runUntil(provider: MockProvider, condition: () => boolean, timeoutMs = 2000): Promise<void> {
   const controller = new AbortController();
   const loop = Promise.race([
-    runPollLoop({ provider, providerName: 'mock', cwd: '/tmp' }),
+    // signal is load-bearing: without it this loop is unstoppable and its
+    // poll interval keeps stealing pending messages from every test that
+    // runs after this file in the same process.
+    runPollLoop({ provider, providerName: 'mock', cwd: '/tmp', signal: controller.signal }),
     new Promise<void>((_, reject) => controller.signal.addEventListener('abort', () => reject(new Error('aborted')))),
     new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs)),
   ]);

@@ -284,7 +284,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         continuation,
         originDests,
         config.lenientOutput ?? false,
+        config.signal,
       );
+
+      // Shutdown, not turn failure: the stop signal aborted the query
+      // mid-turn. No error message and no empty-turn net — the host (or
+      // test) tearing us down owns the messaging from here.
+      if (config.signal?.aborted) return;
 
       // Self-heal a dead/stale continuation. Unlike a thrown error (recovered
       // in the catch block below), an unusable resume id surfaces as a
@@ -311,6 +317,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
           undefined,
           originDests,
           config.lenientOutput ?? false,
+          config.signal,
         );
       }
 
@@ -341,6 +348,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         );
       }
     } catch (err) {
+      // Same shutdown guard as the result path — an abort-induced throw is
+      // teardown, not a provider failure to report.
+      if (config.signal?.aborted) return;
       const errMsg = err instanceof Error ? err.message : String(err);
       log(`Query error: ${errMsg}`);
 
@@ -464,6 +474,7 @@ export async function processQuery(
   initialContinuation: string | undefined,
   originDests: DestinationEntry[] = [],
   lenient = false,
+  signal?: AbortSignal,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -496,6 +507,16 @@ export async function processQuery(
   let endedForCommand = false;
   let corruptionStreak = 0;
   const pollHandle = setInterval(() => {
+    // Abandoned-loop guard: when the surrounding runPollLoop's stop signal
+    // fires while a hub-style query is still open, this interval would keep
+    // polling — and STEAL pending messages meant for whoever owns the DB now
+    // (in production nobody; in tests, the next test). Kill the query so the
+    // stream closes and this processQuery unwinds.
+    if (signal?.aborted) {
+      endedForCommand = true;
+      query.abort();
+      return;
+    }
     if (done || pollInFlight || endedForCommand) return;
     pollInFlight = true;
 
