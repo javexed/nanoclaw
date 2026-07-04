@@ -118,12 +118,40 @@ id `auto` — assigning it to an agent group behaves like any other
 openai-compatible model (the group runs on OpenCode; each turn's model is
 picked per prompt).
 
+## Escalation — the confidence floor as a route (Phase 3, §16c)
+
+Arch-Router yields no confidence score, so the floor is realized as an
+**escalate route**: a route with `"escalate": true` and **no model binding**
+whose description captures work beyond your local roster (the example seeds
+one). Live behavior when a prompt classifies there:
+
+- The hook rejects the request **before any generation** with HTTP 400 and a
+  `no_adequate_model` marker in the error body.
+- The turn fails inside the agent container; if the agent group has a
+  **`fallback_provider`** configured, the runner re-runs the turn ONCE on
+  that provider with a fresh session (one-shot — a fallback failure never
+  re-escalates; the next turn goes back to the primary). The same seam
+  catches hard failures: LiteLLM down, backend timeout, dead model.
+
+```bash
+ncl groups config update --id <group-id> --fallback-provider claude
+ncl groups restart --id <group-id>
+# clear it again with --fallback-provider none
+```
+
+Classifier failures never escalate — only an affirmative classification does.
+Escalation costs fallback-provider quota and double latency; it is a
+backstop, not a routine path. Shadow mode logs escalate matches as
+`"bound_model": "__escalate__"` so you can tune the route description before
+arming a fallback. Without a `fallback_provider`, an escalate match surfaces
+to the user as an error — don't add the route until the group has a fallback
+(or you want a hard refusal).
+
 ## What this deliberately does NOT do (yet)
 
-The confidence floor (`no_adequate_model` → NanoClaw `fallback_provider`
-Claude escalation) and nightly threshold recalibration are the next phases of
-§16 and land behind explicit config — never as a side effect of installing
-this skill.
+Nightly threshold recalibration (§16e tier-1) and the post-flight quality
+judge (§16d) are later phases and land behind explicit config — never as a
+side effect of installing this skill.
 
 ## Removal
 

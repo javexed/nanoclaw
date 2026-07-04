@@ -27,6 +27,7 @@ import json
 import time
 
 import httpx
+from fastapi import HTTPException
 from litellm.integrations.custom_logger import CustomLogger
 
 ROUTES_PATH = "/app/routing/routes.json"
@@ -94,7 +95,16 @@ def _parse_route(raw):
 
 
 def _bindings(cfg):
-    return {r["name"]: r["model"] for r in cfg["routes"]}
+    return {r["name"]: r.get("model") for r in cfg["routes"] if r.get("model")}
+
+
+def _escalate_routes(cfg):
+    """Routes with `"escalate": true` have no local binding — a live match
+    rejects the request with a no_adequate_model marker so NanoClaw's
+    per-group fallback_provider re-runs the turn on a stronger provider
+    (llm-router §16c). The confidence floor, realized as a route: describe
+    what's beyond the local roster and let Arch-Router match it."""
+    return {r["name"] for r in cfg["routes"] if r.get("escalate")}
 
 
 def _default_binding(cfg):
@@ -152,7 +162,10 @@ async def _classify_and_log(requested_model, prompt_text):
         cfg = _load_routes()
         route = await _classify(cfg, prompt_text)
         entry["route"] = route
-        entry["bound_model"] = _bindings(cfg).get(route) or _default_binding(cfg)
+        if route in _escalate_routes(cfg):
+            entry["bound_model"] = "__escalate__"
+        else:
+            entry["bound_model"] = _bindings(cfg).get(route) or _default_binding(cfg)
     except Exception as e:  # classifier host asleep, timeout, parse failure — log and move on
         entry["error"] = f"{type(e).__name__}: {e}"[:200]
     entry["ms"] = int((time.time() - t0) * 1000)
@@ -174,8 +187,24 @@ async def _route_live(cfg, live, data, prompt_text):
     try:
         route = await _classify(cfg, prompt_text, timeout_ms=live.get("timeout_ms", 5000))
         entry["route"] = route
+        if route in _escalate_routes(cfg):
+            # No adequate local model (§16c). Reject fast — before any
+            # generation — with a greppable marker; the agent-runner's
+            # fallback_provider seam re-runs the turn on a stronger provider.
+            # Only an AFFIRMATIVE classification escalates: classifier errors
+            # below fall back to the local default binding, never to the
+            # (quota-costing) fallback provider.
+            entry["final_model"] = "__escalate__"
+            entry["ms"] = int((time.time() - t0) * 1000)
+            _append_log(entry)
+            raise HTTPException(
+                status_code=400,
+                detail=f"no_adequate_model: prompt classified to route '{route}' — no local binding, escalate",
+            )
         # Unknown route or "other" → default binding, same as an error.
         target = _bindings(cfg).get(route) or target
+    except HTTPException:
+        raise
     except Exception as e:
         entry["error"] = f"{type(e).__name__}: {e}"[:200]
     if target:
@@ -204,6 +233,8 @@ class ShadowRouter(CustomLogger):
                 return await _route_live(cfg, live, data, text)
             # Fire-and-forget: the request proceeds untouched immediately.
             asyncio.get_running_loop().create_task(_classify_and_log(data.get("model", "?"), text))
+        except HTTPException:
+            raise  # no_adequate_model rejection must reach the client
         except Exception:
             pass
         return data

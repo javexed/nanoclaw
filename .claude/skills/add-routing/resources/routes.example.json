@@ -26,6 +26,11 @@
       "name": "general",
       "description": "Everyday conversation, quick questions, summaries, casual requests",
       "model": "BIND-A-ROSTER-MODEL"
+    },
+    {
+      "name": "escalate",
+      "description": "Extremely complex or high-stakes work beyond a small local model: large multi-file refactors, subtle cross-system debugging, long-document analysis, tasks where a wrong answer is costly",
+      "escalate": true
     }
   ]
 }

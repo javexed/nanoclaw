@@ -86,6 +86,7 @@ LIVE_CFG = {
     "routes": [
         {"name": "code", "description": "d", "model": "qwen3-coder:30b"},
         {"name": "general", "description": "d", "model": "gemma4:latest"},
+        {"name": "escalate", "description": "d", "escalate": True},
     ],
 }
 
@@ -143,6 +144,29 @@ class LiveRouting(unittest.IsolatedAsyncioTestCase):
         cfg = {**LIVE_CFG, "live": {"enabled": False, "model_name": "auto"}}
         out, _ = await self._call(cfg, _req(), mock.AsyncMock(return_value="code"))
         self.assertEqual(out["model"], "auto")
+
+    async def test_escalate_route_raises_no_adequate_model(self):
+        from fastapi import HTTPException
+
+        with self.assertRaises(HTTPException) as ctx:
+            await self._call(LIVE_CFG, _req(), mock.AsyncMock(return_value="escalate"))
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("no_adequate_model", str(ctx.exception.detail))
+
+    async def test_classifier_error_never_escalates(self):
+        # Escalation costs fallback-provider quota — only an affirmative
+        # classification may trigger it. Errors stay on the local default.
+        out, _ = await self._call(LIVE_CFG, _req(), mock.AsyncMock(side_effect=RuntimeError("down")))
+        self.assertEqual(out["model"], "gemma4:latest")
+
+    async def test_shadow_logs_escalate_binding(self):
+        with mock.patch.object(router_hook, "_load_routes", return_value=LIVE_CFG), \
+             mock.patch.object(router_hook, "_classify", mock.AsyncMock(return_value="escalate")), \
+             mock.patch.object(router_hook, "_append_log") as logged:
+            await router_hook._classify_and_log("gemma4:latest", "some prompt")
+        entry = logged.call_args[0][0]
+        self.assertEqual(entry["route"], "escalate")
+        self.assertEqual(entry["bound_model"], "__escalate__")
 
 
 if __name__ == "__main__":
