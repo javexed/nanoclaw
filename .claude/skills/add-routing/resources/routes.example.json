@@ -6,6 +6,11 @@
     "keep_alive": "60m"
   },
   "default_route": "general",
+  "live": {
+    "enabled": false,
+    "model_name": "auto",
+    "timeout_ms": 5000
+  },
   "routes": [
     {
       "name": "code",

@@ -7,11 +7,14 @@ has litellm + httpx installed — the host tree deliberately doesn't):
     -m unittest discover -s /t -p 'test_*.py' -v
 """
 
+import asyncio
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, "/t")
 
+import router_hook  # noqa: E402
 from router_hook import _last_user_text, _parse_route  # noqa: E402
 
 
@@ -64,6 +67,72 @@ class ParseRoute(unittest.TestCase):
     def test_garbage_raises(self):
         with self.assertRaises(Exception):
             _parse_route("no json here")
+
+
+LIVE_CFG = {
+    "classifier": {"url": "http://unused", "model": "m"},
+    "default_route": "general",
+    "live": {"enabled": True, "model_name": "auto", "timeout_ms": 5000},
+    "routes": [
+        {"name": "code", "description": "d", "model": "qwen3-coder:30b"},
+        {"name": "general", "description": "d", "model": "gemma4:latest"},
+    ],
+}
+
+
+def _req(model="auto", text="write a function"):
+    return {"model": model, "messages": [{"role": "user", "content": text}]}
+
+
+class LiveRouting(unittest.IsolatedAsyncioTestCase):
+    """Phase 2: the virtual 'auto' model. Classifier is mocked — no network."""
+
+    async def _call(self, cfg, data, classify):
+        with mock.patch.object(router_hook, "_load_routes", return_value=cfg), \
+             mock.patch.object(router_hook, "_classify", classify), \
+             mock.patch.object(router_hook, "_append_log") as logged:
+            out = await router_hook.proxy_handler_instance.async_pre_call_hook(
+                {}, None, data, "acompletion"
+            )
+            # Drain any fire-and-forget shadow task while the mocks still hold.
+            for _ in range(3):
+                await asyncio.sleep(0)
+        return out, logged
+
+    async def test_rewrites_auto_to_classified_binding(self):
+        out, logged = await self._call(LIVE_CFG, _req(), mock.AsyncMock(return_value="code"))
+        self.assertEqual(out["model"], "qwen3-coder:30b")
+        entry = logged.call_args[0][0]
+        self.assertEqual(entry["mode"], "live")
+        self.assertEqual(entry["route"], "code")
+        self.assertEqual(entry["final_model"], "qwen3-coder:30b")
+
+    async def test_classifier_error_falls_back_to_default_binding(self):
+        out, logged = await self._call(LIVE_CFG, _req(), mock.AsyncMock(side_effect=RuntimeError("down")))
+        self.assertEqual(out["model"], "gemma4:latest")
+        entry = logged.call_args[0][0]
+        self.assertEqual(entry["route"], "__error__")
+        self.assertIn("error", entry)
+        self.assertEqual(entry["final_model"], "gemma4:latest")
+
+    async def test_other_route_falls_back_to_default_binding(self):
+        out, _ = await self._call(LIVE_CFG, _req(), mock.AsyncMock(return_value="other"))
+        self.assertEqual(out["model"], "gemma4:latest")
+
+    async def test_concrete_model_never_rewritten(self):
+        out, logged = await self._call(
+            LIVE_CFG, _req(model="qwen3-coder:30b"), mock.AsyncMock(return_value="general")
+        )
+        self.assertEqual(out["model"], "qwen3-coder:30b")
+        # Shadow task was scheduled instead of a live log entry.
+        self.assertFalse(
+            any(c.args and c.args[0].get("mode") == "live" for c in logged.call_args_list)
+        )
+
+    async def test_flag_off_leaves_auto_untouched(self):
+        cfg = {**LIVE_CFG, "live": {"enabled": False, "model_name": "auto"}}
+        out, _ = await self._call(cfg, _req(), mock.AsyncMock(return_value="code"))
+        self.assertEqual(out["model"], "auto")
 
 
 if __name__ == "__main__":

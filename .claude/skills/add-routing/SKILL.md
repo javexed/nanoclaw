@@ -1,6 +1,6 @@
 ---
 name: add-routing
-description: Layer an N-way capability classifier (Arch-Router 1.5B on your own Ollama) onto the LiteLLM router — shadow mode first. Every request through the router gets classified against operator-defined capability routes (code / reasoning / general / …) and logged; requests are never modified. The calibration base for live 'auto' routing and Claude escalation (llm-router design §16). Use when the user wants prompt-aware model routing or to start collecting routing data.
+description: Layer an N-way capability classifier (Arch-Router 1.5B on your own Ollama) onto the LiteLLM router — shadow mode first, then flag-gated live routing via a virtual 'auto' model. Every request through the router gets classified against operator-defined capability routes (code / reasoning / general / …) and logged; only requests explicitly naming 'auto' are ever rewritten. The base for the confidence floor and Claude escalation (llm-router design §16). Use when the user wants prompt-aware model routing or to start collecting routing data.
 ---
 
 # Add routing (capability classifier over LiteLLM, shadow-first)
@@ -84,12 +84,46 @@ timeout) — by design the request itself was unaffected.
   the default-route fallback for the live phase.
 - Warm classify latency (`ms`) sets the live-phase timeout budget.
 
+## Going live — the virtual `auto` model (Phase 2)
+
+When the shadow log looks right, enable live routing in `routes.json`:
+
+```json
+"live": { "enabled": true, "model_name": "auto", "timeout_ms": 5000 }
+```
+
+No installer re-run needed — the hook re-reads `routes.json` per request.
+Semantics:
+
+- A request whose model is exactly `live.model_name` (`auto`) is classified
+  **synchronously** (adds one warm classify, ~750–1000ms) and rewritten to the
+  matched route's bound model before LiteLLM picks a deployment.
+- **Fallback, never failure**: classifier unreachable / timeout / bad JSON /
+  route `other` or unknown → the request runs on the `default_route` binding.
+  `live.timeout_ms` (default 5000) bounds how long a request can wait on the
+  classifier — keep it tight; the fallback is always available.
+- Requests naming a **concrete roster model are never rewritten**, flag or no
+  flag. Shadow logging continues for them unchanged.
+- Every live decision is logged to the same JSONL with `"mode":"live"` and a
+  `final_model` field — `grep '"mode": "live"'` to audit what `auto` did.
+
+`auto` is not in LiteLLM's `model_list` — it exists only while the hook is
+loaded. If `/add-litellm` is re-run (which drops the hook wiring), requests
+for `auto` fail with model-not-found until this installer is re-run. That's
+deliberate: loud, not silently unrouted.
+
+To expose it in the webchat Models tab, register a model with kind
+**openai-compatible**, endpoint `http://host.docker.internal:4000/v1`, model
+id `auto` — assigning it to an agent group behaves like any other
+openai-compatible model (the group runs on OpenCode; each turn's model is
+picked per prompt).
+
 ## What this deliberately does NOT do (yet)
 
-Live routing (a virtual `auto` model whose requests are rewritten to the
-bound model), the confidence floor, and Claude escalation are the next phases
-of §16 and land behind explicit config — never as a side effect of installing
-shadow mode.
+The confidence floor (`no_adequate_model` → NanoClaw `fallback_provider`
+Claude escalation) and nightly threshold recalibration are the next phases of
+§16 and land behind explicit config — never as a side effect of installing
+this skill.
 
 ## Removal
 

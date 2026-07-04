@@ -110,6 +110,9 @@ cat <<EOF
   Decisions log:   $ROUTING_DIR/routing-shadow.jsonl
   Review:          tail -f $ROUTING_DIR/routing-shadow.jsonl
 
-Shadow mode only: requests are never modified. Re-running the /add-litellm
-installer removes the hook wiring — re-run this installer afterwards.
+Shadow mode by default: requests are never modified until you set
+"live": {"enabled": true} in routes.json — then ONLY requests naming the
+virtual model ("auto") are rewritten (see SKILL.md "Going live").
+Re-running the /add-litellm installer removes the hook wiring — re-run this
+installer afterwards (until then, "auto" requests fail loudly).
 EOF
