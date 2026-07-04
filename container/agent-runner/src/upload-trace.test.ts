@@ -67,7 +67,10 @@ describe('poll loop — /upload-trace command', () => {
 
 async function runPollLoopWithTimeout(provider: MockProvider, signal: AbortSignal, timeoutMs: number): Promise<void> {
   return Promise.race([
-    runPollLoop({ provider, providerName: 'mock', cwd: '/tmp' }),
+    // signal is load-bearing: without it this loop is unstoppable and its
+    // poll interval keeps stealing pending messages from every test that
+    // runs after this file in the same process.
+    runPollLoop({ provider, providerName: 'mock', cwd: '/tmp', signal }),
     new Promise<void>((_, reject) => {
       signal.addEventListener('abort', () => reject(new Error('aborted')));
     }),
