@@ -19,9 +19,29 @@ Design: [docs/design/add-litellm.md](../../../docs/design/add-litellm.md).
 ## Prerequisites
 
 1. **Docker** and **Node** on the host.
-2. **A local model server running** with ≥1 model — localhost Ollama default;
-   verify: `curl -s http://localhost:11434/api/tags`. For an OpenAI-compatible
-   server instead: `curl -s http://<host>:<port>/v1/models`. LAN hosts optional.
+2. **A local model server with ≥1 model.** The installer hard-fails without one
+   (`no model server reachable` / `no models discovered`). Before installing,
+   detect the state and — if something is missing — **offer** to set it up;
+   never install software or download a model silently.
+
+   ```bash
+   curl -fsS --max-time 3 http://localhost:11434/api/tags   # Ollama roster
+   # OpenAI-compatible server instead: curl -fsS http://<host>:<port>/v1/models
+   ```
+
+   - **No Ollama (connection refused / not installed)** → offer to install it,
+     and run only after the operator confirms — piping a remote install script
+     is their trust decision. Linux: `curl -fsSL https://ollama.com/install.sh | sh`;
+     macOS: `brew install --cask ollama` or the app at
+     https://ollama.com/download. Then start it: `ollama serve` (background) if
+     it isn't already listening.
+   - **Ollama up but empty roster** (`{"models":[]}`) → offer to pull a small
+     default, stating the download size first: `ollama pull llama3.2:3b` (~2 GB).
+     Let the operator pick a different or larger model.
+
+   Re-check `/api/tags` after either step, then continue. LAN hosts are optional
+   (`--hosts`); keyed-only installs skip this entirely (see "Keyed backends" and
+   `--hosts ''`).
 
 ## Install
 
