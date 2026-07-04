@@ -57,6 +57,18 @@ def _load_routes():
         return json.load(f)
 
 
+def _strip_system_wrapper(text):
+    """NanoClaw's agent-runner prepends '<system>…</system>' inside the USER
+    message (OpenCode has no separate system channel there). Classify on the
+    user's actual words, not the agent preamble — otherwise every
+    first-of-session prompt routes on boilerplate."""
+    if text.lstrip().startswith("<system>"):
+        end = text.find("</system>")
+        if end >= 0:
+            return text[end + len("</system>") :].strip()
+    return text
+
+
 def _last_user_text(messages):
     """Latest user message as plain text (handles string and parts-list content)."""
     for m in reversed(messages or []):
@@ -64,9 +76,10 @@ def _last_user_text(messages):
             continue
         c = m.get("content")
         if isinstance(c, str):
-            return c
+            return _strip_system_wrapper(c)
         if isinstance(c, list):
-            return " ".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
+            joined = " ".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
+            return _strip_system_wrapper(joined)
     return ""
 
 

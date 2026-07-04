@@ -49,6 +49,16 @@ class LastUserText(unittest.TestCase):
         self.assertEqual(_last_user_text([]), "")
         self.assertEqual(_last_user_text([{"role": "assistant", "content": "a"}]), "")
 
+    def test_strips_nanoclaw_system_wrapper(self):
+        # NanoClaw's agent-runner embeds instructions in the USER message —
+        # classify the user's words, not the agent preamble.
+        msgs = [{"role": "user", "content": "<system>\n# You are Helper\nRules…\n</system>\n\nwrite a regex"}]
+        self.assertEqual(_last_user_text(msgs), "write a regex")
+
+    def test_unclosed_system_wrapper_left_alone(self):
+        msgs = [{"role": "user", "content": "<system> dangling preamble without close"}]
+        self.assertEqual(_last_user_text(msgs), "<system> dangling preamble without close")
+
 
 class ParseRoute(unittest.TestCase):
     def test_clean_json(self):

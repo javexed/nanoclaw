@@ -87,6 +87,10 @@ logic, not integration legs.
 ## Operations
 
 - **Roster or backends changed** → re-run the installer.
+  ⚠ Re-running regenerates `config.yaml` and recreates the container, which
+  **drops any dependent-skill layering** (e.g. `/add-routing`'s callback hook
+  — its virtual `auto` model stops resolving until it's restored). Re-run the
+  dependent skill's installer afterwards: add-litellm first, then the layer.
 - **Admin UI**: `http://127.0.0.1:4000/ui` (localhost only).
 - **Logs**: `docker logs nanoclaw-litellm`.
 - **Tests**: `node --test "${CLAUDE_SKILL_DIR}/resources/generators.test.mjs"`.
