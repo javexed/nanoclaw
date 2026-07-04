@@ -1179,6 +1179,8 @@ body {
   padding: 12px 20px;
   background: var(--surface);
   border-top: 1px solid var(--border);
+  /* Anchor for the @-mention popover (absolute, bottom: 100%). */
+  position: relative;
 }
 #message-input {
   flex: 1;
@@ -4080,7 +4082,15 @@ a.lightbox-btn {
 
 /* Mention autocomplete popover — anchored above the message input */
 .mention-popover {
-  position: fixed;
+  /* Anchored inside #message-form (position: relative), NOT body+fixed:
+     fixed elements pin to the layout viewport while iOS shifts the visual
+     viewport when the keyboard opens — which painted this off-screen on
+     iPhone PWAs. bottom:100% keeps it glued above the composer everywhere. */
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 16px;
+  min-width: 200px;
+  max-width: min(320px, calc(100% - 32px));
   z-index: 1000;
   background: var(--surface);
   border: 1px solid var(--border);

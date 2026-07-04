@@ -4082,7 +4082,12 @@ function ensureMentionPopover() {
   el.id = 'mention-popover';
   el.className = 'mention-popover';
   el.hidden = true;
-  document.body.appendChild(el);
+  // Anchor INSIDE the composer (absolute, bottom:100% — see CSS), not
+  // body+fixed: iOS shifts the visual viewport when the on-screen keyboard
+  // opens while fixed elements stay pinned to the layout viewport, which
+  // painted the popover off-screen on iPhone PWAs. In-layout anchoring rides
+  // with the input under every keyboard state, with no JS positioning math.
+  $('#message-form').appendChild(el);
   mentionPopover = el;
   return el;
 }
@@ -4125,21 +4130,19 @@ function renderMentionPopover(input) {
       item.appendChild(badge);
     }
     // mousedown (not click) so the input doesn't blur and dismiss the popover
-    // before we can read the selection.
-    item.addEventListener('mousedown', (e) => {
+    // before we can read the selection — plus touchstart for iOS, where the
+    // synthesized mouse events can land after the blur-dismiss timer.
+    const pick = (e) => {
       e.preventDefault();
       mentionSelectedIndex = i;
       acceptMention(input);
-    });
+    };
+    item.addEventListener('mousedown', pick);
+    item.addEventListener('touchstart', pick, { passive: false });
     el.appendChild(item);
   });
-  // Position above the input.
+  // Placement is pure CSS (absolute above the composer) — nothing to compute.
   el.hidden = false;
-  const rect = input.getBoundingClientRect();
-  const popHeight = el.offsetHeight || 200;
-  el.style.left = `${Math.round(rect.left + 8)}px`;
-  el.style.top = `${Math.round(rect.top - popHeight - 4)}px`;
-  el.style.minWidth = `${Math.round(Math.min(Math.max(rect.width - 16, 200), 320))}px`;
 }
 
 function tryActivateMention(input) {
