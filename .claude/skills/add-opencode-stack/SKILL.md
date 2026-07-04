@@ -49,6 +49,26 @@ both barrels, pin `@opencode-ai/sdk` and the `opencode-ai` CLI (versions must
 match; see that skill's warnings), copy its tests, build, and **rebuild the
 agent image**. All its validation gates must be green before continuing.
 
+> ⚠ **Rebuild every PER-GROUP image too, or those groups crash-loop at
+> boot — Claude-only groups included.** The barrel edit adds a top-level
+> `import './opencode.js'` that EVERY container evaluates at startup (the
+> runner source is bind-mounted into all of them), and it resolves
+> `@opencode-ai/sdk` against the *image's* `node_modules`. Groups that ever
+> used self-mod `install_packages` have their own image tag layered on the
+> old base — new code + stale dependencies = `Cannot find module
+> '@opencode-ai/sdk'` before the group's provider setting is even read, and
+> host-sweep re-wakes them into the same crash forever. Find and fix them:
+>
+> ```bash
+> pnpm exec tsx scripts/q.ts data/v2.db \
+>   "SELECT agent_group_id FROM container_configs WHERE image_tag IS NOT NULL"
+> ncl groups restart --rebuild --id <each-group-id>
+> ```
+>
+> Symptom in `logs/nanoclaw.error.log`: repeated `Container exited non-zero`
+> with that stderr, once per sweep. Same rule applies to ANY future dep added
+> to the shared runner: code updates by mount, dependencies update by image.
+
 ### 2. LiteLLM router
 
 Skip if `curl -s http://127.0.0.1:4000/v1/models` already answers with your
