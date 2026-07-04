@@ -1,11 +1,12 @@
 ---
 name: add-opencode-stack
-description: One-command stack for running agents on models beyond the built-in Claude path — installs the OpenCode agent provider, the LiteLLM router, and registers the router's models in webchat so assigning one flips an agent onto OpenCode. Backends can be local (Ollama, vLLM, LM Studio, …) or opt-in keyed cloud. Use when the user wants agents running on their own model servers end to end.
+description: One-command stack for running agents on models beyond the built-in Claude path — installs the OpenCode agent provider and the LiteLLM router, then wires an agent group to a routed model through the OpenCode provider. Backends can be local (Ollama, vLLM, LM Studio, …) or opt-in keyed cloud. Use when the user wants agents running on their own model servers end to end.
 ---
 
 # Add the OpenCode stack (OpenCode → LiteLLM → your model servers)
 
-Batteries-included composition of three existing pieces, in dependency order:
+Batteries-included composition of two existing skills, in dependency order,
+plus a wiring step:
 
 1. **OpenCode provider** (`/add-opencode`) — the harness that lets an agent
    group run against any OpenAI-compatible endpoint instead of the Claude SDK.
@@ -13,10 +14,10 @@ Batteries-included composition of three existing pieces, in dependency order:
    model your server(s) serve; Ollama by default, any keyless
    OpenAI-compatible server likewise, keyed cloud backends as an explicit
    opt-in.
-3. **Webchat model registration** (this skill's `resources/register-models.mjs`)
-   — every routed model becomes an assignable webchat model. Assigning one to
-   an agent switches that agent's provider to OpenCode automatically
-   (`syncAgentProviderForAssignedModel`); unassigning reverts to Claude.
+3. **Wire a group onto the router** — point an agent group's OpenCode config
+   at the router endpoint with a roster model, and set the group's provider
+   to `opencode`. If no agent group exists yet, this stage first runs
+   `/init-first-agent` (which needs a configured channel) to create one.
 
 Each piece stays independently useful — this skill only sequences them and is
 idempotent: every stage no-ops when its work is already in place, so re-run it
@@ -35,9 +36,6 @@ cloud providers (OpenAI, Anthropic, …) behind the same endpoint. See the
    No server yet? Install Ollama first (https://ollama.com/download) or
    declare keyed cloud backends per `/add-litellm` — a keyed-only stack is
    supported (`--hosts ''`).
-3. **Webchat channel installed** (the Models UI is where routed models get
-   assigned). Without webchat, stop after stage 2 and wire groups by hand per
-   `/add-litellm`'s "For dependent skills".
 
 ## Install
 
@@ -50,10 +48,6 @@ follow its Install section end to end: copy from the `providers` branch, wire
 both barrels, pin `@opencode-ai/sdk` and the `opencode-ai` CLI (versions must
 match; see that skill's warnings), copy its tests, build, and **rebuild the
 agent image**. All its validation gates must be green before continuing.
-
-The `OPENCODE_*` host env configuration in that skill is **not needed** for
-this stack — per-agent model env comes from the webchat model assignment
-(settings.json), not install-wide variables.
 
 ### 2. LiteLLM router
 
@@ -68,18 +62,43 @@ bash .claude/skills/add-litellm/resources/install-litellm.sh \
 
 Re-run it whenever a roster or the backends file changes (idempotent).
 
-### 3. Register the routed models in webchat
+### 3. Wire an agent group onto a routed model
 
-```bash
-node .claude/skills/add-opencode-stack/resources/register-models.mjs \
-  --checkout . [--port 4000] [--dry-run]
-```
+The router is a standard OpenAI-compatible endpoint —
+`http://host.docker.internal:4000/v1` from agent containers. Wire a group to
+it through the OpenCode provider (config, not code):
 
-Reads the live roster from the router and upserts one webchat model per entry
-— kind `openai-compatible`, endpoint `http://host.docker.internal:<port>/v1`
-(the container-facing form; the host side translates for its own fetches).
-Dedupe is by display name, so models registered by hand earlier are left
-untouched and re-runs only add roster newcomers. `--dry-run` previews.
+1. **Ensure a target agent group exists** — this stage wires an *existing*
+   group, so one must be present. Check: `ncl groups list`. If it returns
+   none, run **`/init-first-agent`** first to stand up the first DM-wired
+   group, then continue here. That skill has its own prerequisite — a
+   configured channel — so if no `/add-<channel>` has been run yet, install
+   one first (`/add-telegram`, `/add-slack`, `/add-discord`, …). Skip this
+   step when a group already exists; it is idempotent, so never create a
+   duplicate.
+2. **Pick a model** from the roster:
+   `curl -s http://127.0.0.1:4000/v1/models`.
+3. **Point OpenCode at the router** and select that model — see
+   `/add-opencode`'s **Configuration** (the `OPENCODE_*` variables) and
+   `/add-litellm`'s **"Wire an agent group"** for the exact shape. In short:
+   set the OpenCode base URL to the router endpoint above and the OpenCode
+   model to a roster tag.
+4. **Switch the group's provider to OpenCode** so it uses that harness:
+   ```bash
+   ncl groups config update --id <agent-group-id> --provider opencode
+   ncl groups restart --id <agent-group-id> --message "switched to OpenCode via LiteLLM"
+   ```
+   Revert any time with `--provider claude`.
+
+The wiring is a runtime operator action with no source footprint, so there is
+no in-tree integration point for a test to guard (docs/skill-guidelines.md,
+"when there is genuinely nothing to test in-tree").
+
+> **If the webchat channel is installed**, you can register the roster in its
+> **Models** UI instead and assign a model to a group with point-and-click —
+> assigning flips that group onto OpenCode automatically, unassigning reverts.
+> This skill does **not** require webchat; the steps above are the portable
+> path.
 
 ### 4. Verify
 
@@ -89,23 +108,21 @@ curl -s http://127.0.0.1:4000/v1/models | head -c 300
 # OpenCode registered in BOTH trees (guards from /add-opencode)
 pnpm exec vitest run src/providers/opencode-registration.test.ts
 cd container/agent-runner && bun test src/providers/opencode-registration.test.ts && cd -
-# Registration script behaves
-node --test .claude/skills/add-opencode-stack/resources/register-models.test.mjs
 ```
 
-Then the end-to-end leg: in the webchat **Models** UI, assign one of the
-registered models to a (test) agent — the assignment flips that group's
-provider to OpenCode and restarts its container — and send it a message. The
-first reply can take 10-30s+ while the backend cold-loads the model. Unassign
-to return the agent to Claude.
+Then the end-to-end leg: with a group wired to OpenCode (stage 3) and a roster
+model selected, send it a message. The first reply can take 10-30s+ while the
+backend cold-loads the model. Set the group's provider back to `claude` to
+return it to the built-in path.
 
 ## Operations
 
-- **Roster changed** → re-run stages 2 and 3 (both idempotent).
-- **Keyed cloud backends** → configure per `/add-litellm` ("Keyed backends"),
-  then re-run stage 3 to register the new names.
-- **Which agent runs on what** → the webchat Models UI is the single control
-  surface; no `.env` or `container.json` edits.
+- **Roster changed** → re-run stage 2 (idempotent); new models become
+  selectable immediately.
+- **Keyed cloud backends** → configure per `/add-litellm` ("Keyed backends").
+- **Which agent runs on what** → the group's provider (`ncl groups config`)
+  plus its OpenCode model — or the webchat Models UI, if that channel is
+  installed.
 
 ## Removal
 

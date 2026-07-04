@@ -1,23 +1,22 @@
 # Remove the OpenCode stack
 
-Reverse of install order — models first (they reference the router), then the
-router, then the provider. Each stage is optional: remove only the layers you
-no longer want (e.g. keep OpenCode + LiteLLM but drop the registered models).
+Reverse of install order — unwire groups first, then the router, then the
+provider. Each stage is optional: remove only the layers you no longer want
+(e.g. keep OpenCode + LiteLLM but return a group to Claude).
 
-## 1. Unregister the routed models
+## 1. Unwire groups from the router
 
-Unassign any agent still using one (webchat Models UI — unassigning reverts
-the agent to the default Claude provider), then delete the registered rows.
-From the checkout:
+For each group you pointed at the router, set it back to the built-in provider
+and restart:
 
 ```bash
-pnpm exec tsx scripts/q.ts data/v2.db \
-  "DELETE FROM webchat_models WHERE kind='openai-compatible' AND endpoint LIKE 'http://host.docker.internal:%'"
-pnpm exec tsx scripts/q.ts data/v2.db \
-  "DELETE FROM webchat_agent_models WHERE model_id NOT IN (SELECT id FROM webchat_models)"
+ncl groups config update --id <agent-group-id> --provider claude
+ncl groups restart --id <agent-group-id> --message "reverted to Claude"
 ```
 
-(Deleting via the Models UI instead is equivalent and prompts per assignment.)
+Remove any `OPENCODE_*` router values you added for these groups (per
+`/add-opencode`'s Configuration). If the webchat channel is installed and you
+registered router models in its Models UI, unassign and delete them there.
 
 ## 2. LiteLLM router
 
