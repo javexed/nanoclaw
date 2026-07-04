@@ -1,8 +1,8 @@
 diff --git a/container/agent-runner/src/poll-loop.ts b/container/agent-runner/src/poll-loop.ts
-index 515a174e..e9590d46 100644
+index a217f012..71910ede 100644
 --- a/container/agent-runner/src/poll-loop.ts
 +++ b/container/agent-runner/src/poll-loop.ts
-@@ -80,6 +80,62 @@ export interface PollLoopConfig {
+@@ -80,6 +80,83 @@ export interface PollLoopConfig {
     * Set for ollama-backed agents (see RunnerConfig.lenientOutput).
     */
    lenientOutput?: boolean;
@@ -42,13 +42,33 @@ index 515a174e..e9590d46 100644
 +  // 'progress' needs no new status kind anywhere downstream.
 +  appendStatusEvent('progress', `Escalating to ${fallbackName.charAt(0).toUpperCase()}${fallbackName.slice(1)}…`);
 +  try {
++    const q = fallback.query({
++      prompt,
++      continuation: undefined,
++      cwd: config.cwd,
++      systemContext: config.systemContext,
++    });
++    // Hub-style providers (Claude) keep their query open after a result so
++    // follow-ups reuse the warm session — as the PRIMARY that's the whole
++    // point, but an open FALLBACK query becomes the loop's active query and
++    // silently captures every subsequent message: the group is then stuck on
++    // the fallback until the container recycles. Enforce one-shot at the
++    // stream level: end the query after its first result so processQuery
++    // returns and the next turn starts on the primary.
++    const singleTurn: AgentQuery = {
++      push: (m) => q.push(m),
++      end: () => q.end(),
++      abort: () => q.abort(),
++      events: (async function* () {
++        for await (const ev of q.events) {
++          yield ev;
++          if (ev.type === 'result') break;
++        }
++        q.end();
++      })(),
++    };
 +    return await processQuery(
-+      fallback.query({
-+        prompt,
-+        continuation: undefined,
-+        cwd: config.cwd,
-+        systemContext: config.systemContext,
-+      }),
++      singleTurn,
 +      routing,
 +      processingIds,
 +      fallbackName,
@@ -57,6 +77,7 @@ index 515a174e..e9590d46 100644
 +      undefined,
 +      originDests,
 +      config.lenientOutput ?? false,
++      config.signal,
 +    );
 +  } catch (err) {
 +    log(`Fallback provider ${fallbackName} failed too: ${err instanceof Error ? err.message : String(err)}`);
@@ -65,7 +86,18 @@ index 515a174e..e9590d46 100644
  }
  
  /**
-@@ -314,6 +370,19 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+@@ -283,8 +360,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+       );
+ 
+       // Shutdown, not turn failure: the stop signal aborted the query
+-      // mid-turn. No error message and no empty-turn net — the host (or
+-      // test) tearing us down owns the messaging from here.
++      // mid-turn. No error message, no empty-turn net, no escalation — the
++      // host (or test) tearing us down owns the messaging from here.
+       if (config.signal?.aborted) return;
+ 
+       // Self-heal a dead/stale continuation. Unlike a thrown error (recovered
+@@ -321,6 +398,19 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
          setContinuation(config.providerName, continuation);
        }
  
@@ -85,7 +117,16 @@ index 515a174e..e9590d46 100644
        // (A) Non-quota terminal error (model not found, backend unreachable, an
        // error result, or the SDK dying mid-stream): surface it to the user
        // instead of dropping the turn. The quota case writes its own message
-@@ -348,8 +417,15 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+@@ -344,7 +434,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+       }
+     } catch (err) {
+       // Same shutdown guard as the result path — an abort-induced throw is
+-      // teardown, not a provider failure to report.
++      // teardown, not a provider failure to report or escalate.
+       if (config.signal?.aborted) return;
+       const errMsg = err instanceof Error ? err.message : String(err);
+       log(`Query error: ${errMsg}`);
+@@ -358,8 +448,15 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
          clearContinuation(config.providerName);
        }
  

@@ -136,7 +136,11 @@ one). Live behavior when a prompt classifies there:
 The `fallback_provider` seam is **not part of trunk** — this skill delivers
 it as reversible core-file surgery (same contract as the webchat installer's
 hook patches: reverse-check → `git apply --3way` → conflict-restore; new
-files copied in). Install it, then restart the host so the migration runs:
+files copied in). **Prerequisite:** the poll-loop abandoned-query fix
+(`fix(poll-loop): abandoned hub queries kept polling`) must be in your
+checkout's history — the escalation patches build on its `signal` parameter.
+It ships on `channels-webchat`; a checkout current with that branch has it.
+Install, then restart the host so the migration runs:
 
 ```bash
 bash .claude/skills/add-routing/resources/core-escalation/install-core-escalation.sh
