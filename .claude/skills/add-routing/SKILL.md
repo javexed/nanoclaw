@@ -165,11 +165,40 @@ arming a fallback. Without a `fallback_provider`, an escalate match surfaces
 to the user as an error — don't add the route until the group has a fallback
 (or you want a hard refusal).
 
+## Nightly recalibration (Phase 4, §16e tier-1)
+
+Opt-in nightly script over the decision log — no training, no LLM calls:
+
+```bash
+bash .claude/skills/add-routing/resources/install-recalibration.sh   # systemd user timer, 03:30
+# or run once by hand:
+node .claude/skills/add-routing/resources/recalibrate.mjs --days 7
+```
+
+What it does each night:
+
+- **Report** (`data/litellm/routing/recalibration-<date>.md`): route
+  distribution, classifier error/timeout rate, `other` rate, escalation rate
+  as a share of live traffic, classify-latency percentiles — with ⚠ flags
+  when a rate leaves its normal band.
+- **Auto-tunes ONE knob** (`--apply`, default in the timer):
+  `live.timeout_ms` from observed latency (p95 × 1.5, clamped to 2–15s,
+  20% deadband so it doesn't thrash). Everything else — route descriptions,
+  bindings, the escalate route's aggressiveness — is a recommendation only:
+  those are judgment calls, and the whole game is route descriptions.
+- **Rotates** log entries older than 30 days to
+  `routing-shadow.archive.jsonl` (the rewrite races a concurrent classify
+  append in a microscopic window at 03:30 — worst case one shadow line lost).
+
+Arch-Router yields no confidence score, so there is no numeric floor to
+recalibrate — the escalation-rate flag is the §16e "escalating 45% but
+quality plateaued" signal, pointed at the escalate route's description.
+
 ## What this deliberately does NOT do (yet)
 
-Nightly threshold recalibration (§16e tier-1) and the post-flight quality
-judge (§16d) are later phases and land behind explicit config — never as a
-side effect of installing this skill.
+The post-flight quality judge (§16d) and router retraining (§16e tier-2) are
+later phases and land behind explicit config — never as a side effect of
+installing this skill.
 
 ## Removal
 

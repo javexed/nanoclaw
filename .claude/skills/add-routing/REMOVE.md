@@ -20,7 +20,16 @@ rm -rf data/litellm/routing        # includes routes.json AND the shadow log —
                                    # want to keep the collected decisions
 ```
 
-## 3. (If installed) reverse the core escalation seam
+## 3. (If installed) remove the nightly recalibration timer
+
+```bash
+systemctl --user disable --now nanoclaw-routing-recal.timer
+rm -f ~/.config/systemd/user/nanoclaw-routing-recal.{service,timer}
+systemctl --user daemon-reload
+rm -f data/litellm/routing/recalibration-*.md data/litellm/routing/routing-shadow.archive.jsonl
+```
+
+## 4. (If installed) reverse the core escalation seam
 
 Disarm every group first, then reverse the patches in reverse order and drop
 the migration file. The `fallback_provider` DB column stays — SQLite column
@@ -37,14 +46,14 @@ rm -f src/db/migrations/025-fallback-provider.ts
 pnpm run build   # then restart the nanoclaw service
 ```
 
-## 4. (Optional) drop the classifier model from its Ollama host
+## 5. (Optional) drop the classifier model from its Ollama host
 
 ```bash
 curl -s -X DELETE http://<classifier-host>:11434/api/delete \
   -d '{"model":"hf.co/katanemo/Arch-Router-1.5B.gguf:Q4_K_M"}'
 ```
 
-## 5. This skill's files
+## 6. This skill's files
 
 ```bash
 rm -rf .claude/skills/add-routing
