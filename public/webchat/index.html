@@ -845,6 +845,18 @@
                   <span class="form-label">Command</span>
                   <input id="mcp-command" type="text" autocomplete="off" />
                 </label>
+                <!-- Token rotation: stored tokens are never displayed; leaving this
+                     blank keeps the existing one. Remote transports only. -->
+                <label id="mcp-token-label">
+                  <span class="form-label">Replace bearer token</span>
+                  <input
+                    id="mcp-token"
+                    type="password"
+                    placeholder="Leave blank to keep the current token"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                </label>
                 <p id="mcp-detail-usage" class="room-prime-note"></p>
                 <div class="agent-detail-actions">
                   <button type="submit" class="btn btn-primary">Save</button>
@@ -877,6 +889,18 @@
                       />
                       <button type="button" id="mcp-probe-btn" class="btn btn-secondary">Probe</button>
                     </div>
+                  </label>
+                  <!-- Revealed when a probe comes back 401 — the server wants a
+                       bearer token; filling it re-probes with Authorization. -->
+                  <label id="mcp-probe-token-label" hidden>
+                    <span class="form-label">Bearer token</span>
+                    <input
+                      id="mcp-probe-token"
+                      type="password"
+                      placeholder="Token the server expects"
+                      autocomplete="off"
+                      spellcheck="false"
+                    />
                   </label>
                   <p id="mcp-probe-status" class="model-probe-status" hidden></p>
                   <div id="mcp-probe-results" class="model-probe-results" hidden>
@@ -926,7 +950,20 @@
                       <span class="form-label">Arguments (one per line)</span>
                       <textarea id="mcp-create-args" rows="2" placeholder="--flag&#10;value"></textarea>
                     </label>
-                    <p class="form-hint">Credentials go through the gateway — don't put keys here.</p>
+                    <label id="mcp-create-token-label">
+                      <span class="form-label">Bearer token (optional)</span>
+                      <input
+                        id="mcp-create-token"
+                        type="password"
+                        placeholder="Only if the server requires one"
+                        autocomplete="off"
+                        spellcheck="false"
+                      />
+                    </label>
+                    <p class="form-hint">
+                      The token is stored for this server only and never shown again. Other credentials go
+                      through the gateway — don't put API keys here.
+                    </p>
                     <div class="agent-detail-actions">
                       <button type="submit" class="btn btn-primary">Create</button>
                     </div>

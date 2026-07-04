@@ -28,6 +28,22 @@ export interface McpProbeResult {
   tools: { name: string; description: string }[];
   /** Why the probe failed (transport === null). */
   reason?: string;
+  /**
+   * The failure looked like an auth rejection (401 / missing Authorization) —
+   * the UI uses this to reveal a token field and re-probe, instead of making
+   * the client string-match the reason text.
+   */
+  requiresAuth?: boolean;
+}
+
+/**
+ * Does a transport failure read as "the server wants credentials"? Matches the
+ * shapes real servers emit: a bare 401 status (SSE transport surfaces
+ * "Non-200 status code (401)"), or an Authorization/Bearer complaint in the
+ * error body (Streamable HTTP surfaces the response text verbatim).
+ */
+export function looksAuthGated(message: string): boolean {
+  return /\b401\b|unauthori[sz]ed|authorization header|bearer/i.test(message);
 }
 
 const PROBE_TIMEOUT_MS = 8000;
@@ -76,10 +92,14 @@ export async function probeMcpEndpoint(rawUrl: string, headers: Record<string, s
       reasons.push(`${kind}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+  const requiresAuth = reasons.some(looksAuthGated);
   return {
     transport: null,
     endpoint: url,
     tools: [],
-    reason: `No MCP server responded. ${reasons.join(' · ')}`,
+    reason: requiresAuth
+      ? 'The server requires authentication — provide a bearer token and probe again.'
+      : `No MCP server responded. ${reasons.join(' · ')}`,
+    ...(requiresAuth ? { requiresAuth: true } : {}),
   };
 }

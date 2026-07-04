@@ -8531,6 +8531,8 @@ function openMcpDetail(id) {
   const remote = server.transport !== 'stdio';
   $('#mcp-url-label').hidden = !remote;
   $('#mcp-command-label').hidden = remote;
+  $('#mcp-token-label').hidden = !remote;
+  $('#mcp-token').value = ''; // stored tokens are never displayed; blank = keep
   if (remote) $('#mcp-url').value = server.target;
   else $('#mcp-command').value = server.target;
 
@@ -8569,20 +8571,26 @@ $('#create-mcp-btn').addEventListener('click', () => {
   $('#mcp-probe-status').hidden = true;
   $('#mcp-probe-results').hidden = true;
   $('#mcp-probe-name').value = '';
+  $('#mcp-probe-token').value = '';
+  $('#mcp-probe-token-label').hidden = true;
   lastMcpProbe = null;
+  lastMcpProbeToken = '';
   $('#mcp-create-name').value = '';
   $('#mcp-create-url').value = '';
   $('#mcp-create-command').value = '';
   $('#mcp-create-args').value = '';
+  $('#mcp-create-token').value = '';
   $('#mcp-create-transport').value = 'sse';
   syncMcpCreateTransportFields();
   $('#mcp-detail').hidden = false;
   $('#members-panel').hidden = true;
 });
 
-// Manual-entry transport select swaps url vs command/args fields.
+// Manual-entry transport select swaps url vs command/args fields (the bearer
+// token is a remote-transport concept — hidden for stdio).
 function syncMcpCreateTransportFields() {
   const remote = $('#mcp-create-transport').value !== 'stdio';
+  $('#mcp-create-token-label').hidden = !remote;
   $('#mcp-create-url-label').hidden = !remote;
   $('#mcp-create-command-label').hidden = remote;
   $('#mcp-create-args-label').hidden = remote;
@@ -8590,6 +8598,16 @@ function syncMcpCreateTransportFields() {
 $('#mcp-create-transport').addEventListener('change', syncMcpCreateTransportFields);
 
 // ── MCP probe — connect to the URL as an MCP client, list its tools ──
+// The bearer token used by the LAST SUCCESSFUL probe — carried into the add
+// body so the registered server keeps working. Kept out of lastMcpProbe (the
+// server response) so it can't leak via logging of that object.
+let lastMcpProbeToken = '';
+
+function mcpProbeAuthHeaders() {
+  const token = $('#mcp-probe-token').value.trim();
+  return token ? { Authorization: `Bearer ${token}` } : undefined;
+}
+
 async function runMcpProbe() {
   const url = $('#mcp-probe-url').value.trim();
   if (!url) {
@@ -8608,10 +8626,11 @@ async function runMcpProbe() {
   results.hidden = true;
   $('#mcp-probe-btn').disabled = true;
   try {
+    const headers = mcpProbeAuthHeaders();
     const res = await authFetch('/api/mcp-servers/probe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify(headers ? { url, headers } : { url }),
     });
     const body = await res.json();
     if (!res.ok) {
@@ -8620,11 +8639,25 @@ async function runMcpProbe() {
       return;
     }
     if (!body.transport) {
+      // Auth-gated server: reveal the token field and invite a re-probe. A
+      // WRONG token lands here too — same affordance, different message.
+      if (body.requiresAuth) {
+        const tokenLabel = $('#mcp-probe-token-label');
+        const hadToken = Boolean(headers);
+        tokenLabel.hidden = false;
+        status.textContent = hadToken
+          ? 'The server rejected that token — check it and probe again.'
+          : 'This server requires a bearer token — enter it below and probe again.';
+        status.classList.add('error');
+        $('#mcp-probe-token').focus();
+        return;
+      }
       status.textContent = body.reason || 'No MCP server responded.';
       status.classList.add('error');
       return;
     }
     lastMcpProbe = body;
+    lastMcpProbeToken = $('#mcp-probe-token').value.trim();
     status.hidden = true;
     renderMcpProbeResults(body);
   } catch (err) {
@@ -8679,7 +8712,8 @@ $('#mcp-probe-url').addEventListener('keydown', (e) => {
   }
 });
 
-// Add-from-probe: the URL + detected transport come from the probe result.
+// Add-from-probe: the URL + detected transport come from the probe result; the
+// token that made the probe succeed rides along so the saved server works too.
 $('#mcp-probe-add').addEventListener('click', async () => {
   if (!lastMcpProbe) return;
   const name = $('#mcp-probe-name').value.trim();
@@ -8687,10 +8721,9 @@ $('#mcp-probe-add').addEventListener('click', async () => {
     showToast('Give the server a name first.', { kind: 'error' });
     return;
   }
-  await createMcpServer(
-    { name, transport: lastMcpProbe.transport, url: lastMcpProbe.endpoint },
-    $('#mcp-probe-add'),
-  );
+  const body = { name, transport: lastMcpProbe.transport, url: lastMcpProbe.endpoint };
+  if (lastMcpProbeToken) body.headers = { Authorization: `Bearer ${lastMcpProbeToken}` };
+  await createMcpServer(body, $('#mcp-probe-add'));
 });
 
 // Manual entry (Advanced).
@@ -8706,6 +8739,8 @@ $('#mcp-create-form').addEventListener('submit', async (e) => {
       .filter(Boolean);
   } else {
     body.url = $('#mcp-create-url').value.trim();
+    const token = $('#mcp-create-token').value.trim();
+    if (token) body.headers = { Authorization: `Bearer ${token}` };
   }
   await createMcpServer(body, $('#mcp-create-form button.btn-primary'));
 });
@@ -8737,7 +8772,13 @@ $('#mcp-detail-form').addEventListener('submit', async (e) => {
   if (!server) return;
   const body = { name: $('#mcp-name').value.trim() };
   if (server.transport === 'stdio') body.command = $('#mcp-command').value.trim();
-  else body.url = $('#mcp-url').value.trim();
+  else {
+    body.url = $('#mcp-url').value.trim();
+    // Token rotation: only send headers when a new token was typed — the
+    // update handler merges, so omitting the field keeps the stored one.
+    const token = $('#mcp-token').value.trim();
+    if (token) body.headers = { Authorization: `Bearer ${token}` };
+  }
   try {
     const res = await authFetch(`/api/mcp-servers/${encodeURIComponent(selectedMcpId)}`, {
       method: 'PUT',
