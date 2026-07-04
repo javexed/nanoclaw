@@ -8,8 +8,13 @@ import {
   appendStatusEvent,
   clearStatusEvents,
 } from './db/connection.js';
-import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
-import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
+import {
+  clearContinuation,
+  clearCurrentInReplyTo,
+  migrateLegacyContinuation,
+  setContinuation,
+  setCurrentInReplyTo,
+} from './db/session-state.js';
 import {
   formatMessages,
   extractRouting,
