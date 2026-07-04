@@ -1,8 +1,8 @@
 diff --git a/src/cli/resources/groups.ts b/src/cli/resources/groups.ts
-index c207549c..90f37fa9 100644
+index 866078b9..b96d5781 100644
 --- a/src/cli/resources/groups.ts
 +++ b/src/cli/resources/groups.ts
-@@ -23,6 +23,7 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
+@@ -27,6 +27,7 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
      image_tag: row.image_tag,
      assistant_name: row.assistant_name,
      max_messages_per_prompt: row.max_messages_per_prompt,
@@ -10,7 +10,7 @@ index c207549c..90f37fa9 100644
      skills: JSON.parse(row.skills),
      mcp_servers: JSON.parse(row.mcp_servers),
      packages_apt: JSON.parse(row.packages_apt),
-@@ -214,7 +215,8 @@ registerResource({
+@@ -244,7 +245,8 @@ registerResource({
        access: 'approval',
        description:
          'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
@@ -20,7 +20,7 @@ index c207549c..90f37fa9 100644
        handler: async (args) => {
          const id = args.id as string;
          if (!id) throw new Error('--id is required');
-@@ -224,7 +226,14 @@ registerResource({
+@@ -254,7 +256,14 @@ registerResource({
          const updates: Partial<
            Pick<
              ContainerConfigRow,
@@ -36,7 +36,7 @@ index c207549c..90f37fa9 100644
            >
          > = {};
          if (args.provider !== undefined) updates.provider = args.provider as string;
-@@ -241,10 +250,16 @@ registerResource({
+@@ -271,10 +280,16 @@ registerResource({
            }
            updates.cli_scope = scope;
          }

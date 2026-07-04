@@ -1,8 +1,8 @@
 diff --git a/src/container-runner.ts b/src/container-runner.ts
-index 134a1fbd..d8dfb07a 100644
+index b5156b99..8d8931ad 100644
 --- a/src/container-runner.ts
 +++ b/src/container-runner.ts
-@@ -323,16 +323,30 @@ function resolveProviderContribution(
+@@ -326,16 +326,30 @@ function resolveProviderContribution(
    containerConfig: import('./container-config.js').ContainerConfig,
  ): { provider: string; contribution: ProviderContainerContribution } {
    const provider = resolveProviderName(session.agent_provider, containerConfig.provider);

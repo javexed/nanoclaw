@@ -1,8 +1,8 @@
 diff --git a/container/agent-runner/src/poll-loop.ts b/container/agent-runner/src/poll-loop.ts
-index a217f012..71910ede 100644
+index 56693b0f..b2f4de3e 100644
 --- a/container/agent-runner/src/poll-loop.ts
 +++ b/container/agent-runner/src/poll-loop.ts
-@@ -80,6 +80,83 @@ export interface PollLoopConfig {
+@@ -85,6 +85,83 @@ export interface PollLoopConfig {
     * Set for ollama-backed agents (see RunnerConfig.lenientOutput).
     */
    lenientOutput?: boolean;
@@ -86,7 +86,7 @@ index a217f012..71910ede 100644
  }
  
  /**
-@@ -283,8 +360,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+@@ -288,8 +365,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
        );
  
        // Shutdown, not turn failure: the stop signal aborted the query
@@ -97,7 +97,7 @@ index a217f012..71910ede 100644
        if (config.signal?.aborted) return;
  
        // Self-heal a dead/stale continuation. Unlike a thrown error (recovered
-@@ -321,6 +398,19 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+@@ -326,6 +403,19 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
          setContinuation(config.providerName, continuation);
        }
  
@@ -117,7 +117,7 @@ index a217f012..71910ede 100644
        // (A) Non-quota terminal error (model not found, backend unreachable, an
        // error result, or the SDK dying mid-stream): surface it to the user
        // instead of dropping the turn. The quota case writes its own message
-@@ -344,7 +434,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+@@ -349,7 +439,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
        }
      } catch (err) {
        // Same shutdown guard as the result path — an abort-induced throw is
@@ -126,7 +126,7 @@ index a217f012..71910ede 100644
        if (config.signal?.aborted) return;
        const errMsg = err instanceof Error ? err.message : String(err);
        log(`Query error: ${errMsg}`);
-@@ -358,8 +448,15 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+@@ -363,8 +453,15 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
          clearContinuation(config.providerName);
        }
  
