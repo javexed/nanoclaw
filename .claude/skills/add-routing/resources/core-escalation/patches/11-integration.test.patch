@@ -1,8 +1,8 @@
 diff --git a/container/agent-runner/src/integration.test.ts b/container/agent-runner/src/integration.test.ts
-index 93077fd6..63e5b497 100644
+index 93077fd6..d571381d 100644
 --- a/container/agent-runner/src/integration.test.ts
 +++ b/container/agent-runner/src/integration.test.ts
-@@ -577,6 +577,71 @@ class InvalidSessionProvider {
+@@ -577,6 +577,76 @@ class InvalidSessionProvider {
    }
  }
  
@@ -48,6 +48,11 @@ index 93077fd6..63e5b497 100644
 +    expect(getContinuation('mock')).toBeUndefined();
 +    expect(getContinuation('claude')).toStartWith('mock-session-');
 +    expect(getPendingMessages()).toHaveLength(0);
++    // Thinking-bubble: escalation announces itself as a progress event.
++    const statuses = getOutboundDb()
++      .prepare(`SELECT text FROM status_events WHERE kind = 'progress'`)
++      .all() as { text: string }[];
++    expect(statuses.some((s) => s.text === 'Escalating to Claude…')).toBe(true);
 +
 +    await loopPromise.catch(() => {});
 +  });

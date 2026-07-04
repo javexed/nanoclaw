@@ -1,8 +1,8 @@
 diff --git a/container/agent-runner/src/poll-loop.ts b/container/agent-runner/src/poll-loop.ts
-index 515a174e..d6f849d3 100644
+index 515a174e..e9590d46 100644
 --- a/container/agent-runner/src/poll-loop.ts
 +++ b/container/agent-runner/src/poll-loop.ts
-@@ -80,6 +80,59 @@ export interface PollLoopConfig {
+@@ -80,6 +80,62 @@ export interface PollLoopConfig {
     * Set for ollama-backed agents (see RunnerConfig.lenientOutput).
     */
    lenientOutput?: boolean;
@@ -38,6 +38,9 @@ index 515a174e..d6f849d3 100644
 +  const fallbackName = config.fallbackProviderName;
 +  if (!fallback || !fallbackName) return null;
 +  log(`Escalating turn to fallback provider ${fallbackName} (fresh session)`);
++  // Thinking-bubble static line: escalated turns are the slow ones — say so.
++  // 'progress' needs no new status kind anywhere downstream.
++  appendStatusEvent('progress', `Escalating to ${fallbackName.charAt(0).toUpperCase()}${fallbackName.slice(1)}…`);
 +  try {
 +    return await processQuery(
 +      fallback.query({
@@ -62,7 +65,7 @@ index 515a174e..d6f849d3 100644
  }
  
  /**
-@@ -314,6 +367,19 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+@@ -314,6 +370,19 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
          setContinuation(config.providerName, continuation);
        }
  
@@ -82,7 +85,7 @@ index 515a174e..d6f849d3 100644
        // (A) Non-quota terminal error (model not found, backend unreachable, an
        // error result, or the SDK dying mid-stream): surface it to the user
        // instead of dropping the turn. The quota case writes its own message
-@@ -348,8 +414,15 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+@@ -348,8 +417,15 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
          clearContinuation(config.providerName);
        }
  
