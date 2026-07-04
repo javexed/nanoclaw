@@ -133,11 +133,25 @@ one). Live behavior when a prompt classifies there:
   re-escalates; the next turn goes back to the primary). The same seam
   catches hard failures: LiteLLM down, backend timeout, dead model.
 
+The `fallback_provider` seam is **not part of trunk** — this skill delivers
+it as reversible core-file surgery (same contract as the webchat installer's
+hook patches: reverse-check → `git apply --3way` → conflict-restore; new
+files copied in). Install it, then restart the host so the migration runs:
+
 ```bash
+bash .claude/skills/add-routing/resources/core-escalation/install-core-escalation.sh
+# restart the nanoclaw service, then arm a group:
 ncl groups config update --id <group-id> --fallback-provider claude
 ncl groups restart --id <group-id>
 # clear it again with --fallback-provider none
 ```
+
+The seam is provider-agnostic core plumbing (migration for the
+`container_configs.fallback_provider` column, the `ncl` flag, the poll-loop
+one-shot retry, the container-runner env/mount merge for the fallback
+provider). Re-running the installer is idempotent; upstream drift is absorbed
+by the 3-way apply, and a genuine conflict restores the file and reports
+instead of leaving markers.
 
 Classifier failures never escalate — only an affirmative classification does.
 Escalation costs fallback-provider quota and double latency; it is a

@@ -1,0 +1,20 @@
+diff --git a/src/db/migrations/index.ts b/src/db/migrations/index.ts
+index 599983c7..a387cd5c 100644
+--- a/src/db/migrations/index.ts
++++ b/src/db/migrations/index.ts
+@@ -19,6 +19,7 @@ import { migration021 } from './021-byok-oauth.js';
+ import { migration022 } from './022-byok-provider.js';
+ import { migration023 } from './023-byok-user-credentials.js';
+ import { migration024 } from './024-rename-user-credentials.js';
++import { migration025 } from './025-fallback-provider.js';
+ import { moduleApprovalsPendingApprovals } from './module-approvals-pending-approvals.js';
+ import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js';
+ import { migration018 } from './018-approvals-approver-user-id.js';
+@@ -103,6 +104,7 @@ export const migrations: Migration[] = [
+   migration022,
+   migration023,
+   migration024,
++  migration025,
+   moduleWebchatThreads,
+   moduleWebchatThreadEngaged,
+   moduleWebchatThreadContextSync,

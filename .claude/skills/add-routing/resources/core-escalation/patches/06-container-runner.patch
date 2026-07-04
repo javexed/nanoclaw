@@ -1,0 +1,44 @@
+diff --git a/src/container-runner.ts b/src/container-runner.ts
+index 134a1fbd..d8dfb07a 100644
+--- a/src/container-runner.ts
++++ b/src/container-runner.ts
+@@ -323,16 +323,30 @@ function resolveProviderContribution(
+   containerConfig: import('./container-config.js').ContainerConfig,
+ ): { provider: string; contribution: ProviderContainerContribution } {
+   const provider = resolveProviderName(session.agent_provider, containerConfig.provider);
++  const ctx = {
++    sessionDir: sessionDir(agentGroup.id, session.id),
++    agentGroupId: agentGroup.id,
++    groupDir: path.resolve(GROUPS_DIR, agentGroup.folder),
++    selectedSkills: selectedSkillNames(containerConfig),
++    hostEnv: process.env,
++  };
+   const fn = getProviderContainerConfig(provider);
+-  const contribution = fn
+-    ? fn({
+-        sessionDir: sessionDir(agentGroup.id, session.id),
+-        agentGroupId: agentGroup.id,
+-        groupDir: path.resolve(GROUPS_DIR, agentGroup.folder),
+-        selectedSkills: selectedSkillNames(containerConfig),
+-        hostEnv: process.env,
+-      })
+-    : {};
++  const contribution = fn ? fn(ctx) : {};
++
++  // The escalation provider (§16c) runs inside the SAME container, so its
++  // env/mounts must be present too. Merge under the primary's — the primary
++  // wins any env-key or containerPath conflict.
++  const fallbackName = containerConfig.fallbackProvider?.toLowerCase();
++  if (fallbackName && fallbackName !== provider) {
++    const ffn = getProviderContainerConfig(fallbackName);
++    if (ffn) {
++      const fc = ffn(ctx);
++      contribution.env = { ...fc.env, ...contribution.env };
++      const takenPaths = new Set((contribution.mounts ?? []).map((m) => m.containerPath));
++      const extraMounts = (fc.mounts ?? []).filter((m) => !takenPaths.has(m.containerPath));
++      if (extraMounts.length > 0) contribution.mounts = [...(contribution.mounts ?? []), ...extraMounts];
++    }
++  }
+   return { provider, contribution };
+ }
+ 
