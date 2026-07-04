@@ -185,6 +185,28 @@ export function updatePendingApprovalStatus(approvalId: string, status: PendingA
   getDb().prepare('UPDATE pending_approvals SET status = ? WHERE approval_id = ?').run(status, approvalId);
 }
 
+/**
+ * Park an approval in the "rejected, awaiting reason" hold: the admin clicked
+ * "Reject with reason…" and we're waiting for their one-line reply. `expiresAt`
+ * is the deadline after which the host sweep finalizes a plain reject (so a
+ * ghosted hold never strands the requesting agent). Reuses the otherwise-unused
+ * `expires_at` column on module-initiated rows.
+ */
+export function markApprovalAwaitingReason(approvalId: string, expiresAt: string): void {
+  getDb()
+    .prepare("UPDATE pending_approvals SET status = 'awaiting_reason', expires_at = ? WHERE approval_id = ?")
+    .run(expiresAt, approvalId);
+}
+
+/** Awaiting-reason approvals whose reply window has elapsed — the sweep's ghost set. */
+export function getExpiredAwaitingReasonApprovals(nowIso: string): PendingApproval[] {
+  return getDb()
+    .prepare(
+      "SELECT * FROM pending_approvals WHERE status = 'awaiting_reason' AND expires_at IS NOT NULL AND expires_at <= ?",
+    )
+    .all(nowIso) as PendingApproval[];
+}
+
 export function deletePendingApproval(approvalId: string): void {
   getDb().prepare('DELETE FROM pending_approvals WHERE approval_id = ?').run(approvalId);
 }

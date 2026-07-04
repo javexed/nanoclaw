@@ -38,7 +38,6 @@ import {
   getContainerState,
   getMessageForRetry,
   getProcessingClaims,
-  getStuckProcessingIds,
   markMessageFailed,
   retryWithBackoff,
   syncProcessingAcks,
@@ -152,6 +151,18 @@ async function sweep(): Promise<void> {
   } catch (err) {
     log.error('Host sweep error', { err });
   }
+
+  // Finalize any "Reject with reason…" holds whose reply window elapsed (admin
+  // ghosted, or the host restarted mid-capture). Central-DB scan, once per tick
+  // — not per session.
+  // MODULE-HOOK:approvals-reason-sweep:start
+  try {
+    const { sweepAwaitingReasonRejects } = await import('./modules/approvals/index.js');
+    await sweepAwaitingReasonRejects();
+  } catch (err) {
+    log.error('Reject-with-reason sweep failed', { err });
+  }
+  // MODULE-HOOK:approvals-reason-sweep:end
 
   setTimeout(sweep, SWEEP_INTERVAL_MS);
 }
@@ -337,7 +348,13 @@ function resetStuckProcessingRows(
     // Capture the ids BEFORE clearing: these claims re-appear in
     // getPendingMessages if their inbound status never advanced past 'pending',
     // which is the double-answer path (a re-processed message id shows here first).
-    const orphanIds = getStuckProcessingIds(useDb);
+    // (Inlined — upstream's shim cleanup removed the getStuckProcessingIds
+    // helper it considered dead; this log enrichment is webchat's.)
+    const orphanIds = (
+      useDb.prepare("SELECT message_id FROM processing_ack WHERE status = 'processing'").all() as Array<{
+        message_id: string;
+      }>
+    ).map((r) => r.message_id);
     const cleared = deleteOrphanProcessingClaims(useDb);
     if (cleared > 0) {
       log.info('Cleared orphan processing claims', {

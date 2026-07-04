@@ -214,8 +214,13 @@ export interface PendingApproval {
   channel_type: string | null;
   platform_id: string | null;
   platform_message_id: string | null;
+  /**
+   * For OneCLI credential rows, the gateway's request TTL. For a module
+   * approval held by "Reject with reason…", the deadline after which the
+   * host sweep finalizes a plain reject (set by markApprovalAwaitingReason).
+   */
   expires_at: string | null;
-  status: 'pending' | 'approved' | 'rejected' | 'expired';
+  status: 'pending' | 'approved' | 'rejected' | 'expired' | 'awaiting_reason';
   title: string;
   options_json: string;
   /** When set, only this exact user may resolve the approval. */
