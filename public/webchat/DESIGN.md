@@ -201,10 +201,11 @@ first — one Escape, one layer. Any new full-screen view must register through
 full surface by toggling its `hidden` attribute alone.
 
 Current state to converge: ESC closes settings, lightbox, confirm modal, model
-picker, mention popup, overflow menu, and all full-screen views (`viewStack` +
-`popstate` + capture-phase ESC). The remaining gap is the **detail asides +
-members panel on desktop** (× only, no ESC / no backdrop). Wire them through the
-same helper.
+picker, mention popup, overflow menu, all full-screen views (`viewStack` +
+`popstate` + capture-phase ESC), **and the detail asides + members panel**
+(`closeTopDetailAside()` — the aside is one layer above its view, so the first
+Escape closes the aside, the next closes the view). Remaining gap: asides have
+no backdrop-tap or history entry yet — × and Escape only.
 
 ---
 
@@ -320,3 +321,21 @@ Once code is migrated onto the tokens, add a stylelint
 the migration lands, the rule would be all-red — introduce it *after*, not
 before. Keep this doc in sync when the contract changes; agents read it as the
 spec.
+
+## Model identity
+
+One convention wherever a model appears (registry list, detail panel, Ollama
+host cards): **kind badge + bare model name + dim host meta** (`.model-row-host`
+/ card meta). Never bake the endpoint into the display name — older entries
+that did are display-normalized by `modelDisplayParts()`. Kind is identity,
+not data entry: render it as the badge plus a one-line explainer
+(`modelKindExplainer()`), never as a form field. Live endpoint facts
+(installed · size · in-memory) use the same wording in the detail strip and
+the host cards so the two surfaces can't disagree.
+
+The Models tab has exactly two surfaces: **Selectable models** (top — what
+agent settings offers; every row opens its detail) and **Servers** (bottom —
+Ollama hosts and the LiteLLM router, each listing what it serves). Server
+rows never open a detail; they carry a single +/− toggle that adds/removes
+the model from the selectable list (kind decided by the server type), plus
+per-card actions (pull on Ollama hosts, roster refresh on the router).

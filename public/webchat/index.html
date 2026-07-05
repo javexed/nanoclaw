@@ -199,6 +199,9 @@
                 <button class="overflow-item" data-action="mcp" role="menuitem">
                   <svg class="icon" aria-hidden="true"><use href="#i-plug"></use></svg>&nbsp;&nbsp;MCP
                 </button>
+                <button class="overflow-item" data-action="routing" role="menuitem" hidden>
+                  <svg class="icon" aria-hidden="true"><use href="#i-sort"></use></svg>&nbsp;&nbsp;Routing
+                </button>
                 <button class="overflow-item" data-action="topology" role="menuitem">
                   <svg class="icon" aria-hidden="true"><use href="#i-layout-dashboard"></use></svg>&nbsp;&nbsp;Topology
                 </button>
@@ -696,6 +699,7 @@
             <!-- Edit mode -->
             <div id="model-edit-view">
               <div class="agent-detail-header">
+                <span id="model-detail-badge" class="model-kind-badge" hidden></span>
                 <span id="model-detail-title">Model</span>
                 <button id="model-detail-close" class="members-close">
                   <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
@@ -706,10 +710,9 @@
                   <span class="form-label">Display name</span>
                   <input id="model-name" type="text" required />
                 </label>
-                <label>
-                  <span class="form-label">Kind</span>
-                  <input id="model-kind" type="text" readonly class="readonly" />
-                </label>
+                <input id="model-kind" type="hidden" />
+                <p id="model-kind-explainer" class="model-kind-explainer"></p>
+                <p id="model-live-facts" class="model-live-facts" hidden></p>
                 <label id="model-endpoint-label">
                   <span class="form-label">Endpoint</span>
                   <input id="model-endpoint" type="text" placeholder="http://localhost:11434" autocomplete="off" />
@@ -999,6 +1002,9 @@
             <button class="manage-tab" data-mtab="mcp" role="tab" aria-selected="false" aria-controls="mtab-mcp">
               MCP
             </button>
+            <button class="manage-tab" data-mtab="routing" role="tab" aria-selected="false" aria-controls="mtab-routing" hidden>
+              Routing
+            </button>
           </div>
           <button id="manage-sort-az" class="sort-icon-btn" type="button" aria-pressed="false" title="Sort A–Z" aria-label="Sort A–Z">
             <svg class="icon" aria-hidden="true"><use href="#i-sort"></use></svg>
@@ -1012,11 +1018,39 @@
           </div>
           <div id="mtab-models" class="manage-pane" role="tabpanel" hidden>
             <ul id="model-list"></ul>
-            <button id="create-model-btn" class="btn btn-secondary btn-list-footer">+ New model</button>
+            <button id="create-model-btn" class="btn btn-secondary btn-list-footer">+ Add model endpoint…</button>
+            <div id="ollama-hosts" class="ollama-hosts" hidden>
+              <div class="ollama-hosts-title">Servers</div>
+              <div id="ollama-host-cards"></div>
+            </div>
           </div>
           <div id="mtab-mcp" class="manage-pane" role="tabpanel" hidden>
             <ul id="mcp-list"></ul>
             <button id="create-mcp-btn" class="btn btn-secondary btn-list-footer">+ New server</button>
+          </div>
+          <div id="mtab-routing" class="manage-pane" role="tabpanel" hidden>
+            <div class="routing-body">
+              <div class="routing-live-row">
+                <label><input type="checkbox" id="routing-live-enabled" /> Live routing via “auto”</label>
+                <label class="routing-timeout-label">Classify timeout
+                  <input type="number" id="routing-timeout" min="1000" max="30000" step="500" /> ms
+                </label>
+              </div>
+              <div id="routing-routes"></div>
+              <button id="routing-add-route" class="btn btn-ghost" type="button">+ Add route</button>
+              <div class="agent-detail-actions">
+                <button id="routing-save" class="btn btn-primary" type="button">Save</button>
+                <span class="routing-save-note">Changes apply to the next request — no restart.</span>
+              </div>
+              <div class="routing-section-title">Test a prompt</div>
+              <div class="routing-bench-row">
+                <input id="routing-bench-input" type="text" placeholder="Type a prompt to classify…" />
+                <button id="routing-bench-run" class="btn btn-secondary" type="button">Classify</button>
+              </div>
+              <div id="routing-bench-result" class="routing-bench-result" hidden></div>
+              <div class="routing-section-title">Recent decisions</div>
+              <div id="routing-decisions-list" class="routing-decisions-list"></div>
+            </div>
           </div>
         </div>
       </section>
@@ -1154,6 +1188,10 @@
           <div class="dash-section">
             <div class="dash-section-title">Metrics</div>
             <div id="dash-graph" class="dash-graph"></div>
+          </div>
+          <div class="dash-section" id="dash-router-section" hidden>
+            <div class="dash-section-title">Router · last 7 days</div>
+            <div id="dash-router" class="dash-router"></div>
           </div>
           <div id="dash-detail" class="dash-detail" hidden>
             <div class="dash-detail-header">

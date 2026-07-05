@@ -556,6 +556,7 @@ $('#overflow-menu')?.addEventListener('click', (e) => {
   if (action === 'agents') openManage('agents');
   else if (action === 'models') openManage('models');
   else if (action === 'mcp') openManage('mcp');
+  else if (action === 'routing') openManage('routing');
   else if (action === 'topology') toggleTopology();
   else if (action === 'matrix') toggleMatrix();
   else if (action === 'dashboard') toggleDashboard();
@@ -772,6 +773,26 @@ function blockingOverlayOpen() {
 // permissions, agents/models) — the same path as its Back button, so history
 // and the OS back gesture stay in sync. Capture phase so it can defer to any
 // open modal/menu (which closes on its own bubble-phase handler instead).
+// Detail asides (model/agent/MCP/members) sit one layer above their view:
+// Escape closes the aside first, the next Escape closes the view — same
+// "one layer per press" rule as everything else (DESIGN.md §4).
+function closeTopDetailAside() {
+  const layers = [
+    ['members-panel', () => { $('#members-panel').hidden = true; }],
+    ['model-detail', closeModelDetail],
+    ['agent-detail', closeAgentDetail],
+    ['mcp-detail', closeMcpDetail],
+  ];
+  for (const [id, close] of layers) {
+    const el = document.getElementById(id);
+    if (el && !el.hidden) {
+      close();
+      return true;
+    }
+  }
+  return false;
+}
+
 document.addEventListener(
   'keydown',
   (e) => {
@@ -781,6 +802,7 @@ document.addEventListener(
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
     e.preventDefault();
     e.stopPropagation();
+    if (closeTopDetailAside()) return; // aside is the topmost layer
     closeView(viewStack[viewStack.length - 1].name);
   },
   true,
@@ -4455,6 +4477,7 @@ function openManage(tab = 'agents') {
   $('#overflow-btn')?.classList.add('active');
   switchManageTab(tab);
   if (!viewStack.some((v) => v.name === 'manage')) openView('manage', teardownManage);
+  probeRoutingAvailability();
 }
 function teardownManage() {
   manageActive = false;
@@ -4471,10 +4494,15 @@ function switchManageTab(tab) {
   $('#mtab-agents').hidden = tab !== 'agents';
   $('#mtab-models').hidden = tab !== 'models';
   $('#mtab-mcp').hidden = tab !== 'mcp';
+  $('#mtab-routing').hidden = tab !== 'routing';
   if (typeof syncManageSortIcon === 'function') syncManageSortIcon(); // reflect the active tab's sort
   if (tab === 'agents') fetchAgents();
   else if (tab === 'models') fetchModels();
   else if (tab === 'mcp') fetchMcpServers();
+  else if (tab === 'routing') {
+    if (!routingAvailable) return switchManageTab('agents');
+    loadRoutingTab();
+  }
 }
 $('#manage-back')?.addEventListener('click', () => closeView('manage'));
 document.querySelectorAll('.manage-tab').forEach((t) => {
@@ -5774,6 +5802,55 @@ async function refreshDashboard() {
   }
   renderHealthStrip(snap);
   renderMetrics(snap);
+  refreshRouterMetrics();
+}
+
+// Router traffic panel: per-model request counts from the routing decision
+// log (the shadow hook classifies every LiteLLM completion, so the log IS
+// the request ledger). Owner-only; the section stays hidden when the
+// routing skill isn't installed or the viewer isn't the owner.
+async function refreshRouterMetrics() {
+  const section = $('#dash-router-section');
+  if (!section) return;
+  try {
+    const res = await authFetch('/api/router/metrics?days=7');
+    if (!res.ok) {
+      section.hidden = true;
+      return;
+    }
+    const m = await res.json();
+    if (!m.available || m.total === 0) {
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
+    const max = Math.max(...m.byModel.map((x) => x.count), 1);
+    const bars = m.byModel
+      .map(
+        (x) => `
+      <div class="router-bar-row" title="${esc(x.model)}">
+        <span class="router-bar-label">${esc(x.model)}</span>
+        <span class="router-bar-track"><span class="router-bar-fill" style="width:${Math.max(3, Math.round((100 * x.count) / max))}%"></span></span>
+        <span class="router-bar-count">${x.count}</span>
+      </div>`,
+      )
+      .join('');
+    const routes = m.byRoute
+      .filter((r) => r.route !== '__error__')
+      .map((r) => `${esc(r.route)} ${r.count}`)
+      .join(' · ');
+    const health = [];
+    health.push(`${m.total} request${m.total === 1 ? '' : 's'}`);
+    health.push(`${m.live} via auto`);
+    if (m.escalations > 0) health.push(`${m.escalations} escalated to Claude`);
+    if (m.errors > 0) health.push(`${m.errors} classifier error${m.errors === 1 ? '' : 's'}`);
+    $('#dash-router').innerHTML =
+      `<div class="router-summary">${esc(health.join(' · '))}</div>` +
+      bars +
+      (routes ? `<div class="router-routes">Routes: ${routes}</div>` : '');
+  } catch {
+    section.hidden = true;
+  }
 }
 
 function renderHealthStrip(snap) {
@@ -7959,8 +8036,608 @@ async function fetchModels() {
     const res = await authFetch('/api/models');
     allModels = await res.json();
     renderModels();
+    loadOllamaHosts();
   } catch (err) {
     console.error('Failed to fetch models:', err);
+  }
+}
+
+// ── Servers & selection (owner-only; hidden entirely for non-owners) ──
+// One mental model: SERVERS (Ollama hosts + the LiteLLM router) each list
+// what they serve; +/− on a server row adds/removes that model from the
+// SELECTABLE list at the top (what agent settings offers). Server rows are
+// never clickable-for-detail — only selectable-list rows are. Everything
+// renders in one pass from loadServers() so sections can't race each other.
+let ollamaPullPoller = null;
+
+async function loadOllamaHosts() {
+  const wrap = $('#ollama-hosts');
+  if (!wrap) return;
+  try {
+    const [hostsRes, routerRes] = await Promise.all([
+      authFetch('/api/ollama/hosts'),
+      authFetch('/api/router/models'),
+    ]);
+    if (!hostsRes.ok) {
+      wrap.hidden = true; // non-owner
+      return;
+    }
+    const { hosts } = await hostsRes.json();
+    const router = routerRes.ok ? await routerRes.json() : { available: false };
+    wrap.hidden = hosts.length === 0 && !router.available;
+    if (wrap.hidden) return;
+    const cards = $('#ollama-host-cards');
+    cards.innerHTML = '';
+    if (router.available) cards.appendChild(buildRouterCard(router));
+    for (const host of hosts) {
+      cards.appendChild(buildOllamaHostCard(host));
+      loadOllamaHostModels(host);
+    }
+    pollOllamaPulls(); // pick up any pull still running from a previous visit
+  } catch (err) {
+    console.error('Failed to load servers:', err);
+    wrap.hidden = true;
+  }
+}
+
+function ollamaCardId(host) {
+  return 'ollama-card-' + host.replace(/[^a-z0-9]/gi, '-');
+}
+
+// The selectable-list entry a server row corresponds to, if any.
+function findSelectable(kind, endpoint, modelId) {
+  const norm = (e) => (e || '').replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  return allModels.find((r) => {
+    if (r.model_id !== modelId) return false;
+    if (kind === 'ollama') return r.kind === 'ollama' && norm(r.endpoint) === norm(endpoint);
+    // Router rows: any openai-compatible registration pointing at the router,
+    // whichever host form an older registration used (127.0.0.1 vs
+    // host.docker.internal, with or without /v1).
+    return r.kind === 'openai-compatible' && /:4000(\/v1)?$/.test(norm(r.endpoint));
+  });
+}
+
+// The +/− control every server row carries. Adding registers the model as a
+// selectable (kind decided by the server type); removing deletes the
+// selectable — refused with names when agents are assigned to it.
+function buildSelectToggle(kind, endpoint, modelId, displayName) {
+  const existing = findSelectable(kind, endpoint, modelId);
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn btn-ghost select-toggle' + (existing ? ' on' : '');
+  btn.textContent = existing ? '−' : '+';
+  btn.title = existing ? 'Remove from selectable models' : 'Add to selectable models';
+  btn.setAttribute('aria-label', btn.title);
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      if (existing) {
+        const r = await authFetch('/api/models/' + encodeURIComponent(existing.id), { method: 'DELETE' });
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({}));
+          const who = (existing.agents || []).map((a) => a.name).join(', ');
+          throw new Error(who ? 'in use by ' + who + ' — unassign first' : body.error || r.status);
+        }
+        showToast('Removed from selectable models');
+      } else {
+        const r = await authFetch('/api/models', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: displayName, kind, endpoint, model_id: modelId }),
+        });
+        if (!r.ok) throw new Error((await r.json()).error || r.status);
+        showToast('Added to selectable models', { kind: 'success' });
+      }
+      fetchModels(); // one pass re-renders selection AND servers
+    } catch (err) {
+      showToast(String(err.message || err), { kind: 'error' });
+      btn.disabled = false;
+    }
+  });
+  return btn;
+}
+
+// Accordion state per server card, remembered across visits.
+function cardOpen(key) {
+  return localStorage.getItem('serverCardOpen:' + key) === '1';
+}
+function setCardOpen(key, open) {
+  localStorage.setItem('serverCardOpen:' + key, open ? '1' : '0');
+}
+// Collapsible card chrome: chevron + clickable header + a body wrapper that
+// hides when collapsed. Returns the body element to append content into.
+function makeCardAccordion(card, head, key, summaryEl) {
+  const chev = document.createElement('span');
+  chev.className = 'ollama-card-chevron';
+  chev.textContent = '\u203a';
+  head.prepend(chev);
+  const body = document.createElement('div');
+  card.appendChild(body);
+  const apply = () => {
+    const open = cardOpen(key);
+    body.hidden = !open;
+    if (summaryEl) summaryEl.hidden = open;
+    chev.classList.toggle('open', open);
+  };
+  head.classList.add('clickable');
+  head.setAttribute('role', 'button');
+  head.setAttribute('tabindex', '0');
+  head.addEventListener('click', (e) => {
+    if (e.target.closest('button')) return; // card actions keep working
+    setCardOpen(key, !cardOpen(key));
+    apply();
+  });
+  apply();
+  return body;
+}
+
+function buildRouterCard(router) {
+  const card = document.createElement('div');
+  card.className = 'ollama-host-card';
+  card.id = 'router-card';
+
+  const head = document.createElement('div');
+  head.className = 'ollama-host-head';
+  const label = document.createElement('span');
+  label.className = 'ollama-host-name';
+  label.textContent = 'LiteLLM router';
+  head.appendChild(label);
+  const summary = document.createElement('span');
+  summary.className = 'ollama-card-summary';
+  summary.textContent = router.models.length + ' model' + (router.models.length === 1 ? '' : 's');
+  head.appendChild(summary);
+  const routing = document.createElement('button');
+  routing.className = 'btn btn-ghost ollama-card-action';
+  routing.type = 'button';
+  routing.textContent = 'Routing…';
+  routing.title = 'Edit routes, test the classifier, see recent decisions';
+  routing.addEventListener('click', () => switchManageTab('routing'));
+  head.appendChild(routing);
+  const refresh = document.createElement('button');
+  refresh.className = 'btn btn-ghost ollama-card-action';
+  refresh.type = 'button';
+  refresh.textContent = 'Refresh roster…';
+  refresh.title = 'Re-run the router installers so newly pulled models join the roster (brief router restart)';
+  refresh.addEventListener('click', () => startRosterRefresh(card, refresh));
+  head.appendChild(refresh);
+  card.appendChild(head);
+  const body = makeCardAccordion(card, head, 'router', summary);
+
+  const ul = document.createElement('ul');
+  ul.className = 'ollama-model-list';
+  if (router.models.length === 0) {
+    ul.innerHTML = '<li class="ollama-muted">Router not reachable right now…</li>';
+  }
+  for (const id of router.models) {
+    const li = document.createElement('li');
+    const name = document.createElement('span');
+    name.className = 'ollama-model-name';
+    name.textContent = id;
+    li.appendChild(name);
+    li.appendChild(buildSelectToggle('openai-compatible', router.endpoint, id, id));
+    ul.appendChild(li);
+  }
+  body.appendChild(ul);
+
+  const log = document.createElement('pre');
+  log.className = 'roster-refresh-log';
+  log.hidden = true;
+  body.appendChild(log);
+  // Hide the refresh action when the installer isn't available in this checkout.
+  authFetch('/api/litellm/roster-refresh')
+    .then((r) => r.json())
+    .then((st) => {
+      if (!st.available) refresh.hidden = true;
+    })
+    .catch(() => {});
+  return card;
+}
+
+async function startRosterRefresh(card, btn) {
+  const log = card.querySelector('.roster-refresh-log');
+  btn.disabled = true;
+  log.hidden = false;
+  log.textContent = 'Starting…';
+  try {
+    const res = await authFetch('/api/litellm/roster-refresh', { method: 'POST' });
+    if (res.status === 409) throw new Error('a refresh is already running');
+    const poll = async () => {
+      const st = await (await authFetch('/api/litellm/roster-refresh')).json();
+      log.textContent = st.lines.join('\n') || '…';
+      log.scrollTop = log.scrollHeight;
+      if (st.running) {
+        setTimeout(poll, 2000);
+      } else {
+        btn.disabled = false;
+        if (st.exitCode === 0) {
+          showToast('Router roster refreshed', { kind: 'success' });
+          log.hidden = true;
+          fetchModels();
+        } else {
+          showToast('Roster refresh failed — see log', { kind: 'error' });
+        }
+      }
+    };
+    poll();
+  } catch (err) {
+    btn.disabled = false;
+    showToast('Roster refresh: ' + err.message, { kind: 'error' });
+  }
+}
+
+function buildOllamaHostCard(host) {
+  const card = document.createElement('div');
+  card.className = 'ollama-host-card';
+  card.id = ollamaCardId(host);
+  card.dataset.host = host;
+
+  const head = document.createElement('div');
+  head.className = 'ollama-host-head';
+  const label = document.createElement('span');
+  label.className = 'ollama-host-name';
+  label.textContent = host.replace(/^https?:\/\//, '');
+  head.appendChild(label);
+  const summary = document.createElement('span');
+  summary.className = 'ollama-card-summary';
+  summary.textContent = '…';
+  head.appendChild(summary);
+  card.appendChild(head);
+  const body = makeCardAccordion(card, head, host, summary);
+  card._summary = summary;
+
+  const ul = document.createElement('ul');
+  ul.className = 'ollama-model-list';
+  ul.innerHTML = '<li class="ollama-muted">Loading…</li>';
+  body.appendChild(ul);
+
+  const pullRow = document.createElement('div');
+  pullRow.className = 'ollama-pull-row';
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = 'Model to pull, e.g. qwen3.5:4b…';
+  input.className = 'ollama-pull-input';
+  const btn = document.createElement('button');
+  btn.className = 'btn btn-secondary';
+  btn.type = 'button';
+  btn.textContent = 'Pull';
+  btn.addEventListener('click', () => startOllamaPull(host, input.value.trim(), input, btn));
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') startOllamaPull(host, input.value.trim(), input, btn);
+  });
+  pullRow.appendChild(input);
+  pullRow.appendChild(btn);
+  body.appendChild(pullRow);
+
+  const progress = document.createElement('div');
+  progress.className = 'ollama-pull-status';
+  progress.hidden = true;
+  card.appendChild(progress); // outside the body: pull progress stays visible collapsed
+
+  return card;
+}
+
+async function loadOllamaHostModels(host) {
+  const card = document.getElementById(ollamaCardId(host));
+  if (!card) return;
+  const ul = card.querySelector('.ollama-model-list');
+  try {
+    const res = await authFetch('/api/ollama/models?host=' + encodeURIComponent(host));
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.status);
+    ul.innerHTML = '';
+    const sum = card._summary;
+    if (sum) sum.textContent = body.models.length + ' model' + (body.models.length === 1 ? '' : 's');
+    if (body.models.length === 0) {
+      ul.innerHTML = '<li class="ollama-muted">No models installed</li>';
+      return;
+    }
+    for (const m of body.models) {
+      const li = document.createElement('li');
+      const name = document.createElement('span');
+      name.className = 'ollama-model-name';
+      name.textContent = m.name;
+      li.appendChild(name);
+      const meta = document.createElement('span');
+      meta.className = 'ollama-model-meta';
+      meta.textContent = (m.size / 1e9).toFixed(1) + ' GB';
+      li.appendChild(meta);
+      if (m.loaded) {
+        const badge = document.createElement('span');
+        badge.className = 'ollama-loaded-badge';
+        badge.textContent = 'in memory';
+        badge.title = (m.size_vram / 1e9).toFixed(1) + ' GB in VRAM';
+        li.appendChild(badge);
+      }
+      li.appendChild(buildSelectToggle('ollama', host, m.name, m.name));
+      ul.appendChild(li);
+    }
+  } catch (err) {
+    ul.innerHTML = '';
+    const li = document.createElement('li');
+    li.className = 'ollama-muted';
+    li.textContent = 'Unreachable: ' + err.message;
+    ul.appendChild(li);
+  }
+}
+
+async function startOllamaPull(host, model, input, btn) {
+  if (!model) return;
+  btn.disabled = true;
+  try {
+    const res = await authFetch('/api/ollama/pull', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host, model }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.status);
+    input.value = '';
+    pollOllamaPulls();
+  } catch (err) {
+    showToast('Pull failed to start: ' + err.message, { kind: 'error' });
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderOllamaPulls(pulls) {
+  for (const job of pulls) {
+    const card = document.getElementById(ollamaCardId(job.host));
+    if (!card) continue;
+    const box = card.querySelector('.ollama-pull-status');
+    box.hidden = false;
+    const pct = job.total > 0 ? Math.min(100, Math.round((100 * job.completed) / job.total)) : 0;
+    if (job.status === 'pulling') {
+      box.innerHTML =
+        '<div class="ollama-pull-line">Pulling ' + job.model + ' — ' + job.detail + '</div>' +
+        '<div class="ollama-pull-bar"><span style="width:' + pct + '%"></span></div>';
+    } else if (job.status === 'success') {
+      box.innerHTML = '<div class="ollama-pull-line ok">Pulled ' + job.model + '</div>';
+    } else {
+      box.innerHTML = '<div class="ollama-pull-line err">Pull of ' + job.model + ' failed: ' + (job.error || '') + '</div>';
+    }
+    if (job.status !== 'pulling' && !box.dataset['done_' + job.model]) {
+      box.dataset['done_' + job.model] = '1';
+      if (job.status === 'success') {
+        showToast('Pulled ' + job.model, { kind: 'success' });
+        loadOllamaHostModels(job.host);
+      }
+    }
+  }
+}
+
+async function pollOllamaPulls() {
+  if (ollamaPullPoller) return; // one poller
+  const tick = async () => {
+    try {
+      const res = await authFetch('/api/ollama/pulls');
+      if (!res.ok) throw new Error(res.status);
+      const { pulls } = await res.json();
+      renderOllamaPulls(pulls);
+      if (pulls.some((p) => p.status === 'pulling')) {
+        ollamaPullPoller = setTimeout(tick, 1500);
+      } else {
+        ollamaPullPoller = null;
+      }
+    } catch {
+      ollamaPullPoller = null;
+    }
+  };
+  ollamaPullPoller = setTimeout(tick, 0);
+}
+
+// ── Routing aside: routes editor + test bench + recent decisions ─────────
+// Opened from the router server card. Edits write routes.json through the
+// server (validated); the hook re-reads per request, so Save is immediate.
+let routingDraft = null; // {routes:[...], live:{...}, default_route}
+let routingRoster = [];
+let routingAvailable = false;
+
+// The Routing tab exists only when the LLM stack answers: the routing skill
+// installed (routes.json present) AND the viewer is the owner — anyone else
+// gets no tab, no menu item, no dead surface. Probed lazily, re-checked when
+// the manage view opens so installing the stack shows up without a reload.
+async function probeRoutingAvailability() {
+  try {
+    const res = await authFetch('/api/router/routes');
+    routingAvailable = res.ok;
+  } catch {
+    routingAvailable = false;
+  }
+  document.querySelectorAll('.manage-tab[data-mtab="routing"], .overflow-item[data-action="routing"]').forEach((el) => {
+    el.hidden = !routingAvailable;
+  });
+  if (!routingAvailable && manageTab === 'routing') switchManageTab('agents');
+}
+
+async function loadRoutingTab() {
+  try {
+    const [routesRes, rosterRes] = await Promise.all([
+      authFetch('/api/router/routes'),
+      authFetch('/api/router/models'),
+    ]);
+    if (!routesRes.ok) throw new Error((await routesRes.json()).error || routesRes.status);
+    routingDraft = await routesRes.json();
+    routingRoster = rosterRes.ok ? (await rosterRes.json()).models : [];
+  } catch (err) {
+    showToast('Routing config unavailable: ' + err.message, { kind: 'error' });
+    return;
+  }
+  $('#routing-live-enabled').checked = Boolean(routingDraft.live && routingDraft.live.enabled);
+  $('#routing-timeout').value = (routingDraft.live && routingDraft.live.timeout_ms) || 5000;
+  renderRoutingRoutes();
+  refreshRoutingDecisions();
+  $('#routing-bench-result').hidden = true;
+}
+
+function renderRoutingRoutes() {
+  const wrap = $('#routing-routes');
+  wrap.innerHTML = '';
+  for (let i = 0; i < routingDraft.routes.length; i++) {
+    const r = routingDraft.routes[i];
+    const card = document.createElement('div');
+    card.className = 'routing-route';
+
+    const head = document.createElement('div');
+    head.className = 'routing-route-head';
+    const name = document.createElement('input');
+    name.className = 'routing-route-name';
+    name.value = r.name;
+    name.addEventListener('input', () => { r.name = name.value; });
+    head.appendChild(name);
+    if (r.escalate) {
+      const esc = document.createElement('span');
+      esc.className = 'ollama-loaded-badge';
+      esc.textContent = 'escalates';
+      esc.title = 'No local binding — rejects with no_adequate_model so the fallback provider takes the turn';
+      head.appendChild(esc);
+    } else {
+      const pin = document.createElement('label');
+      pin.className = 'routing-pin';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = Boolean(r.pinned);
+      cb.addEventListener('change', () => { r.pinned = cb.checked; });
+      pin.appendChild(cb);
+      pin.appendChild(document.createTextNode(' pin'));
+      pin.title = 'Pinned routes are never touched by the capability auto-binder';
+      head.appendChild(pin);
+    }
+    const del = document.createElement('button');
+    del.className = 'btn btn-ghost routing-route-del';
+    del.type = 'button';
+    del.textContent = '×';
+    del.title = 'Remove this route';
+    del.addEventListener('click', () => {
+      routingDraft.routes.splice(i, 1);
+      renderRoutingRoutes();
+    });
+    head.appendChild(del);
+    card.appendChild(head);
+
+    const desc = document.createElement('textarea');
+    desc.className = 'routing-route-desc';
+    desc.rows = 2;
+    desc.value = r.description;
+    desc.placeholder = 'What prompts belong here? The classifier matches this text.';
+    desc.addEventListener('input', () => { r.description = desc.value; });
+    card.appendChild(desc);
+
+    if (!r.escalate) {
+      const bindRow = document.createElement('div');
+      bindRow.className = 'routing-bind-row';
+      const sel = document.createElement('select');
+      const opts = [...new Set([r.model, ...routingRoster])].filter(Boolean);
+      for (const m of opts) {
+        const o = document.createElement('option');
+        o.value = m;
+        o.textContent = m;
+        if (m === r.model) o.selected = true;
+        sel.appendChild(o);
+      }
+      sel.addEventListener('change', () => { r.model = sel.value; });
+      bindRow.appendChild(sel);
+      const defLabel = document.createElement('label');
+      defLabel.className = 'routing-pin';
+      const defRadio = document.createElement('input');
+      defRadio.type = 'radio';
+      defRadio.name = 'routing-default';
+      defRadio.checked = routingDraft.default_route === r.name;
+      defRadio.addEventListener('change', () => { routingDraft.default_route = r.name; });
+      defLabel.appendChild(defRadio);
+      defLabel.appendChild(document.createTextNode(' default'));
+      defLabel.title = 'Where requests land when the classifier errors or matches nothing';
+      bindRow.appendChild(defLabel);
+      card.appendChild(bindRow);
+    }
+    wrap.appendChild(card);
+  }
+}
+
+$('#routing-add-route')?.addEventListener('click', () => {
+  if (!routingDraft) return;
+  routingDraft.routes.push({ name: 'new-route', description: '', model: routingRoster[0] || '' });
+  renderRoutingRoutes();
+});
+
+$('#routing-save')?.addEventListener('click', async () => {
+  if (!routingDraft) return;
+  const btn = $('#routing-save');
+  btn.disabled = true;
+  try {
+    const res = await authFetch('/api/router/routes', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        routes: routingDraft.routes,
+        default_route: routingDraft.default_route,
+        live: {
+          enabled: $('#routing-live-enabled').checked,
+          timeout_ms: Number($('#routing-timeout').value) || 5000,
+        },
+      }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.status);
+    routingDraft = body;
+    renderRoutingRoutes();
+    showToast('Routing saved — live now', { kind: 'success' });
+  } catch (err) {
+    showToast('Save failed: ' + err.message, { kind: 'error' });
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+async function runRoutingBench() {
+  const input = $('#routing-bench-input');
+  const out = $('#routing-bench-result');
+  const prompt = input.value.trim();
+  if (!prompt) return;
+  out.hidden = false;
+  out.textContent = 'Classifying…';
+  try {
+    const res = await authFetch('/api/router/classify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.status);
+    out.textContent = `→ ${body.route} · ${body.model ?? '(no binding)'} · ${body.ms} ms`;
+  } catch (err) {
+    out.textContent = 'Classifier error: ' + err.message;
+  }
+}
+$('#routing-bench-run')?.addEventListener('click', runRoutingBench);
+$('#routing-bench-input')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') runRoutingBench();
+});
+// Startup probe (deferred so auth is settled before the first owner-gated call).
+setTimeout(probeRoutingAvailability, 3000);
+
+async function refreshRoutingDecisions() {
+  const list = $('#routing-decisions-list');
+  try {
+    const res = await authFetch('/api/router/decisions?limit=15');
+    if (!res.ok) throw new Error(res.status);
+    const { decisions } = await res.json();
+    list.innerHTML = '';
+    if (decisions.length === 0) {
+      list.innerHTML = '<div class="ollama-muted">No decisions yet</div>';
+      return;
+    }
+    for (const d of decisions) {
+      const row = document.createElement('div');
+      row.className = 'routing-decision-row' + (d.route === '__error__' ? ' err' : '');
+      const when = new Date(d.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const model = d.final_model || d.bound_model || '';
+      row.textContent = `${when} · ${d.mode || 'shadow'} · ${d.route} → ${model} · ${d.ms} ms`;
+      row.title = d.prompt_head || '';
+      list.appendChild(row);
+    }
+  } catch {
+    list.innerHTML = '<div class="ollama-muted">Log unavailable</div>';
   }
 }
 
@@ -7972,6 +8649,24 @@ function modelKindLabel(kind) {
   return kind === 'openai-compatible' ? 'opencode' : kind;
 }
 
+// One identity convention everywhere (list rows, detail header, host cards):
+// kind badge + bare model name + dim host meta. Older registrations baked
+// "host · " into the display name — strip it for DISPLAY when it matches the
+// endpoint, so both naming eras render identically. Stored names untouched.
+function modelDisplayParts(model) {
+  const host = model.endpoint ? model.endpoint.replace(/^https?:\/\//, '').replace(/\/+$/, '') : null;
+  let title = model.name;
+  if (host && title.startsWith(host + ' \u00b7 ')) title = title.slice(host.length + 3);
+  return { title, host };
+}
+
+function modelKindExplainer(kind) {
+  if (kind === 'ollama') return 'Direct Ollama endpoint \u2014 runs on the default harness via its Anthropic-compatible API.';
+  if (kind === 'openai-compatible') return 'OpenAI-compatible endpoint \u2014 assigned agents run on the OpenCode harness.';
+  if (kind === 'anthropic') return 'Anthropic model \u2014 credentials injected per request by the OneCLI gateway.';
+  return '';
+}
+
 function renderModels() {
   const list = $('#model-list');
   list.innerHTML = '';
@@ -7979,7 +8674,7 @@ function renderModels() {
     const li = document.createElement('li');
     li.style.cursor = 'default';
     li.style.opacity = '0.6';
-    li.textContent = 'No models registered. Click "+ New model" to add one.';
+    li.textContent = 'No models selected yet \u2014 use + on a server below, or \u201cAdd model endpoint\u2026\u201d for anything else.';
     list.appendChild(li);
     return;
   }
@@ -7999,10 +8694,18 @@ function renderModels() {
     badge.textContent = modelKindLabel(model.kind);
     li.appendChild(badge);
 
+    const parts = modelDisplayParts(model);
     const name = document.createElement('span');
     name.className = 'model-row-name';
-    name.textContent = model.name;
+    name.textContent = parts.title;
     li.appendChild(name);
+
+    if (parts.host) {
+      const host = document.createElement('span');
+      host.className = 'model-row-host';
+      host.textContent = parts.host;
+      li.appendChild(host);
+    }
 
     if (model.agents_assigned > 0) {
       const uses = document.createElement('span');
@@ -8010,6 +8713,35 @@ function renderModels() {
       uses.textContent = `${model.agents_assigned}×`;
       li.appendChild(uses);
     }
+
+    // Same − as the server cards: remove from the selectable list right here.
+    // Refuses with names when agents are assigned; row click still opens the
+    // detail (the button stops propagation).
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'btn btn-ghost select-toggle on';
+    remove.textContent = '−';
+    remove.title = 'Remove from selectable models';
+    remove.setAttribute('aria-label', remove.title);
+    remove.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      remove.disabled = true;
+      try {
+        const r = await authFetch('/api/models/' + encodeURIComponent(model.id), { method: 'DELETE' });
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({}));
+          const who = (model.agents || []).map((a) => a.name).join(', ');
+          throw new Error(who ? 'in use by ' + who + ' — unassign first' : body.error || r.status);
+        }
+        showToast('Removed from selectable models');
+        if (selectedModelId === model.id) closeModelDetail();
+        fetchModels();
+      } catch (err) {
+        showToast(String(err.message || err), { kind: 'error' });
+        remove.disabled = false;
+      }
+    });
+    li.appendChild(remove);
 
     li.setAttribute('role', 'button');
     li.setAttribute('tabindex', '0');
@@ -8036,26 +8768,69 @@ async function openModelDetail(id) {
   $('#model-edit-view').hidden = false;
   $('#model-create-view').hidden = true;
 
-  $('#model-detail-title').textContent = model.name;
+  const parts = modelDisplayParts(model);
+  $('#model-detail-title').textContent = parts.title;
+  const badge = $('#model-detail-badge');
+  badge.textContent = modelKindLabel(model.kind);
+  badge.className = `model-kind-badge kind-${model.kind}`;
+  badge.hidden = false;
+  $('#model-kind-explainer').textContent = modelKindExplainer(model.kind);
   $('#model-name').value = model.name;
-  // Display shows the harness-facing label; the RAW kind rides in a data
-  // attribute because the Browse (discover) button reads this field back as
-  // the API `kind` parameter.
+  // The RAW kind rides on the hidden input because the Browse (discover)
+  // button reads it back as the API `kind` parameter.
   $('#model-kind').value = modelKindLabel(model.kind);
   $('#model-kind').dataset.kind = model.kind;
   $('#model-endpoint').value = model.endpoint || '';
   $('#model-endpoint-label').hidden = model.kind !== 'ollama';
   $('#model-model-id').value = model.model_id;
   $('#model-discover-select').hidden = true;
+  loadModelLiveFacts(model);
 
   const usage = $('#model-detail-usage');
-  usage.textContent =
-    model.agents_assigned > 0
-      ? `Assigned to ${model.agents_assigned} agent${model.agents_assigned === 1 ? '' : 's'}.`
-      : 'Not assigned to any agent yet.';
+  usage.innerHTML = '';
+  if (model.agents && model.agents.length > 0) {
+    usage.appendChild(document.createTextNode('Assigned to: '));
+    for (const a of model.agents) {
+      const chip = document.createElement('span');
+      chip.className = 'model-assignee-chip';
+      chip.textContent = a.name;
+      usage.appendChild(chip);
+    }
+  } else {
+    usage.textContent = 'Not assigned to any agent yet.';
+  }
 
   $('#model-detail').hidden = false;
   $('#members-panel').hidden = true;
+}
+
+// Live facts for ollama-kind models: is the model actually installed on its
+// endpoint, how big is it, is it in memory right now — the same facts the
+// host cards below show, so the two surfaces agree.
+async function loadModelLiveFacts(model) {
+  const el = $('#model-live-facts');
+  el.hidden = true;
+  el.classList.remove('warn');
+  if (model.kind !== 'ollama' || !model.endpoint) return;
+  try {
+    const res = await authFetch('/api/ollama/models?host=' + encodeURIComponent(model.endpoint));
+    if (!res.ok) return; // non-owner or unreachable — facts are best-effort
+    const { models } = await res.json();
+    if (selectedModelId !== model.id) return; // panel moved on
+    const hit = models.find((m) => m.name === model.model_id);
+    if (!hit) {
+      el.textContent = 'Not installed on this endpoint \u2014 pull it below or pick another model id.';
+      el.classList.add('warn');
+    } else {
+      const gb = (hit.size / 1e9).toFixed(1);
+      el.textContent = hit.loaded
+        ? `Installed \u00b7 ${gb} GB \u00b7 in memory (${(hit.size_vram / 1e9).toFixed(1)} GB VRAM)`
+        : `Installed \u00b7 ${gb} GB`;
+    }
+    el.hidden = false;
+  } catch {
+    /* best-effort */
+  }
 }
 
 function closeModelDetail() {

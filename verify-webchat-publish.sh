@@ -189,6 +189,7 @@ WEBCHAT_HOOK_ALLOWLIST=(
   container/Dockerfile
   container/agent-runner/src/integration.test.ts
   container/agent-runner/src/poll-loop.test.ts
+  container/agent-runner/src/upload-trace.test.ts
   container/agent-runner/src/mcp-tools/cli.instructions.md
   src/modules/typing/index.ts
   src/modules/typing/index.test.ts

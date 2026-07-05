@@ -136,6 +136,22 @@ import {
   warnIfAutoProxyTrust,
 } from './auth.js';
 import {
+  getPullsSnapshot,
+  getRosterRefreshState,
+  dryClassify,
+  getRouterInfo,
+  getRouterMetrics,
+  listHostModels,
+  mergeRoutesUpdate,
+  readRoutesConfig,
+  recentDecisions,
+  type RoutesUpdate,
+  writeRoutesConfig,
+  parseConfiguredHosts,
+  startPull,
+  startRosterRefresh,
+} from './ollama-manage.js';
+import {
   approvalInboxForUser,
   archiveRoom,
   assignModelToAgent,
@@ -1529,6 +1545,127 @@ async function handleHttp(
   // ── Models ────────────────────────────────────────────────────────────
   if (url.pathname === '/api/models' && method === 'GET') {
     return json(res, 200, listModelsForUI());
+  }
+
+  // ── Ollama host management (owner-only; SSRF-gated in ollama-manage) ──
+  if (url.pathname === '/api/ollama/hosts' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const hosts = new Set<string>();
+    for (const m of listWebchatModels()) {
+      if (m.kind === 'ollama' && m.endpoint) hosts.add(m.endpoint.replace(/\/+$/, ''));
+    }
+    try {
+      const cfg = fs.readFileSync(path.join(process.cwd(), 'data/litellm/config.yaml'), 'utf8');
+      for (const h of (parseConfiguredHosts(cfg) ?? '').split(',')) {
+        if (h.trim()) hosts.add(h.trim().replace(/\/+$/, ''));
+      }
+    } catch {
+      /* no litellm installed — models-derived hosts only */
+    }
+    return json(res, 200, { hosts: [...hosts].sort() });
+  }
+  if (url.pathname === '/api/ollama/models' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const host = url.searchParams.get('host') || '';
+    if (!host) return json(res, 400, { error: 'host required' });
+    try {
+      return json(res, 200, { models: await listHostModels(host) });
+    } catch (err) {
+      return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  if (url.pathname === '/api/router/routes' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const cfg = readRoutesConfig();
+    if (!cfg) return json(res, 404, { error: 'Routing not installed' });
+    return json(res, 200, { routes: cfg.routes, live: cfg.live ?? null, default_route: cfg.default_route ?? null });
+  }
+  if (url.pathname === '/api/router/routes' && method === 'PUT') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let update: RoutesUpdate;
+    try {
+      update = JSON.parse(raw) as RoutesUpdate;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    const cfg = readRoutesConfig();
+    if (!cfg) return json(res, 404, { error: 'Routing not installed' });
+    try {
+      const merged = mergeRoutesUpdate(cfg, update);
+      writeRoutesConfig(merged);
+      return json(res, 200, { ok: true, routes: merged.routes, live: merged.live ?? null, default_route: merged.default_route ?? null });
+    } catch (err) {
+      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  if (url.pathname === '/api/router/classify' && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { prompt?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    if (typeof body.prompt !== 'string' || !body.prompt.trim()) return json(res, 400, { error: 'prompt required' });
+    try {
+      return json(res, 200, await dryClassify(body.prompt.trim()));
+    } catch (err) {
+      return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  if (url.pathname === '/api/router/decisions' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const limit = Math.max(1, Math.min(100, Number(url.searchParams.get('limit')) || 20));
+    return json(res, 200, { decisions: recentDecisions(limit) });
+  }
+  if (url.pathname === '/api/router/metrics' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const days = Math.max(1, Math.min(30, Number(url.searchParams.get('days')) || 7));
+    return json(res, 200, getRouterMetrics(days));
+  }
+  if (url.pathname === '/api/router/models' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    return json(res, 200, await getRouterInfo());
+  }
+  if (url.pathname === '/api/ollama/pulls' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    return json(res, 200, { pulls: getPullsSnapshot() });
+  }
+  if (url.pathname === '/api/ollama/pull' && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { host?: unknown; model?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    if (typeof body.host !== 'string' || !body.host.trim()) return json(res, 400, { error: 'host required' });
+    if (typeof body.model !== 'string' || !body.model.trim()) return json(res, 400, { error: 'model required' });
+    try {
+      const job = await startPull(body.host.trim(), body.model.trim());
+      return json(res, 202, { pull: job });
+    } catch (err) {
+      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  if (url.pathname === '/api/litellm/roster-refresh' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    return json(res, 200, getRosterRefreshState());
+  }
+  if (url.pathname === '/api/litellm/roster-refresh' && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const started = startRosterRefresh();
+    return json(res, started ? 202 : 409, { ...getRosterRefreshState(), started });
   }
   if (url.pathname === '/api/models' && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') {
@@ -3280,10 +3417,19 @@ function clearRoomPrimeHandler(res: ServerResponse, roomId: string): void {
 
 interface ModelForUI extends WebchatModel {
   agents_assigned: number;
+  /** Named assignees so the detail panel can say WHO, not just how many. */
+  agents: Array<{ id: string; name: string }>;
 }
 
 function listModelsForUI(): ModelForUI[] {
-  return listWebchatModels().map((m) => ({ ...m, agents_assigned: getAgentsAssignedToModel(m.id).length }));
+  return listWebchatModels().map((m) => {
+    const ids = getAgentsAssignedToModel(m.id);
+    return {
+      ...m,
+      agents_assigned: ids.length,
+      agents: ids.map((id) => ({ id, name: getAgentGroup(id)?.name ?? id })),
+    };
+  });
 }
 
 async function createModelHandler(req: IncomingMessage, res: ServerResponse): Promise<void> {
