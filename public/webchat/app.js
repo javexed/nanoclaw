@@ -8396,7 +8396,7 @@ function renderModels() {
     const li = document.createElement('li');
     li.style.cursor = 'default';
     li.style.opacity = '0.6';
-    li.textContent = 'No models registered. Click "+ New model" to add one.';
+    li.textContent = 'No models selected yet \u2014 use + on a server below, or \u201c+ Custom model\u2026\u201d for anything else.';
     list.appendChild(li);
     return;
   }
