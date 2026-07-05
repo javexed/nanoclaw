@@ -5973,3 +5973,49 @@ a.lightbox-btn {
   margin-top: 4px;
   padding: 0 4px;
 }
+
+/* ── Model identity consistency (list · detail · host cards) ─────────── */
+.model-row-host {
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  margin-left: auto;
+  padding-left: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 45%;
+}
+.model-kind-explainer {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  margin: 2px 0 6px;
+}
+.model-live-facts {
+  font-size: var(--fs-xs);
+  color: var(--success-strong);
+  border: 1px solid var(--success);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+  margin: 0 0 6px;
+  width: fit-content;
+}
+.model-live-facts.warn {
+  color: var(--warning-strong);
+  border-color: var(--warning);
+}
+.model-assignee-chip {
+  display: inline-block;
+  font-size: var(--fs-xs);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0 6px;
+  margin: 0 3px 2px 0;
+  background: var(--pre-bg);
+}
+.ollama-model-list li.linkable {
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.ollama-model-list li.linkable:hover {
+  background: var(--pre-bg);
+}

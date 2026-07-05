@@ -696,6 +696,7 @@
             <!-- Edit mode -->
             <div id="model-edit-view">
               <div class="agent-detail-header">
+                <span id="model-detail-badge" class="model-kind-badge" hidden></span>
                 <span id="model-detail-title">Model</span>
                 <button id="model-detail-close" class="members-close">
                   <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
@@ -706,10 +707,9 @@
                   <span class="form-label">Display name</span>
                   <input id="model-name" type="text" required />
                 </label>
-                <label>
-                  <span class="form-label">Kind</span>
-                  <input id="model-kind" type="text" readonly class="readonly" />
-                </label>
+                <input id="model-kind" type="hidden" />
+                <p id="model-kind-explainer" class="model-kind-explainer"></p>
+                <p id="model-live-facts" class="model-live-facts" hidden></p>
                 <label id="model-endpoint-label">
                   <span class="form-label">Endpoint</span>
                   <input id="model-endpoint" type="text" placeholder="http://localhost:11434" autocomplete="off" />

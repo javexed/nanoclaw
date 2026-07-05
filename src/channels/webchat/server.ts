@@ -3350,10 +3350,19 @@ function clearRoomPrimeHandler(res: ServerResponse, roomId: string): void {
 
 interface ModelForUI extends WebchatModel {
   agents_assigned: number;
+  /** Named assignees so the detail panel can say WHO, not just how many. */
+  agents: Array<{ id: string; name: string }>;
 }
 
 function listModelsForUI(): ModelForUI[] {
-  return listWebchatModels().map((m) => ({ ...m, agents_assigned: getAgentsAssignedToModel(m.id).length }));
+  return listWebchatModels().map((m) => {
+    const ids = getAgentsAssignedToModel(m.id);
+    return {
+      ...m,
+      agents_assigned: ids.length,
+      agents: ids.map((id) => ({ id, name: getAgentGroup(id)?.name ?? id })),
+    };
+  });
 }
 
 async function createModelHandler(req: IncomingMessage, res: ServerResponse): Promise<void> {

@@ -320,3 +320,14 @@ Once code is migrated onto the tokens, add a stylelint
 the migration lands, the rule would be all-red — introduce it *after*, not
 before. Keep this doc in sync when the contract changes; agents read it as the
 spec.
+
+## Model identity
+
+One convention wherever a model appears (registry list, detail panel, Ollama
+host cards): **kind badge + bare model name + dim host meta** (`.model-row-host`
+/ card meta). Never bake the endpoint into the display name — older entries
+that did are display-normalized by `modelDisplayParts()`. Kind is identity,
+not data entry: render it as the badge plus a one-line explainer
+(`modelKindExplainer()`), never as a form field. Live endpoint facts
+(installed · size · in-memory) use the same wording in the detail strip and
+the host cards so the two surfaces can't disagree.

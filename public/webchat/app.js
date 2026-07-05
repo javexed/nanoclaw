@@ -8077,9 +8077,16 @@ async function loadOllamaHostModels(host) {
         badge.title = (m.size_vram / 1e9).toFixed(1) + ' GB in VRAM';
         li.appendChild(badge);
       }
-      const registered = allModels.some(
+      const registered = allModels.find(
         (r) => r.kind === 'ollama' && r.model_id === m.name && (r.endpoint || '').replace(/\/+$/, '') === host,
       );
+      if (registered) {
+        li.classList.add('linkable');
+        li.setAttribute('role', 'button');
+        li.setAttribute('tabindex', '0');
+        li.title = 'Open in the model registry';
+        li.addEventListener('click', () => openModelDetail(registered.id));
+      }
       if (!registered) {
         const reg = document.createElement('button');
         reg.className = 'btn btn-ghost ollama-register-btn';
@@ -8223,6 +8230,24 @@ function modelKindLabel(kind) {
   return kind === 'openai-compatible' ? 'opencode' : kind;
 }
 
+// One identity convention everywhere (list rows, detail header, host cards):
+// kind badge + bare model name + dim host meta. Older registrations baked
+// "host · " into the display name — strip it for DISPLAY when it matches the
+// endpoint, so both naming eras render identically. Stored names untouched.
+function modelDisplayParts(model) {
+  const host = model.endpoint ? model.endpoint.replace(/^https?:\/\//, '').replace(/\/+$/, '') : null;
+  let title = model.name;
+  if (host && title.startsWith(host + ' \u00b7 ')) title = title.slice(host.length + 3);
+  return { title, host };
+}
+
+function modelKindExplainer(kind) {
+  if (kind === 'ollama') return 'Direct Ollama endpoint \u2014 runs on the default harness via its Anthropic-compatible API.';
+  if (kind === 'openai-compatible') return 'OpenAI-compatible endpoint \u2014 assigned agents run on the OpenCode harness.';
+  if (kind === 'anthropic') return 'Anthropic model \u2014 credentials injected per request by the OneCLI gateway.';
+  return '';
+}
+
 function renderModels() {
   const list = $('#model-list');
   list.innerHTML = '';
@@ -8250,10 +8275,18 @@ function renderModels() {
     badge.textContent = modelKindLabel(model.kind);
     li.appendChild(badge);
 
+    const parts = modelDisplayParts(model);
     const name = document.createElement('span');
     name.className = 'model-row-name';
-    name.textContent = model.name;
+    name.textContent = parts.title;
     li.appendChild(name);
+
+    if (parts.host) {
+      const host = document.createElement('span');
+      host.className = 'model-row-host';
+      host.textContent = parts.host;
+      li.appendChild(host);
+    }
 
     if (model.agents_assigned > 0) {
       const uses = document.createElement('span');
@@ -8287,26 +8320,69 @@ async function openModelDetail(id) {
   $('#model-edit-view').hidden = false;
   $('#model-create-view').hidden = true;
 
-  $('#model-detail-title').textContent = model.name;
+  const parts = modelDisplayParts(model);
+  $('#model-detail-title').textContent = parts.title;
+  const badge = $('#model-detail-badge');
+  badge.textContent = modelKindLabel(model.kind);
+  badge.className = `model-kind-badge kind-${model.kind}`;
+  badge.hidden = false;
+  $('#model-kind-explainer').textContent = modelKindExplainer(model.kind);
   $('#model-name').value = model.name;
-  // Display shows the harness-facing label; the RAW kind rides in a data
-  // attribute because the Browse (discover) button reads this field back as
-  // the API `kind` parameter.
+  // The RAW kind rides on the hidden input because the Browse (discover)
+  // button reads it back as the API `kind` parameter.
   $('#model-kind').value = modelKindLabel(model.kind);
   $('#model-kind').dataset.kind = model.kind;
   $('#model-endpoint').value = model.endpoint || '';
   $('#model-endpoint-label').hidden = model.kind !== 'ollama';
   $('#model-model-id').value = model.model_id;
   $('#model-discover-select').hidden = true;
+  loadModelLiveFacts(model);
 
   const usage = $('#model-detail-usage');
-  usage.textContent =
-    model.agents_assigned > 0
-      ? `Assigned to ${model.agents_assigned} agent${model.agents_assigned === 1 ? '' : 's'}.`
-      : 'Not assigned to any agent yet.';
+  usage.innerHTML = '';
+  if (model.agents && model.agents.length > 0) {
+    usage.appendChild(document.createTextNode('Assigned to: '));
+    for (const a of model.agents) {
+      const chip = document.createElement('span');
+      chip.className = 'model-assignee-chip';
+      chip.textContent = a.name;
+      usage.appendChild(chip);
+    }
+  } else {
+    usage.textContent = 'Not assigned to any agent yet.';
+  }
 
   $('#model-detail').hidden = false;
   $('#members-panel').hidden = true;
+}
+
+// Live facts for ollama-kind models: is the model actually installed on its
+// endpoint, how big is it, is it in memory right now — the same facts the
+// host cards below show, so the two surfaces agree.
+async function loadModelLiveFacts(model) {
+  const el = $('#model-live-facts');
+  el.hidden = true;
+  el.classList.remove('warn');
+  if (model.kind !== 'ollama' || !model.endpoint) return;
+  try {
+    const res = await authFetch('/api/ollama/models?host=' + encodeURIComponent(model.endpoint));
+    if (!res.ok) return; // non-owner or unreachable — facts are best-effort
+    const { models } = await res.json();
+    if (selectedModelId !== model.id) return; // panel moved on
+    const hit = models.find((m) => m.name === model.model_id);
+    if (!hit) {
+      el.textContent = 'Not installed on this endpoint \u2014 pull it below or pick another model id.';
+      el.classList.add('warn');
+    } else {
+      const gb = (hit.size / 1e9).toFixed(1);
+      el.textContent = hit.loaded
+        ? `Installed \u00b7 ${gb} GB \u00b7 in memory (${(hit.size_vram / 1e9).toFixed(1)} GB VRAM)`
+        : `Installed \u00b7 ${gb} GB`;
+    }
+    el.hidden = false;
+  } catch {
+    /* best-effort */
+  }
 }
 
 function closeModelDetail() {
