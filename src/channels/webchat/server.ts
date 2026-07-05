@@ -138,6 +138,7 @@ import {
 import {
   getPullsSnapshot,
   getRosterRefreshState,
+  getRouterInfo,
   listHostModels,
   parseConfiguredHosts,
   startPull,
@@ -1565,6 +1566,10 @@ async function handleHttp(
     } catch (err) {
       return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
     }
+  }
+  if (url.pathname === '/api/router/models' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    return json(res, 200, await getRouterInfo());
   }
   if (url.pathname === '/api/ollama/pulls' && method === 'GET') {
     if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });

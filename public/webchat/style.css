@@ -3305,6 +3305,7 @@ a.lightbox-btn {
 .manage-pane {
   flex: 1;
   min-height: 0;
+  min-width: 0; /* row-flex item: without this, wide nowrap list content expands the pane past the 420px panel and pushes controls off-screen */
   display: flex;
   flex-direction: column;
 }
@@ -4289,6 +4290,7 @@ a.lightbox-btn {
 #model-list .model-row-name,
 #mcp-list .model-row-name {
   flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -5902,6 +5904,7 @@ a.lightbox-btn {
 }
 .ollama-model-name {
   flex: 1;
+  min-width: 0; /* flex items refuse to shrink below content without this — the +/− toggles were pushed off-card */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6028,4 +6031,35 @@ a.lightbox-btn {
 }
 #model-detail .agent-detail-header .model-kind-badge {
   margin-right: 2px;
+}
+
+/* ── Servers-and-selection model (Models tab rework) ─────────────────── */
+.select-toggle {
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  line-height: 1;
+  padding: 1px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.select-toggle.on {
+  color: var(--danger, #f85149);
+  border-color: var(--danger, #f85149);
+}
+.select-toggle:not(.on) {
+  color: var(--success-strong);
+  border-color: var(--success);
+}
+.ollama-host-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ollama-card-action {
+  font-size: var(--fs-xs);
+  padding: 1px 8px;
+}
+.ollama-card-note {
+  margin: 2px 0 4px;
 }

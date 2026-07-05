@@ -7965,41 +7965,186 @@ async function fetchModels() {
   }
 }
 
-// ── Ollama host management (owner-only; hidden entirely for non-owners) ──
-// Lists each known Ollama host's installed models (with in-memory state),
-// pulls new models with a polled progress bar, registers pulled models as
-// webchat models in one click, and re-runs the router-roster installers.
+// ── Servers & selection (owner-only; hidden entirely for non-owners) ──
+// One mental model: SERVERS (Ollama hosts + the LiteLLM router) each list
+// what they serve; +/− on a server row adds/removes that model from the
+// SELECTABLE list at the top (what agent settings offers). Server rows are
+// never clickable-for-detail — only selectable-list rows are. Everything
+// renders in one pass from loadServers() so sections can't race each other.
 let ollamaPullPoller = null;
 
 async function loadOllamaHosts() {
   const wrap = $('#ollama-hosts');
   if (!wrap) return;
   try {
-    const res = await authFetch('/api/ollama/hosts');
-    if (!res.ok) {
-      wrap.hidden = true;
+    const [hostsRes, routerRes] = await Promise.all([
+      authFetch('/api/ollama/hosts'),
+      authFetch('/api/router/models'),
+    ]);
+    if (!hostsRes.ok) {
+      wrap.hidden = true; // non-owner
       return;
     }
-    const { hosts } = await res.json();
-    wrap.hidden = hosts.length === 0;
-    if (hosts.length === 0) return;
+    const { hosts } = await hostsRes.json();
+    const router = routerRes.ok ? await routerRes.json() : { available: false };
+    wrap.hidden = hosts.length === 0 && !router.available;
+    if (wrap.hidden) return;
     const cards = $('#ollama-host-cards');
     cards.innerHTML = '';
+    if (router.available) cards.appendChild(buildRouterCard(router));
     for (const host of hosts) {
       cards.appendChild(buildOllamaHostCard(host));
       loadOllamaHostModels(host);
     }
-    const rr = await (await authFetch('/api/litellm/roster-refresh')).json();
-    $('#roster-refresh-row').hidden = !rr.available;
     pollOllamaPulls(); // pick up any pull still running from a previous visit
   } catch (err) {
-    console.error('Failed to load Ollama hosts:', err);
+    console.error('Failed to load servers:', err);
     wrap.hidden = true;
   }
 }
 
 function ollamaCardId(host) {
   return 'ollama-card-' + host.replace(/[^a-z0-9]/gi, '-');
+}
+
+// The selectable-list entry a server row corresponds to, if any.
+function findSelectable(kind, endpoint, modelId) {
+  const norm = (e) => (e || '').replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  return allModels.find((r) => {
+    if (r.model_id !== modelId) return false;
+    if (kind === 'ollama') return r.kind === 'ollama' && norm(r.endpoint) === norm(endpoint);
+    // Router rows: any openai-compatible registration pointing at the router,
+    // whichever host form an older registration used (127.0.0.1 vs
+    // host.docker.internal, with or without /v1).
+    return r.kind === 'openai-compatible' && /:4000(\/v1)?$/.test(norm(r.endpoint));
+  });
+}
+
+// The +/− control every server row carries. Adding registers the model as a
+// selectable (kind decided by the server type); removing deletes the
+// selectable — refused with names when agents are assigned to it.
+function buildSelectToggle(kind, endpoint, modelId, displayName) {
+  const existing = findSelectable(kind, endpoint, modelId);
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn btn-ghost select-toggle' + (existing ? ' on' : '');
+  btn.textContent = existing ? '−' : '+';
+  btn.title = existing ? 'Remove from selectable models' : 'Add to selectable models';
+  btn.setAttribute('aria-label', btn.title);
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      if (existing) {
+        const r = await authFetch('/api/models/' + encodeURIComponent(existing.id), { method: 'DELETE' });
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({}));
+          const who = (existing.agents || []).map((a) => a.name).join(', ');
+          throw new Error(who ? 'in use by ' + who + ' — unassign first' : body.error || r.status);
+        }
+        showToast('Removed from selectable models');
+      } else {
+        const r = await authFetch('/api/models', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: displayName, kind, endpoint, model_id: modelId }),
+        });
+        if (!r.ok) throw new Error((await r.json()).error || r.status);
+        showToast('Added to selectable models', { kind: 'success' });
+      }
+      fetchModels(); // one pass re-renders selection AND servers
+    } catch (err) {
+      showToast(String(err.message || err), { kind: 'error' });
+      btn.disabled = false;
+    }
+  });
+  return btn;
+}
+
+function buildRouterCard(router) {
+  const card = document.createElement('div');
+  card.className = 'ollama-host-card';
+  card.id = 'router-card';
+
+  const head = document.createElement('div');
+  head.className = 'ollama-host-head';
+  const label = document.createElement('span');
+  label.className = 'ollama-host-name';
+  label.textContent = 'LiteLLM router';
+  head.appendChild(label);
+  const refresh = document.createElement('button');
+  refresh.className = 'btn btn-ghost ollama-card-action';
+  refresh.type = 'button';
+  refresh.textContent = 'Refresh roster…';
+  refresh.title = 'Re-run the router installers so newly pulled models join the roster (brief router restart)';
+  refresh.addEventListener('click', () => startRosterRefresh(card, refresh));
+  head.appendChild(refresh);
+  card.appendChild(head);
+
+  const note = document.createElement('div');
+  note.className = 'ollama-muted ollama-card-note';
+  note.textContent = 'Adding from here runs the agent on the OpenCode harness.';
+  card.appendChild(note);
+
+  const ul = document.createElement('ul');
+  ul.className = 'ollama-model-list';
+  if (router.models.length === 0) {
+    ul.innerHTML = '<li class="ollama-muted">Router not reachable right now…</li>';
+  }
+  for (const id of router.models) {
+    const li = document.createElement('li');
+    const name = document.createElement('span');
+    name.className = 'ollama-model-name';
+    name.textContent = id;
+    li.appendChild(name);
+    li.appendChild(buildSelectToggle('openai-compatible', router.endpoint, id, id));
+    ul.appendChild(li);
+  }
+  card.appendChild(ul);
+
+  const log = document.createElement('pre');
+  log.className = 'roster-refresh-log';
+  log.hidden = true;
+  card.appendChild(log);
+  // Hide the refresh action when the installer isn't available in this checkout.
+  authFetch('/api/litellm/roster-refresh')
+    .then((r) => r.json())
+    .then((st) => {
+      if (!st.available) refresh.hidden = true;
+    })
+    .catch(() => {});
+  return card;
+}
+
+async function startRosterRefresh(card, btn) {
+  const log = card.querySelector('.roster-refresh-log');
+  btn.disabled = true;
+  log.hidden = false;
+  log.textContent = 'Starting…';
+  try {
+    const res = await authFetch('/api/litellm/roster-refresh', { method: 'POST' });
+    if (res.status === 409) throw new Error('a refresh is already running');
+    const poll = async () => {
+      const st = await (await authFetch('/api/litellm/roster-refresh')).json();
+      log.textContent = st.lines.join('\n') || '…';
+      log.scrollTop = log.scrollHeight;
+      if (st.running) {
+        setTimeout(poll, 2000);
+      } else {
+        btn.disabled = false;
+        if (st.exitCode === 0) {
+          showToast('Router roster refreshed', { kind: 'success' });
+          log.hidden = true;
+          fetchModels();
+        } else {
+          showToast('Roster refresh failed — see log', { kind: 'error' });
+        }
+      }
+    };
+    poll();
+  } catch (err) {
+    btn.disabled = false;
+    showToast('Roster refresh: ' + err.message, { kind: 'error' });
+  }
 }
 
 function buildOllamaHostCard(host) {
@@ -8077,40 +8222,7 @@ async function loadOllamaHostModels(host) {
         badge.title = (m.size_vram / 1e9).toFixed(1) + ' GB in VRAM';
         li.appendChild(badge);
       }
-      const registered = allModels.find(
-        (r) => r.kind === 'ollama' && r.model_id === m.name && (r.endpoint || '').replace(/\/+$/, '') === host,
-      );
-      if (registered) {
-        li.classList.add('linkable');
-        li.setAttribute('role', 'button');
-        li.setAttribute('tabindex', '0');
-        li.title = 'Open in the model registry';
-        li.addEventListener('click', () => openModelDetail(registered.id));
-      }
-      if (!registered) {
-        const reg = document.createElement('button');
-        reg.className = 'btn btn-ghost ollama-register-btn';
-        reg.type = 'button';
-        reg.textContent = 'Register';
-        reg.title = 'Register as a webchat model';
-        reg.addEventListener('click', async () => {
-          reg.disabled = true;
-          try {
-            const r = await authFetch('/api/models', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ name: m.name, kind: 'ollama', endpoint: host, model_id: m.name }),
-            });
-            if (!r.ok) throw new Error((await r.json()).error || r.status);
-            showToast('Model registered', { kind: 'success' });
-            fetchModels();
-          } catch (err) {
-            showToast('Register failed: ' + err.message, { kind: 'error' });
-            reg.disabled = false;
-          }
-        });
-        li.appendChild(reg);
-      }
+      li.appendChild(buildSelectToggle('ollama', host, m.name, m.name));
       ul.appendChild(li);
     }
   } catch (err) {
@@ -8143,11 +8255,9 @@ async function startOllamaPull(host, model, input, btn) {
 }
 
 function renderOllamaPulls(pulls) {
-  const seenCards = new Set();
   for (const job of pulls) {
     const card = document.getElementById(ollamaCardId(job.host));
     if (!card) continue;
-    seenCards.add(card.id);
     const box = card.querySelector('.ollama-pull-status');
     box.hidden = false;
     const pct = job.total > 0 ? Math.min(100, Math.round((100 * job.completed) / job.total)) : 0;
@@ -8189,38 +8299,6 @@ async function pollOllamaPulls() {
   };
   ollamaPullPoller = setTimeout(tick, 0);
 }
-
-$('#roster-refresh-btn')?.addEventListener('click', async () => {
-  const btn = $('#roster-refresh-btn');
-  const log = $('#roster-refresh-log');
-  btn.disabled = true;
-  log.hidden = false;
-  log.textContent = 'Starting…';
-  try {
-    const res = await authFetch('/api/litellm/roster-refresh', { method: 'POST' });
-    if (res.status === 409) throw new Error('a refresh is already running');
-    const poll = async () => {
-      const st = await (await authFetch('/api/litellm/roster-refresh')).json();
-      log.textContent = st.lines.join('\n') || '…';
-      log.scrollTop = log.scrollHeight;
-      if (st.running) {
-        setTimeout(poll, 2000);
-      } else {
-        btn.disabled = false;
-        if (st.exitCode === 0) {
-          showToast('Router roster refreshed', { kind: 'success' });
-          fetchModels();
-        } else {
-          showToast('Roster refresh failed — see log', { kind: 'error' });
-        }
-      }
-    };
-    poll();
-  } catch (err) {
-    btn.disabled = false;
-    showToast('Roster refresh: ' + err.message, { kind: 'error' });
-  }
-});
 
 // Display label for a model kind. The STORED kind stays 'openai-compatible'
 // (it names the endpoint's protocol — what the probe detects); the UI says

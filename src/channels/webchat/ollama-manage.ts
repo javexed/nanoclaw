@@ -302,3 +302,37 @@ export function startRosterRefresh(root = process.cwd()): boolean {
   runStep(0);
   return true;
 }
+
+// ── Router (LiteLLM) as a server card ─────────────────────────────────────
+
+export interface RouterInfo {
+  available: boolean;
+  /** Container-facing endpoint — the canonical form model registrations use. */
+  endpoint: string;
+  models: string[];
+}
+
+/**
+ * The LiteLLM roster, presented like an Ollama host: a server with models
+ * underneath. Availability = the litellm config exists in this checkout;
+ * models come from /v1/models (safeFetch translates host.docker.internal
+ * to loopback host-side). The virtual 'auto' model deliberately isn't in
+ * the roster — it exists only in the routing hook.
+ */
+export async function getRouterInfo(root = process.cwd()): Promise<RouterInfo> {
+  const endpoint = 'http://host.docker.internal:4000/v1';
+  if (!fs.existsSync(path.join(root, 'data/litellm/config.yaml'))) {
+    return { available: false, endpoint, models: [] };
+  }
+  try {
+    const res = await safeFetch(`${endpoint.replace(/\/v1$/, '')}/v1/models`, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) throw new Error(`router /v1/models returned ${res.status}`);
+    const body = (await res.json()) as { data?: Array<{ id?: string }> };
+    const models = (body.data ?? []).map((m) => m.id).filter((x): x is string => typeof x === 'string');
+    return { available: true, endpoint, models: models.sort() };
+  } catch {
+    // Config present but router unreachable (container down / mid-refresh):
+    // still a server, just empty — the card can say so.
+    return { available: true, endpoint, models: [] };
+  }
+}

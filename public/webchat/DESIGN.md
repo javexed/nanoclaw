@@ -331,3 +331,10 @@ not data entry: render it as the badge plus a one-line explainer
 (`modelKindExplainer()`), never as a form field. Live endpoint facts
 (installed · size · in-memory) use the same wording in the detail strip and
 the host cards so the two surfaces can't disagree.
+
+The Models tab has exactly two surfaces: **Selectable models** (top — what
+agent settings offers; every row opens its detail) and **Servers** (bottom —
+Ollama hosts and the LiteLLM router, each listing what it serves). Server
+rows never open a detail; they carry a single +/− toggle that adds/removes
+the model from the selectable list (kind decided by the server type), plus
+per-card actions (pull on Ollama hosts, roster refresh on the router).
