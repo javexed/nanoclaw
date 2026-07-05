@@ -4261,6 +4261,7 @@ a.lightbox-btn {
   box-shadow: inset 0 0 8px color-mix(in srgb, var(--accent) 15%, transparent);
 }
 #model-list .model-kind-badge,
+#model-detail .model-kind-badge,
 #mcp-list .model-kind-badge {
   font-size: 0.6rem;
   text-transform: uppercase;
@@ -4271,6 +4272,7 @@ a.lightbox-btn {
   border-radius: 3px;
   font-weight: 700;
 }
+#model-detail .model-kind-badge.kind-ollama,
 #model-list .model-kind-badge.kind-ollama {
   background: var(--accent2);
 }
@@ -6018,4 +6020,12 @@ a.lightbox-btn {
 }
 .ollama-model-list li.linkable:hover {
   background: var(--pre-bg);
+}
+
+#model-detail .agent-detail-header #model-detail-title {
+  flex: 1;
+  text-align: left;
+}
+#model-detail .agent-detail-header .model-kind-badge {
+  margin-right: 2px;
 }
