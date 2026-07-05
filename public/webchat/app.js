@@ -556,6 +556,7 @@ $('#overflow-menu')?.addEventListener('click', (e) => {
   if (action === 'agents') openManage('agents');
   else if (action === 'models') openManage('models');
   else if (action === 'mcp') openManage('mcp');
+  else if (action === 'routing') openManage('routing');
   else if (action === 'topology') toggleTopology();
   else if (action === 'matrix') toggleMatrix();
   else if (action === 'dashboard') toggleDashboard();
@@ -778,7 +779,6 @@ function blockingOverlayOpen() {
 function closeTopDetailAside() {
   const layers = [
     ['members-panel', () => { $('#members-panel').hidden = true; }],
-    ['routing-detail', closeRoutingDetail],
     ['model-detail', closeModelDetail],
     ['agent-detail', closeAgentDetail],
     ['mcp-detail', closeMcpDetail],
@@ -4493,10 +4493,12 @@ function switchManageTab(tab) {
   $('#mtab-agents').hidden = tab !== 'agents';
   $('#mtab-models').hidden = tab !== 'models';
   $('#mtab-mcp').hidden = tab !== 'mcp';
+  $('#mtab-routing').hidden = tab !== 'routing';
   if (typeof syncManageSortIcon === 'function') syncManageSortIcon(); // reflect the active tab's sort
   if (tab === 'agents') fetchAgents();
   else if (tab === 'models') fetchModels();
   else if (tab === 'mcp') fetchMcpServers();
+  else if (tab === 'routing') loadRoutingTab();
 }
 $('#manage-back')?.addEventListener('click', () => closeView('manage'));
 document.querySelectorAll('.manage-tab').forEach((t) => {
@@ -8185,7 +8187,7 @@ function buildRouterCard(router) {
   routing.type = 'button';
   routing.textContent = 'Routing…';
   routing.title = 'Edit routes, test the classifier, see recent decisions';
-  routing.addEventListener('click', openRoutingDetail);
+  routing.addEventListener('click', () => switchManageTab('routing'));
   head.appendChild(routing);
   const refresh = document.createElement('button');
   refresh.className = 'btn btn-ghost ollama-card-action';
@@ -8426,7 +8428,7 @@ async function pollOllamaPulls() {
 let routingDraft = null; // {routes:[...], live:{...}, default_route}
 let routingRoster = [];
 
-async function openRoutingDetail() {
+async function loadRoutingTab() {
   try {
     const [routesRes, rosterRes] = await Promise.all([
       authFetch('/api/router/routes'),
@@ -8439,20 +8441,12 @@ async function openRoutingDetail() {
     showToast('Routing config unavailable: ' + err.message, { kind: 'error' });
     return;
   }
-  closeModelDetail();
   $('#routing-live-enabled').checked = Boolean(routingDraft.live && routingDraft.live.enabled);
   $('#routing-timeout').value = (routingDraft.live && routingDraft.live.timeout_ms) || 5000;
   renderRoutingRoutes();
   refreshRoutingDecisions();
   $('#routing-bench-result').hidden = true;
-  $('#routing-detail').hidden = false;
 }
-
-function closeRoutingDetail() {
-  $('#routing-detail').hidden = true;
-  routingDraft = null;
-}
-$('#routing-detail-close')?.addEventListener('click', closeRoutingDetail);
 
 function renderRoutingRoutes() {
   const wrap = $('#routing-routes');
