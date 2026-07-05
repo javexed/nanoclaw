@@ -1,0 +1,49 @@
+diff --git a/container/agent-runner/src/index.ts b/container/agent-runner/src/index.ts
+index fc0a62e5..05662c51 100644
+--- a/container/agent-runner/src/index.ts
++++ b/container/agent-runner/src/index.ts
+@@ -32,7 +32,7 @@ import { ensureMemoryScaffold } from './memory-scaffold.js';
+ // Provider skills append imports to providers/index.ts.
+ import './providers/index.js';
+ import { createProvider, type ProviderName } from './providers/factory.js';
+-import type { McpServerConfig } from './providers/types.js';
++import type { AgentProvider, McpServerConfig } from './providers/types.js';
+ import { runPollLoop } from './poll-loop.js';
+ 
+ function log(msg: string): void {
+@@ -104,12 +104,35 @@ async function main(): Promise<void> {
+   // and keeps its native memory untouched.
+   if (provider.usesMemoryScaffold) ensureMemoryScaffold();
+ 
++  // Escalation provider (§16c) — same options as the primary so MCP tools and
++  // identity carry over. A misconfigured name (provider not in this image)
++  // must not take the whole agent down: log and run without escalation.
++  let fallbackProvider: AgentProvider | undefined;
++  let fallbackProviderName: string | undefined;
++  const fallbackName = config.fallbackProvider?.toLowerCase();
++  if (fallbackName && fallbackName !== providerName) {
++    try {
++      fallbackProvider = createProvider(fallbackName as ProviderName, {
++        assistantName: config.assistantName || undefined,
++        mcpServers,
++        env: { ...process.env },
++        additionalDirectories: additionalDirectories.length > 0 ? additionalDirectories : undefined,
++      });
++      fallbackProviderName = fallbackName;
++      log(`Fallback provider armed: ${fallbackName}`);
++    } catch (err) {
++      log(`Fallback provider unavailable (${fallbackName}): ${err instanceof Error ? err.message : String(err)}`);
++    }
++  }
++
+   await runPollLoop({
+     provider,
+     providerName,
+     cwd: CWD,
+     systemContext: { instructions },
+     lenientOutput: config.lenientOutput,
++    fallbackProvider,
++    fallbackProviderName,
+   });
+ }
+ 

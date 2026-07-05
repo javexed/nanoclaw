@@ -1,0 +1,146 @@
+diff --git a/container/agent-runner/src/poll-loop.ts b/container/agent-runner/src/poll-loop.ts
+index 56693b0f..b2f4de3e 100644
+--- a/container/agent-runner/src/poll-loop.ts
++++ b/container/agent-runner/src/poll-loop.ts
+@@ -85,6 +85,83 @@ export interface PollLoopConfig {
+    * Set for ollama-backed agents (see RunnerConfig.lenientOutput).
+    */
+   lenientOutput?: boolean;
++  /**
++   * Escalation provider (llm-router §16c). When set, a turn that fails
++   * terminally on the primary provider — the router's no_adequate_model
++   * rejection, a dead backend, a timeout — is re-run ONCE here on a FRESH
++   * session (never resuming a prior one: reliability over continuity for a
++   * backstop). One-shot guard: a fallback failure never re-escalates, and the
++   * next turn goes back to the primary. processQuery's mid-turn crash-safety
++   * persist does record the fallback session under the fallback's own
++   * continuation key — escalation never reads it, but a later permanent
++   * switch to that provider resumes the last escalation session.
++   */
++  fallbackProvider?: AgentProvider;
++  fallbackProviderName?: string;
++}
++
++/**
++ * Re-run the current batch on the fallback provider. Returns the fallback's
++ * result, or null when no fallback is configured or the fallback itself
++ * threw. The caller decides whether the fallback result supersedes the
++ * primary's error (it does only when the fallback actually produced output).
++ */
++async function runEscalation(
++  config: PollLoopConfig,
++  routing: RoutingContext,
++  processingIds: string[],
++  prompt: string,
++  originDests: DestinationEntry[],
++): Promise<QueryResult | null> {
++  const fallback = config.fallbackProvider;
++  const fallbackName = config.fallbackProviderName;
++  if (!fallback || !fallbackName) return null;
++  log(`Escalating turn to fallback provider ${fallbackName} (fresh session)`);
++  // Thinking-bubble static line: escalated turns are the slow ones — say so.
++  // 'progress' needs no new status kind anywhere downstream.
++  appendStatusEvent('progress', `Escalating to ${fallbackName.charAt(0).toUpperCase()}${fallbackName.slice(1)}…`);
++  try {
++    const q = fallback.query({
++      prompt,
++      continuation: undefined,
++      cwd: config.cwd,
++      systemContext: config.systemContext,
++    });
++    // Hub-style providers (Claude) keep their query open after a result so
++    // follow-ups reuse the warm session — as the PRIMARY that's the whole
++    // point, but an open FALLBACK query becomes the loop's active query and
++    // silently captures every subsequent message: the group is then stuck on
++    // the fallback until the container recycles. Enforce one-shot at the
++    // stream level: end the query after its first result so processQuery
++    // returns and the next turn starts on the primary.
++    const singleTurn: AgentQuery = {
++      push: (m) => q.push(m),
++      end: () => q.end(),
++      abort: () => q.abort(),
++      events: (async function* () {
++        for await (const ev of q.events) {
++          yield ev;
++          if (ev.type === 'result') break;
++        }
++        q.end();
++      })(),
++    };
++    return await processQuery(
++      singleTurn,
++      routing,
++      processingIds,
++      fallbackName,
++      fallback.onExchangeComplete?.bind(fallback),
++      prompt,
++      undefined,
++      originDests,
++      config.lenientOutput ?? false,
++      config.signal,
++    );
++  } catch (err) {
++    log(`Fallback provider ${fallbackName} failed too: ${err instanceof Error ? err.message : String(err)}`);
++    return null;
++  }
+ }
+ 
+ /**
+@@ -288,8 +365,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+       );
+ 
+       // Shutdown, not turn failure: the stop signal aborted the query
+-      // mid-turn. No error message and no empty-turn net — the host (or
+-      // test) tearing us down owns the messaging from here.
++      // mid-turn. No error message, no empty-turn net, no escalation — the
++      // host (or test) tearing us down owns the messaging from here.
+       if (config.signal?.aborted) return;
+ 
+       // Self-heal a dead/stale continuation. Unlike a thrown error (recovered
+@@ -326,6 +403,19 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+         setContinuation(config.providerName, continuation);
+       }
+ 
++      // Escalation (§16c): the primary failed terminally (after its self-heal
++      // retry) — give the fallback provider one shot at the same batch before
++      // surfacing the error. Runs on hard failure and on the router's
++      // no_adequate_model rejection alike; both arrive here as terminal errors.
++      if (result.terminalError && config.fallbackProvider) {
++        const escalated = await runEscalation(config, routing, processingIds, prompt, originDests);
++        if (escalated && !escalated.terminalError && escalated.producedOutput) {
++          result = escalated; // continuation-store already ran — the fallback session is not persisted
++        } else if (escalated?.terminalError) {
++          log(`Fallback terminal error: ${escalated.terminalError.message}`);
++        }
++      }
++
+       // (A) Non-quota terminal error (model not found, backend unreachable, an
+       // error result, or the SDK dying mid-stream): surface it to the user
+       // instead of dropping the turn. The quota case writes its own message
+@@ -349,7 +439,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+       }
+     } catch (err) {
+       // Same shutdown guard as the result path — an abort-induced throw is
+-      // teardown, not a provider failure to report.
++      // teardown, not a provider failure to report or escalate.
+       if (config.signal?.aborted) return;
+       const errMsg = err instanceof Error ? err.message : String(err);
+       log(`Query error: ${errMsg}`);
+@@ -363,8 +453,15 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+         clearContinuation(config.providerName);
+       }
+ 
+-      // Write error response so the user knows something went wrong
+-      writeUserText(routing, `Error: ${errMsg}`);
++      // Escalation (§16c), thrown-error flavor: timeouts and mid-stream
++      // failures land here rather than as terminal-error results. Same
++      // one-shot fallback; the original error is surfaced unless the
++      // fallback actually delivered output.
++      const escalated = await runEscalation(config, routing, processingIds, prompt, originDests);
++      if (!(escalated && !escalated.terminalError && escalated.producedOutput)) {
++        // Write error response so the user knows something went wrong
++        writeUserText(routing, `Error: ${errMsg}`);
++      }
+     } finally {
+       clearCurrentInReplyTo();
+     }

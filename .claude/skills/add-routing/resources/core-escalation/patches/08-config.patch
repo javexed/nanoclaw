@@ -1,0 +1,24 @@
+diff --git a/container/agent-runner/src/config.ts b/container/agent-runner/src/config.ts
+index b53bfa6f..ef0b983c 100644
+--- a/container/agent-runner/src/config.ts
++++ b/container/agent-runner/src/config.ts
+@@ -29,6 +29,11 @@ export interface RunnerConfig {
+    * scratchpad. See dispatchResultText in poll-loop.ts.
+    */
+   lenientOutput?: boolean;
++  /**
++   * Escalation provider (llm-router §16c): a terminally-failed turn is
++   * re-run once on this provider (fresh session). Unset = no escalation.
++   */
++  fallbackProvider?: string;
+ }
+ 
+ const DEFAULT_MAX_MESSAGES = 10;
+@@ -59,6 +64,7 @@ export function loadConfig(): RunnerConfig {
+     model: (raw.model as string) || undefined,
+     effort: (raw.effort as string) || undefined,
+     lenientOutput: raw.lenientOutput === true,
++    fallbackProvider: (raw.fallbackProvider as string) || undefined,
+   };
+ 
+   return _config;

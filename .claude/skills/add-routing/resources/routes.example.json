@@ -1,0 +1,36 @@
+{
+  "classifier": {
+    "url": "http://CLASSIFIER-HOST:11434/api/chat",
+    "model": "hf.co/katanemo/Arch-Router-1.5B.gguf:Q4_K_M",
+    "timeout_ms": 15000,
+    "keep_alive": "60m"
+  },
+  "default_route": "general",
+  "live": {
+    "enabled": false,
+    "model_name": "auto",
+    "timeout_ms": 5000
+  },
+  "routes": [
+    {
+      "name": "code",
+      "description": "Writing, debugging, or explaining code, scripts, or software configuration",
+      "model": "BIND-A-ROSTER-MODEL"
+    },
+    {
+      "name": "reasoning",
+      "description": "Multi-step planning, math, logic, or analysis requiring careful thought",
+      "model": "BIND-A-ROSTER-MODEL"
+    },
+    {
+      "name": "general",
+      "description": "Everyday conversation, quick questions, summaries, casual requests",
+      "model": "BIND-A-ROSTER-MODEL"
+    },
+    {
+      "name": "escalate",
+      "description": "Extremely complex or high-stakes work beyond a small local model: large multi-file refactors, subtle cross-system debugging, long-document analysis, tasks where a wrong answer is costly",
+      "escalate": true
+    }
+  ]
+}

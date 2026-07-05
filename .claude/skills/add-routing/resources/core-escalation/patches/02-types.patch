@@ -1,0 +1,12 @@
+diff --git a/src/types.ts b/src/types.ts
+index 7a23bbac..a7db2d6d 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -39,6 +39,7 @@ export interface ContainerConfigRow {
+   packages_npm: string; // JSON: string[]
+   additional_mounts: string; // JSON: AdditionalMountConfig[]
+   cli_scope: string; // 'disabled' | 'group' | 'global'
++  fallback_provider: string | null; // §16c escalation target (e.g. 'claude'); NULL = no escalation
+   updated_at: string;
+ }
+ 

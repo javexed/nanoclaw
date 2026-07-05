@@ -1,0 +1,152 @@
+diff --git a/container/agent-runner/src/integration.test.ts b/container/agent-runner/src/integration.test.ts
+index 93077fd6..e611c337 100644
+--- a/container/agent-runner/src/integration.test.ts
++++ b/container/agent-runner/src/integration.test.ts
+@@ -577,6 +577,147 @@ class InvalidSessionProvider {
+   }
+ }
+ 
++describe('poll loop — fallback provider escalation (§16c)', () => {
++  function runWithFallback(
++    primary: unknown,
++    fallback: unknown,
++    signal: AbortSignal,
++    timeoutMs: number,
++  ): Promise<void> {
++    return Promise.race([
++      runPollLoop({
++        provider: primary as MockProvider,
++        providerName: 'mock',
++        cwd: '/tmp',
++        signal,
++        fallbackProvider: fallback as MockProvider,
++        fallbackProviderName: 'claude',
++      }),
++      new Promise<void>((_, reject) => {
++        signal.addEventListener('abort', () => reject(new Error('aborted')));
++      }),
++      new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs)),
++    ]);
++  }
++
++  it('re-runs a failed turn on the fallback and delivers its reply, without persisting its session', async () => {
++    insertMessage('m-esc', { sender: 'Alice', text: 'hard question' }, { platformId: 'chan-1', channelType: 'discord' });
++
++    const primary = new ThrowingProvider('400 no_adequate_model');
++    const fallback = new MockProvider({}, () => '<message to="discord-test">escalated answer</message>');
++    const controller = new AbortController();
++    const loopPromise = runWithFallback(primary, fallback, controller.signal, 3000);
++
++    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
++    controller.abort();
++
++    const out = getUndeliveredMessages();
++    expect(out).toHaveLength(1);
++    expect(JSON.parse(out[0].content).text).toBe('escalated answer');
++    // The fallback session lands under ITS OWN key (processQuery crash-safety
++    // persist) and never under the primary's — the next turn stays primary.
++    expect(getContinuation('mock')).toBeUndefined();
++    expect(getContinuation('claude')).toStartWith('mock-session-');
++    expect(getPendingMessages()).toHaveLength(0);
++    // Thinking-bubble: escalation announces itself as a progress event.
++    const statuses = getOutboundDb()
++      .prepare(`SELECT text FROM status_events WHERE kind = 'progress'`)
++      .all() as { text: string }[];
++    expect(statuses.some((s) => s.text === 'Escalating to Claude…')).toBe(true);
++
++    await loopPromise.catch(() => {});
++  });
++
++  it('returns to the primary after a hub-style fallback turn (query left open)', async () => {
++    // Claude keeps its query open after a result (warm-session hub). An open
++    // FALLBACK query must NOT become the loop's active query — that captured
++    // every subsequent message onto the fallback until the container died.
++    class HubFallback {
++      readonly supportsNativeSlashCommands = false;
++      queries = 0;
++      isSessionInvalid(): boolean {
++        return false;
++      }
++      query(_input: { prompt: string; cwd: string }) {
++        this.queries += 1;
++        let ended = false;
++        let wake: (() => void) | null = null;
++        const n = this.queries;
++        return {
++          push() {},
++          end() {
++            ended = true;
++            wake?.();
++          },
++          abort() {
++            ended = true;
++            wake?.();
++          },
++          events: (async function* () {
++            yield { type: 'init' as const, continuation: `hub-session-${n}` };
++            yield { type: 'result' as const, text: `<message to="discord-test">hub answer ${n}</message>` };
++            // Stay open until end()/abort() — the hub behavior.
++            while (!ended) {
++              await new Promise<void>((resolve) => {
++                wake = resolve;
++              });
++            }
++          })(),
++        };
++      }
++    }
++
++    const primary = new ThrowingProvider('LiteLLM down');
++    const primarySpy = { queries: 0 };
++    const primaryWrapped = {
++      supportsNativeSlashCommands: false,
++      isSessionInvalid: () => false,
++      query(input: { prompt: string; cwd: string }) {
++        primarySpy.queries += 1;
++        return primary.query(input);
++      },
++    };
++    const fallback = new HubFallback();
++    const controller = new AbortController();
++    const loopPromise = runWithFallback(primaryWrapped, fallback, controller.signal, 6000);
++
++    insertMessage('m-hub-1', { sender: 'Alice', text: 'first' }, { platformId: 'chan-1', channelType: 'discord' });
++    await waitFor(() => getUndeliveredMessages().length >= 1, 3000);
++
++    // Second message AFTER the escalated turn completed: it must start a NEW
++    // primary attempt (and re-escalate), not ride the fallback's open query.
++    insertMessage('m-hub-2', { sender: 'Alice', text: 'second' }, { platformId: 'chan-1', channelType: 'discord' });
++    await waitFor(() => getUndeliveredMessages().length >= 2, 3000);
++    controller.abort();
++
++    const texts = getUndeliveredMessages().map((m) => JSON.parse(m.content).text);
++    expect(primarySpy.queries).toBe(2);
++    expect(fallback.queries).toBe(2);
++    expect(texts).toContain('hub answer 1');
++    expect(texts).toContain('hub answer 2');
++
++    await loopPromise.catch(() => {});
++  });
++
++  it('surfaces the ORIGINAL error when the fallback also fails', async () => {
++    insertMessage('m-esc2', { sender: 'Alice', text: 'hard question' }, { platformId: 'chan-1', channelType: 'discord' });
++
++    const primary = new ThrowingProvider('LiteLLM down');
++    const fallback = new ThrowingProvider('claude also down');
++    const controller = new AbortController();
++    const loopPromise = runWithFallback(primary, fallback, controller.signal, 3000);
++
++    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
++    controller.abort();
++
++    const out = getUndeliveredMessages();
++    expect(out).toHaveLength(1);
++    expect(JSON.parse(out[0].content).text).toBe('Error: LiteLLM down');
++
++    await loopPromise.catch(() => {});
++  });
++});
++
+ describe('poll loop — slash command during active query', () => {
+   it('aborts the active query when /clear arrives as a follow-up', async () => {
+     insertMessage('m-active', { sender: 'Alice', text: 'long running request' }, { platformId: 'chan-1', channelType: 'discord' });
