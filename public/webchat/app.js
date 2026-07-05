@@ -4477,6 +4477,7 @@ function openManage(tab = 'agents') {
   $('#overflow-btn')?.classList.add('active');
   switchManageTab(tab);
   if (!viewStack.some((v) => v.name === 'manage')) openView('manage', teardownManage);
+  probeRoutingAvailability();
 }
 function teardownManage() {
   manageActive = false;
@@ -4498,7 +4499,10 @@ function switchManageTab(tab) {
   if (tab === 'agents') fetchAgents();
   else if (tab === 'models') fetchModels();
   else if (tab === 'mcp') fetchMcpServers();
-  else if (tab === 'routing') loadRoutingTab();
+  else if (tab === 'routing') {
+    if (!routingAvailable) return switchManageTab('agents');
+    loadRoutingTab();
+  }
 }
 $('#manage-back')?.addEventListener('click', () => closeView('manage'));
 document.querySelectorAll('.manage-tab').forEach((t) => {
@@ -8427,6 +8431,24 @@ async function pollOllamaPulls() {
 // server (validated); the hook re-reads per request, so Save is immediate.
 let routingDraft = null; // {routes:[...], live:{...}, default_route}
 let routingRoster = [];
+let routingAvailable = false;
+
+// The Routing tab exists only when the LLM stack answers: the routing skill
+// installed (routes.json present) AND the viewer is the owner — anyone else
+// gets no tab, no menu item, no dead surface. Probed lazily, re-checked when
+// the manage view opens so installing the stack shows up without a reload.
+async function probeRoutingAvailability() {
+  try {
+    const res = await authFetch('/api/router/routes');
+    routingAvailable = res.ok;
+  } catch {
+    routingAvailable = false;
+  }
+  document.querySelectorAll('.manage-tab[data-mtab="routing"], .overflow-item[data-action="routing"]').forEach((el) => {
+    el.hidden = !routingAvailable;
+  });
+  if (!routingAvailable && manageTab === 'routing') switchManageTab('agents');
+}
 
 async function loadRoutingTab() {
   try {
@@ -8591,6 +8613,8 @@ $('#routing-bench-run')?.addEventListener('click', runRoutingBench);
 $('#routing-bench-input')?.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') runRoutingBench();
 });
+// Startup probe (deferred so auth is settled before the first owner-gated call).
+setTimeout(probeRoutingAvailability, 3000);
 
 async function refreshRoutingDecisions() {
   const list = $('#routing-decisions-list');
