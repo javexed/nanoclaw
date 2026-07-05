@@ -7959,10 +7959,261 @@ async function fetchModels() {
     const res = await authFetch('/api/models');
     allModels = await res.json();
     renderModels();
+    loadOllamaHosts();
   } catch (err) {
     console.error('Failed to fetch models:', err);
   }
 }
+
+// ── Ollama host management (owner-only; hidden entirely for non-owners) ──
+// Lists each known Ollama host's installed models (with in-memory state),
+// pulls new models with a polled progress bar, registers pulled models as
+// webchat models in one click, and re-runs the router-roster installers.
+let ollamaPullPoller = null;
+
+async function loadOllamaHosts() {
+  const wrap = $('#ollama-hosts');
+  if (!wrap) return;
+  try {
+    const res = await authFetch('/api/ollama/hosts');
+    if (!res.ok) {
+      wrap.hidden = true;
+      return;
+    }
+    const { hosts } = await res.json();
+    wrap.hidden = hosts.length === 0;
+    if (hosts.length === 0) return;
+    const cards = $('#ollama-host-cards');
+    cards.innerHTML = '';
+    for (const host of hosts) {
+      cards.appendChild(buildOllamaHostCard(host));
+      loadOllamaHostModels(host);
+    }
+    const rr = await (await authFetch('/api/litellm/roster-refresh')).json();
+    $('#roster-refresh-row').hidden = !rr.available;
+    pollOllamaPulls(); // pick up any pull still running from a previous visit
+  } catch (err) {
+    console.error('Failed to load Ollama hosts:', err);
+    wrap.hidden = true;
+  }
+}
+
+function ollamaCardId(host) {
+  return 'ollama-card-' + host.replace(/[^a-z0-9]/gi, '-');
+}
+
+function buildOllamaHostCard(host) {
+  const card = document.createElement('div');
+  card.className = 'ollama-host-card';
+  card.id = ollamaCardId(host);
+  card.dataset.host = host;
+
+  const head = document.createElement('div');
+  head.className = 'ollama-host-head';
+  const label = document.createElement('span');
+  label.className = 'ollama-host-name';
+  label.textContent = host.replace(/^https?:\/\//, '');
+  head.appendChild(label);
+  card.appendChild(head);
+
+  const ul = document.createElement('ul');
+  ul.className = 'ollama-model-list';
+  ul.innerHTML = '<li class="ollama-muted">Loading…</li>';
+  card.appendChild(ul);
+
+  const pullRow = document.createElement('div');
+  pullRow.className = 'ollama-pull-row';
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = 'Model to pull, e.g. qwen3.5:4b…';
+  input.className = 'ollama-pull-input';
+  const btn = document.createElement('button');
+  btn.className = 'btn btn-secondary';
+  btn.type = 'button';
+  btn.textContent = 'Pull';
+  btn.addEventListener('click', () => startOllamaPull(host, input.value.trim(), input, btn));
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') startOllamaPull(host, input.value.trim(), input, btn);
+  });
+  pullRow.appendChild(input);
+  pullRow.appendChild(btn);
+  card.appendChild(pullRow);
+
+  const progress = document.createElement('div');
+  progress.className = 'ollama-pull-status';
+  progress.hidden = true;
+  card.appendChild(progress);
+
+  return card;
+}
+
+async function loadOllamaHostModels(host) {
+  const card = document.getElementById(ollamaCardId(host));
+  if (!card) return;
+  const ul = card.querySelector('.ollama-model-list');
+  try {
+    const res = await authFetch('/api/ollama/models?host=' + encodeURIComponent(host));
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.status);
+    ul.innerHTML = '';
+    if (body.models.length === 0) {
+      ul.innerHTML = '<li class="ollama-muted">No models installed</li>';
+      return;
+    }
+    for (const m of body.models) {
+      const li = document.createElement('li');
+      const name = document.createElement('span');
+      name.className = 'ollama-model-name';
+      name.textContent = m.name;
+      li.appendChild(name);
+      const meta = document.createElement('span');
+      meta.className = 'ollama-model-meta';
+      meta.textContent = (m.size / 1e9).toFixed(1) + ' GB';
+      li.appendChild(meta);
+      if (m.loaded) {
+        const badge = document.createElement('span');
+        badge.className = 'ollama-loaded-badge';
+        badge.textContent = 'in memory';
+        badge.title = (m.size_vram / 1e9).toFixed(1) + ' GB in VRAM';
+        li.appendChild(badge);
+      }
+      const registered = allModels.some(
+        (r) => r.kind === 'ollama' && r.model_id === m.name && (r.endpoint || '').replace(/\/+$/, '') === host,
+      );
+      if (!registered) {
+        const reg = document.createElement('button');
+        reg.className = 'btn btn-ghost ollama-register-btn';
+        reg.type = 'button';
+        reg.textContent = 'Register';
+        reg.title = 'Register as a webchat model';
+        reg.addEventListener('click', async () => {
+          reg.disabled = true;
+          try {
+            const r = await authFetch('/api/models', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name: m.name, kind: 'ollama', endpoint: host, model_id: m.name }),
+            });
+            if (!r.ok) throw new Error((await r.json()).error || r.status);
+            showToast('Model registered', { kind: 'success' });
+            fetchModels();
+          } catch (err) {
+            showToast('Register failed: ' + err.message, { kind: 'error' });
+            reg.disabled = false;
+          }
+        });
+        li.appendChild(reg);
+      }
+      ul.appendChild(li);
+    }
+  } catch (err) {
+    ul.innerHTML = '';
+    const li = document.createElement('li');
+    li.className = 'ollama-muted';
+    li.textContent = 'Unreachable: ' + err.message;
+    ul.appendChild(li);
+  }
+}
+
+async function startOllamaPull(host, model, input, btn) {
+  if (!model) return;
+  btn.disabled = true;
+  try {
+    const res = await authFetch('/api/ollama/pull', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host, model }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.status);
+    input.value = '';
+    pollOllamaPulls();
+  } catch (err) {
+    showToast('Pull failed to start: ' + err.message, { kind: 'error' });
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderOllamaPulls(pulls) {
+  const seenCards = new Set();
+  for (const job of pulls) {
+    const card = document.getElementById(ollamaCardId(job.host));
+    if (!card) continue;
+    seenCards.add(card.id);
+    const box = card.querySelector('.ollama-pull-status');
+    box.hidden = false;
+    const pct = job.total > 0 ? Math.min(100, Math.round((100 * job.completed) / job.total)) : 0;
+    if (job.status === 'pulling') {
+      box.innerHTML =
+        '<div class="ollama-pull-line">Pulling ' + job.model + ' — ' + job.detail + '</div>' +
+        '<div class="ollama-pull-bar"><span style="width:' + pct + '%"></span></div>';
+    } else if (job.status === 'success') {
+      box.innerHTML = '<div class="ollama-pull-line ok">Pulled ' + job.model + '</div>';
+    } else {
+      box.innerHTML = '<div class="ollama-pull-line err">Pull of ' + job.model + ' failed: ' + (job.error || '') + '</div>';
+    }
+    if (job.status !== 'pulling' && !box.dataset['done_' + job.model]) {
+      box.dataset['done_' + job.model] = '1';
+      if (job.status === 'success') {
+        showToast('Pulled ' + job.model, { kind: 'success' });
+        loadOllamaHostModels(job.host);
+      }
+    }
+  }
+}
+
+async function pollOllamaPulls() {
+  if (ollamaPullPoller) return; // one poller
+  const tick = async () => {
+    try {
+      const res = await authFetch('/api/ollama/pulls');
+      if (!res.ok) throw new Error(res.status);
+      const { pulls } = await res.json();
+      renderOllamaPulls(pulls);
+      if (pulls.some((p) => p.status === 'pulling')) {
+        ollamaPullPoller = setTimeout(tick, 1500);
+      } else {
+        ollamaPullPoller = null;
+      }
+    } catch {
+      ollamaPullPoller = null;
+    }
+  };
+  ollamaPullPoller = setTimeout(tick, 0);
+}
+
+$('#roster-refresh-btn')?.addEventListener('click', async () => {
+  const btn = $('#roster-refresh-btn');
+  const log = $('#roster-refresh-log');
+  btn.disabled = true;
+  log.hidden = false;
+  log.textContent = 'Starting…';
+  try {
+    const res = await authFetch('/api/litellm/roster-refresh', { method: 'POST' });
+    if (res.status === 409) throw new Error('a refresh is already running');
+    const poll = async () => {
+      const st = await (await authFetch('/api/litellm/roster-refresh')).json();
+      log.textContent = st.lines.join('\n') || '…';
+      log.scrollTop = log.scrollHeight;
+      if (st.running) {
+        setTimeout(poll, 2000);
+      } else {
+        btn.disabled = false;
+        if (st.exitCode === 0) {
+          showToast('Router roster refreshed', { kind: 'success' });
+          fetchModels();
+        } else {
+          showToast('Roster refresh failed — see log', { kind: 'error' });
+        }
+      }
+    };
+    poll();
+  } catch (err) {
+    btn.disabled = false;
+    showToast('Roster refresh: ' + err.message, { kind: 'error' });
+  }
+});
 
 // Display label for a model kind. The STORED kind stays 'openai-compatible'
 // (it names the endpoint's protocol — what the probe detects); the UI says

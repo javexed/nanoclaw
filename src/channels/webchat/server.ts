@@ -136,6 +136,14 @@ import {
   warnIfAutoProxyTrust,
 } from './auth.js';
 import {
+  getPullsSnapshot,
+  getRosterRefreshState,
+  listHostModels,
+  parseConfiguredHosts,
+  startPull,
+  startRosterRefresh,
+} from './ollama-manage.js';
+import {
   approvalInboxForUser,
   archiveRoom,
   assignModelToAgent,
@@ -1529,6 +1537,68 @@ async function handleHttp(
   // ── Models ────────────────────────────────────────────────────────────
   if (url.pathname === '/api/models' && method === 'GET') {
     return json(res, 200, listModelsForUI());
+  }
+
+  // ── Ollama host management (owner-only; SSRF-gated in ollama-manage) ──
+  if (url.pathname === '/api/ollama/hosts' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const hosts = new Set<string>();
+    for (const m of listWebchatModels()) {
+      if (m.kind === 'ollama' && m.endpoint) hosts.add(m.endpoint.replace(/\/+$/, ''));
+    }
+    try {
+      const cfg = fs.readFileSync(path.join(process.cwd(), 'data/litellm/config.yaml'), 'utf8');
+      for (const h of (parseConfiguredHosts(cfg) ?? '').split(',')) {
+        if (h.trim()) hosts.add(h.trim().replace(/\/+$/, ''));
+      }
+    } catch {
+      /* no litellm installed — models-derived hosts only */
+    }
+    return json(res, 200, { hosts: [...hosts].sort() });
+  }
+  if (url.pathname === '/api/ollama/models' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const host = url.searchParams.get('host') || '';
+    if (!host) return json(res, 400, { error: 'host required' });
+    try {
+      return json(res, 200, { models: await listHostModels(host) });
+    } catch (err) {
+      return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  if (url.pathname === '/api/ollama/pulls' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    return json(res, 200, { pulls: getPullsSnapshot() });
+  }
+  if (url.pathname === '/api/ollama/pull' && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { host?: unknown; model?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    if (typeof body.host !== 'string' || !body.host.trim()) return json(res, 400, { error: 'host required' });
+    if (typeof body.model !== 'string' || !body.model.trim()) return json(res, 400, { error: 'model required' });
+    try {
+      const job = await startPull(body.host.trim(), body.model.trim());
+      return json(res, 202, { pull: job });
+    } catch (err) {
+      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  if (url.pathname === '/api/litellm/roster-refresh' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    return json(res, 200, getRosterRefreshState());
+  }
+  if (url.pathname === '/api/litellm/roster-refresh' && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const started = startRosterRefresh();
+    return json(res, started ? 202 : 409, { ...getRosterRefreshState(), started });
   }
   if (url.pathname === '/api/models' && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') {

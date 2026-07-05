@@ -1013,6 +1013,14 @@
           <div id="mtab-models" class="manage-pane" role="tabpanel" hidden>
             <ul id="model-list"></ul>
             <button id="create-model-btn" class="btn btn-secondary btn-list-footer">+ New model</button>
+            <div id="ollama-hosts" class="ollama-hosts" hidden>
+              <div class="ollama-hosts-title">Ollama hosts</div>
+              <div id="ollama-host-cards"></div>
+              <div id="roster-refresh-row" hidden>
+                <button id="roster-refresh-btn" class="btn btn-secondary" type="button">Refresh router roster</button>
+                <pre id="roster-refresh-log" class="roster-refresh-log" hidden></pre>
+              </div>
+            </div>
           </div>
           <div id="mtab-mcp" class="manage-pane" role="tabpanel" hidden>
             <ul id="mcp-list"></ul>

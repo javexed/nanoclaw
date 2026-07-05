@@ -5862,3 +5862,114 @@ a.lightbox-btn {
 .thread-menu button.danger {
   color: var(--danger);
 }
+
+/* ── Ollama host management (Models tab) ─────────────────────────────── */
+.ollama-hosts {
+  margin-top: 12px;
+  padding: 0 8px 8px;
+}
+.ollama-hosts-title {
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  margin: 4px 4px 6px;
+}
+.ollama-host-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 8px;
+  margin-bottom: 8px;
+  background: var(--pre-bg);
+}
+.ollama-host-name {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+.ollama-model-list {
+  list-style: none;
+  margin: 6px 0;
+  padding: 0;
+}
+.ollama-model-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 2px;
+  font-size: var(--fs-sm);
+}
+.ollama-model-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ollama-model-meta {
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+}
+.ollama-loaded-badge {
+  font-size: var(--fs-xs);
+  color: var(--success-strong);
+  border: 1px solid var(--success);
+  border-radius: var(--radius-sm);
+  padding: 0 5px;
+}
+.ollama-register-btn {
+  font-size: var(--fs-xs);
+  padding: 1px 8px;
+}
+.ollama-muted {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+.ollama-pull-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+.ollama-pull-input {
+  flex: 1;
+  min-width: 0;
+}
+.ollama-pull-status {
+  margin-top: 6px;
+}
+.ollama-pull-line {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  margin-bottom: 3px;
+}
+.ollama-pull-line.ok {
+  color: var(--success-strong);
+}
+.ollama-pull-line.err {
+  color: var(--danger, #f85149);
+}
+.ollama-pull-bar {
+  height: 4px;
+  border-radius: var(--radius-sm);
+  background: var(--border);
+  overflow: hidden;
+}
+.ollama-pull-bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width var(--transition);
+}
+.roster-refresh-log {
+  max-height: 140px;
+  overflow: auto;
+  font-size: var(--fs-xs);
+  background: var(--pre-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 6px;
+  margin-top: 6px;
+  white-space: pre-wrap;
+}
+#roster-refresh-row {
+  margin-top: 4px;
+  padding: 0 4px;
+}
