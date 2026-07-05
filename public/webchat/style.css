@@ -6138,3 +6138,115 @@ a.lightbox-btn {
   font-size: var(--fs-xs);
   color: var(--text-dim);
 }
+
+/* ── Routing aside (routes editor + bench + decisions) ───────────────── */
+.routing-body {
+  padding: 10px 14px;
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+}
+.routing-live-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  margin-bottom: 10px;
+}
+.routing-timeout-label input {
+  width: 80px;
+  margin: 0 4px;
+}
+.routing-route {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  background: var(--pre-bg);
+}
+.routing-route-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.routing-route-name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  background: transparent;
+  border: none;
+  border-bottom: 1px dashed var(--border);
+  color: var(--text);
+  padding: 2px 0;
+}
+.routing-pin {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+.routing-route-del {
+  font-size: var(--fs-sm);
+  padding: 0 7px;
+}
+.routing-route-desc {
+  width: 100%;
+  margin-top: 6px;
+  font-size: var(--fs-sm);
+  resize: vertical;
+}
+.routing-bind-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+}
+.routing-bind-row select {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-sm);
+}
+.routing-save-note {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  margin-left: 8px;
+}
+.routing-section-title {
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  margin: 14px 0 6px;
+}
+.routing-bench-row {
+  display: flex;
+  gap: 6px;
+}
+.routing-bench-row input {
+  flex: 1;
+  min-width: 0;
+}
+.routing-bench-result {
+  font-size: var(--fs-sm);
+  margin-top: 6px;
+  color: var(--success-strong);
+}
+.routing-decisions-list {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  max-height: 180px;
+  overflow-y: auto;
+}
+.routing-decision-row {
+  padding: 2px 0;
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.routing-decision-row.err {
+  color: var(--warning-strong);
+}

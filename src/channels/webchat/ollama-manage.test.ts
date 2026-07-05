@@ -150,3 +150,55 @@ describe('computeRouterMetrics', () => {
     expect(m.byRoute[0].count).toBeGreaterThan(0);
   });
 });
+
+describe('mergeRoutesUpdate / parseClassifierRoute', () => {
+  it('validates and merges an editor submission, preserving the classifier section', async () => {
+    const { mergeRoutesUpdate } = await import('./ollama-manage.js');
+    const existing = {
+      classifier: { url: 'http://c', model: 'arch' },
+      default_route: 'general',
+      live: { enabled: true, model_name: 'auto', timeout_ms: 8000 },
+      routes: [{ name: 'general', description: 'everyday chit chat', model: 'gemma4:latest' }],
+    };
+    const merged = mergeRoutesUpdate(existing, {
+      routes: [
+        { name: 'general', description: 'everyday conversation and quick questions', model: 'gemma4:latest', pinned: true },
+        { name: 'escalate', description: 'too hard for local models here', escalate: true },
+      ],
+      default_route: 'general',
+      live: { enabled: false },
+    });
+    expect((merged.classifier as { url: string }).url).toBe('http://c');
+    expect((merged.live as { enabled: boolean; timeout_ms: number }).enabled).toBe(false);
+    expect((merged.live as { timeout_ms: number }).timeout_ms).toBe(8000); // preserved
+    expect((merged.routes as Array<{ pinned?: boolean }>)[0].pinned).toBe(true);
+  });
+
+  it('rejects bad submissions with readable messages', async () => {
+    const { mergeRoutesUpdate } = await import('./ollama-manage.js');
+    const existing = { routes: [] };
+    expect(() => mergeRoutesUpdate(existing, { routes: [] })).toThrow(/at least one route/);
+    expect(() =>
+      mergeRoutesUpdate(existing, { routes: [{ name: 'x y', description: 'long enough desc', model: 'm' }] }),
+    ).toThrow(/route name/);
+    expect(() => mergeRoutesUpdate(existing, { routes: [{ name: 'a', description: 'short', model: 'm' }] })).toThrow(
+      /description/,
+    );
+    expect(() =>
+      mergeRoutesUpdate(existing, { routes: [{ name: 'a', description: 'long enough desc', escalate: true, model: 'm' }] }),
+    ).toThrow(/must not have a model/);
+    expect(() =>
+      mergeRoutesUpdate(existing, {
+        routes: [{ name: 'a', description: 'long enough desc', model: 'm' }],
+        live: { enabled: true, timeout_ms: 100 },
+      }),
+    ).toThrow(/timeout_ms/);
+  });
+
+  it('parses tolerant classifier replies', async () => {
+    const { parseClassifierRoute } = await import('./ollama-manage.js');
+    expect(parseClassifierRoute('{"route": "code"}')).toBe('code');
+    expect(parseClassifierRoute("Sure! {'route': 'vision'} ")).toBe('vision');
+    expect(() => parseClassifierRoute('nope')).toThrow(/no JSON/);
+  });
+});

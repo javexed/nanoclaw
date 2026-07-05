@@ -138,9 +138,15 @@ import {
 import {
   getPullsSnapshot,
   getRosterRefreshState,
+  dryClassify,
   getRouterInfo,
   getRouterMetrics,
   listHostModels,
+  mergeRoutesUpdate,
+  readRoutesConfig,
+  recentDecisions,
+  type RoutesUpdate,
+  writeRoutesConfig,
   parseConfiguredHosts,
   startPull,
   startRosterRefresh,
@@ -1567,6 +1573,56 @@ async function handleHttp(
     } catch (err) {
       return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
     }
+  }
+  if (url.pathname === '/api/router/routes' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const cfg = readRoutesConfig();
+    if (!cfg) return json(res, 404, { error: 'Routing not installed' });
+    return json(res, 200, { routes: cfg.routes, live: cfg.live ?? null, default_route: cfg.default_route ?? null });
+  }
+  if (url.pathname === '/api/router/routes' && method === 'PUT') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let update: RoutesUpdate;
+    try {
+      update = JSON.parse(raw) as RoutesUpdate;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    const cfg = readRoutesConfig();
+    if (!cfg) return json(res, 404, { error: 'Routing not installed' });
+    try {
+      const merged = mergeRoutesUpdate(cfg, update);
+      writeRoutesConfig(merged);
+      return json(res, 200, { ok: true, routes: merged.routes, live: merged.live ?? null, default_route: merged.default_route ?? null });
+    } catch (err) {
+      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  if (url.pathname === '/api/router/classify' && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { prompt?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    if (typeof body.prompt !== 'string' || !body.prompt.trim()) return json(res, 400, { error: 'prompt required' });
+    try {
+      return json(res, 200, await dryClassify(body.prompt.trim()));
+    } catch (err) {
+      return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  if (url.pathname === '/api/router/decisions' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const limit = Math.max(1, Math.min(100, Number(url.searchParams.get('limit')) || 20));
+    return json(res, 200, { decisions: recentDecisions(limit) });
   }
   if (url.pathname === '/api/router/metrics' && method === 'GET') {
     if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });

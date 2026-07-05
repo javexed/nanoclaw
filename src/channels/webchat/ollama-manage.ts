@@ -413,3 +413,166 @@ export function getRouterMetrics(days: number, root = process.cwd()): RouterMetr
   }
   return { available: true, days, ...computeRouterMetrics(fs.readFileSync(logPath, 'utf8'), days) };
 }
+
+// ── Classifier interface: routes editor, dry classify, decisions tail ─────
+
+interface RouteDef {
+  name: string;
+  description: string;
+  model?: string;
+  escalate?: boolean;
+  pinned?: boolean;
+}
+
+export interface RoutesUpdate {
+  routes: RouteDef[];
+  live?: { enabled: boolean; model_name?: string; timeout_ms?: number };
+  default_route?: string;
+}
+
+function routesPathFor(root: string): string {
+  return path.join(root, 'data/litellm/routing/routes.json');
+}
+
+export function readRoutesConfig(root = process.cwd()): Record<string, unknown> | null {
+  const p = routesPathFor(root);
+  if (!fs.existsSync(p)) return null;
+  return JSON.parse(fs.readFileSync(p, 'utf8')) as Record<string, unknown>;
+}
+
+/**
+ * Validate an editor submission and merge it over the on-disk config.
+ * The classifier section is never client-writable (endpoint + model are the
+ * install's concern); everything else the editor owns. Throws with a
+ * human-readable message on invalid input.
+ */
+export function mergeRoutesUpdate(existing: Record<string, unknown>, update: RoutesUpdate): Record<string, unknown> {
+  if (!Array.isArray(update.routes) || update.routes.length === 0) throw new Error('at least one route is required');
+  const seen = new Set<string>();
+  for (const r of update.routes) {
+    if (typeof r.name !== 'string' || !/^[a-z0-9_-]{1,32}$/i.test(r.name)) {
+      throw new Error(`route name must be 1-32 word characters: ${JSON.stringify(r.name)}`);
+    }
+    if (seen.has(r.name)) throw new Error(`duplicate route name: ${r.name}`);
+    seen.add(r.name);
+    if (typeof r.description !== 'string' || r.description.trim().length < 8) {
+      throw new Error(`route "${r.name}" needs a description (it is what the classifier matches against)`);
+    }
+    if (r.escalate) {
+      if (r.model) throw new Error(`escalate route "${r.name}" must not have a model binding`);
+    } else if (typeof r.model !== 'string' || !r.model.trim()) {
+      throw new Error(`route "${r.name}" needs a model binding`);
+    }
+  }
+  const merged: Record<string, unknown> = { ...existing };
+  merged.routes = update.routes.map((r) => ({
+    name: r.name,
+    description: r.description.trim(),
+    ...(r.escalate ? { escalate: true } : { model: r.model }),
+    ...(r.pinned ? { pinned: true } : {}),
+  }));
+  if (update.default_route !== undefined) {
+    if (!seen.has(update.default_route)) throw new Error(`default_route "${update.default_route}" is not a route`);
+    merged.default_route = update.default_route;
+  }
+  if (update.live !== undefined) {
+    const prev = (existing.live as Record<string, unknown>) ?? {};
+    const timeout = update.live.timeout_ms ?? (prev.timeout_ms as number) ?? 5000;
+    if (typeof timeout !== 'number' || timeout < 1000 || timeout > 30000) {
+      throw new Error('live.timeout_ms must be between 1000 and 30000');
+    }
+    merged.live = {
+      enabled: Boolean(update.live.enabled),
+      model_name: update.live.model_name ?? (prev.model_name as string) ?? 'auto',
+      timeout_ms: timeout,
+    };
+  }
+  return merged;
+}
+
+export function writeRoutesConfig(cfg: Record<string, unknown>, root = process.cwd()): void {
+  const p = routesPathFor(root);
+  const tmp = p + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\n');
+  fs.renameSync(tmp, p);
+}
+
+// The classifier prompt contract — KEEP IN SYNC with router_hook.py
+// (TASK_INSTRUCTION / FORMAT_PROMPT). The bench must classify exactly the
+// way the hook does or its answers are lies.
+const CLASSIFY_TASK = `You are a helpful assistant designed to find the best suited route.
+You are provided with route description within <routes></routes> XML tags:
+<routes>
+{routes}
+</routes>
+
+<conversation>
+{conversation}
+</conversation>
+`;
+const CLASSIFY_FORMAT = `Your task is to decide which route is best suit with user intent on the conversation in <conversation></conversation> XML tags.  Follow the instruction:
+1. If the latest intent from user is irrelevant or user intent is full filled, response with other route {"route": "other"}.
+2. You must analyze the route descriptions and find the best match route for user latest intent.
+3. You only response the name of the route that best matches the user's request, use the exact name in the <routes></routes>.
+
+Based on your analysis, provide your response in the following JSON formats if you decide to match any route:
+{"route": "route_name"}`;
+
+export function parseClassifierRoute(raw: string): string {
+  const s = raw.trim();
+  const i = s.indexOf('{');
+  const j = s.lastIndexOf('}');
+  if (i < 0 || j <= i) throw new Error(`no JSON object in classifier reply: ${s.slice(0, 80)}`);
+  return (JSON.parse(s.slice(i, j + 1).replace(/'/g, '"')) as { route: string }).route;
+}
+
+/** Dry classify: run the real classifier on a prompt, change nothing. */
+export async function dryClassify(prompt: string, root = process.cwd()): Promise<{ route: string; model: string | null; ms: number }> {
+  const cfg = readRoutesConfig(root);
+  if (!cfg) throw new Error('routing is not installed');
+  const classifier = cfg.classifier as { url: string; model: string; keep_alive?: string };
+  const routes = cfg.routes as RouteDef[];
+  const routeDescs = routes.map((r) => ({ name: r.name, description: r.description }));
+  const content =
+    CLASSIFY_TASK.replace('{routes}', JSON.stringify(routeDescs)).replace(
+      '{conversation}',
+      JSON.stringify([{ role: 'user', content: prompt }]),
+    ) + CLASSIFY_FORMAT;
+  const t0 = Date.now();
+  const res = await safeFetch(classifier.url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: classifier.model,
+      stream: false,
+      options: { temperature: 0, num_predict: 64 },
+      keep_alive: classifier.keep_alive ?? '60m',
+      messages: [{ role: 'user', content }],
+    }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!res.ok) throw new Error(`classifier returned ${res.status}`);
+  const body = (await res.json()) as { message?: { content?: string } };
+  const route = parseClassifierRoute(body.message?.content ?? '');
+  const ms = Date.now() - t0;
+  const hit = routes.find((r) => r.name === route);
+  const fallback = routes.find((r) => r.name === cfg.default_route);
+  const model = hit?.escalate ? '__escalate__' : (hit?.model ?? fallback?.model ?? null);
+  return { route, model, ms };
+}
+
+/** Last N routing decisions, newest first. */
+export function recentDecisions(limit: number, root = process.cwd()): Array<Record<string, unknown>> {
+  const p = path.join(root, 'data/litellm/routing/routing-shadow.jsonl');
+  if (!fs.existsSync(p)) return [];
+  const lines = fs.readFileSync(p, 'utf8').trim().split('\n');
+  const out: Array<Record<string, unknown>> = [];
+  for (let i = lines.length - 1; i >= 0 && out.length < limit; i--) {
+    try {
+      out.push(JSON.parse(lines[i]) as Record<string, unknown>);
+    } catch {
+      /* torn line */
+    }
+  }
+  return out;
+}

@@ -778,6 +778,7 @@ function blockingOverlayOpen() {
 function closeTopDetailAside() {
   const layers = [
     ['members-panel', () => { $('#members-panel').hidden = true; }],
+    ['routing-detail', closeRoutingDetail],
     ['model-detail', closeModelDetail],
     ['agent-detail', closeAgentDetail],
     ['mcp-detail', closeMcpDetail],
@@ -8179,6 +8180,13 @@ function buildRouterCard(router) {
   summary.className = 'ollama-card-summary';
   summary.textContent = router.models.length + ' model' + (router.models.length === 1 ? '' : 's');
   head.appendChild(summary);
+  const routing = document.createElement('button');
+  routing.className = 'btn btn-ghost ollama-card-action';
+  routing.type = 'button';
+  routing.textContent = 'Routing…';
+  routing.title = 'Edit routes, test the classifier, see recent decisions';
+  routing.addEventListener('click', openRoutingDetail);
+  head.appendChild(routing);
   const refresh = document.createElement('button');
   refresh.className = 'btn btn-ghost ollama-card-action';
   refresh.type = 'button';
@@ -8410,6 +8418,209 @@ async function pollOllamaPulls() {
     }
   };
   ollamaPullPoller = setTimeout(tick, 0);
+}
+
+// ── Routing aside: routes editor + test bench + recent decisions ─────────
+// Opened from the router server card. Edits write routes.json through the
+// server (validated); the hook re-reads per request, so Save is immediate.
+let routingDraft = null; // {routes:[...], live:{...}, default_route}
+let routingRoster = [];
+
+async function openRoutingDetail() {
+  try {
+    const [routesRes, rosterRes] = await Promise.all([
+      authFetch('/api/router/routes'),
+      authFetch('/api/router/models'),
+    ]);
+    if (!routesRes.ok) throw new Error((await routesRes.json()).error || routesRes.status);
+    routingDraft = await routesRes.json();
+    routingRoster = rosterRes.ok ? (await rosterRes.json()).models : [];
+  } catch (err) {
+    showToast('Routing config unavailable: ' + err.message, { kind: 'error' });
+    return;
+  }
+  closeModelDetail();
+  $('#routing-live-enabled').checked = Boolean(routingDraft.live && routingDraft.live.enabled);
+  $('#routing-timeout').value = (routingDraft.live && routingDraft.live.timeout_ms) || 5000;
+  renderRoutingRoutes();
+  refreshRoutingDecisions();
+  $('#routing-bench-result').hidden = true;
+  $('#routing-detail').hidden = false;
+}
+
+function closeRoutingDetail() {
+  $('#routing-detail').hidden = true;
+  routingDraft = null;
+}
+$('#routing-detail-close')?.addEventListener('click', closeRoutingDetail);
+
+function renderRoutingRoutes() {
+  const wrap = $('#routing-routes');
+  wrap.innerHTML = '';
+  for (let i = 0; i < routingDraft.routes.length; i++) {
+    const r = routingDraft.routes[i];
+    const card = document.createElement('div');
+    card.className = 'routing-route';
+
+    const head = document.createElement('div');
+    head.className = 'routing-route-head';
+    const name = document.createElement('input');
+    name.className = 'routing-route-name';
+    name.value = r.name;
+    name.addEventListener('input', () => { r.name = name.value; });
+    head.appendChild(name);
+    if (r.escalate) {
+      const esc = document.createElement('span');
+      esc.className = 'ollama-loaded-badge';
+      esc.textContent = 'escalates';
+      esc.title = 'No local binding — rejects with no_adequate_model so the fallback provider takes the turn';
+      head.appendChild(esc);
+    } else {
+      const pin = document.createElement('label');
+      pin.className = 'routing-pin';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = Boolean(r.pinned);
+      cb.addEventListener('change', () => { r.pinned = cb.checked; });
+      pin.appendChild(cb);
+      pin.appendChild(document.createTextNode(' pin'));
+      pin.title = 'Pinned routes are never touched by the capability auto-binder';
+      head.appendChild(pin);
+    }
+    const del = document.createElement('button');
+    del.className = 'btn btn-ghost routing-route-del';
+    del.type = 'button';
+    del.textContent = '×';
+    del.title = 'Remove this route';
+    del.addEventListener('click', () => {
+      routingDraft.routes.splice(i, 1);
+      renderRoutingRoutes();
+    });
+    head.appendChild(del);
+    card.appendChild(head);
+
+    const desc = document.createElement('textarea');
+    desc.className = 'routing-route-desc';
+    desc.rows = 2;
+    desc.value = r.description;
+    desc.placeholder = 'What prompts belong here? The classifier matches this text.';
+    desc.addEventListener('input', () => { r.description = desc.value; });
+    card.appendChild(desc);
+
+    if (!r.escalate) {
+      const bindRow = document.createElement('div');
+      bindRow.className = 'routing-bind-row';
+      const sel = document.createElement('select');
+      const opts = [...new Set([r.model, ...routingRoster])].filter(Boolean);
+      for (const m of opts) {
+        const o = document.createElement('option');
+        o.value = m;
+        o.textContent = m;
+        if (m === r.model) o.selected = true;
+        sel.appendChild(o);
+      }
+      sel.addEventListener('change', () => { r.model = sel.value; });
+      bindRow.appendChild(sel);
+      const defLabel = document.createElement('label');
+      defLabel.className = 'routing-pin';
+      const defRadio = document.createElement('input');
+      defRadio.type = 'radio';
+      defRadio.name = 'routing-default';
+      defRadio.checked = routingDraft.default_route === r.name;
+      defRadio.addEventListener('change', () => { routingDraft.default_route = r.name; });
+      defLabel.appendChild(defRadio);
+      defLabel.appendChild(document.createTextNode(' default'));
+      defLabel.title = 'Where requests land when the classifier errors or matches nothing';
+      bindRow.appendChild(defLabel);
+      card.appendChild(bindRow);
+    }
+    wrap.appendChild(card);
+  }
+}
+
+$('#routing-add-route')?.addEventListener('click', () => {
+  if (!routingDraft) return;
+  routingDraft.routes.push({ name: 'new-route', description: '', model: routingRoster[0] || '' });
+  renderRoutingRoutes();
+});
+
+$('#routing-save')?.addEventListener('click', async () => {
+  if (!routingDraft) return;
+  const btn = $('#routing-save');
+  btn.disabled = true;
+  try {
+    const res = await authFetch('/api/router/routes', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        routes: routingDraft.routes,
+        default_route: routingDraft.default_route,
+        live: {
+          enabled: $('#routing-live-enabled').checked,
+          timeout_ms: Number($('#routing-timeout').value) || 5000,
+        },
+      }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.status);
+    routingDraft = body;
+    renderRoutingRoutes();
+    showToast('Routing saved — live now', { kind: 'success' });
+  } catch (err) {
+    showToast('Save failed: ' + err.message, { kind: 'error' });
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+async function runRoutingBench() {
+  const input = $('#routing-bench-input');
+  const out = $('#routing-bench-result');
+  const prompt = input.value.trim();
+  if (!prompt) return;
+  out.hidden = false;
+  out.textContent = 'Classifying…';
+  try {
+    const res = await authFetch('/api/router/classify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.status);
+    out.textContent = `→ ${body.route} · ${body.model ?? '(no binding)'} · ${body.ms} ms`;
+  } catch (err) {
+    out.textContent = 'Classifier error: ' + err.message;
+  }
+}
+$('#routing-bench-run')?.addEventListener('click', runRoutingBench);
+$('#routing-bench-input')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') runRoutingBench();
+});
+
+async function refreshRoutingDecisions() {
+  const list = $('#routing-decisions-list');
+  try {
+    const res = await authFetch('/api/router/decisions?limit=15');
+    if (!res.ok) throw new Error(res.status);
+    const { decisions } = await res.json();
+    list.innerHTML = '';
+    if (decisions.length === 0) {
+      list.innerHTML = '<div class="ollama-muted">No decisions yet</div>';
+      return;
+    }
+    for (const d of decisions) {
+      const row = document.createElement('div');
+      row.className = 'routing-decision-row' + (d.route === '__error__' ? ' err' : '');
+      const when = new Date(d.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const model = d.final_model || d.bound_model || '';
+      row.textContent = `${when} · ${d.mode || 'shadow'} · ${d.route} → ${model} · ${d.ms} ms`;
+      row.title = d.prompt_head || '';
+      list.appendChild(row);
+    }
+  } catch {
+    list.innerHTML = '<div class="ollama-muted">Log unavailable</div>';
+  }
 }
 
 // Display label for a model kind. The STORED kind stays 'openai-compatible'
