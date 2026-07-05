@@ -222,6 +222,9 @@ function litellmInstallerPath(root: string): string {
 function routingInstallerPath(root: string): string {
   return path.join(root, '.claude/skills/add-routing/resources/install-routing.sh');
 }
+function bindRoutesPath(root: string): string {
+  return path.join(root, '.claude/skills/add-routing/resources/bind-routes.mjs');
+}
 
 /** Hosts the current router config was generated from (gen-config's header). */
 export function parseConfiguredHosts(configText: string): string | null {
@@ -275,6 +278,12 @@ export function startRosterRefresh(root = process.cwd()): boolean {
   const steps: Array<[string, string[]]> = [['bash', [installer, '--hosts', hosts]]];
   if (fs.existsSync(path.join(root, 'data/litellm/router_hook.py')) && fs.existsSync(routingInstallerPath(root))) {
     steps.push(['bash', [routingInstallerPath(root)]]);
+  }
+  // Capability auto-binding: a refreshed roster re-binds unpinned routes so a
+  // freshly pulled model joins routing on its own (see the routing skill's
+  // bind-routes.mjs — pins, escalate, and descriptions are never touched).
+  if (fs.existsSync(bindRoutesPath(root))) {
+    steps.push(['node', [bindRoutesPath(root), '--apply']]);
   }
 
   const runStep = (i: number): void => {
