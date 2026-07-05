@@ -6092,3 +6092,49 @@ a.lightbox-btn {
 .ollama-model-list li {
   padding: 2px 2px;
 }
+
+/* ── Dashboard: router traffic panel ─────────────────────────────────── */
+.router-summary {
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+.router-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 3px 0;
+  font-size: var(--fs-sm);
+}
+.router-bar-label {
+  flex: 0 0 34%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.router-bar-track {
+  flex: 1;
+  height: 8px;
+  border-radius: var(--radius-sm);
+  background: var(--pre-bg);
+  overflow: hidden;
+}
+.router-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: var(--radius-sm);
+}
+.router-bar-count {
+  flex: 0 0 auto;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  min-width: 30px;
+  text-align: right;
+}
+.router-routes {
+  margin-top: 8px;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}

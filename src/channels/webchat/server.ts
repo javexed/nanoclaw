@@ -139,6 +139,7 @@ import {
   getPullsSnapshot,
   getRosterRefreshState,
   getRouterInfo,
+  getRouterMetrics,
   listHostModels,
   parseConfiguredHosts,
   startPull,
@@ -1566,6 +1567,11 @@ async function handleHttp(
     } catch (err) {
       return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
     }
+  }
+  if (url.pathname === '/api/router/metrics' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const days = Math.max(1, Math.min(30, Number(url.searchParams.get('days')) || 7));
+    return json(res, 200, getRouterMetrics(days));
   }
   if (url.pathname === '/api/router/models' && method === 'GET') {
     if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });

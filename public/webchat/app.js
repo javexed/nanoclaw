@@ -5795,6 +5795,55 @@ async function refreshDashboard() {
   }
   renderHealthStrip(snap);
   renderMetrics(snap);
+  refreshRouterMetrics();
+}
+
+// Router traffic panel: per-model request counts from the routing decision
+// log (the shadow hook classifies every LiteLLM completion, so the log IS
+// the request ledger). Owner-only; the section stays hidden when the
+// routing skill isn't installed or the viewer isn't the owner.
+async function refreshRouterMetrics() {
+  const section = $('#dash-router-section');
+  if (!section) return;
+  try {
+    const res = await authFetch('/api/router/metrics?days=7');
+    if (!res.ok) {
+      section.hidden = true;
+      return;
+    }
+    const m = await res.json();
+    if (!m.available || m.total === 0) {
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
+    const max = Math.max(...m.byModel.map((x) => x.count), 1);
+    const bars = m.byModel
+      .map(
+        (x) => `
+      <div class="router-bar-row" title="${esc(x.model)}">
+        <span class="router-bar-label">${esc(x.model)}</span>
+        <span class="router-bar-track"><span class="router-bar-fill" style="width:${Math.max(3, Math.round((100 * x.count) / max))}%"></span></span>
+        <span class="router-bar-count">${x.count}</span>
+      </div>`,
+      )
+      .join('');
+    const routes = m.byRoute
+      .filter((r) => r.route !== '__error__')
+      .map((r) => `${esc(r.route)} ${r.count}`)
+      .join(' · ');
+    const health = [];
+    health.push(`${m.total} request${m.total === 1 ? '' : 's'}`);
+    health.push(`${m.live} via auto`);
+    if (m.escalations > 0) health.push(`${m.escalations} escalated to Claude`);
+    if (m.errors > 0) health.push(`${m.errors} classifier error${m.errors === 1 ? '' : 's'}`);
+    $('#dash-router').innerHTML =
+      `<div class="router-summary">${esc(health.join(' · '))}</div>` +
+      bars +
+      (routes ? `<div class="router-routes">Routes: ${routes}</div>` : '');
+  } catch {
+    section.hidden = true;
+  }
 }
 
 function renderHealthStrip(snap) {

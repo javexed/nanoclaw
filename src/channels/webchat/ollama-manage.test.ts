@@ -124,3 +124,29 @@ describe('getRosterRefreshState', () => {
     expect(getRosterRefreshState('/nonexistent-root').available).toBe(false);
   });
 });
+
+describe('computeRouterMetrics', () => {
+  const NOW = 1_783_200_000_000;
+  const line = (o: object) => JSON.stringify(o);
+  it('counts per served model, splits live/shadow, excludes escalations from model counts', async () => {
+    const { computeRouterMetrics } = await import('./ollama-manage.js');
+    const text = [
+      line({ ts: NOW, mode: 'live', route: 'code', final_model: 'ornith:latest' }),
+      line({ ts: NOW, mode: 'live', route: 'escalate', final_model: '__escalate__' }),
+      line({ ts: NOW, mode: 'shadow', route: 'general', requested_model: 'gemma4:latest' }),
+      line({ ts: NOW, route: 'general', requested_model: 'gemma4:latest' }), // legacy, no mode
+      line({ ts: NOW, mode: 'live', route: '__error__', final_model: 'gemma4:latest', error: 'ReadTimeout' }),
+      line({ ts: NOW - 10 * 86_400_000, mode: 'live', route: 'code', final_model: 'old:1b' }), // outside window
+      '{torn',
+    ].join('\n');
+    const m = computeRouterMetrics(text, 7, NOW + 1000);
+    expect(m.total).toBe(5);
+    expect(m.live).toBe(3);
+    expect(m.errors).toBe(1);
+    expect(m.escalations).toBe(1);
+    expect(m.byModel.find((x) => x.model === 'gemma4:latest')!.count).toBe(3);
+    expect(m.byModel.find((x) => x.model === 'ornith:latest')!.count).toBe(1);
+    expect(m.byModel.some((x) => x.model === '__escalate__')).toBe(false);
+    expect(m.byRoute[0].count).toBeGreaterThan(0);
+  });
+});

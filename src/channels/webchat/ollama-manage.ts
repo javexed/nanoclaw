@@ -345,3 +345,71 @@ export async function getRouterInfo(root = process.cwd()): Promise<RouterInfo> {
     return { available: true, endpoint, models: [] };
   }
 }
+
+// ── Router metrics (dashboard) ─────────────────────────────────────────────
+
+export interface RouterMetrics {
+  available: boolean;
+  days: number;
+  total: number;
+  live: number;
+  errors: number;
+  escalations: number;
+  byModel: Array<{ model: string; count: number }>;
+  byRoute: Array<{ route: string; count: number }>;
+}
+
+/**
+ * Aggregate the routing decision log for the dashboard. The shadow hook
+ * classifies EVERY completion through LiteLLM, so the JSONL doubles as the
+ * per-model request ledger: shadow entries count against the model that was
+ * asked for, live ('auto') entries against the model the router chose.
+ */
+export function computeRouterMetrics(text: string, days: number, nowMs = Date.now()): Omit<RouterMetrics, 'available' | 'days'> {
+  const since = nowMs - days * 86_400_000;
+  const byModel = new Map<string, number>();
+  const byRoute = new Map<string, number>();
+  let total = 0;
+  let live = 0;
+  let errors = 0;
+  let escalations = 0;
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    let e: { ts?: number; mode?: string; route?: string; requested_model?: string; final_model?: string; bound_model?: string };
+    try {
+      e = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (typeof e.ts !== 'number' || e.ts < since) continue;
+    total += 1;
+    const mode = e.mode || 'shadow';
+    if (mode === 'live') live += 1;
+    const route = e.route || '?';
+    byRoute.set(route, (byRoute.get(route) ?? 0) + 1);
+    if (route === '__error__') errors += 1;
+    if (e.final_model === '__escalate__' || e.bound_model === '__escalate__') {
+      escalations += 1;
+      continue; // escalated turns ran on the fallback provider, not a roster model
+    }
+    const model = mode === 'live' ? e.final_model : e.requested_model;
+    if (model) byModel.set(model, (byModel.get(model) ?? 0) + 1);
+  }
+  const sort = (m: Map<string, number>) => [...m.entries()].sort((a, b) => b[1] - a[1]);
+  return {
+    total,
+    live,
+    errors,
+    escalations,
+    byModel: sort(byModel).map(([model, count]) => ({ model, count })),
+    byRoute: sort(byRoute).map(([route, count]) => ({ route, count })),
+  };
+}
+
+export function getRouterMetrics(days: number, root = process.cwd()): RouterMetrics {
+  const logPath = path.join(root, 'data/litellm/routing/routing-shadow.jsonl');
+  if (!fs.existsSync(logPath)) {
+    return { available: false, days, total: 0, live: 0, errors: 0, escalations: 0, byModel: [], byRoute: [] };
+  }
+  return { available: true, days, ...computeRouterMetrics(fs.readFileSync(logPath, 'utf8'), days) };
+}
