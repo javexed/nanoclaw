@@ -8436,6 +8436,35 @@ function renderModels() {
       li.appendChild(uses);
     }
 
+    // Same − as the server cards: remove from the selectable list right here.
+    // Refuses with names when agents are assigned; row click still opens the
+    // detail (the button stops propagation).
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'btn btn-ghost select-toggle on';
+    remove.textContent = '−';
+    remove.title = 'Remove from selectable models';
+    remove.setAttribute('aria-label', remove.title);
+    remove.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      remove.disabled = true;
+      try {
+        const r = await authFetch('/api/models/' + encodeURIComponent(model.id), { method: 'DELETE' });
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({}));
+          const who = (model.agents || []).map((a) => a.name).join(', ');
+          throw new Error(who ? 'in use by ' + who + ' — unassign first' : body.error || r.status);
+        }
+        showToast('Removed from selectable models');
+        if (selectedModelId === model.id) closeModelDetail();
+        fetchModels();
+      } catch (err) {
+        showToast(String(err.message || err), { kind: 'error' });
+        remove.disabled = false;
+      }
+    });
+    li.appendChild(remove);
+
     li.setAttribute('role', 'button');
     li.setAttribute('tabindex', '0');
     li.addEventListener('click', () => {
