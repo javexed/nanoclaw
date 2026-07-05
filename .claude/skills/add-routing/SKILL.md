@@ -166,6 +166,28 @@ arming a fallback. Without a `fallback_provider`, an escalate match surfaces
 to the user as an error — don't add the route until the group has a fallback
 (or you want a hard refusal).
 
+## Automatic capability bindings (roster-driven routing)
+
+Routes stay operator-described; the MODEL each route binds to is derived
+automatically from the live roster and a capability catalog:
+
+```bash
+node .claude/skills/add-routing/resources/bind-routes.mjs          # dry-run decision table
+node .claude/skills/add-routing/resources/bind-routes.mjs --apply  # rewrite unpinned bindings
+```
+
+`capabilities.json` (skill-owned) profiles model families — per-route quality
+0-100 plus a size penalty (`quality − (paramB − max_comfortable_b) ×
+size_penalty_per_b`) so an oversized specialist loses to a right-sized one on
+modest hardware. Operator layer: `data/litellm/routing/capabilities.local.json`
+(same shape, matched first, can raise `max_comfortable_b` on big-GPU hosts).
+Rules: pinned routes (`"pinned": true`) and the escalate route are never
+touched; descriptions are never touched; unknown roster models are reported,
+never auto-bound; a route with no scored candidate keeps its current binding.
+Runs automatically after the webchat "Refresh roster…" action and in the
+nightly recalibration timer — pull a model, refresh, and it joins routing by
+capability on its own.
+
 ## Nightly recalibration (Phase 4, §16e tier-1)
 
 Opt-in nightly script over the decision log — no training, no LLM calls:

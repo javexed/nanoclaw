@@ -41,7 +41,7 @@ Description=NanoClaw routing recalibration (llm-router §16e tier-1)
 [Service]
 Type=oneshot
 WorkingDirectory=$REPO
-ExecStart=$NODE_BIN $REPO/.claude/skills/add-routing/resources/recalibrate.mjs $APPLY --rotate
+ExecStart=/bin/bash -c '$NODE_BIN $REPO/.claude/skills/add-routing/resources/recalibrate.mjs $APPLY --rotate && $NODE_BIN $REPO/.claude/skills/add-routing/resources/bind-routes.mjs --apply'
 EOF
 
 cat > "$UNIT_DIR/nanoclaw-routing-recal.timer" <<EOF
