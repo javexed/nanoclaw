@@ -3,19 +3,121 @@
   "max_comfortable_b": 14,
   "size_penalty_per_b": 4,
   "entries": [
-    { "pattern": "ornith",      "quality": { "code": 88, "reasoning": 70, "general": 60 }, "notes": "agentic-coding specialist (DeepReinforce), reasoning model" },
-    { "pattern": "qwen3-coder", "quality": { "code": 92 }, "notes": "coding specialist" },
-    { "pattern": "coder",       "quality": { "code": 85 }, "notes": "generic *coder* family fallback" },
-    { "pattern": "qwen3.5",     "quality": { "code": 62, "reasoning": 60, "general": 62 } },
-    { "pattern": "qwen",        "quality": { "code": 55, "reasoning": 55, "general": 55 } },
-    { "pattern": "gemma",       "quality": { "reasoning": 72, "general": 75, "code": 50 } },
-    { "pattern": "llama3.2",    "quality": { "general": 45, "code": 30, "reasoning": 35 }, "notes": "small & fast" },
-    { "pattern": "llama",       "quality": { "general": 55, "reasoning": 50, "code": 40 } },
-    { "pattern": "deepseek-r1", "quality": { "reasoning": 90, "code": 75, "general": 60 } },
-    { "pattern": "deepseek",    "quality": { "code": 80, "reasoning": 70, "general": 60 } },
-    { "pattern": "minimax",     "quality": { "general": 70, "reasoning": 65, "code": 55 } },
-    { "pattern": "mistral",     "quality": { "general": 65, "reasoning": 60, "code": 55 } },
-    { "pattern": "phi",         "quality": { "reasoning": 60, "general": 55, "code": 45 } },
-    { "pattern": "arch-router", "quality": {}, "notes": "classifier — never a route target" }
+    {
+      "pattern": "llava",
+      "quality": {
+        "vision": 85
+      },
+      "notes": "vision-language model"
+    },
+    {
+      "pattern": "ornith",
+      "quality": {
+        "code": 88,
+        "reasoning": 70,
+        "general": 60
+      },
+      "notes": "agentic-coding specialist (DeepReinforce), reasoning model"
+    },
+    {
+      "pattern": "qwen3-coder",
+      "quality": {
+        "code": 92
+      },
+      "notes": "coding specialist"
+    },
+    {
+      "pattern": "coder",
+      "quality": {
+        "code": 85
+      },
+      "notes": "generic *coder* family fallback"
+    },
+    {
+      "pattern": "qwen3.5",
+      "quality": {
+        "code": 62,
+        "reasoning": 60,
+        "general": 62
+      }
+    },
+    {
+      "pattern": "qwen",
+      "quality": {
+        "code": 55,
+        "reasoning": 55,
+        "general": 55
+      }
+    },
+    {
+      "pattern": "gemma",
+      "quality": {
+        "reasoning": 72,
+        "general": 75,
+        "code": 50
+      }
+    },
+    {
+      "pattern": "llama3.2",
+      "quality": {
+        "general": 45,
+        "code": 30,
+        "reasoning": 35
+      },
+      "notes": "small & fast"
+    },
+    {
+      "pattern": "llama",
+      "quality": {
+        "general": 55,
+        "reasoning": 50,
+        "code": 40
+      }
+    },
+    {
+      "pattern": "deepseek-r1",
+      "quality": {
+        "reasoning": 90,
+        "code": 75,
+        "general": 60
+      }
+    },
+    {
+      "pattern": "deepseek",
+      "quality": {
+        "code": 80,
+        "reasoning": 70,
+        "general": 60
+      }
+    },
+    {
+      "pattern": "minimax",
+      "quality": {
+        "general": 70,
+        "reasoning": 65,
+        "code": 55
+      }
+    },
+    {
+      "pattern": "mistral",
+      "quality": {
+        "general": 65,
+        "reasoning": 60,
+        "code": 55
+      }
+    },
+    {
+      "pattern": "phi",
+      "quality": {
+        "reasoning": 60,
+        "general": 55,
+        "code": 45
+      }
+    },
+    {
+      "pattern": "arch-router",
+      "quality": {},
+      "notes": "classifier \u2014 never a route target"
+    }
   ]
 }
