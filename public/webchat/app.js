@@ -772,6 +772,26 @@ function blockingOverlayOpen() {
 // permissions, agents/models) — the same path as its Back button, so history
 // and the OS back gesture stay in sync. Capture phase so it can defer to any
 // open modal/menu (which closes on its own bubble-phase handler instead).
+// Detail asides (model/agent/MCP/members) sit one layer above their view:
+// Escape closes the aside first, the next Escape closes the view — same
+// "one layer per press" rule as everything else (DESIGN.md §4).
+function closeTopDetailAside() {
+  const layers = [
+    ['members-panel', () => { $('#members-panel').hidden = true; }],
+    ['model-detail', closeModelDetail],
+    ['agent-detail', closeAgentDetail],
+    ['mcp-detail', closeMcpDetail],
+  ];
+  for (const [id, close] of layers) {
+    const el = document.getElementById(id);
+    if (el && !el.hidden) {
+      close();
+      return true;
+    }
+  }
+  return false;
+}
+
 document.addEventListener(
   'keydown',
   (e) => {
@@ -781,6 +801,7 @@ document.addEventListener(
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
     e.preventDefault();
     e.stopPropagation();
+    if (closeTopDetailAside()) return; // aside is the topmost layer
     closeView(viewStack[viewStack.length - 1].name);
   },
   true,
@@ -8060,6 +8081,40 @@ function buildSelectToggle(kind, endpoint, modelId, displayName) {
   return btn;
 }
 
+// Accordion state per server card, remembered across visits.
+function cardOpen(key) {
+  return localStorage.getItem('serverCardOpen:' + key) === '1';
+}
+function setCardOpen(key, open) {
+  localStorage.setItem('serverCardOpen:' + key, open ? '1' : '0');
+}
+// Collapsible card chrome: chevron + clickable header + a body wrapper that
+// hides when collapsed. Returns the body element to append content into.
+function makeCardAccordion(card, head, key, summaryEl) {
+  const chev = document.createElement('span');
+  chev.className = 'ollama-card-chevron';
+  chev.textContent = '\u203a';
+  head.prepend(chev);
+  const body = document.createElement('div');
+  card.appendChild(body);
+  const apply = () => {
+    const open = cardOpen(key);
+    body.hidden = !open;
+    if (summaryEl) summaryEl.hidden = open;
+    chev.classList.toggle('open', open);
+  };
+  head.classList.add('clickable');
+  head.setAttribute('role', 'button');
+  head.setAttribute('tabindex', '0');
+  head.addEventListener('click', (e) => {
+    if (e.target.closest('button')) return; // card actions keep working
+    setCardOpen(key, !cardOpen(key));
+    apply();
+  });
+  apply();
+  return body;
+}
+
 function buildRouterCard(router) {
   const card = document.createElement('div');
   card.className = 'ollama-host-card';
@@ -8071,6 +8126,10 @@ function buildRouterCard(router) {
   label.className = 'ollama-host-name';
   label.textContent = 'LiteLLM router';
   head.appendChild(label);
+  const summary = document.createElement('span');
+  summary.className = 'ollama-card-summary';
+  summary.textContent = router.models.length + ' model' + (router.models.length === 1 ? '' : 's');
+  head.appendChild(summary);
   const refresh = document.createElement('button');
   refresh.className = 'btn btn-ghost ollama-card-action';
   refresh.type = 'button';
@@ -8079,11 +8138,7 @@ function buildRouterCard(router) {
   refresh.addEventListener('click', () => startRosterRefresh(card, refresh));
   head.appendChild(refresh);
   card.appendChild(head);
-
-  const note = document.createElement('div');
-  note.className = 'ollama-muted ollama-card-note';
-  note.textContent = 'Adding from here runs the agent on the OpenCode harness.';
-  card.appendChild(note);
+  const body = makeCardAccordion(card, head, 'router', summary);
 
   const ul = document.createElement('ul');
   ul.className = 'ollama-model-list';
@@ -8099,12 +8154,12 @@ function buildRouterCard(router) {
     li.appendChild(buildSelectToggle('openai-compatible', router.endpoint, id, id));
     ul.appendChild(li);
   }
-  card.appendChild(ul);
+  body.appendChild(ul);
 
   const log = document.createElement('pre');
   log.className = 'roster-refresh-log';
   log.hidden = true;
-  card.appendChild(log);
+  body.appendChild(log);
   // Hide the refresh action when the installer isn't available in this checkout.
   authFetch('/api/litellm/roster-refresh')
     .then((r) => r.json())
@@ -8159,12 +8214,18 @@ function buildOllamaHostCard(host) {
   label.className = 'ollama-host-name';
   label.textContent = host.replace(/^https?:\/\//, '');
   head.appendChild(label);
+  const summary = document.createElement('span');
+  summary.className = 'ollama-card-summary';
+  summary.textContent = '…';
+  head.appendChild(summary);
   card.appendChild(head);
+  const body = makeCardAccordion(card, head, host, summary);
+  card._summary = summary;
 
   const ul = document.createElement('ul');
   ul.className = 'ollama-model-list';
   ul.innerHTML = '<li class="ollama-muted">Loading…</li>';
-  card.appendChild(ul);
+  body.appendChild(ul);
 
   const pullRow = document.createElement('div');
   pullRow.className = 'ollama-pull-row';
@@ -8182,12 +8243,12 @@ function buildOllamaHostCard(host) {
   });
   pullRow.appendChild(input);
   pullRow.appendChild(btn);
-  card.appendChild(pullRow);
+  body.appendChild(pullRow);
 
   const progress = document.createElement('div');
   progress.className = 'ollama-pull-status';
   progress.hidden = true;
-  card.appendChild(progress);
+  card.appendChild(progress); // outside the body: pull progress stays visible collapsed
 
   return card;
 }
@@ -8201,6 +8262,8 @@ async function loadOllamaHostModels(host) {
     const body = await res.json();
     if (!res.ok) throw new Error(body.error || res.status);
     ul.innerHTML = '';
+    const sum = card._summary;
+    if (sum) sum.textContent = body.models.length + ' model' + (body.models.length === 1 ? '' : 's');
     if (body.models.length === 0) {
       ul.innerHTML = '<li class="ollama-muted">No models installed</li>';
       return;

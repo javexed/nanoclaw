@@ -6063,3 +6063,32 @@ a.lightbox-btn {
 .ollama-card-note {
   margin: 2px 0 4px;
 }
+
+/* ── Server card accordion ───────────────────────────────────────────── */
+.ollama-host-head.clickable {
+  cursor: pointer;
+  user-select: none;
+}
+.ollama-card-chevron {
+  display: inline-block;
+  color: var(--text-dim);
+  font-weight: 700;
+  margin-right: 6px;
+  transition: transform var(--transition);
+}
+.ollama-card-chevron.open {
+  transform: rotate(90deg);
+}
+.ollama-card-summary {
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  margin-left: auto;
+  padding-right: 6px;
+}
+.ollama-host-card {
+  padding: 6px 8px;
+  margin-bottom: 6px;
+}
+.ollama-model-list li {
+  padding: 2px 2px;
+}

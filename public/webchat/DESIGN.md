@@ -201,10 +201,11 @@ first — one Escape, one layer. Any new full-screen view must register through
 full surface by toggling its `hidden` attribute alone.
 
 Current state to converge: ESC closes settings, lightbox, confirm modal, model
-picker, mention popup, overflow menu, and all full-screen views (`viewStack` +
-`popstate` + capture-phase ESC). The remaining gap is the **detail asides +
-members panel on desktop** (× only, no ESC / no backdrop). Wire them through the
-same helper.
+picker, mention popup, overflow menu, all full-screen views (`viewStack` +
+`popstate` + capture-phase ESC), **and the detail asides + members panel**
+(`closeTopDetailAside()` — the aside is one layer above its view, so the first
+Escape closes the aside, the next closes the view). Remaining gap: asides have
+no backdrop-tap or history entry yet — × and Escape only.
 
 ---
 
