@@ -13,11 +13,30 @@
 import { buildAgentGroupImage, killContainer, wakeContainer } from '../../container-runner.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getContainerConfig, updateContainerConfigJson } from '../../db/container-configs.js';
-import { getSession } from '../../db/sessions.js';
+import { getSession, getSessionsByAgentGroup } from '../../db/sessions.js';
 import type { McpServerConfig } from '../../container-config.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { ApprovalHandler } from '../approvals/index.js';
+
+/**
+ * A config/image change applies to the whole agent group, but only the session
+ * that requested it gets its container killed+respawned above. Any OTHER active
+ * session of the same group (an agent wired to multiple rooms has one session
+ * per room) keeps running its stale container — the old image without the new
+ * package, or the old container.json without the new MCP server — so the agent
+ * in that room never sees the change and re-requests it forever.
+ *
+ * Kill those sibling containers too. They carry no on_wake note (they didn't
+ * request anything) and aren't force-woken — each respawns on the current
+ * image/config on its next message.
+ */
+function respawnSiblingSessions(agentGroupId: string, requestingSessionId: string, reason: string): void {
+  for (const s of getSessionsByAgentGroup(agentGroupId)) {
+    if (s.id === requestingSessionId || s.status !== 'active') continue;
+    killContainer(s.id, reason);
+  }
+}
 
 export const applyInstallPackages: ApprovalHandler = async ({ session, payload, userId, notify }) => {
   const agentGroup = getAgentGroup(session.agent_group_id);
@@ -73,6 +92,7 @@ export const applyInstallPackages: ApprovalHandler = async ({ session, payload, 
       const s = getSession(session.id);
       if (s) wakeContainer(s);
     });
+    respawnSiblingSessions(session.agent_group_id, session.id, 'sibling session stale after package rebuild');
     log.info('Container rebuild completed (bundled with install)', { agentGroupId: session.agent_group_id });
   } catch (e) {
     notify(
@@ -122,5 +142,6 @@ export const applyAddMcpServer: ApprovalHandler = async ({ session, payload, use
     const s = getSession(session.id);
     if (s) wakeContainer(s);
   });
+  respawnSiblingSessions(session.agent_group_id, session.id, 'sibling session stale after mcp server add');
   log.info('MCP server add approved', { agentGroupId: session.agent_group_id, userId });
 };
