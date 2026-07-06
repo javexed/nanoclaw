@@ -1,23 +1,32 @@
 /**
- * Ollama host management for the webchat Models tab (owner-only surface).
+ * Backend for the webchat Models and Routing tabs (owner-only surfaces). All
+ * outbound calls to operator-supplied Ollama/LiteLLM endpoints go through
+ * models.ts's safeFetch SSRF gate.
  *
- * Three capabilities, all operating on operator-supplied Ollama endpoints
- * (every outbound fetch goes through models.ts's safeFetch SSRF gate):
+ * Ollama host management (Models tab):
+ *   - listHostModels(host)   — installed models (/api/tags) merged with what's
+ *     loaded and its VRAM split (/api/ps).
+ *   - Pull manager           — start a streamed pull (/api/pull, NDJSON) and
+ *     expose progress snapshots the client polls. One active pull per
+ *     host+model; finished jobs linger ~10 min for reconnecting clients.
+ *   - Roster refresh         — re-run the /add-litellm installer (+ /add-routing
+ *     layer when present) so a freshly pulled model becomes routable. Shells out
+ *     to the skill's own installer; reports {available:false} when the skill
+ *     isn't installed so the UI can hide the button. Skills are referenced by
+ *     path at runtime, never imported.
  *
- *   1. listHostModels(host)  — installed models (/api/tags) merged with
- *      what's currently loaded and its VRAM split (/api/ps).
- *   2. Pull manager — start a model pull (/api/pull, streamed NDJSON) and
- *      expose progress snapshots the client polls. One active pull per
- *      host+model; finished jobs linger ~10 minutes so a reconnecting
- *      client still sees the outcome.
- *   3. Roster refresh — re-run the /add-litellm installer (and the
- *      /add-routing layer when present) so a freshly pulled model becomes
- *      routable. Shells out to the skill's own installer rather than
- *      duplicating its logic; reports {available:false} when the skill
- *      isn't installed in this checkout, so the UI can hide the button.
- *      (The skills live under .claude/skills/ in installs that ran
- *      /add-litellm — this module only ever references them by path at
- *      runtime, never imports them.)
+ * LiteLLM router / classifier (Routing tab), all guarded by the routing skill
+ * being present (routes.json / capabilities.json):
+ *   - getRouterInfo / getRouterMetrics — the roster and the dashboard traffic
+ *     panel (from the routing decision log).
+ *   - Routes config CRUD (readRoutesConfig / mergeRoutesUpdate / writeRoutesConfig)
+ *     — the operator-editable routes; the classifier section is never
+ *     client-writable.
+ *   - dryClassify            — run the real classifier on a prompt, change nothing
+ *     (the "test a prompt" bench). Prompt contract KEEP-IN-SYNC with router_hook.py.
+ *   - getRouteSuggestions / computeRouteSuggestions + readCapabilityCatalog —
+ *     propose a route for a roster capability nothing covers yet.
+ *   - recentDecisions        — tail the routing decision log for the Logs sub-tab.
  */
 import { spawn } from 'child_process';
 import fs from 'fs';
