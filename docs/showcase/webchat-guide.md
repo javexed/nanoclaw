@@ -4,7 +4,7 @@
   Some shots (lobby/DM/approvals) come from a populated demo — see CAPTURE.md.
 -->
 
-# Webchat — Feature Guide
+# NanoClaw Webchat — Feature Guide
 
 A local-first chat desk **and** operator console for your [NanoClaw](https://github.com/nanocoai/nanoclaw)
 agents — one installable PWA bound to `127.0.0.1`. This guide walks the whole
