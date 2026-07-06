@@ -8372,7 +8372,7 @@ async function loadRoutingTab() {
   $('#routing-timeout').value = (routingDraft.live && routingDraft.live.timeout_ms) || 5000;
   renderRouteList();
   renderRouterRoster();
-  if (routingSubtab === 'log') refreshRoutingDecisions();
+  if (routingSubtab === 'logs') refreshRoutingDecisions();
   $('#routing-bench-result').hidden = true;
   $('#routing-bench-result-log').hidden = true;
 }
@@ -8388,8 +8388,9 @@ function switchRoutingSubtab(which) {
     b.setAttribute('aria-selected', on ? 'true' : 'false');
   });
   $('#rsub-rules').hidden = which !== 'rules';
-  $('#rsub-log').hidden = which !== 'log';
-  if (which === 'log') refreshRoutingDecisions();
+  $('#rsub-models').hidden = which !== 'models';
+  $('#rsub-logs').hidden = which !== 'logs';
+  if (which === 'logs') refreshRoutingDecisions();
 }
 document.querySelectorAll('.routing-subtab').forEach((b) => {
   b.addEventListener('click', () => switchRoutingSubtab(b.dataset.rsub));
