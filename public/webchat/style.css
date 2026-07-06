@@ -2712,7 +2712,7 @@ a.lightbox-btn {
 }
 /* ── Buttons — role-based set: .btn base + four role modifiers. See DESIGN.md §2.
    Icon buttons (.lightbox-btn, .settings-btn, .file-picker-btn) and the
-   .agent-status-btn segmented control are deliberately NOT part of this set. */
+   .setting-option pills are deliberately NOT part of this set. */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -2827,6 +2827,8 @@ a.lightbox-btn {
   font-family: 'SF Mono', 'Fira Code', monospace;
   resize: vertical;
   min-height: 120px;
+  width: 100%;
+  box-sizing: border-box;
 }
 .agent-detail-form textarea:focus {
   border-color: var(--accent);
@@ -4645,6 +4647,26 @@ a.lightbox-btn {
 .model-picker-row.is-default {
   background: var(--surface2);
 }
+/* Attach-picker rows carry a +/− toggle instead of single-select semantics. */
+.attach-picker-toggle {
+  margin-left: auto;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 1.05rem;
+  line-height: 1;
+}
+.attach-picker-row.selected .attach-picker-toggle {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
 .model-picker-row-top {
   display: flex;
   align-items: center;
@@ -5509,39 +5531,55 @@ a.lightbox-btn {
   gap: 6px;
   margin: 4px 0;
 }
-.agent-status-control {
-  display: inline-flex;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  overflow: hidden;
-  align-self: flex-start;
+
+/* ── Agent detail accordions (MCP servers, Rooms, Instructions) ─────────────
+   Collapsible sections in the agent detail form; each summary carries an
+   optional count badge and a rotating chevron. */
+.agent-accordion {
+  border-top: 1px solid var(--border);
 }
-.agent-status-btn {
-  background: transparent;
-  color: var(--text-dim);
-  border: none;
-  border-right: 1px solid var(--border);
-  padding: 6px 14px;
-  font-size: var(--fs-sm);
+.agent-accordion > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 0;
   cursor: pointer;
-  transition:
-    background 0.12s,
-    color 0.12s;
+  list-style: none;
+  user-select: none;
 }
-.agent-status-btn:last-child {
-  border-right: none;
+.agent-accordion > summary::-webkit-details-marker {
+  display: none;
 }
-.agent-status-btn:hover {
-  color: var(--text);
+.agent-accordion > summary .form-label {
+  margin-right: auto;
 }
-.agent-status-btn.active {
-  background: var(--accent);
-  color: #fff;
-}
-#agent-status-hint {
-  margin: 0;
+.agent-accordion-count {
+  font-size: 0.7rem;
   color: var(--text-dim);
-  font-size: var(--fs-xs);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0 7px;
+  min-width: 18px;
+  text-align: center;
+}
+.agent-accordion-count:empty {
+  display: none;
+}
+.agent-accordion > summary::after {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid var(--text-dim);
+  border-bottom: 2px solid var(--text-dim);
+  transform: rotate(-45deg);
+  transition: transform 0.15s ease;
+}
+.agent-accordion[open] > summary::after {
+  transform: rotate(45deg);
+}
+.agent-accordion > *:not(summary) {
+  padding-bottom: 12px;
 }
 
 /* Badge next to a non-active agent in the list. */

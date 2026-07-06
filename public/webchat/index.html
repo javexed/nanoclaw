@@ -439,6 +439,14 @@
                 </button>
               </div>
               <form id="agent-detail-form" class="agent-detail-form">
+                <div class="agent-status-field">
+                  <span class="form-label">Status</span>
+                  <div id="agent-status-control" class="setting-options" role="group" aria-label="Agent status">
+                    <button type="button" class="setting-option" data-status="active">Active</button>
+                    <button type="button" class="setting-option" data-status="paused">Paused</button>
+                    <button type="button" class="setting-option" data-status="archived">Archived</button>
+                  </div>
+                </div>
                 <label>
                   <span class="form-label">Name</span>
                   <input id="agent-name" type="text" required />
@@ -454,15 +462,25 @@
                   </button>
                   <input id="agent-model" type="hidden" />
                 </label>
-                <div class="agent-status-field">
-                  <span class="form-label">Status</span>
-                  <div id="agent-status-control" class="agent-status-control" role="group" aria-label="Agent status">
-                    <button type="button" class="agent-status-btn" data-status="active">Active</button>
-                    <button type="button" class="agent-status-btn" data-status="paused">Paused</button>
-                    <button type="button" class="agent-status-btn" data-status="archived">Archived</button>
+                <!-- MCP servers attached to this agent — a compact list + shared
+                     attach picker over the registry (the MCP tab defines servers;
+                     this only attaches/detaches them). -->
+                <details class="agent-accordion" open>
+                  <summary class="agent-accordion-summary"><span class="form-label">MCP servers</span><span class="agent-accordion-count" id="agent-mcp-count"></span></summary>
+                  <div id="agent-mcp-section" class="agent-mcp-section">
+                    <ul id="agent-mcp-list" class="agent-mcp-list"></ul>
+                    <button type="button" id="agent-mcp-attach-toggle" class="btn btn-secondary">+ Attach server</button>
                   </div>
-                  <p class="form-hint" id="agent-status-hint"></p>
-                </div>
+                </details>
+                <!-- Rooms this agent is wired to (assign / unassign) via the shared
+                     attach picker. -->
+                <details class="agent-accordion" open>
+                  <summary class="agent-accordion-summary"><span class="form-label">Rooms</span><span class="agent-accordion-count" id="agent-rooms-count"></span></summary>
+                  <div id="agent-rooms-section" class="agent-rooms-section">
+                    <ul id="agent-wired-rooms" class="room-wired-agents"></ul>
+                    <button type="button" id="agent-add-room-toggle" class="btn btn-secondary">+ Wire to room</button>
+                  </div>
+                </details>
                 <label>
                   <span class="form-label">Instructions</span>
                   <textarea id="agent-instructions" rows="12" placeholder="CLAUDE.md instructions…"></textarea>
@@ -474,40 +492,6 @@
                   <button type="button" id="agent-delete" class="btn btn-danger">Delete this agent</button>
                 </div>
               </form>
-              <!-- Rooms this agent is wired to (assign / unassign). Mirror of the
-                   room-detail "Wired agents" section; reuses its styling. -->
-              <div id="agent-rooms-section" class="agent-rooms-section">
-                <span class="form-label">Rooms</span>
-                <ul id="agent-wired-rooms" class="room-wired-agents"></ul>
-                <button type="button" id="agent-add-room-toggle" class="btn btn-secondary">+ Wire to room</button>
-                <div id="agent-add-room-form" class="room-add-agent-form" hidden>
-                  <input
-                    type="search"
-                    id="agent-add-room-search"
-                    class="model-picker-search"
-                    placeholder="Filter rooms…"
-                    autocomplete="off"
-                  />
-                  <ul id="agent-add-room-list" class="room-create-agent-checklist"></ul>
-                  <button type="button" id="agent-add-room-submit" class="btn btn-primary" disabled>
-                    Wire selected
-                  </button>
-                </div>
-              </div>
-              <!-- MCP servers attached to this agent — a compact list + picker over
-                   the shared registry (the MCP tab defines servers; this only
-                   attaches/detaches them). Mirrors the Rooms wiring block above. -->
-              <div id="agent-mcp-section" class="agent-mcp-section">
-                <span class="form-label">MCP servers</span>
-                <ul id="agent-mcp-list" class="agent-mcp-list"></ul>
-                <button type="button" id="agent-mcp-attach-toggle" class="btn btn-secondary">+ Attach server</button>
-                <div id="agent-mcp-attach-form" class="room-add-agent-form" hidden>
-                  <ul id="agent-mcp-attach-list" class="room-create-agent-checklist"></ul>
-                  <button type="button" id="agent-mcp-attach-submit" class="btn btn-primary" disabled>
-                    Attach selected
-                  </button>
-                </div>
-              </div>
             </div>
             <!-- Create mode (form) -->
             <div id="agent-create-view" hidden>
@@ -1483,6 +1467,33 @@
         </div>
         <div class="model-picker-footer">
           <button type="button" id="model-picker-add-new" class="btn btn-secondary">+ Add new model</button>
+        </div>
+      </div>
+    </div>
+    <!-- Shared multi-select attach picker (MCP servers, rooms) — reuses the
+         model-picker bottom-sheet chrome; each row toggles attach/detach. -->
+    <div id="attach-picker" class="model-picker-overlay" hidden>
+      <div class="model-picker-backdrop"></div>
+      <div class="model-picker-sheet" role="dialog" aria-modal="true" aria-label="Attach">
+        <div class="model-picker-grabber" aria-hidden="true"></div>
+        <div class="model-picker-header">
+          <span id="attach-picker-title">Attach</span>
+          <button id="attach-picker-close" class="members-close" aria-label="Close">
+            <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+          </button>
+        </div>
+        <div class="model-picker-body">
+          <input
+            id="attach-picker-search"
+            type="search"
+            class="model-picker-search"
+            placeholder="Search…"
+            autocomplete="off"
+          />
+          <ul id="attach-picker-list" class="model-picker-list"></ul>
+        </div>
+        <div class="model-picker-footer">
+          <button type="button" id="attach-picker-add-new" class="btn btn-secondary">+ Add new</button>
         </div>
       </div>
     </div>
