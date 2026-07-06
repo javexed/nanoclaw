@@ -242,6 +242,68 @@ export function getRosterRefreshState(root = process.cwd()): RosterRefreshState 
   return refreshState;
 }
 
+/** The subset of installer state the shared runner drives (a rolling log job). */
+interface InstallState {
+  running: boolean;
+  lines: string[];
+  exitCode: number | null;
+  startedAt: number | null;
+  finishedAt: number | null;
+}
+
+/** A chain step: a spawned command, or an in-process callback (with a log label). */
+type InstallStep = { run: [string, string[]] } | { call: () => void; label: string };
+
+/**
+ * Run installer steps in sequence, streaming a capped rolling log into `state`.
+ * Stops on the first non-zero exit or thrown callback. Shared by the roster
+ * refresh and the routing install so the spawn/log boilerplate lives once.
+ */
+function runInstallChain(state: InstallState, steps: InstallStep[], root: string): void {
+  const append = (chunk: Buffer | string): void => {
+    for (const l of String(chunk).split('\n')) {
+      const line = l.trimEnd();
+      if (!line) continue;
+      state.lines.push(line);
+      if (state.lines.length > LINES_CAP) state.lines.shift();
+    }
+  };
+  const fail = (code: number): void => {
+    state.running = false;
+    state.exitCode = code;
+    state.finishedAt = Date.now();
+  };
+  const runStep = (i: number): void => {
+    if (i >= steps.length) {
+      state.running = false;
+      state.exitCode = 0;
+      state.finishedAt = Date.now();
+      return;
+    }
+    const step = steps[i];
+    if ('call' in step) {
+      append(`→ ${step.label} …`);
+      try {
+        step.call();
+      } catch (err) {
+        append(`✗ ${err instanceof Error ? err.message : String(err)}`);
+        return fail(1);
+      }
+      return runStep(i + 1);
+    }
+    const [cmd, args] = step.run;
+    append(`→ ${args[0].split('/').slice(-1)[0]} …`);
+    const child = spawn(cmd, args, { cwd: root });
+    child.stdout.on('data', append);
+    child.stderr.on('data', append);
+    child.on('close', (code) => {
+      if (code !== 0) return fail(code ?? 1);
+      runStep(i + 1);
+    });
+  };
+  runStep(0);
+}
+
 /**
  * Re-run the litellm installer with the hosts the current config was built
  * from, then the routing layer's installer when its hook is installed
@@ -266,50 +328,110 @@ export function startRosterRefresh(root = process.cwd()): boolean {
   refreshState.startedAt = Date.now();
   refreshState.finishedAt = null;
 
-  const append = (chunk: Buffer | string): void => {
-    for (const l of String(chunk).split('\n')) {
-      const line = l.trimEnd();
-      if (!line) continue;
-      refreshState.lines.push(line);
-      if (refreshState.lines.length > LINES_CAP) refreshState.lines.shift();
-    }
-  };
-
-  const steps: Array<[string, string[]]> = [['bash', [installer, '--hosts', hosts]]];
+  const steps: InstallStep[] = [{ run: ['bash', [installer, '--hosts', hosts]] }];
   if (fs.existsSync(path.join(root, 'data/litellm/router_hook.py')) && fs.existsSync(routingInstallerPath(root))) {
-    steps.push(['bash', [routingInstallerPath(root)]]);
+    steps.push({ run: ['bash', [routingInstallerPath(root)]] });
   }
   // Capability auto-binding: a refreshed roster re-binds unpinned routes so a
   // freshly pulled model joins routing on its own (see the routing skill's
   // bind-routes.mjs — pins, escalate, and descriptions are never touched).
   if (fs.existsSync(bindRoutesPath(root))) {
-    steps.push(['node', [bindRoutesPath(root), '--apply']]);
+    steps.push({ run: ['node', [bindRoutesPath(root), '--apply']] });
+  }
+  runInstallChain(refreshState, steps, root);
+  return true;
+}
+
+// ── Routing install (one-click "Set up routing" from Settings) ─────────────
+
+const ARCH_ROUTER_MODEL = 'hf.co/katanemo/Arch-Router-1.5B.gguf:Q4_K_M';
+
+const routingInstallState: InstallState = {
+  running: false,
+  lines: [],
+  exitCode: null,
+  startedAt: null,
+  finishedAt: null,
+};
+
+export interface RoutingInstallState extends InstallState {
+  /** routes.json exists — routing is scaffolded and the Routing tab can show. */
+  installed: boolean;
+  /** The LiteLLM router is installed (add-litellm ran) — routing's prerequisite. */
+  litellmReady: boolean;
+  /** The Arch-Router classifier download, if one has been kicked off. */
+  pull: PullJob | null;
+}
+
+export function getRoutingInstallState(root = process.cwd()): RoutingInstallState {
+  const pull = getPullsSnapshot().find((j) => j.model === ARCH_ROUTER_MODEL) ?? null;
+  return {
+    ...routingInstallState,
+    installed: fs.existsSync(routesPathFor(root)),
+    litellmReady: fs.existsSync(path.join(root, 'data/litellm/config.yaml')),
+    pull,
+  };
+}
+
+/**
+ * Point the seeded classifier at the real Ollama host. router_hook.py runs
+ * INSIDE the LiteLLM container, so the host is `host.docker.internal`, not
+ * `localhost` (the roster path uses the same form). Idempotent — only the
+ * install seed's `CLASSIFIER-HOST` placeholder is rewritten, never an
+ * operator-set host. mergeRoutesUpdate refuses to touch `classifier`, so this
+ * is the one place that owns it.
+ */
+function configureClassifierHost(root: string): void {
+  const cfg = readRoutesConfig(root);
+  if (!cfg) throw new Error('routes.json not found after install');
+  const classifier = (cfg.classifier ?? {}) as Record<string, unknown>;
+  const url = typeof classifier.url === 'string' ? classifier.url : '';
+  if (url.includes('CLASSIFIER-HOST')) {
+    classifier.url = url.replace('CLASSIFIER-HOST', 'host.docker.internal');
+    cfg.classifier = classifier;
+    writeRoutesConfig(cfg, root);
+  }
+}
+
+export interface StartRoutingResult {
+  started: boolean;
+  error?: 'already-running' | 'litellm-not-installed' | 'installer-missing';
+}
+
+/**
+ * One-click routing setup: kick the Arch-Router classifier pull (streamed via
+ * the normal pull machinery, in parallel), then run install-routing.sh → point
+ * the classifier at the host → auto-bind routes to the roster. Shadow mode by
+ * default (the template's `live.enabled:false`). One install at a time.
+ */
+export function startRoutingInstall(root = process.cwd()): StartRoutingResult {
+  if (routingInstallState.running) return { started: false, error: 'already-running' };
+  const configPath = path.join(root, 'data/litellm/config.yaml');
+  if (!fs.existsSync(configPath)) return { started: false, error: 'litellm-not-installed' };
+  if (!fs.existsSync(routingInstallerPath(root)) || !fs.existsSync(bindRoutesPath(root))) {
+    return { started: false, error: 'installer-missing' };
   }
 
-  const runStep = (i: number): void => {
-    if (i >= steps.length) {
-      refreshState.running = false;
-      refreshState.exitCode = 0;
-      refreshState.finishedAt = Date.now();
-      return;
-    }
-    const [cmd, args] = steps[i];
-    append(`→ ${args[0].split('/').slice(-1)[0]} …`);
-    const child = spawn(cmd, args, { cwd: root });
-    child.stdout.on('data', append);
-    child.stderr.on('data', append);
-    child.on('close', (code) => {
-      if (code !== 0) {
-        refreshState.running = false;
-        refreshState.exitCode = code ?? 1;
-        refreshState.finishedAt = Date.now();
-        return;
-      }
-      runStep(i + 1);
-    });
-  };
-  runStep(0);
-  return true;
+  // Kick the classifier-model pull in parallel on the host-side Ollama. The
+  // install steps don't wait on it — the model is only needed at classify time.
+  const ollamaHost = parseConfiguredHosts(fs.readFileSync(configPath, 'utf8'))?.split(',')[0] ?? 'http://localhost:11434';
+  void startPull(ollamaHost, ARCH_ROUTER_MODEL).catch(() => {
+    /* failure surfaces on the pull job's own status/error */
+  });
+
+  routingInstallState.running = true;
+  routingInstallState.lines = [];
+  routingInstallState.exitCode = null;
+  routingInstallState.startedAt = Date.now();
+  routingInstallState.finishedAt = null;
+
+  const steps: InstallStep[] = [
+    { run: ['bash', [routingInstallerPath(root)]] },
+    { call: () => configureClassifierHost(root), label: 'configure classifier host' },
+    { run: ['node', [bindRoutesPath(root), '--apply']] },
+  ];
+  runInstallChain(routingInstallState, steps, root);
+  return { started: true };
 }
 
 // ── Router (LiteLLM) as a server card ─────────────────────────────────────

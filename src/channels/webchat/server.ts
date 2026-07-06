@@ -153,6 +153,8 @@ import {
   parseConfiguredHosts,
   startPull,
   startRosterRefresh,
+  getRoutingInstallState,
+  startRoutingInstall,
 } from './ollama-manage.js';
 import {
   approvalInboxForUser,
@@ -1673,6 +1675,22 @@ async function handleHttp(
     if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
     const started = startRosterRefresh();
     return json(res, started ? 202 : 409, { ...getRosterRefreshState(), started });
+  }
+  if (url.pathname === '/api/router/install' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    return json(res, 200, getRoutingInstallState());
+  }
+  if (url.pathname === '/api/router/install' && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const r = startRoutingInstall();
+    if (r.error === 'litellm-not-installed') {
+      return json(res, 409, { error: 'LiteLLM is not installed. Run /add-litellm first.', code: 'litellm-not-installed' });
+    }
+    if (r.error === 'installer-missing') {
+      return json(res, 409, { error: 'The add-routing skill is not present in this checkout.', code: 'installer-missing' });
+    }
+    return json(res, r.started ? 202 : 409, { ...getRoutingInstallState(), started: r.started });
   }
   if (url.pathname === '/api/models' && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') {

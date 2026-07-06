@@ -1493,6 +1493,26 @@
                 </div>
               </div>
             </div>
+            <div id="settings-routing" class="settings-credentials" hidden>
+              <h3 class="settings-section-title">Prompt-aware routing</h3>
+              <p class="cred-hint" id="routing-setup-desc">
+                Layer a capability classifier onto your LiteLLM router: pulls the Arch-Router
+                model, installs the routing hook, and binds your models to default routes.
+                Starts in shadow mode — a Routing tab appears where you review decisions and go live.
+              </p>
+              <div class="setting-group">
+                <button id="routing-install-btn" class="btn btn-secondary" type="button">Set up routing</button>
+              </div>
+              <div id="routing-install-progress" hidden>
+                <div class="ollama-pull-bar" id="routing-pull-bar" hidden><span style="width:0%"></span></div>
+                <div class="cred-hint" id="routing-pull-label" hidden></div>
+                <pre id="routing-install-log" class="roster-refresh-log"></pre>
+              </div>
+              <p class="cred-hint" id="routing-installed-note" hidden>
+                Routing is installed (shadow mode). Open the Routing tab (kebab menu → Routing)
+                to review classifier decisions and switch it live.
+              </p>
+            </div>
           </div>
         </div>
       </div>
