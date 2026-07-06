@@ -6113,6 +6113,20 @@ a.lightbox-btn {
   margin: 0 3px 2px 0;
   background: var(--pre-bg);
 }
+/* Room chips in the model detail are buttons — reset UA styling and mark them
+   as clickable (they open the room's settings). */
+.model-room-chip {
+  cursor: pointer;
+  font-family: inherit;
+  color: var(--text-dim);
+  transition:
+    border-color 0.15s,
+    color 0.15s;
+}
+.model-room-chip:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
 .ollama-model-list li.linkable {
   cursor: pointer;
   border-radius: var(--radius-sm);
