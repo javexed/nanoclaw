@@ -8616,6 +8616,13 @@ function renderRouterPicker() {
     sel.appendChild(o);
   }
   $('#router-delete-btn').disabled = names.length <= 1;
+
+  // Intro reflects the selected profile — assign THIS profile's model to route through it.
+  const intro = $('#routing-intro');
+  if (intro) {
+    const name = routingCurrentRouter ?? 'auto';
+    intro.innerHTML = `Each route sends matching prompts to a model. Assign the <strong>${esc(name)}</strong> model to an agent to route through this profile; test a prompt below to see where it lands.`;
+  }
 }
 
 $('#router-select')?.addEventListener('change', (e) => {
@@ -9048,12 +9055,17 @@ setTimeout(probeRoutingAvailability, 3000);
 async function refreshRoutingDecisions() {
   const list = $('#routing-decisions-list');
   try {
-    const res = await authFetch('/api/router/decisions?limit=15');
+    // Over-fetch and filter client-side to the selected profile — the log
+    // interleaves every router's traffic. (Legacy lines with no `router` field
+    // are attributed to the primary `auto`.)
+    const res = await authFetch('/api/router/decisions?limit=60');
     if (!res.ok) throw new Error(res.status);
-    const { decisions } = await res.json();
+    let { decisions } = await res.json();
+    const cur = routingCurrentRouter ?? 'auto';
+    decisions = decisions.filter((d) => (d.router ?? 'auto') === cur).slice(0, 15);
     list.innerHTML = '';
     if (decisions.length === 0) {
-      list.innerHTML = '<div class="ollama-muted">No decisions yet</div>';
+      list.innerHTML = `<div class="ollama-muted">No decisions yet for ${esc(cur)}</div>`;
       return;
     }
     for (const d of decisions) {
