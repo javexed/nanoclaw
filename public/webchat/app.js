@@ -8462,37 +8462,49 @@ function renderRouteList() {
   list.innerHTML = '';
   routingDraft.routes.forEach((r, i) => {
     const li = document.createElement('li');
+    li.classList.add('route-row');
     if (i === selectedRouteIdx && !$('#route-detail').hidden) li.classList.add('active');
 
+    // Top line: name + state chips + bound model (the house row layout).
+    const top = document.createElement('div');
+    top.className = 'route-row-top';
     if (r.escalate) {
       const badge = document.createElement('span');
       badge.className = 'model-kind-badge kind-anthropic';
       badge.textContent = 'escalate';
-      li.appendChild(badge);
+      top.appendChild(badge);
     }
     const name = document.createElement('span');
     name.className = 'model-row-name';
     name.textContent = r.name;
-    li.appendChild(name);
-
+    top.appendChild(name);
     if (routingDraft.default_route === r.name) {
       const chip = document.createElement('span');
       chip.className = 'model-kind-badge model-default-badge';
       chip.textContent = 'default';
-      li.appendChild(chip);
+      top.appendChild(chip);
     }
     if (r.pinned) {
       const chip = document.createElement('span');
       chip.className = 'model-row-uses';
       chip.textContent = 'pinned';
-      li.appendChild(chip);
+      top.appendChild(chip);
     }
     if (!r.escalate) {
       const host = document.createElement('span');
       host.className = 'model-row-host';
       host.textContent = r.model || '';
-      li.appendChild(host);
+      top.appendChild(host);
     }
+    li.appendChild(top);
+
+    // Second line: the rule itself — the description the classifier matches
+    // against. Visible at a glance; click the row to edit it.
+    const desc = document.createElement('div');
+    desc.className = 'route-row-desc';
+    desc.textContent = r.description || 'No description — click to add the rule';
+    if (!r.description) desc.classList.add('empty');
+    li.appendChild(desc);
 
     li.setAttribute('role', 'button');
     li.setAttribute('tabindex', '0');
