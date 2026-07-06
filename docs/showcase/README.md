@@ -15,6 +15,8 @@
 
 Not Slack. Not a hosted widget. Your agents, your keys, your machine.
 
+**→ [Full feature guide](./GUIDE.md)** — getting started + a screenshot tour of every component.
+
 <!-- ![Lobby with @mentions, threads, and the operator sidebar](./screenshots/lobby.png) -->
 > _Hero screenshot here (lobby + thread sidebar)._
 
