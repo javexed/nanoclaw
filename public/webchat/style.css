@@ -3017,6 +3017,18 @@ a.lightbox-btn {
   align-items: baseline;
   gap: 6px;
 }
+.room-wired-name-link {
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: color var(--transition);
+}
+.room-wired-name-link:hover {
+  color: var(--accent);
+}
+.room-wired-name-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .room-wired-prime-badge {
   font-size: 0.667rem;
   text-transform: uppercase;
