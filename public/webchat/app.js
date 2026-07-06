@@ -558,7 +558,7 @@ $('#overflow-menu')?.addEventListener('click', (e) => {
   else if (action === 'mcp') openManage('mcp');
   else if (action === 'routing') openManage('routing');
   else if (action === 'topology') toggleTopology();
-  else if (action === 'matrix') toggleMatrix();
+  else if (action === 'wiring') toggleMatrix();
   else if (action === 'dashboard') toggleDashboard();
   else if (action === 'permissions') togglePermissions();
   else if (action === 'settings') openSettings();
@@ -8393,7 +8393,6 @@ async function pollOllamaPulls() {
 // Opened from the router server card. Edits write routes.json through the
 // server (validated); the hook re-reads per request, so Save is immediate.
 let routingDraft = null; // {routes:[...], live:{...}, default_route}
-let routingRoster = [];
 let routingRouterInfo = null; // {endpoint, models} — for the Router models section
 let routingAvailable = false;
 
@@ -8423,7 +8422,6 @@ async function loadRoutingTab() {
     if (!routesRes.ok) throw new Error((await routesRes.json()).error || routesRes.status);
     routingDraft = await routesRes.json();
     routingRouterInfo = rosterRes.ok ? await rosterRes.json() : null;
-    routingRoster = routingRouterInfo ? routingRouterInfo.models : [];
   } catch (err) {
     showToast('Routing config unavailable: ' + err.message, { kind: 'error' });
     return;
@@ -8437,8 +8435,8 @@ async function loadRoutingTab() {
   $('#routing-bench-result-log').hidden = true;
 }
 
-// Routing pane has two sub-tabs: Rules (routes + classifier + router models)
-// and Log (recent decisions) — the log is present but tucked out of the way.
+// Routing pane has three sub-tabs: Rules (bench + routes), Models (the router
+// roster with +/− select toggles + suggestions), and Logs (recent decisions).
 let routingSubtab = 'rules';
 function switchRoutingSubtab(which) {
   routingSubtab = which;
@@ -8567,16 +8565,13 @@ async function saveRoutingConfig() {
   const res = await authFetch('/api/router/routes', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
+    // Only routes + default_route are editable in the UI. Omitting `live`
+    // leaves the server's existing live config (enabled / timeout_ms) untouched
+    // — those controls were removed from the UI (live-routing was a footgun for
+    // 'auto'-assigned agents; timeout is an install-tuning detail).
     body: JSON.stringify({
       routes: routingDraft.routes,
       default_route: routingDraft.default_route,
-      live: {
-        // Live routing and classify timeout stay at their configured values;
-        // both controls were removed from the UI (live-routing was a footgun
-        // for 'auto'-assigned agents; timeout is an install-tuning detail).
-        enabled: routingDraft.live ? routingDraft.live.enabled !== false : true,
-        timeout_ms: routingDraft.live?.timeout_ms ?? 5000,
-      },
     }),
   });
   const body = await res.json();
@@ -8587,11 +8582,35 @@ async function saveRoutingConfig() {
 
 let selectedRouteIdx = null;
 
+// Make a list <li> behave as a button for both pointer and keyboard users:
+// role + tabindex + click + Enter/Space. The manage-tab list rows (route /
+// model / mcp) are non-<button> elements, so without the keydown a keyboard or
+// screen-reader user can focus a row but can't open it (WCAG 2.1.1). One
+// helper so all three lists stay accessible and consistent.
+function makeRowActivatable(li, activate) {
+  li.setAttribute('role', 'button');
+  li.setAttribute('tabindex', '0');
+  li.addEventListener('click', activate);
+  li.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      activate();
+    }
+  });
+}
+
 // Same list grammar as Agents/Models/MCP: rows open a detail aside; chips
 // carry state (default / pinned / escalates); bound model rides as dim meta.
 function renderRouteList() {
   const list = $('#route-list');
   list.innerHTML = '';
+  if (routingDraft.routes.length === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'ollama-muted';
+    empty.textContent = 'No routes yet — add one, or a suggestion will offer to.';
+    list.appendChild(empty);
+    return;
+  }
   routingDraft.routes.forEach((r, i) => {
     const li = document.createElement('li');
     li.classList.add('route-row');
@@ -8638,9 +8657,7 @@ function renderRouteList() {
     if (!r.description) desc.classList.add('empty');
     li.appendChild(desc);
 
-    li.setAttribute('role', 'button');
-    li.setAttribute('tabindex', '0');
-    li.addEventListener('click', () => {
+    makeRowActivatable(li, () => {
       if (selectedRouteIdx === i && !$('#route-detail').hidden) closeRouteDetail();
       else openRouteDetail(i);
     });
@@ -8648,14 +8665,27 @@ function renderRouteList() {
   });
 }
 
+// selectedRouteIdx === -1 means "new route being drafted in the detail aside" —
+// nothing is added to routingDraft until Save succeeds, so cancelling leaves no
+// phantom row and a failed save doesn't strand one.
 function openRouteDetail(i) {
   const r = routingDraft.routes[i];
   if (!r) return;
   selectedRouteIdx = i;
+  populateRouteDetail(r, false);
+}
+
+function openNewRouteDetail() {
+  if (!routingDraft) return;
+  selectedRouteIdx = -1;
+  populateRouteDetail({ name: '', description: '', model: (routingRouterInfo?.models ?? [])[0] || '' }, true);
+}
+
+function populateRouteDetail(r, isNew) {
   closeModelDetail();
   renderRouteList();
 
-  $('#route-detail-title').textContent = r.name;
+  $('#route-detail-title').textContent = isNew ? 'New route' : r.name;
   const badge = $('#route-detail-badge');
   badge.hidden = !r.escalate;
   if (r.escalate) {
@@ -8669,7 +8699,7 @@ function openRouteDetail(i) {
   if (!r.escalate) {
     const sel = $('#route-binding');
     sel.innerHTML = '';
-    for (const m of [...new Set([r.model, ...routingRoster])].filter(Boolean)) {
+    for (const m of [...new Set([r.model, ...(routingRouterInfo?.models ?? [])])].filter(Boolean)) {
       const o = document.createElement('option');
       o.value = m;
       o.textContent = m;
@@ -8698,7 +8728,8 @@ $('#route-detail-close')?.addEventListener('click', closeRouteDetail);
 
 $('#route-detail-form')?.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const r = routingDraft.routes[selectedRouteIdx];
+  const isNew = selectedRouteIdx === -1;
+  const r = isNew ? { name: '', description: '', model: '' } : routingDraft.routes[selectedRouteIdx];
   if (!r) return;
   const prevName = r.name;
   r.name = $('#route-name').value.trim();
@@ -8709,11 +8740,22 @@ $('#route-detail-form')?.addEventListener('submit', async (e) => {
     if ($('#route-default').checked) routingDraft.default_route = r.name;
     else if (routingDraft.default_route === prevName) routingDraft.default_route = r.name;
   }
+  // Append a new route only now, right before the save that validates it; pop
+  // it back off on failure so the draft never keeps an unsaved/invalid row.
+  if (isNew) {
+    routingDraft.routes.push(r);
+    selectedRouteIdx = routingDraft.routes.length - 1;
+  }
   try {
     await saveRoutingConfig();
-    $('#route-detail-title').textContent = r.name;
     showToast('Route saved — live now', { kind: 'success' });
+    if (isNew) closeRouteDetail();
+    else $('#route-detail-title').textContent = r.name;
   } catch (err) {
+    if (isNew) {
+      routingDraft.routes.pop();
+      selectedRouteIdx = -1;
+    }
     showToast('Save failed: ' + err.message, { kind: 'error' });
   }
 });
@@ -8732,19 +8774,15 @@ $('#route-delete')?.addEventListener('click', async () => {
   }
 });
 
-$('#create-route-btn')?.addEventListener('click', () => {
-  if (!routingDraft) return;
-  routingDraft.routes.push({ name: 'new-route', description: '', model: routingRoster[0] || '' });
-  renderRouteList();
-  openRouteDetail(routingDraft.routes.length - 1);
-});
+$('#create-route-btn')?.addEventListener('click', openNewRouteDetail);
 
-// The classify bench appears at the top of BOTH sub-tabs (Rules and Log), so
+// The classify bench appears at the top of both the Rules and Logs sub-tabs, so
 // tuning and log-reading each have the tester at hand. One helper, two mounts.
 async function runBench(inputEl, outEl) {
   const prompt = inputEl.value.trim();
   if (!prompt) return;
   outEl.hidden = false;
+  outEl.classList.remove('err');
   outEl.textContent = 'Classifying…';
   try {
     const res = await authFetch('/api/router/classify', {
@@ -8753,10 +8791,12 @@ async function runBench(inputEl, outEl) {
       body: JSON.stringify({ prompt }),
     });
     const body = await res.json();
-    if (!res.ok) throw new Error(body.error || res.status);
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
     outEl.textContent = `→ ${body.route} · ${body.model ?? '(no binding)'} · ${body.ms} ms`;
   } catch (err) {
-    outEl.textContent = 'Classifier error: ' + err.message;
+    // Errors must not read like a green success — flip to the warning colour.
+    outEl.classList.add('err');
+    outEl.textContent = 'Could not classify — ' + (err.message || 'classifier unavailable');
   }
 }
 function wireBench(inputId, runId, outId) {
@@ -8788,8 +8828,11 @@ async function refreshRoutingDecisions() {
       const row = document.createElement('div');
       row.className = 'routing-decision-row' + (d.route === '__error__' ? ' err' : '');
       const when = new Date(d.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      const model = d.final_model || d.bound_model || '';
-      row.textContent = `${when} · ${d.mode || 'shadow'} · ${d.route} → ${model} · ${d.ms} ms`;
+      // Translate the log's internal sentinels to plain language for display.
+      const route = d.route === '__error__' ? 'classifier error' : d.route;
+      const rawModel = d.final_model || d.bound_model || '';
+      const model = rawModel === '__escalate__' ? 'escalated to Claude' : rawModel;
+      row.textContent = `${when} · ${d.mode || 'shadow'} · ${route} → ${model} · ${d.ms} ms`;
       row.title = d.prompt_head || '';
       list.appendChild(row);
     }
@@ -8900,9 +8943,7 @@ function renderModels() {
     });
     li.appendChild(remove);
 
-    li.setAttribute('role', 'button');
-    li.setAttribute('tabindex', '0');
-    li.addEventListener('click', () => {
+    makeRowActivatable(li, () => {
       if (selectedModelId === model.id && !$('#model-detail').hidden) {
         closeModelDetail();
       } else {
@@ -9447,9 +9488,7 @@ function renderMcpServers() {
       li.appendChild(uses);
     }
 
-    li.setAttribute('role', 'button');
-    li.setAttribute('tabindex', '0');
-    li.addEventListener('click', () => {
+    makeRowActivatable(li, () => {
       if (selectedMcpId === server.id && !$('#mcp-detail').hidden) {
         closeMcpDetail();
       } else {

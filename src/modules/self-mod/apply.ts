@@ -17,6 +17,7 @@ import { getSession, getSessionsByAgentGroup } from '../../db/sessions.js';
 import type { McpServerConfig } from '../../container-config.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
+import type { Session } from '../../types.js';
 import type { ApprovalHandler } from '../approvals/index.js';
 
 /**
@@ -36,6 +37,35 @@ function respawnSiblingSessions(agentGroupId: string, requestingSessionId: strin
     if (s.id === requestingSessionId || s.status !== 'active') continue;
     killContainer(s.id, reason);
   }
+}
+
+function newApprNoteId(): string {
+  return `appr-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Common tail after a config/image change is applied: hand the requesting
+ * session an on_wake note (picked up on the fresh container's first poll, so a
+ * dying container can't steal it), respawn that container, and respawn every
+ * stale sibling session. `onWakeText` is the verify-and-report instruction the
+ * agent reads after respawn.
+ */
+function notifyAndRespawn(session: Session, onWakeText: string, reason: string): void {
+  writeSessionMessage(session.agent_group_id, session.id, {
+    id: newApprNoteId(),
+    kind: 'chat',
+    timestamp: new Date().toISOString(),
+    platformId: session.agent_group_id,
+    channelType: 'agent',
+    threadId: null,
+    content: JSON.stringify({ text: onWakeText, sender: 'system', senderId: 'system' }),
+    onWake: 1,
+  });
+  killContainer(session.id, reason, () => {
+    const s = getSession(session.id);
+    if (s) wakeContainer(s);
+  });
+  respawnSiblingSessions(session.agent_group_id, session.id, `sibling session stale after ${reason}`);
 }
 
 export const applyInstallPackages: ApprovalHandler = async ({ session, payload, userId, notify }) => {
@@ -74,25 +104,11 @@ export const applyInstallPackages: ApprovalHandler = async ({ session, payload, 
   log.info('Package install approved', { agentGroupId: session.agent_group_id, userId });
   try {
     await buildAgentGroupImage(session.agent_group_id);
-    writeSessionMessage(session.agent_group_id, session.id, {
-      id: `appr-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      kind: 'chat',
-      timestamp: new Date().toISOString(),
-      platformId: session.agent_group_id,
-      channelType: 'agent',
-      threadId: null,
-      content: JSON.stringify({
-        text: `Packages installed (${pkgs}) and container rebuilt. Verify the new packages are available (e.g. run them or check versions) and report the result to the user.`,
-        sender: 'system',
-        senderId: 'system',
-      }),
-      onWake: 1,
-    });
-    killContainer(session.id, 'rebuild applied', () => {
-      const s = getSession(session.id);
-      if (s) wakeContainer(s);
-    });
-    respawnSiblingSessions(session.agent_group_id, session.id, 'sibling session stale after package rebuild');
+    notifyAndRespawn(
+      session,
+      `Packages installed (${pkgs}) and container rebuilt. Verify the new packages are available (e.g. run them or check versions) and report the result to the user.`,
+      'rebuild applied',
+    );
     log.info('Container rebuild completed (bundled with install)', { agentGroupId: session.agent_group_id });
   } catch (e) {
     notify(
@@ -124,24 +140,10 @@ export const applyAddMcpServer: ApprovalHandler = async ({ session, payload, use
   };
   updateContainerConfigJson(agentGroup.id, 'mcp_servers', servers);
 
-  writeSessionMessage(session.agent_group_id, session.id, {
-    id: `appr-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    kind: 'chat',
-    timestamp: new Date().toISOString(),
-    platformId: session.agent_group_id,
-    channelType: 'agent',
-    threadId: null,
-    content: JSON.stringify({
-      text: `MCP server "${payload.name}" added. Verify it's available (e.g. list your tools) and report the result to the user.`,
-      sender: 'system',
-      senderId: 'system',
-    }),
-    onWake: 1,
-  });
-  killContainer(session.id, 'mcp server added', () => {
-    const s = getSession(session.id);
-    if (s) wakeContainer(s);
-  });
-  respawnSiblingSessions(session.agent_group_id, session.id, 'sibling session stale after mcp server add');
+  notifyAndRespawn(
+    session,
+    `MCP server "${payload.name}" added. Verify it's available (e.g. list your tools) and report the result to the user.`,
+    'mcp server added',
+  );
   log.info('MCP server add approved', { agentGroupId: session.agent_group_id, userId });
 };

@@ -222,7 +222,7 @@
                 <button class="overflow-item" data-action="topology" role="menuitem">
                   <svg class="icon" aria-hidden="true"><use href="#i-workflow"></use></svg>&nbsp;&nbsp;Topology
                 </button>
-                <button class="overflow-item" data-action="matrix" role="menuitem">
+                <button class="overflow-item" data-action="wiring" role="menuitem">
                   <svg class="icon" aria-hidden="true"><use href="#i-share"></use></svg>&nbsp;&nbsp;Wiring
                 </button>
                 <button
@@ -726,8 +726,8 @@
                 <select id="route-binding"></select>
               </label>
               <p id="route-escalate-note" class="model-kind-explainer" hidden>
-                Escalate route — no local binding; matching prompts reject with
-                no_adequate_model so the group's fallback provider takes the turn.
+                Escalate route — no local model; matching prompts hand off to the
+                agent group's fallback provider (Claude) instead.
               </p>
               <div class="route-flags">
                 <label class="routing-pin"><input type="checkbox" id="route-pinned" /> Pin — auto-binder never touches this route</label>
@@ -1082,6 +1082,10 @@
               <button class="routing-subtab" data-rsub="logs" role="tab" aria-selected="false">Logs</button>
             </div>
             <div id="rsub-rules" class="routing-subpane" role="tabpanel">
+              <p class="routing-intro">
+                Each route sends matching prompts to a model. Routing applies to agents
+                assigned the <strong>auto</strong> model; test a prompt below to see where it lands.
+              </p>
               <div class="routing-bench-row">
                 <input id="routing-bench-input" type="text" placeholder="Type a prompt to classify…" />
                 <button id="routing-bench-run" class="btn btn-secondary" type="button">Classify</button>
