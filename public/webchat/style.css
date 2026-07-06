@@ -2607,6 +2607,41 @@ a.lightbox-btn {
   flex-direction: column;
   gap: 12px;
 }
+/* Agent-detail sub-tabs — tuck the less-frequently-changed Instructions behind
+   a tab so the panel stays focused on the settings people actually touch. */
+.agent-subtabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+}
+.agent-subtab {
+  background: none;
+  border: none;
+  padding: 6px 12px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition:
+    color 0.15s,
+    border-color 0.15s;
+}
+.agent-subtab:hover {
+  color: var(--text);
+}
+.agent-subtab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+.agent-subtab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.agent-subtab-panel[hidden] {
+  display: none;
+}
 .agent-detail-form label {
   display: flex;
   flex-direction: column;

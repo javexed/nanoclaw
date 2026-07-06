@@ -6186,6 +6186,24 @@ function setAgentStatusControl(status) {
   });
 }
 
+// Agent-detail sub-tabs: Settings (status/name/model/MCP/rooms) vs Instructions.
+// Instructions lives behind a tab so it doesn't dominate a panel that's mostly
+// used for quick status/model/wiring tweaks. All fields share one <form>, so a
+// hidden tab's values still submit on Save.
+function setAgentSubtab(name) {
+  document.querySelectorAll('#agent-edit-view .agent-subtab').forEach((t) => {
+    const on = t.dataset.subtab === name;
+    t.classList.toggle('active', on);
+    t.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  document.querySelectorAll('#agent-edit-view .agent-subtab-panel').forEach((p) => {
+    p.hidden = p.dataset.subtabPanel !== name;
+  });
+}
+document.querySelectorAll('#agent-edit-view .agent-subtab').forEach((tab) => {
+  tab.addEventListener('click', () => setAgentSubtab(tab.dataset.subtab));
+});
+
 async function openAgentDetail(id) {
   const agent = allAgents.find((b) => b.id === id);
   if (!agent) return;
@@ -6198,6 +6216,7 @@ async function openAgentDetail(id) {
   // Show edit view, hide create view
   $('#agent-edit-view').hidden = false;
   $('#agent-create-view').hidden = true;
+  setAgentSubtab('settings'); // always open on Settings, not the last-used tab
 
   $('#agent-detail-title').textContent = agent.name;
   $('#agent-name').value = agent.name;

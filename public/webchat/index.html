@@ -439,6 +439,11 @@
                 </button>
               </div>
               <form id="agent-detail-form" class="agent-detail-form">
+                <div class="agent-subtabs" role="tablist" aria-label="Agent settings sections">
+                  <button type="button" class="agent-subtab active" data-subtab="settings" role="tab" aria-selected="true">Settings</button>
+                  <button type="button" class="agent-subtab" data-subtab="instructions" role="tab" aria-selected="false">Instructions</button>
+                </div>
+                <div class="agent-subtab-panel" data-subtab-panel="settings">
                 <div class="agent-status-field">
                   <span class="form-label">Status</span>
                   <div id="agent-status-control" class="setting-options" role="group" aria-label="Agent status">
@@ -481,10 +486,13 @@
                     <button type="button" id="agent-add-room-toggle" class="btn btn-secondary">+ Wire to room</button>
                   </div>
                 </details>
+                </div>
+                <div class="agent-subtab-panel" data-subtab-panel="instructions" hidden>
                 <label>
                   <span class="form-label">Instructions</span>
-                  <textarea id="agent-instructions" rows="12" placeholder="CLAUDE.md instructions…"></textarea>
+                  <textarea id="agent-instructions" rows="18" placeholder="CLAUDE.md instructions…"></textarea>
                 </label>
+                </div>
                 <div class="agent-detail-actions">
                   <button type="submit" class="btn btn-primary">Save</button>
                 </div>
