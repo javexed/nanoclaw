@@ -217,7 +217,7 @@
                   <svg class="icon" aria-hidden="true"><use href="#i-plug"></use></svg>&nbsp;&nbsp;MCP
                 </button>
                 <button class="overflow-item" data-action="routing" role="menuitem" hidden>
-                  <svg class="icon" aria-hidden="true"><use href="#i-route"></use></svg>&nbsp;&nbsp;Routing
+                  <svg class="icon" aria-hidden="true"><use href="#i-route"></use></svg>&nbsp;&nbsp;Auto routing
                 </button>
                 <button class="overflow-item" data-action="topology" role="menuitem">
                   <svg class="icon" aria-hidden="true"><use href="#i-workflow"></use></svg>&nbsp;&nbsp;Topology
@@ -1050,7 +1050,7 @@
               MCP
             </button>
             <button class="manage-tab" data-mtab="routing" role="tab" aria-selected="false" aria-controls="mtab-routing" hidden>
-              Routing
+              Auto routing
             </button>
           </div>
           <button id="manage-sort-az" class="sort-icon-btn" type="button" aria-pressed="false" title="Sort A–Z" aria-label="Sort A–Z">
@@ -1519,10 +1519,10 @@
               <p class="cred-hint" id="routing-setup-desc">
                 Layer a capability classifier onto your LiteLLM router: pulls the Arch-Router
                 model, installs the routing hook, and binds your models to default routes.
-                Starts in shadow mode — a Routing tab appears where you review decisions and go live.
+                Starts in shadow mode — an Auto routing tab appears where you review decisions and go live.
               </p>
               <div class="setting-group">
-                <button id="routing-install-btn" class="btn btn-secondary" type="button">Set up routing</button>
+                <button id="routing-install-btn" class="btn btn-secondary" type="button">Set up auto routing</button>
               </div>
               <div id="routing-install-progress" hidden>
                 <div class="ollama-pull-bar" id="routing-pull-bar" hidden><span style="width:0%"></span></div>
@@ -1530,7 +1530,7 @@
                 <pre id="routing-install-log" class="roster-refresh-log"></pre>
               </div>
               <p class="cred-hint" id="routing-installed-note" hidden>
-                Routing is installed (shadow mode). Open the Routing tab (kebab menu → Routing)
+                Auto routing is installed (shadow mode). Open the Auto routing tab (kebab menu → Auto routing)
                 to review classifier decisions and switch it live.
               </p>
             </div>

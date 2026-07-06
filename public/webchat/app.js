@@ -577,10 +577,10 @@ async function pollRoutingInstall() {
       if (!st.running && !chainHandled) {
         chainHandled = true;
         if (st.exitCode === 0) {
-          showToast('Routing installed — shadow mode. Open the Routing tab to review and go live.', { kind: 'success' });
-          await probeRoutingAvailability(); // un-hides the Routing tab + menu item
+          showToast('Auto routing installed — shadow mode. Open the Auto routing tab to review and go live.', { kind: 'success' });
+          await probeRoutingAvailability(); // un-hides the Auto routing tab + menu item
         } else {
-          showToast('Routing setup failed — see log', { kind: 'error' });
+          showToast('Auto routing setup failed — see log', { kind: 'error' });
           break;
         }
       }
@@ -589,7 +589,7 @@ async function pollRoutingInstall() {
       await new Promise((r) => setTimeout(r, 2000));
     }
   } catch (err) {
-    showToast('Routing setup error: ' + err.message, { kind: 'error' });
+    showToast('Auto routing setup error: ' + err.message, { kind: 'error' });
   } finally {
     routingInstallActive = false;
     renderRoutingSetupSettings(); // reflect installed state / re-enable
@@ -611,7 +611,7 @@ async function runRoutingInstall() {
         showToast('Install LiteLLM first (/add-litellm)', { kind: 'error' });
       } else {
         log.textContent = 'Install failed: ' + (err.error || res.status);
-        showToast('Routing setup failed', { kind: 'error' });
+        showToast('Auto routing setup failed', { kind: 'error' });
       }
       btn.disabled = false;
       return;
@@ -619,7 +619,7 @@ async function runRoutingInstall() {
     pollRoutingInstall();
   } catch (err) {
     log.textContent = 'Install failed: ' + err.message;
-    showToast('Routing setup failed', { kind: 'error' });
+    showToast('Auto routing setup failed', { kind: 'error' });
     btn.disabled = false;
   }
 }
@@ -8579,7 +8579,7 @@ async function loadRoutingTab() {
     routingDraft = await routesRes.json();
     routingRouterInfo = rosterRes.ok ? await rosterRes.json() : null;
   } catch (err) {
-    showToast('Routing config unavailable: ' + err.message, { kind: 'error' });
+    showToast('Auto routing config unavailable: ' + err.message, { kind: 'error' });
     return;
   }
   if (allModels.length === 0) await fetchModels(); // ± states need the registry
