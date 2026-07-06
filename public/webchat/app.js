@@ -8369,7 +8369,6 @@ async function loadRoutingTab() {
     return;
   }
   if (allModels.length === 0) await fetchModels(); // ± states need the registry
-  $('#routing-timeout').value = (routingDraft.live && routingDraft.live.timeout_ms) || 5000;
   renderRouteList();
   renderRouterRoster();
   if (routingSubtab === 'logs') refreshRoutingDecisions();
@@ -8461,10 +8460,11 @@ async function saveRoutingConfig() {
       routes: routingDraft.routes,
       default_route: routingDraft.default_route,
       live: {
-        // Live routing stays on (agents assigned to 'auto' depend on it); the
-        // toggle was removed from the UI to avoid accidentally breaking them.
+        // Live routing and classify timeout stay at their configured values;
+        // both controls were removed from the UI (live-routing was a footgun
+        // for 'auto'-assigned agents; timeout is an install-tuning detail).
         enabled: routingDraft.live ? routingDraft.live.enabled !== false : true,
-        timeout_ms: Number($('#routing-timeout').value) || 5000,
+        timeout_ms: routingDraft.live?.timeout_ms ?? 5000,
       },
     }),
   });
@@ -8626,16 +8626,6 @@ $('#create-route-btn')?.addEventListener('click', () => {
   routingDraft.routes.push({ name: 'new-route', description: '', model: routingRoster[0] || '' });
   renderRouteList();
   openRouteDetail(routingDraft.routes.length - 1);
-});
-
-// Classify timeout saves immediately — same immediacy as +/− elsewhere.
-document.getElementById('routing-timeout')?.addEventListener('change', async () => {
-  try {
-    await saveRoutingConfig();
-    showToast('Classifier settings saved', { kind: 'success' });
-  } catch (err) {
-    showToast('Save failed: ' + err.message, { kind: 'error' });
-  }
 });
 
 // The classify bench appears at the top of BOTH sub-tabs (Rules and Log), so
