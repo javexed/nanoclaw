@@ -155,7 +155,12 @@ preserved by fan-out (sender `trigger:1`, others `trigger:0`).
 - **Agents** — CRUD, wire to rooms, edit instructions, status (active / paused /
   archived), assign a model, attach MCP servers, and **draft from a prompt**
   (`POST /api/agents/draft` calls Anthropic host-side via OneCLI and returns a
-  `{name, instructions}` suggestion — it does not create).
+  `{name, instructions}` suggestion — it does not create). The settings panel is a
+  two-tab layout: **Settings** (status pills, name, a model picker showing the
+  agent's auto-detected model when none is assigned, and MCP-servers / Rooms attach
+  accordions driven by one shared bottom-sheet picker) and an **Instructions**
+  sub-tab. Clicking an agent in a room's settings — or a room in an agent's — jumps
+  straight to that entity.
 - **Models** — register `anthropic` / `ollama` / `openai-compatible`; live
   discover / probe (races http/https + Ollama, classifies the provider); bulk
   register; per-agent assignment writes an env override into the group's
@@ -163,12 +168,18 @@ preserved by fan-out (sender `trigger:1`, others `trigger:0`).
   requires `/add-opencode`.
 - **Ollama host management** — list hosts, stream model **pulls** with progress,
   refresh the router roster.
-- **Local-model routing** — a console over an external, companion-skill-installed
-  LiteLLM + classifier stack: routes editor, a live **test bench**, a **decisions
-  tail** (`routing-shadow.jsonl`), shadow-vs-live **metrics**, the router roster,
-  and a roster-refresh that shells the installers. Degrades cleanly to
-  "not installed" when `data/litellm/*` is absent. The engine itself installs via
-  `/add-litellm` + `/add-routing`.
+- **Local-model routing** — a console over a LiteLLM + Arch-Router classifier stack.
+  A **"Set up routing"** button in Settings installs and configures it in one flow
+  (`POST /api/router/install`: pulls the classifier model with a progress bar, runs
+  the `add-routing` installer, points the classifier at `host.docker.internal`, and
+  auto-binds routes to the roster) — no shell required; it can still be installed via
+  `/add-litellm` + `/add-routing` instead. Once installed the **Routing tab** appears
+  (hidden until `routes.json` exists) with **Rules** and **Logs** sub-tabs: a routes
+  editor with a live **test bench** and per-route suggestions when a roster model has
+  an uncovered capability, a **decisions tail** (`routing-shadow.jsonl`) and
+  shadow-vs-live **metrics**, the router roster, and a roster-refresh that re-runs
+  the installers and re-binds. Starts in **shadow mode**; the operator flips it live
+  from the tab. Degrades cleanly to "not installed" when `data/litellm/*` is absent.
 - **MCP registry** — register / probe (real MCP client, lists tools) / assign MCP
   servers to agents; syncs into `container_configs.mcp_servers`, co-existing with
   `ncl`-added servers.
@@ -242,7 +253,8 @@ Loaded from `.env` into `process.env` (if unset) by the adapter's `env-load.ts`
   `POST /api/models/discover|probe|bulk`, `PUT|DELETE /api/models/:id`,
   `GET /api/ollama/hosts|models|pulls`, `POST /api/ollama/pull`,
   `GET|PUT /api/router/routes`, `POST /api/router/classify`,
-  `GET /api/router/decisions|metrics|models`, `GET|POST /api/litellm/roster-refresh`.
+  `GET /api/router/decisions|metrics|models`, `GET|POST /api/router/install`,
+  `GET|POST /api/litellm/roster-refresh`.
 - **Approvals / permissions / push** — `GET /api/approvals/pending`,
   `POST /api/approvals/:id/respond`, `GET /api/users`, `DELETE /api/users/:id`,
   `POST /api/permissions/grant|revoke`, `GET /api/push/vapid-public`,
@@ -303,7 +315,8 @@ merged into trunk (too large a surface for core). It is installed by the
   Codex minting flow is a prototype** (fragile PTY screen-scrape, no tests).
 - **Thread-engaged agents (chips)**: built but **dormant/removed** — the backend
   tables and routes remain, but the UI was pulled and threads route mention-only.
-- **Local-model routing**: the **console is shipped**; the **engine** (LiteLLM +
-  classifier) is an **external, companion-skill-installed** stack
-  (`/add-litellm`, `/add-routing`). The console degrades to "not installed" without
-  it.
+- **Local-model routing**: the **console is shipped**, now with a one-click **"Set
+  up routing"** installer in Settings (pulls the classifier, scaffolds routing, and
+  auto-binds routes). The **engine** (LiteLLM + Arch-Router classifier) is still a
+  separate stack — installed from that button or via `/add-litellm` + `/add-routing`;
+  the console degrades to "not installed" without it.

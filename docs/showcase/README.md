@@ -34,17 +34,13 @@ It flows through NanoClaw's normal router and session model — it's a **channel
 
 ## Screenshots
 
-| Multi-agent lobby + threads | Per-agent DM |
-|---|---|
-| <!--![](./screenshots/lobby.png)-->_lobby.png_ | <!--![](./screenshots/dm.png)-->_dm.png_ |
+Real shots from a live install — the redesigned agent panel and the routing console:
 
-| Models tab (Anthropic / Ollama / OpenAI-compatible) | Approvals inbox |
+| Agent settings — Settings / Instructions tabs | Routing console — Rules + classify bench |
 |---|---|
-| <!--![](./screenshots/models.png)-->_models.png_ | <!--![](./screenshots/approvals.png)-->_approvals.png_ |
+| ![Agent settings panel](./screenshots/agent-settings.png) | ![Routing console](./screenshots/routing.png) |
 
-| Permissions & roles | Wiring matrix |
-|---|---|
-| <!--![](./screenshots/permissions.png)-->_permissions.png_ | <!--![](./screenshots/wiring.png)-->_wiring.png_ |
+_The hero lobby GIF and the DM / approvals / permissions / wiring shots come from a **populated** demo install — see [screenshots/CAPTURE.md](./screenshots/CAPTURE.md)._
 
 ## Features
 
@@ -74,15 +70,15 @@ It flows through NanoClaw's normal router and session model — it's a **channel
 ### Operator console
 | | |
 |---|---|
-| **Agents** | Create, wire to rooms, edit instructions, set status, assign a model, attach MCP servers — and **draft a new agent from a prompt** (host-side, via OneCLI). |
+| **Agents** | Create, wire to rooms, edit instructions, set status, assign a model, attach MCP servers — and **draft a new agent from a prompt** (host-side, via OneCLI). The settings panel splits into a **Settings** tab (status pills, model picker, a shared MCP/Rooms attach picker) and an **Instructions** tab. |
 | **Models** | Register Anthropic / Ollama / OpenAI-compatible models with live discovery + probe (SSRF-guarded), assign per agent (written to the group's settings; containers pick it up on their next spawn). |
 | **Ollama hosts** | Manage Ollama endpoints, stream model **pulls** with progress, refresh the router roster. |
-| **Local-model routing** | A console over a companion routing stack: routes editor, a live **test bench**, a **decisions tail**, and shadow-vs-live **metrics** — score each turn and send the simple ones to a local model while keeping a frontier model for the hard ones. _(Engine installs as companion skills; the console degrades to "not installed" without them.)_ |
+| **Local-model routing** | A **"Set up routing"** button installs and configures the whole stack in one click — pulls the Arch-Router classifier (progress bar), scaffolds routing, auto-binds routes. Then the **Routing tab** (Rules / Logs sub-tabs) gives a routes editor, a live **test bench**, a **decisions tail**, and shadow-vs-live **metrics**: score each turn and send the simple ones to a local model while keeping a frontier model for the hard ones. Starts in shadow mode. |
 | **Approvals** | Interactive approve/reject inbox for credentialed actions, in-room and in a per-approver DM inbox. |
 | **Permissions** | Manage users, roles, and members. |
 | **Topology / Wiring** | See and edit which agents and models are reachable from which rooms. |
 
-> BYOK ships in the box (Anthropic API-key path); the **local-routing engine** (LiteLLM + classifier) installs as **opt-in companion skills** (`/add-litellm`, `/add-routing`) that the console drives.
+> BYOK ships in the box (Anthropic API-key path). The **local-routing engine** (LiteLLM + Arch-Router classifier) installs right from the console's **"Set up routing"** button — or via the `/add-litellm` + `/add-routing` skills; the console degrades to "not installed" until it's there.
 
 ## Install
 
