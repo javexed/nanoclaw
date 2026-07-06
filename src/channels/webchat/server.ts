@@ -125,6 +125,7 @@ import {
   getDestinationByTarget,
   normalizeName,
 } from '../../modules/agent-to-agent/db/agent-destinations.js';
+import { projectDestinationsToActiveSessions } from '../../modules/agent-to-agent/write-destinations.js';
 import type { InboundMessage, OutboundFile } from '../adapter.js';
 import {
   assertBearerTokenStrength,
@@ -2065,10 +2066,17 @@ export function wireAgentToWebchatRoom(roomName: string, platformId: string, age
     const newAgent = getDb().prepare(`SELECT folder FROM agent_groups WHERE id = ?`).get(agentGroupId) as
       | { folder: string }
       | undefined;
+    const touched = new Set<string>([agentGroupId]);
     for (const peer of peers) {
       ensureA2aDestination(agentGroupId, peer.id, peer.folder);
       if (newAgent) ensureA2aDestination(peer.id, agentGroupId, newAgent.folder);
+      touched.add(peer.id);
     }
+    // Project the new destinations into every touched agent's RUNNING sessions
+    // so co-resident agents can address each other immediately — without this
+    // a peer whose container is already up sees the newcomer as "unknown:agent"
+    // and gets "Unknown destination" trying to reply, until its next respawn.
+    for (const id of touched) projectDestinationsToActiveSessions(id);
   }
   // Wirings changed — recompute engage patterns in case this room has a
   // prime configured. No-op when no prime is set (leaves the default '.').
