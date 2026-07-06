@@ -4,6 +4,10 @@ Status: **design / plan** — not built. Scopes how NanoClaw supports many model
 backends at once: local (localhost + LAN), self-hosted GPU, cloud-by-API-key, and
 **subscription agents over OAuth** (Claude Code now; Codex on a **separate track**).
 
+> See also [local-model-agents.md](local-model-agents.md) — the practical how-to
+> for pointing an agent at a local model (alongside Claude) and evaluating
+> whether the model can actually *drive* an agent.
+
 ## 1. Goal & requirements
 
 1. Add a **virtual LLM router** to NanoClaw, runnable **as a Docker container**.
