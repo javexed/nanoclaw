@@ -8369,12 +8369,12 @@ async function loadRoutingTab() {
     return;
   }
   if (allModels.length === 0) await fetchModels(); // ± states need the registry
-  $('#routing-live-enabled').checked = Boolean(routingDraft.live && routingDraft.live.enabled);
   $('#routing-timeout').value = (routingDraft.live && routingDraft.live.timeout_ms) || 5000;
   renderRouteList();
   renderRouterRoster();
   if (routingSubtab === 'log') refreshRoutingDecisions();
   $('#routing-bench-result').hidden = true;
+  $('#routing-bench-result-log').hidden = true;
 }
 
 // Routing pane has two sub-tabs: Rules (routes + classifier + router models)
@@ -8460,7 +8460,9 @@ async function saveRoutingConfig() {
       routes: routingDraft.routes,
       default_route: routingDraft.default_route,
       live: {
-        enabled: $('#routing-live-enabled').checked,
+        // Live routing stays on (agents assigned to 'auto' depend on it); the
+        // toggle was removed from the UI to avoid accidentally breaking them.
+        enabled: routingDraft.live ? routingDraft.live.enabled !== false : true,
         timeout_ms: Number($('#routing-timeout').value) || 5000,
       },
     }),
@@ -8625,25 +8627,23 @@ $('#create-route-btn')?.addEventListener('click', () => {
   openRouteDetail(routingDraft.routes.length - 1);
 });
 
-// Classifier controls save immediately — same immediacy as +/− elsewhere.
-for (const id of ['routing-live-enabled', 'routing-timeout']) {
-  document.getElementById(id)?.addEventListener('change', async () => {
-    try {
-      await saveRoutingConfig();
-      showToast('Classifier settings saved', { kind: 'success' });
-    } catch (err) {
-      showToast('Save failed: ' + err.message, { kind: 'error' });
-    }
-  });
-}
+// Classify timeout saves immediately — same immediacy as +/− elsewhere.
+document.getElementById('routing-timeout')?.addEventListener('change', async () => {
+  try {
+    await saveRoutingConfig();
+    showToast('Classifier settings saved', { kind: 'success' });
+  } catch (err) {
+    showToast('Save failed: ' + err.message, { kind: 'error' });
+  }
+});
 
-async function runRoutingBench() {
-  const input = $('#routing-bench-input');
-  const out = $('#routing-bench-result');
-  const prompt = input.value.trim();
+// The classify bench appears at the top of BOTH sub-tabs (Rules and Log), so
+// tuning and log-reading each have the tester at hand. One helper, two mounts.
+async function runBench(inputEl, outEl) {
+  const prompt = inputEl.value.trim();
   if (!prompt) return;
-  out.hidden = false;
-  out.textContent = 'Classifying…';
+  outEl.hidden = false;
+  outEl.textContent = 'Classifying…';
   try {
     const res = await authFetch('/api/router/classify', {
       method: 'POST',
@@ -8652,15 +8652,22 @@ async function runRoutingBench() {
     });
     const body = await res.json();
     if (!res.ok) throw new Error(body.error || res.status);
-    out.textContent = `→ ${body.route} · ${body.model ?? '(no binding)'} · ${body.ms} ms`;
+    outEl.textContent = `→ ${body.route} · ${body.model ?? '(no binding)'} · ${body.ms} ms`;
   } catch (err) {
-    out.textContent = 'Classifier error: ' + err.message;
+    outEl.textContent = 'Classifier error: ' + err.message;
   }
 }
-$('#routing-bench-run')?.addEventListener('click', runRoutingBench);
-$('#routing-bench-input')?.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') runRoutingBench();
-});
+function wireBench(inputId, runId, outId) {
+  const input = document.getElementById(inputId);
+  const out = document.getElementById(outId);
+  if (!input || !out) return;
+  document.getElementById(runId)?.addEventListener('click', () => runBench(input, out));
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') runBench(input, out);
+  });
+}
+wireBench('routing-bench-input', 'routing-bench-run', 'routing-bench-result');
+wireBench('routing-bench-input-log', 'routing-bench-run-log', 'routing-bench-result-log');
 // Startup probe (deferred so auth is settled before the first owner-gated call).
 setTimeout(probeRoutingAvailability, 3000);
 
