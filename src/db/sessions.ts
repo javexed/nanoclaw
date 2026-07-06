@@ -211,6 +211,17 @@ export function deletePendingApproval(approvalId: string): void {
   getDb().prepare('DELETE FROM pending_approvals WHERE approval_id = ?').run(approvalId);
 }
 
+/**
+ * Atomically claim a pending approval: delete it and report whether THIS call
+ * removed the row. Returns false if the row was already gone — a concurrent or
+ * repeat response delivery claimed it first. Lets the approve path run its
+ * (possibly slow) handler exactly once even when the same Approve click is
+ * delivered more than once.
+ */
+export function claimPendingApproval(approvalId: string): boolean {
+  return getDb().prepare('DELETE FROM pending_approvals WHERE approval_id = ?').run(approvalId).changes > 0;
+}
+
 export function getPendingApprovalsByAction(action: string): PendingApproval[] {
   return getDb().prepare('SELECT * FROM pending_approvals WHERE action = ?').all(action) as PendingApproval[];
 }

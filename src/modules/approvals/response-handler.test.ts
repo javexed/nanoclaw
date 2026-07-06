@@ -204,4 +204,49 @@ describe('approval response authorization', () => {
     expect(handler).toHaveBeenCalledTimes(1);
     expect(getPendingApproval('appr-4')).toBeUndefined();
   });
+
+  it('runs the handler exactly once when the same Approve is delivered twice mid-handler', async () => {
+    upsertUser({ id: 'telegram:owner2', kind: 'telegram', display_name: 'Owner', created_at: now() });
+    grantRole({ user_id: 'telegram:owner2', role: 'owner', agent_group_id: null, granted_by: null, granted_at: now() });
+
+    const { registerApprovalHandler } = await import('./primitive.js');
+    const { handleApprovalsResponse } = await import('./response-handler.js');
+
+    // A slow handler (like buildAgentGroupImage) that stays in flight while a
+    // duplicate delivery arrives — the exact window that produced 4 racing
+    // rebuilds. The claim must gate the second delivery out.
+    let release: () => void = () => {};
+    const handler = vi.fn().mockImplementation(() => new Promise<void>((r) => (release = r)));
+    registerApprovalHandler('slow_action', handler);
+
+    createPendingApproval({
+      approval_id: 'appr-dup',
+      session_id: 'sess-1',
+      request_id: 'appr-dup',
+      action: 'slow_action',
+      payload: JSON.stringify({ apt: ['admesh'] }),
+      created_at: now(),
+      title: 'Install packages',
+      options_json: JSON.stringify([]),
+    });
+
+    const click = {
+      questionId: 'appr-dup',
+      value: 'approve',
+      userId: 'owner2',
+      channelType: 'telegram' as const,
+      platformId: 'dm-owner2',
+      threadId: null,
+    };
+    // Two deliveries of the same click, concurrently — first claims and enters
+    // the (pending) handler; second must find no row and bail.
+    const p1 = handleApprovalsResponse(click);
+    const p2 = handleApprovalsResponse(click);
+    await Promise.resolve(); // let both settle up to their awaits
+    release();
+    await Promise.all([p1, p2]);
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(getPendingApproval('appr-dup')).toBeUndefined();
+  });
 });
