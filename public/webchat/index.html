@@ -687,6 +687,44 @@
               </form>
             </div>
           </aside>
+          <aside id="route-detail" class="agent-detail" hidden>
+            <div class="agent-detail-header">
+              <span id="route-detail-badge" class="model-kind-badge" hidden></span>
+              <span id="route-detail-title">Route</span>
+              <button id="route-detail-close" class="members-close">
+                <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+              </button>
+            </div>
+            <form id="route-detail-form" class="agent-detail-form">
+              <label>
+                <span class="form-label">Name</span>
+                <input id="route-name" type="text" required />
+              </label>
+              <label>
+                <span class="form-label">Description — what the classifier matches</span>
+                <textarea id="route-description" rows="3" required></textarea>
+              </label>
+              <label id="route-binding-label">
+                <span class="form-label">Model</span>
+                <select id="route-binding"></select>
+              </label>
+              <p id="route-escalate-note" class="model-kind-explainer" hidden>
+                Escalate route — no local binding; matching prompts reject with
+                no_adequate_model so the group's fallback provider takes the turn.
+              </p>
+              <div class="route-flags">
+                <label class="routing-pin"><input type="checkbox" id="route-pinned" /> Pin — auto-binder never touches this route</label>
+                <label class="routing-pin"><input type="checkbox" id="route-default" /> Default — where classifier errors land</label>
+              </div>
+              <div class="agent-detail-actions">
+                <button type="submit" class="btn btn-primary">Save</button>
+                <span class="routing-save-note">Applies to the next request.</span>
+              </div>
+              <div class="agent-detail-danger">
+                <button type="button" id="route-delete" class="btn btn-danger">Delete this route</button>
+              </div>
+            </form>
+          </aside>
           <aside id="model-detail" class="agent-detail" hidden>
             <!-- Edit mode -->
             <div id="model-edit-view">
@@ -1021,26 +1059,28 @@
             <button id="create-mcp-btn" class="btn btn-secondary btn-list-footer">+ New server</button>
           </div>
           <div id="mtab-routing" class="manage-pane" role="tabpanel" hidden>
-            <div class="routing-body">
+            <ul id="route-list"></ul>
+            <button id="create-route-btn" class="btn btn-secondary btn-list-footer">+ Add route</button>
+            <div class="routing-sections">
+              <div class="ollama-hosts-title">Classifier</div>
               <div class="routing-live-row">
                 <label><input type="checkbox" id="routing-live-enabled" /> Live routing via “auto”</label>
                 <label class="routing-timeout-label">Classify timeout
                   <input type="number" id="routing-timeout" min="1000" max="30000" step="500" /> ms
                 </label>
               </div>
-              <div id="routing-routes"></div>
-              <button id="routing-add-route" class="btn btn-ghost" type="button">+ Add route</button>
-              <div class="agent-detail-actions">
-                <button id="routing-save" class="btn btn-primary" type="button">Save</button>
-                <span class="routing-save-note">Changes apply to the next request — no restart.</span>
-              </div>
-              <div class="routing-section-title">Test a prompt</div>
               <div class="routing-bench-row">
                 <input id="routing-bench-input" type="text" placeholder="Type a prompt to classify…" />
                 <button id="routing-bench-run" class="btn btn-secondary" type="button">Classify</button>
               </div>
               <div id="routing-bench-result" class="routing-bench-result" hidden></div>
-              <div class="routing-section-title">Recent decisions</div>
+              <div class="routing-section-head">
+                <span class="ollama-hosts-title">Router models</span>
+                <button id="roster-refresh-btn" class="btn btn-ghost ollama-card-action" type="button" title="Re-run the router installers so newly pulled models join the roster (brief router restart)">Refresh roster…</button>
+              </div>
+              <ul id="router-roster-list" class="ollama-model-list"></ul>
+              <pre id="roster-refresh-log" class="roster-refresh-log" hidden></pre>
+              <div class="ollama-hosts-title routing-decisions-title">Recent decisions</div>
               <div id="routing-decisions-list" class="routing-decisions-list"></div>
             </div>
           </div>
