@@ -6283,3 +6283,17 @@ a.lightbox-btn {
   color: var(--text);
   border-bottom-color: var(--accent);
 }
+
+/* The visible routing sub-pane is the scroll container (the sub-tab bar
+   stays pinned above it); without this the pane grows past the panel and
+   the classifier / router-models sections below the route list can't be
+   reached. */
+.routing-subpane {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+#route-list {
+  list-style: none;
+  padding: 8px 0;
+}
