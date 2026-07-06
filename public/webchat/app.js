@@ -6991,8 +6991,25 @@ function renderRoomWiredAgents() {
 
     const onlyOne = roomDetailWiredAgents.length <= 1;
     const name = document.createElement('span');
-    name.className = 'room-wired-name';
+    name.className = 'room-wired-name room-wired-name-link';
     name.textContent = agent.name;
+    // Click the agent name to jump to its settings (the agent-detail overlay is
+    // standalone, so it opens over the room view; openAgentDetail closes this
+    // room panel). Keeps the ★ / × controls to the sides clickable on their own.
+    name.setAttribute('role', 'button');
+    name.setAttribute('tabindex', '0');
+    name.title = `Open ${agent.name} settings`;
+    const openAgentSettings = async () => {
+      if (!allAgents.some((x) => x.id === agent.id)) await fetchAgents();
+      await openAgentDetail(agent.id);
+    };
+    name.addEventListener('click', openAgentSettings);
+    name.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        openAgentSettings();
+      }
+    });
     if (agent.is_prime) {
       const badge = document.createElement('span');
       badge.className = 'room-wired-prime-badge';
