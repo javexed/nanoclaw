@@ -779,6 +779,7 @@ function blockingOverlayOpen() {
 function closeTopDetailAside() {
   const layers = [
     ['members-panel', () => { $('#members-panel').hidden = true; }],
+    ['route-detail', closeRouteDetail],
     ['model-detail', closeModelDetail],
     ['agent-detail', closeAgentDetail],
     ['mcp-detail', closeMcpDetail],
@@ -8054,21 +8055,16 @@ async function loadOllamaHosts() {
   const wrap = $('#ollama-hosts');
   if (!wrap) return;
   try {
-    const [hostsRes, routerRes] = await Promise.all([
-      authFetch('/api/ollama/hosts'),
-      authFetch('/api/router/models'),
-    ]);
+    const hostsRes = await authFetch('/api/ollama/hosts');
     if (!hostsRes.ok) {
       wrap.hidden = true; // non-owner
       return;
     }
     const { hosts } = await hostsRes.json();
-    const router = routerRes.ok ? await routerRes.json() : { available: false };
-    wrap.hidden = hosts.length === 0 && !router.available;
+    wrap.hidden = hosts.length === 0;
     if (wrap.hidden) return;
     const cards = $('#ollama-host-cards');
     cards.innerHTML = '';
-    if (router.available) cards.appendChild(buildRouterCard(router));
     for (const host of hosts) {
       cards.appendChild(buildOllamaHostCard(host));
       loadOllamaHostModels(host);
@@ -8128,7 +8124,8 @@ function buildSelectToggle(kind, endpoint, modelId, displayName) {
         if (!r.ok) throw new Error((await r.json()).error || r.status);
         showToast('Added to selectable models', { kind: 'success' });
       }
-      fetchModels(); // one pass re-renders selection AND servers
+      await fetchModels(); // one pass re-renders selection AND servers
+      if (!$('#mtab-routing').hidden) renderRouterRoster(); // keep the Routing tab's roster in sync
     } catch (err) {
       showToast(String(err.message || err), { kind: 'error' });
       btn.disabled = false;
@@ -8169,100 +8166,6 @@ function makeCardAccordion(card, head, key, summaryEl) {
   });
   apply();
   return body;
-}
-
-function buildRouterCard(router) {
-  const card = document.createElement('div');
-  card.className = 'ollama-host-card';
-  card.id = 'router-card';
-
-  const head = document.createElement('div');
-  head.className = 'ollama-host-head';
-  const label = document.createElement('span');
-  label.className = 'ollama-host-name';
-  label.textContent = 'LiteLLM router';
-  head.appendChild(label);
-  const summary = document.createElement('span');
-  summary.className = 'ollama-card-summary';
-  summary.textContent = router.models.length + ' model' + (router.models.length === 1 ? '' : 's');
-  head.appendChild(summary);
-  const routing = document.createElement('button');
-  routing.className = 'btn btn-ghost ollama-card-action';
-  routing.type = 'button';
-  routing.textContent = 'Routing…';
-  routing.title = 'Edit routes, test the classifier, see recent decisions';
-  routing.addEventListener('click', () => switchManageTab('routing'));
-  head.appendChild(routing);
-  const refresh = document.createElement('button');
-  refresh.className = 'btn btn-ghost ollama-card-action';
-  refresh.type = 'button';
-  refresh.textContent = 'Refresh roster…';
-  refresh.title = 'Re-run the router installers so newly pulled models join the roster (brief router restart)';
-  refresh.addEventListener('click', () => startRosterRefresh(card, refresh));
-  head.appendChild(refresh);
-  card.appendChild(head);
-  const body = makeCardAccordion(card, head, 'router', summary);
-
-  const ul = document.createElement('ul');
-  ul.className = 'ollama-model-list';
-  if (router.models.length === 0) {
-    ul.innerHTML = '<li class="ollama-muted">Router not reachable right now…</li>';
-  }
-  for (const id of router.models) {
-    const li = document.createElement('li');
-    const name = document.createElement('span');
-    name.className = 'ollama-model-name';
-    name.textContent = id;
-    li.appendChild(name);
-    li.appendChild(buildSelectToggle('openai-compatible', router.endpoint, id, id));
-    ul.appendChild(li);
-  }
-  body.appendChild(ul);
-
-  const log = document.createElement('pre');
-  log.className = 'roster-refresh-log';
-  log.hidden = true;
-  body.appendChild(log);
-  // Hide the refresh action when the installer isn't available in this checkout.
-  authFetch('/api/litellm/roster-refresh')
-    .then((r) => r.json())
-    .then((st) => {
-      if (!st.available) refresh.hidden = true;
-    })
-    .catch(() => {});
-  return card;
-}
-
-async function startRosterRefresh(card, btn) {
-  const log = card.querySelector('.roster-refresh-log');
-  btn.disabled = true;
-  log.hidden = false;
-  log.textContent = 'Starting…';
-  try {
-    const res = await authFetch('/api/litellm/roster-refresh', { method: 'POST' });
-    if (res.status === 409) throw new Error('a refresh is already running');
-    const poll = async () => {
-      const st = await (await authFetch('/api/litellm/roster-refresh')).json();
-      log.textContent = st.lines.join('\n') || '…';
-      log.scrollTop = log.scrollHeight;
-      if (st.running) {
-        setTimeout(poll, 2000);
-      } else {
-        btn.disabled = false;
-        if (st.exitCode === 0) {
-          showToast('Router roster refreshed', { kind: 'success' });
-          log.hidden = true;
-          fetchModels();
-        } else {
-          showToast('Roster refresh failed — see log', { kind: 'error' });
-        }
-      }
-    };
-    poll();
-  } catch (err) {
-    btn.disabled = false;
-    showToast('Roster refresh: ' + err.message, { kind: 'error' });
-  }
 }
 
 function buildOllamaHostCard(host) {
@@ -8431,6 +8334,7 @@ async function pollOllamaPulls() {
 // server (validated); the hook re-reads per request, so Save is immediate.
 let routingDraft = null; // {routes:[...], live:{...}, default_route}
 let routingRoster = [];
+let routingRouterInfo = null; // {endpoint, models} — for the Router models section
 let routingAvailable = false;
 
 // The Routing tab exists only when the LLM stack answers: the routing skill
@@ -8458,136 +8362,262 @@ async function loadRoutingTab() {
     ]);
     if (!routesRes.ok) throw new Error((await routesRes.json()).error || routesRes.status);
     routingDraft = await routesRes.json();
-    routingRoster = rosterRes.ok ? (await rosterRes.json()).models : [];
+    routingRouterInfo = rosterRes.ok ? await rosterRes.json() : null;
+    routingRoster = routingRouterInfo ? routingRouterInfo.models : [];
   } catch (err) {
     showToast('Routing config unavailable: ' + err.message, { kind: 'error' });
     return;
   }
+  if (allModels.length === 0) await fetchModels(); // ± states need the registry
   $('#routing-live-enabled').checked = Boolean(routingDraft.live && routingDraft.live.enabled);
   $('#routing-timeout').value = (routingDraft.live && routingDraft.live.timeout_ms) || 5000;
-  renderRoutingRoutes();
+  renderRouteList();
+  renderRouterRoster();
   refreshRoutingDecisions();
   $('#routing-bench-result').hidden = true;
 }
 
-function renderRoutingRoutes() {
-  const wrap = $('#routing-routes');
-  wrap.innerHTML = '';
-  for (let i = 0; i < routingDraft.routes.length; i++) {
-    const r = routingDraft.routes[i];
-    const card = document.createElement('div');
-    card.className = 'routing-route';
-
-    const head = document.createElement('div');
-    head.className = 'routing-route-head';
-    const name = document.createElement('input');
-    name.className = 'routing-route-name';
-    name.value = r.name;
-    name.addEventListener('input', () => { r.name = name.value; });
-    head.appendChild(name);
-    if (r.escalate) {
-      const esc = document.createElement('span');
-      esc.className = 'ollama-loaded-badge';
-      esc.textContent = 'escalates';
-      esc.title = 'No local binding — rejects with no_adequate_model so the fallback provider takes the turn';
-      head.appendChild(esc);
-    } else {
-      const pin = document.createElement('label');
-      pin.className = 'routing-pin';
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = Boolean(r.pinned);
-      cb.addEventListener('change', () => { r.pinned = cb.checked; });
-      pin.appendChild(cb);
-      pin.appendChild(document.createTextNode(' pin'));
-      pin.title = 'Pinned routes are never touched by the capability auto-binder';
-      head.appendChild(pin);
-    }
-    const del = document.createElement('button');
-    del.className = 'btn btn-ghost routing-route-del';
-    del.type = 'button';
-    del.textContent = '×';
-    del.title = 'Remove this route';
-    del.addEventListener('click', () => {
-      routingDraft.routes.splice(i, 1);
-      renderRoutingRoutes();
-    });
-    head.appendChild(del);
-    card.appendChild(head);
-
-    const desc = document.createElement('textarea');
-    desc.className = 'routing-route-desc';
-    desc.rows = 2;
-    desc.value = r.description;
-    desc.placeholder = 'What prompts belong here? The classifier matches this text.';
-    desc.addEventListener('input', () => { r.description = desc.value; });
-    card.appendChild(desc);
-
-    if (!r.escalate) {
-      const bindRow = document.createElement('div');
-      bindRow.className = 'routing-bind-row';
-      const sel = document.createElement('select');
-      const opts = [...new Set([r.model, ...routingRoster])].filter(Boolean);
-      for (const m of opts) {
-        const o = document.createElement('option');
-        o.value = m;
-        o.textContent = m;
-        if (m === r.model) o.selected = true;
-        sel.appendChild(o);
-      }
-      sel.addEventListener('change', () => { r.model = sel.value; });
-      bindRow.appendChild(sel);
-      const defLabel = document.createElement('label');
-      defLabel.className = 'routing-pin';
-      const defRadio = document.createElement('input');
-      defRadio.type = 'radio';
-      defRadio.name = 'routing-default';
-      defRadio.checked = routingDraft.default_route === r.name;
-      defRadio.addEventListener('change', () => { routingDraft.default_route = r.name; });
-      defLabel.appendChild(defRadio);
-      defLabel.appendChild(document.createTextNode(' default'));
-      defLabel.title = 'Where requests land when the classifier errors or matches nothing';
-      bindRow.appendChild(defLabel);
-      card.appendChild(bindRow);
-    }
-    wrap.appendChild(card);
+// Router models: the LiteLLM roster with the same +/− selection controls as
+// the Ollama host cards — one row per roster model, nothing else.
+function renderRouterRoster() {
+  const list = $('#router-roster-list');
+  list.innerHTML = '';
+  if (!routingRouterInfo || routingRouterInfo.models.length === 0) {
+    list.innerHTML = '<li class="ollama-muted">Router not reachable right now…</li>';
+    return;
+  }
+  for (const id of routingRouterInfo.models) {
+    const li = document.createElement('li');
+    const name = document.createElement('span');
+    name.className = 'ollama-model-name';
+    name.textContent = id;
+    li.appendChild(name);
+    li.appendChild(buildSelectToggle('openai-compatible', routingRouterInfo.endpoint, id, id));
+    list.appendChild(li);
   }
 }
 
-$('#routing-add-route')?.addEventListener('click', () => {
-  if (!routingDraft) return;
-  routingDraft.routes.push({ name: 'new-route', description: '', model: routingRoster[0] || '' });
-  renderRoutingRoutes();
-});
-
-$('#routing-save')?.addEventListener('click', async () => {
-  if (!routingDraft) return;
-  const btn = $('#routing-save');
+// Refresh roster: run the installer chain, stream the log, then re-render.
+async function runRosterRefresh() {
+  const btn = $('#roster-refresh-btn');
+  const log = $('#roster-refresh-log');
   btn.disabled = true;
+  log.hidden = false;
+  log.textContent = 'Starting…';
   try {
-    const res = await authFetch('/api/router/routes', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        routes: routingDraft.routes,
-        default_route: routingDraft.default_route,
-        live: {
-          enabled: $('#routing-live-enabled').checked,
-          timeout_ms: Number($('#routing-timeout').value) || 5000,
-        },
-      }),
-    });
-    const body = await res.json();
-    if (!res.ok) throw new Error(body.error || res.status);
-    routingDraft = body;
-    renderRoutingRoutes();
-    showToast('Routing saved — live now', { kind: 'success' });
+    const res = await authFetch('/api/litellm/roster-refresh', { method: 'POST' });
+    if (!res.ok) throw new Error((await res.json()).error || res.status);
+    while (true) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const st = await (await authFetch('/api/litellm/roster-refresh')).json();
+      log.textContent = st.lines.slice(-12).join('\n');
+      log.scrollTop = log.scrollHeight;
+      if (!st.running) {
+        if (st.exitCode === 0) {
+          showToast('Roster refreshed', { kind: 'success' });
+          setTimeout(() => { log.hidden = true; }, 4000);
+          loadRoutingTab();
+        } else {
+          showToast('Roster refresh failed — see log', { kind: 'error' });
+        }
+        break;
+      }
+    }
   } catch (err) {
-    showToast('Save failed: ' + err.message, { kind: 'error' });
+    log.textContent = 'Refresh failed: ' + err.message;
+    showToast('Roster refresh failed', { kind: 'error' });
   } finally {
     btn.disabled = false;
   }
+}
+$('#roster-refresh-btn')?.addEventListener('click', runRosterRefresh);
+
+// PUT the whole draft (routes + default + live controls) — the server
+// validates; the hook picks it up on the next request.
+async function saveRoutingConfig() {
+  const res = await authFetch('/api/router/routes', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      routes: routingDraft.routes,
+      default_route: routingDraft.default_route,
+      live: {
+        enabled: $('#routing-live-enabled').checked,
+        timeout_ms: Number($('#routing-timeout').value) || 5000,
+      },
+    }),
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || res.status);
+  routingDraft = body;
+  renderRouteList();
+}
+
+let selectedRouteIdx = null;
+
+// Same list grammar as Agents/Models/MCP: rows open a detail aside; chips
+// carry state (default / pinned / escalates); bound model rides as dim meta.
+function renderRouteList() {
+  const list = $('#route-list');
+  list.innerHTML = '';
+  routingDraft.routes.forEach((r, i) => {
+    const li = document.createElement('li');
+    li.classList.add('route-row');
+    if (i === selectedRouteIdx && !$('#route-detail').hidden) li.classList.add('active');
+
+    // Top line: name + state chips + bound model (the house row layout).
+    const top = document.createElement('div');
+    top.className = 'route-row-top';
+    if (r.escalate) {
+      const badge = document.createElement('span');
+      badge.className = 'model-kind-badge kind-anthropic';
+      badge.textContent = 'escalate';
+      top.appendChild(badge);
+    }
+    const name = document.createElement('span');
+    name.className = 'model-row-name';
+    name.textContent = r.name;
+    top.appendChild(name);
+    if (routingDraft.default_route === r.name) {
+      const chip = document.createElement('span');
+      chip.className = 'model-kind-badge model-default-badge';
+      chip.textContent = 'default';
+      top.appendChild(chip);
+    }
+    if (r.pinned) {
+      const chip = document.createElement('span');
+      chip.className = 'model-row-uses';
+      chip.textContent = 'pinned';
+      top.appendChild(chip);
+    }
+    if (!r.escalate) {
+      const host = document.createElement('span');
+      host.className = 'model-row-host';
+      host.textContent = r.model || '';
+      top.appendChild(host);
+    }
+    li.appendChild(top);
+
+    // Second line: the rule itself — the description the classifier matches
+    // against. Visible at a glance; click the row to edit it.
+    const desc = document.createElement('div');
+    desc.className = 'route-row-desc';
+    desc.textContent = r.description || 'No description — click to add the rule';
+    if (!r.description) desc.classList.add('empty');
+    li.appendChild(desc);
+
+    li.setAttribute('role', 'button');
+    li.setAttribute('tabindex', '0');
+    li.addEventListener('click', () => {
+      if (selectedRouteIdx === i && !$('#route-detail').hidden) closeRouteDetail();
+      else openRouteDetail(i);
+    });
+    list.appendChild(li);
+  });
+}
+
+function openRouteDetail(i) {
+  const r = routingDraft.routes[i];
+  if (!r) return;
+  selectedRouteIdx = i;
+  closeModelDetail();
+  renderRouteList();
+
+  $('#route-detail-title').textContent = r.name;
+  const badge = $('#route-detail-badge');
+  badge.hidden = !r.escalate;
+  if (r.escalate) {
+    badge.className = 'model-kind-badge kind-anthropic';
+    badge.textContent = 'escalate';
+  }
+  $('#route-name').value = r.name;
+  $('#route-description').value = r.description || '';
+  $('#route-binding-label').hidden = Boolean(r.escalate);
+  $('#route-escalate-note').hidden = !r.escalate;
+  if (!r.escalate) {
+    const sel = $('#route-binding');
+    sel.innerHTML = '';
+    for (const m of [...new Set([r.model, ...routingRoster])].filter(Boolean)) {
+      const o = document.createElement('option');
+      o.value = m;
+      o.textContent = m;
+      if (m === r.model) o.selected = true;
+      sel.appendChild(o);
+    }
+  }
+  const pin = $('#route-pinned');
+  pin.checked = Boolean(r.pinned);
+  pin.parentElement.hidden = Boolean(r.escalate);
+  const def = $('#route-default');
+  def.checked = routingDraft.default_route === r.name;
+  def.disabled = def.checked; // pick a new default elsewhere instead of unsetting
+  def.parentElement.hidden = Boolean(r.escalate);
+
+  $('#route-detail').hidden = false;
+  $('#members-panel').hidden = true;
+}
+
+function closeRouteDetail() {
+  $('#route-detail').hidden = true;
+  selectedRouteIdx = null;
+  if (routingDraft) renderRouteList();
+}
+$('#route-detail-close')?.addEventListener('click', closeRouteDetail);
+
+$('#route-detail-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const r = routingDraft.routes[selectedRouteIdx];
+  if (!r) return;
+  const prevName = r.name;
+  r.name = $('#route-name').value.trim();
+  r.description = $('#route-description').value;
+  if (!r.escalate) {
+    r.model = $('#route-binding').value;
+    r.pinned = $('#route-pinned').checked;
+    if ($('#route-default').checked) routingDraft.default_route = r.name;
+    else if (routingDraft.default_route === prevName) routingDraft.default_route = r.name;
+  }
+  try {
+    await saveRoutingConfig();
+    $('#route-detail-title').textContent = r.name;
+    showToast('Route saved — live now', { kind: 'success' });
+  } catch (err) {
+    showToast('Save failed: ' + err.message, { kind: 'error' });
+  }
 });
+
+$('#route-delete')?.addEventListener('click', async () => {
+  const r = routingDraft.routes[selectedRouteIdx];
+  if (!r) return;
+  routingDraft.routes.splice(selectedRouteIdx, 1);
+  try {
+    await saveRoutingConfig();
+    closeRouteDetail();
+    showToast('Route removed');
+  } catch (err) {
+    showToast('Delete failed: ' + err.message, { kind: 'error' });
+    loadRoutingTab(); // resync the draft we just mutated
+  }
+});
+
+$('#create-route-btn')?.addEventListener('click', () => {
+  if (!routingDraft) return;
+  routingDraft.routes.push({ name: 'new-route', description: '', model: routingRoster[0] || '' });
+  renderRouteList();
+  openRouteDetail(routingDraft.routes.length - 1);
+});
+
+// Classifier controls save immediately — same immediacy as +/− elsewhere.
+for (const id of ['routing-live-enabled', 'routing-timeout']) {
+  document.getElementById(id)?.addEventListener('change', async () => {
+    try {
+      await saveRoutingConfig();
+      showToast('Classifier settings saved', { kind: 'success' });
+    } catch (err) {
+      showToast('Save failed: ' + err.message, { kind: 'error' });
+    }
+  });
+}
 
 async function runRoutingBench() {
   const input = $('#routing-bench-input');
@@ -8761,6 +8791,7 @@ async function openModelDetail(id) {
   if (!model) return;
   selectedModelId = id;
   renderModels();
+  if (typeof closeRouteDetail === 'function') closeRouteDetail();
   closeAgentDetail();
   closeRoomDetail();
   closeMcpDetail();
