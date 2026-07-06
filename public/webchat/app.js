@@ -8371,6 +8371,7 @@ async function loadRoutingTab() {
   if (allModels.length === 0) await fetchModels(); // ± states need the registry
   renderRouteList();
   renderRouterRoster();
+  renderRouteSuggestions();
   if (routingSubtab === 'logs') refreshRoutingDecisions();
   $('#routing-bench-result').hidden = true;
   $('#routing-bench-result-log').hidden = true;
@@ -8412,6 +8413,56 @@ function renderRouterRoster() {
     li.appendChild(name);
     li.appendChild(buildSelectToggle('openai-compatible', routingRouterInfo.endpoint, id, id));
     list.appendChild(li);
+  }
+}
+
+// A roster model may have a capability (per the routing skill's catalog) that
+// no route covers yet — e.g. adding a vision model with no vision route. Offer
+// to create the route with a default description + the best-scoring binding;
+// the operator tunes it afterward in Rules. Existing routes still auto-rebind
+// via the capability binder — this only fills GAPS.
+async function renderRouteSuggestions() {
+  const box = $('#route-suggestions');
+  if (!box) return;
+  let suggestions = [];
+  try {
+    const res = await authFetch('/api/router/suggestions');
+    if (res.ok) suggestions = (await res.json()).suggestions || [];
+  } catch {
+    /* skill not installed / router down — no suggestions */
+  }
+  box.innerHTML = '';
+  box.hidden = suggestions.length === 0;
+  for (const s of suggestions) {
+    const row = document.createElement('div');
+    row.className = 'route-suggestion';
+    const text = document.createElement('span');
+    text.className = 'route-suggestion-text';
+    text.innerHTML = `<strong>${esc(s.model)}</strong> can do <strong>${esc(s.capability)}</strong> — no route covers it yet.`;
+    row.appendChild(text);
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-secondary';
+    btn.type = 'button';
+    btn.textContent = `Create ${s.capability} route`;
+    btn.addEventListener('click', () => createRouteFromSuggestion(s, btn));
+    row.appendChild(btn);
+    box.appendChild(row);
+  }
+}
+
+async function createRouteFromSuggestion(s, btn) {
+  if (!routingDraft) return;
+  if (routingDraft.routes.some((r) => r.name === s.capability)) return; // already added
+  btn.disabled = true;
+  routingDraft.routes.push({ name: s.capability, description: s.description, model: s.model });
+  try {
+    await saveRoutingConfig();
+    showToast(`Created ${s.capability} route → ${s.model}`, { kind: 'success' });
+    renderRouteSuggestions(); // it drops off the list now that it's covered
+  } catch (err) {
+    routingDraft.routes = routingDraft.routes.filter((r) => r.name !== s.capability); // roll back
+    showToast('Could not create route: ' + err.message, { kind: 'error' });
+    btn.disabled = false;
   }
 }
 
