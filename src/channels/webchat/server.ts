@@ -146,6 +146,7 @@ import {
   getRouterMetrics,
   listHostModels,
   mergeRoutesUpdate,
+  primaryRouter,
   readRoutesConfig,
   recentDecisions,
   type RoutesUpdate,
@@ -1583,7 +1584,8 @@ async function handleHttp(
     if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
     const cfg = readRoutesConfig();
     if (!cfg) return json(res, 404, { error: 'Routing not installed' });
-    return json(res, 200, { routes: cfg.routes, live: cfg.live ?? null, default_route: cfg.default_route ?? null });
+    const pr = primaryRouter(cfg); // multi-router: the tab shows the primary router
+    return json(res, 200, { routes: pr.routes, live: cfg.live ?? null, default_route: pr.default_route ?? null });
   }
   if (url.pathname === '/api/router/routes' && method === 'PUT') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });

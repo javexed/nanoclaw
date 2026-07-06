@@ -571,6 +571,28 @@ export function readRoutesConfig(root = process.cwd()): Record<string, unknown> 
   return JSON.parse(fs.readFileSync(p, 'utf8')) as Record<string, unknown>;
 }
 
+// A routes.json may be single-router (top-level routes) or multi-router
+// (a `routers` map). The current single-router GUI operates on the PRIMARY
+// router — `auto` if present, else the first defined — so the tab keeps
+// working against either shape; full multi-router editing is a later GUI
+// phase. KEEP-IN-SYNC with _routers()/routers() in the skill.
+export function primaryRouterName(cfg: Record<string, unknown>): string {
+  const routers = cfg.routers as Record<string, unknown> | undefined;
+  if (routers && typeof routers === 'object') {
+    return 'auto' in routers ? 'auto' : (Object.keys(routers)[0] ?? 'auto');
+  }
+  return ((cfg.live as { model_name?: string } | undefined)?.model_name) ?? 'auto';
+}
+
+export function primaryRouter(cfg: Record<string, unknown>): { routes: RouteDef[]; default_route?: string } {
+  const routers = cfg.routers as Record<string, { routes?: RouteDef[]; default_route?: string }> | undefined;
+  if (routers && typeof routers === 'object') {
+    const r = routers[primaryRouterName(cfg)] ?? {};
+    return { routes: r.routes ?? [], default_route: r.default_route };
+  }
+  return { routes: (cfg.routes as RouteDef[]) ?? [], default_route: cfg.default_route as string | undefined };
+}
+
 /**
  * Validate an editor submission and merge it over the on-disk config.
  * The classifier section is never client-writable (endpoint + model are the
@@ -596,15 +618,26 @@ export function mergeRoutesUpdate(existing: Record<string, unknown>, update: Rou
     }
   }
   const merged: Record<string, unknown> = { ...existing };
-  merged.routes = update.routes.map((r) => ({
+  const newRoutes = update.routes.map((r) => ({
     name: r.name,
     description: r.description.trim(),
     ...(r.escalate ? { escalate: true } : { model: r.model }),
     ...(r.pinned ? { pinned: true } : {}),
   }));
-  if (update.default_route !== undefined) {
-    if (!seen.has(update.default_route)) throw new Error(`default_route "${update.default_route}" is not a route`);
-    merged.default_route = update.default_route;
+  if (update.default_route !== undefined && !seen.has(update.default_route)) {
+    throw new Error(`default_route "${update.default_route}" is not a route`);
+  }
+  // Multi-router config: edit the PRIMARY router in place; single-router:
+  // write the top-level fields as before.
+  if (merged.routers && typeof merged.routers === 'object') {
+    const name = primaryRouterName(merged);
+    const routers = { ...(merged.routers as Record<string, Record<string, unknown>>) };
+    routers[name] = { ...(routers[name] ?? {}), routes: newRoutes };
+    if (update.default_route !== undefined) routers[name].default_route = update.default_route;
+    merged.routers = routers;
+  } else {
+    merged.routes = newRoutes;
+    if (update.default_route !== undefined) merged.default_route = update.default_route;
   }
   if (update.live !== undefined) {
     const prev = (existing.live as Record<string, unknown>) ?? {};
@@ -662,7 +695,7 @@ export async function dryClassify(prompt: string, root = process.cwd()): Promise
   const cfg = readRoutesConfig(root);
   if (!cfg) throw new Error('routing is not installed');
   const classifier = cfg.classifier as { url: string; model: string; keep_alive?: string };
-  const routes = cfg.routes as RouteDef[];
+  const { routes, default_route } = primaryRouter(cfg); // bench classifies against the primary router
   const routeDescs = routes.map((r) => ({ name: r.name, description: r.description }));
   const content =
     CLASSIFY_TASK.replace('{routes}', JSON.stringify(routeDescs)).replace(
@@ -687,7 +720,7 @@ export async function dryClassify(prompt: string, root = process.cwd()): Promise
   const route = parseClassifierRoute(body.message?.content ?? '');
   const ms = Date.now() - t0;
   const hit = routes.find((r) => r.name === route);
-  const fallback = routes.find((r) => r.name === cfg.default_route);
+  const fallback = routes.find((r) => r.name === default_route);
   const model = hit?.escalate ? '__escalate__' : (hit?.model ?? fallback?.model ?? null);
   return { route, model, ms };
 }
@@ -783,7 +816,7 @@ export async function getRouteSuggestions(root = process.cwd()): Promise<RouteSu
   if (!cfg || !cat) return [];
   const info = await getRouterInfo(root);
   if (!info.available || info.models.length === 0) return [];
-  return computeRouteSuggestions(cfg.routes as Array<{ name: string }>, info.models, cat);
+  return computeRouteSuggestions(primaryRouter(cfg).routes, info.models, cat);
 }
 
 /** Pure core (exported for tests): uncovered-capability suggestions from the
