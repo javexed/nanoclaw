@@ -11,8 +11,7 @@
  *
  * Runs on every spawn from `container-runner.buildMounts()`. Deterministic —
  * same inputs produce the same CLAUDE.md, and stale fragments are pruned.
- *
- * See `docs/claude-md-composition.md` for the full design.
+ * The composition order and fragment sources are documented inline above.
  */
 import fs from 'fs';
 import path from 'path';

@@ -64,14 +64,6 @@ export function heartbeatPath(agentGroupId: string, sessionId: string): string {
   return path.join(sessionDir(agentGroupId, sessionId), '.heartbeat');
 }
 
-/**
- * @deprecated Use inboundDbPath / outboundDbPath instead.
- * Kept temporarily for test compatibility during migration.
- */
-export function sessionDbPath(agentGroupId: string, sessionId: string): string {
-  return inboundDbPath(agentGroupId, sessionId);
-}
-
 function generateId(): string {
   return `sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -219,6 +211,16 @@ export function writeSessionMessage(
     onWake?: 0 | 1;
   },
 ): void {
+  // Documented reset: operators `rm -rf` a session folder to clear a stuck
+  // session. The sessions row survives, so the next message takes the
+  // existing-session path and lands here with a missing inbound.db — the open
+  // below would throw and the message would be logged-and-dropped forever.
+  // Re-provision the folder + DBs (initSessionFolder is idempotent) so the
+  // documented reset actually re-provisions instead of killing the chat.
+  if (!fs.existsSync(inboundDbPath(agentGroupId, sessionId))) {
+    initSessionFolder(agentGroupId, sessionId);
+  }
+
   // Extract base64 attachment data, save to inbox, replace with file paths
   const content = extractAttachmentFiles(agentGroupId, sessionId, message.id, message.content);
 
@@ -390,34 +392,6 @@ export function writeOutboundDirect(
   } finally {
     db.close();
   }
-}
-
-/**
- * @deprecated Use openInboundDb / openOutboundDb instead.
- */
-export function openSessionDb(agentGroupId: string, sessionId: string): Database.Database {
-  return openInboundDb(agentGroupId, sessionId);
-}
-
-/** Write a system response to a session's inbound.db so the container's findQuestionResponse() picks it up. */
-export function writeSystemResponse(
-  agentGroupId: string,
-  sessionId: string,
-  requestId: string,
-  status: string,
-  result: Record<string, unknown>,
-): void {
-  writeSessionMessage(agentGroupId, sessionId, {
-    id: `sys-resp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    kind: 'system',
-    timestamp: new Date().toISOString(),
-    content: JSON.stringify({
-      type: 'question_response',
-      questionId: requestId,
-      status,
-      result,
-    }),
-  });
 }
 
 /**

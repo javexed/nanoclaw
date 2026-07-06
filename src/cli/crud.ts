@@ -10,13 +10,12 @@ import { randomUUID } from 'crypto';
 
 import { getDb } from '../db/connection.js';
 import { register } from './registry.js';
+import type { Access } from './registry.js';
 import type { CallerContext } from './frame.js';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-export type Access = 'open' | 'approval' | 'hidden';
 
 export interface ColumnDef {
   name: string;

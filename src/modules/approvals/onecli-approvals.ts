@@ -147,8 +147,8 @@ async function handleRequest(request: ApprovalRequest): Promise<Decision> {
 
   const onecliTitle = 'Credentials Request';
   const onecliOptions = [
-    { label: 'Approve', selectedLabel: '✅ Approved', value: 'approve' },
-    { label: 'Reject', selectedLabel: '❌ Rejected', value: 'reject' },
+    { label: 'Approve', selectedLabel: '✅ Approved', value: 'approve', style: 'primary' as const },
+    { label: 'Reject', selectedLabel: '❌ Rejected', value: 'reject', style: 'danger' as const },
   ];
   let platformMessageId: string | undefined;
   try {

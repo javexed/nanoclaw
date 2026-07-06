@@ -1,5 +1,7 @@
 # NanoClaw Specification
 
+> **⚠️ Historical v1 spec.** This document describes the original NanoClaw v1 architecture — the single `store/messages.db`, the file-based IPC watcher, the `task-scheduler.ts` loop, the `MAX_CONCURRENT_CONTAINERS` cap, and the `groups/{channel}_{name}/` folder convention. **None of these exist in v2.** v2 replaced them with the two-DB session split (`inbound.db`/`outbound.db`), the entity model (users → messaging groups → agent groups → sessions), and the system-action delivery path. Kept for reference only. For the current architecture start at [architecture.md](architecture.md) and the root [CLAUDE.md](../CLAUDE.md); the v1→v2 diff is in [v1-to-v2-changes.md](v1-to-v2-changes.md).
+
 A personal Claude assistant with multi-channel support, persistent memory per conversation, scheduled tasks, and container-isolated agent execution.
 
 ---
