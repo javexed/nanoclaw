@@ -1,11 +1,11 @@
 <!--
-  DRAFT — seeds the standalone `nanoclaw-webchat` showcase repo.
+  DRAFT — seeds the standalone `webchat` showcase repo.
   Screenshots referenced below go in ./screenshots/ (capture from a live install).
   Replace OWNER/REPO + image paths when the repo is created. Nothing here is
   published until you say so.
 -->
 
-# NanoClaw Webchat
+# Webchat
 
 [![status: branch](https://img.shields.io/badge/status-channels--webchat-blue)](#status--how-it-ships)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
@@ -15,7 +15,7 @@
 
 Not Slack. Not a hosted widget. Your agents, your keys, your machine.
 
-**→ [Full feature guide](./GUIDE.md)** — getting started + a screenshot tour of every component.
+**→ [Full feature guide](./webchat-guide.md)** — getting started + a screenshot tour of every component.
 
 <!-- ![Lobby with @mentions, threads, and the operator sidebar](./screenshots/lobby.png) -->
 > _Hero screenshot here (lobby + thread sidebar)._
@@ -117,7 +117,7 @@ Localhost auto-owner is disabled the moment any explicit method is configured.
 
 ## Status & how it ships
 
-NanoClaw Webchat is a **large, opt-in channel** that lives on the long-running **`channels-webchat`** branch of a NanoClaw fork and installs additively — it is deliberately **not merged into NanoClaw upstream** (too large a surface for core). This repo is its **front door**: docs, screenshots, and a pointer to the installer. The code stays on the branch.
+Webchat is a **large, opt-in channel** that lives on the long-running **`channels-webchat`** branch of a NanoClaw fork and installs additively — it is deliberately **not merged into NanoClaw upstream** (too large a surface for core). This repo is its **front door**: docs, screenshots, and a pointer to the installer. The code stays on the branch.
 
 You still need a working NanoClaw fork — **this is not NanoClaw itself**.
 

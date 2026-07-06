@@ -1,16 +1,16 @@
 <!--
-  Feature guide for the standalone nanoclaw-webchat showcase repo.
+  Feature guide for the standalone webchat showcase repo.
   Screenshots live in ./screenshots/ (captured from a live install).
   Some shots (lobby/DM/approvals) come from a populated demo — see CAPTURE.md.
 -->
 
-# NanoClaw Webchat — Feature Guide
+# Webchat — Feature Guide
 
 A local-first chat desk **and** operator console for your [NanoClaw](https://github.com/nanocoai/nanoclaw)
 agents — one installable PWA bound to `127.0.0.1`. This guide walks the whole
 surface: get it running, then a deep dive into each component.
 
-> New here? The [README](./README.md) is the one-page pitch; this is the tour.
+> New here? The [README](./webchat-readme.md) is the one-page pitch; this is the tour.
 > For architecture + APIs, see the [design doc](../design/webchat.md).
 
 ---
