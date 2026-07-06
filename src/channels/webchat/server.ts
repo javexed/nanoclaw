@@ -1666,11 +1666,11 @@ async function handleHttp(
       return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
     }
   }
-  if (url.pathname === '/api/litellm/roster-refresh' && method === 'GET') {
+  if (url.pathname === '/api/router/roster-refresh' && method === 'GET') {
     if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
     return json(res, 200, getRosterRefreshState());
   }
-  if (url.pathname === '/api/litellm/roster-refresh' && method === 'POST') {
+  if (url.pathname === '/api/router/roster-refresh' && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
     const started = startRosterRefresh();

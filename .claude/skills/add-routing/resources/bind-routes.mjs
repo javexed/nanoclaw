@@ -115,6 +115,8 @@ export function mergeCatalog(stock, local) {
 // ── CLI ────────────────────────────────────────────────────────────────────
 
 async function fetchRoster() {
+  // LiteLLM's default port from /add-litellm — mirrored in ollama-manage.ts and
+  // the app.js roster-endpoint regex; change all three together if it moves.
   const res = await fetch('http://127.0.0.1:4000/v1/models', { signal: AbortSignal.timeout(5000) });
   if (!res.ok) throw new Error(`router /v1/models returned ${res.status}`);
   const body = await res.json();
