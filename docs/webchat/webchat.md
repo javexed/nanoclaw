@@ -11,8 +11,8 @@ This is the overview. Focused design docs cover the harder subsystems in depth:
 - Threads: [webchat-threads.md](webchat-threads.md), [webchat-threads-qa.md](webchat-threads-qa.md)
 - Thread context sync: [webchat-thread-context-sync.md](webchat-thread-context-sync.md)
 - Thread-engaged agents (dormant): [thread-engaged-agents.md](thread-engaged-agents.md)
-- Per-member credentials (BYOK): [user-credentials.md](user-credentials.md), [user-credentials-oauth.md](user-credentials-oauth.md)
-- Local-model routing: [llm-router.md](llm-router.md), [add-litellm.md](add-litellm.md)
+- Per-member credentials (BYOK): [user-credentials.md](../design/user-credentials.md), [user-credentials-oauth.md](../design/user-credentials-oauth.md)
+- Local-model routing: [llm-router.md](../design/llm-router.md), [add-litellm.md](../design/add-litellm.md)
 
 Ships **disabled by default** — the adapter factory returns `null` unless
 `WEBCHAT_ENABLED=true`.
@@ -61,7 +61,7 @@ attachments, push subscriptions, user handles, an approvals index, and settings.
 Credentials are never placed in env vars or chat. Per-turn credentials are
 injected on the wire by the **OneCLI gateway**, keyed to the container's OneCLI
 agent identity, resolved at spawn from trusted session state. See the BYOK
-section and [user-credentials.md](user-credentials.md).
+section and [user-credentials.md](../design/user-credentials.md).
 
 ### Approvals bridge
 

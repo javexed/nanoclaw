@@ -1130,7 +1130,7 @@ async function handleHttp(
   }
 
   // ── Threads (per-room) ────────────────────────────────────────────────
-  // A thread maps to an agent session; see docs/design/webchat-threads.md.
+  // A thread maps to an agent session; see docs/webchat/webchat-threads.md.
   // List/read/create/rename are member-gated; delete (destroys history + tears
   // down the thread's session) is owner-only.
   const roomThreadReadMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads\/([^/]+)\/read$/);
@@ -1215,7 +1215,7 @@ async function handleHttp(
   // broadcast the copies, and advance the per-thread high-water mark so repeat
   // syncs only carry genuinely new messages. The 'main' regular chat is the
   // shared trunk; only a topic thread can pull from / push to it.
-  // See docs/design/webchat-thread-context-sync.md.
+  // See docs/webchat/webchat-thread-context-sync.md.
   const roomThreadPullMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads\/([^/]+)\/(pull|push)$/);
   if (roomThreadPullMatch && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
@@ -1257,7 +1257,7 @@ async function handleHttp(
   // nothing is a footgun. When off, the routes fall through to the default 404.
   // To bring the subsystem back: flip this flag AND add the setEngagedResolver
   // wiring. GET lists, POST engages, DELETE disengages; the 'main' thread can
-  // never engage. See docs/design/thread-engaged-agents.md.
+  // never engage. See docs/webchat/thread-engaged-agents.md.
   const ENGAGED_AGENTS_ENABLED: boolean = false;
   const roomThreadEngagedMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads\/([^/]+)\/engaged$/);
   if (ENGAGED_AGENTS_ENABLED && roomThreadEngagedMatch && method === 'GET') {
@@ -2191,7 +2191,7 @@ function sessionsForThreadKey(messagingGroupId: string, sessionKey: string | nul
  * keyed under — both directions track progress against that one row so a push and
  * a pull on the same thread don't share a mark. Returns the number of messages
  * copied (excluding the divider; 0 = nothing new). See
- * docs/design/webchat-thread-context-sync.md.
+ * docs/webchat/webchat-thread-context-sync.md.
  */
 export function syncThreadContext(opts: {
   roomId: string;
@@ -2273,7 +2273,7 @@ const ENGAGE_FOLDER_ESCAPE_RE = /[.*+?^${}()|[\]\\]/g;
  * un-addressed message → a one-agent thread keeps replying without re-mention) or
  * 'defer' (engaged but someone else was addressed → receives context, no reply).
  * Returns null when engagement doesn't apply so the router falls back to normal
- * mention-only routing. See docs/design/thread-engaged-agents.md.
+ * mention-only routing. See docs/webchat/thread-engaged-agents.md.
  */
 export function resolveEngagedDecision(
   mg: MessagingGroup,

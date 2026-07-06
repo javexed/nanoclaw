@@ -2,7 +2,7 @@
  * Tests for resolveEngagedDecision — the engaged-thread routing decision used by
  * the host router. Verifies @mention auto-engage, expected vs defer, the
  * sole-engaged-agent rule, and the null fall-throughs (regular chat, agent
- * fan-out, non-webchat, nothing engaged). See docs/design/thread-engaged-agents.md.
+ * fan-out, non-webchat, nothing engaged). See docs/webchat/thread-engaged-agents.md.
  */
 import { randomUUID } from 'crypto';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';

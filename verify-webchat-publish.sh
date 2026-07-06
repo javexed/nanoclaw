@@ -133,7 +133,7 @@ if [ -z "$INST" ]; then fail "no install-webchat.sh on $CHANNEL"; else
       e2e/*|playwright.config.ts) covered=yes ;;                                   # dev-only e2e infra — intentionally not installed
       webchat-hooks/*) covered=yes ;;                                              # provider overlays (step 2d) — applied/copied by name
       README.md|CHANGELOG.md) covered=yes ;;                                       # root project docs — branch documents the GUI; overlay never patches them
-      .claude/skills/*|docs/design/*|docs/showcase/*) covered=yes ;;                 # repo-resident skills + design/showcase docs — repo documentation, not delivered by the webchat overlay
+      .claude/skills/*|docs/design/*|docs/showcase/*|docs/webchat/*) covered=yes ;; # repo-resident skills + design/webchat docs — repo documentation, not delivered by the webchat overlay
     esac
     [ "$covered" = no ] && uncovered="${uncovered}${f}"$'\n'
   done < <(git diff --name-only "$BASE" "$CHANNEL")

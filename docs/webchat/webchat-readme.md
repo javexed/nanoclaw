@@ -127,7 +127,7 @@ You still need a working NanoClaw fork — **this is not NanoClaw itself**.
 - A channel **adapter** (`src/channels/webchat/`) that registers with NanoClaw's router; messages flow through the normal session model, not a side channel.
 - History in a webchat-owned set of tables in the host's central SQLite DB; credentials injected per-request by the OneCLI gateway (none in env or chat).
 
-See **[docs/design/webchat.md](../design/webchat.md)** for the full architecture and feature reference.
+See **[docs/webchat/webchat.md](./webchat.md)** for the full architecture and feature reference.
 
 ## License
 

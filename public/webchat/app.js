@@ -2070,7 +2070,7 @@ async function toggleRoomHide(roomId, hide) {
 // ── Threads ─────────────────────────────────────────────────────────────────
 // A webchat thread maps to an isolated agent session. The sidebar nests a
 // room's threads under it; switching a thread re-joins the room scoped to that
-// thread (server filters history). See docs/design/webchat-threads.md.
+// thread (server filters history). See docs/webchat/webchat-threads.md.
 let currentThread = 'main';
 let threadCreating = false; // true while the inline "new thread" input is open
 let threadAddRoom = null; // room id whose row is showing the inline new-thread input
@@ -2955,7 +2955,7 @@ function appendMessage(msg, statusText, beforeNode) {
     return;
   }
   // Context-sync divider: a labelled rule marking where pulled/pushed messages
-  // begin. See docs/design/webchat-thread-context-sync.md.
+  // begin. See docs/webchat/webchat-thread-context-sync.md.
   if (msg.message_type === 'context-divider') {
     const rule = document.createElement('div');
     rule.className = 'context-divider';
