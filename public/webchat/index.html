@@ -148,6 +148,23 @@
         <path d="M10 11v6" />
         <path d="M14 11v6" />
       </symbol>
+      <symbol id="i-route" viewBox="0 0 24 24">
+        <circle cx="6" cy="19" r="3" />
+        <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15" />
+        <circle cx="18" cy="5" r="3" />
+      </symbol>
+      <symbol id="i-workflow" viewBox="0 0 24 24">
+        <rect width="8" height="8" x="3" y="3" rx="2" />
+        <path d="M7 11v4a2 2 0 0 0 2 2h4" />
+        <rect width="8" height="8" x="13" y="13" rx="2" />
+      </symbol>
+      <symbol id="i-share" viewBox="0 0 24 24">
+        <circle cx="18" cy="5" r="3" />
+        <circle cx="6" cy="12" r="3" />
+        <circle cx="18" cy="19" r="3" />
+        <line x1="8.59" x2="15.42" y1="13.51" y2="17.49" />
+        <line x1="15.41" x2="8.59" y1="6.51" y2="10.49" />
+      </symbol>
     </svg>
     <!-- Login screen (shown when auth required) -->
     <div id="login-screen" class="login-screen" hidden>
@@ -200,13 +217,13 @@
                   <svg class="icon" aria-hidden="true"><use href="#i-plug"></use></svg>&nbsp;&nbsp;MCP
                 </button>
                 <button class="overflow-item" data-action="routing" role="menuitem" hidden>
-                  <svg class="icon" aria-hidden="true"><use href="#i-sort"></use></svg>&nbsp;&nbsp;Routing
+                  <svg class="icon" aria-hidden="true"><use href="#i-route"></use></svg>&nbsp;&nbsp;Routing
                 </button>
                 <button class="overflow-item" data-action="topology" role="menuitem">
-                  <svg class="icon" aria-hidden="true"><use href="#i-layout-dashboard"></use></svg>&nbsp;&nbsp;Topology
+                  <svg class="icon" aria-hidden="true"><use href="#i-workflow"></use></svg>&nbsp;&nbsp;Topology
                 </button>
                 <button class="overflow-item" data-action="matrix" role="menuitem">
-                  <svg class="icon" aria-hidden="true"><use href="#i-layout-dashboard"></use></svg>&nbsp;&nbsp;Wiring
+                  <svg class="icon" aria-hidden="true"><use href="#i-share"></use></svg>&nbsp;&nbsp;Wiring
                 </button>
                 <button
                   id="overflow-permissions"
