@@ -576,3 +576,116 @@ export function recentDecisions(limit: number, root = process.cwd()): Array<Reco
   }
   return out;
 }
+
+// ── Route suggestions: propose a route for a capability nothing covers yet ──
+
+interface CapabilityCatalog {
+  entries: Array<{ pattern: string; quality: Record<string, number> }>;
+  max_comfortable_b: number;
+  size_penalty_per_b: number;
+}
+
+export interface RouteSuggestion {
+  capability: string;
+  description: string;
+  model: string; // recommended binding (best-scoring roster model for the capability)
+  models: string[]; // roster models that have this capability
+}
+
+// Default descriptions for the auto-created route. Operator tunes afterward in
+// the Rules sub-tab — this is a starting point, not a fixed rule. Unknown
+// capabilities fall back to a generic sentence.
+const ROUTE_TEMPLATES: Record<string, string> = {
+  code: 'Writing, debugging, or explaining code, scripts, or software configuration',
+  reasoning: 'Multi-step planning, math, logic, or analysis requiring careful thought',
+  general: 'Everyday conversation, quick questions, summaries, casual requests',
+  vision:
+    'Questions about images, screenshots, photos, diagrams, or visual content — anything requiring looking at a picture',
+};
+
+/**
+ * Read the skill-owned capability catalog (capabilities.json), merged under the
+ * operator's optional capabilities.local.json (same shape, matched first).
+ * Returns null when the routing skill isn't installed.
+ */
+export function readCapabilityCatalog(root = process.cwd()): CapabilityCatalog | null {
+  const stockPath = path.join(root, '.claude/skills/add-routing/resources/capabilities.json');
+  if (!fs.existsSync(stockPath)) return null;
+  const stock = JSON.parse(fs.readFileSync(stockPath, 'utf8')) as CapabilityCatalog;
+  const localPath = path.join(root, 'data/litellm/routing/capabilities.local.json');
+  const local = fs.existsSync(localPath)
+    ? (JSON.parse(fs.readFileSync(localPath, 'utf8')) as Partial<CapabilityCatalog>)
+    : null;
+  if (!local) return stock;
+  return {
+    max_comfortable_b: local.max_comfortable_b ?? stock.max_comfortable_b,
+    size_penalty_per_b: local.size_penalty_per_b ?? stock.size_penalty_per_b,
+    entries: [...(local.entries ?? []), ...stock.entries], // local matched first
+  };
+}
+
+function catalogEntryFor(modelId: string, cat: CapabilityCatalog) {
+  const id = modelId.toLowerCase();
+  return cat.entries.find((e) => id.includes(e.pattern.toLowerCase())) ?? null;
+}
+
+// Same score as bind-routes.mjs: quality minus a size penalty so an oversized
+// specialist loses to a right-sized one on modest hardware. Kept in sync.
+function scoreFor(modelId: string, capability: string, cat: CapabilityCatalog): number | null {
+  const entry = catalogEntryFor(modelId, cat);
+  const quality = entry?.quality?.[capability];
+  if (quality == null) return null;
+  const m = modelId.toLowerCase().match(/(\d+(?:\.\d+)?)b\b/);
+  const paramB = m ? parseFloat(m[1]) : null;
+  const penalty = paramB != null && paramB > cat.max_comfortable_b ? (paramB - cat.max_comfortable_b) * cat.size_penalty_per_b : 0;
+  return quality - penalty;
+}
+
+/**
+ * Capabilities present in the roster (per the catalog) that NO existing route
+ * covers — each with a default description and the best model to bind. Empty
+ * when the skill/catalog/router isn't available or every capability is routed.
+ */
+export async function getRouteSuggestions(root = process.cwd()): Promise<RouteSuggestion[]> {
+  const cfg = readRoutesConfig(root);
+  const cat = readCapabilityCatalog(root);
+  if (!cfg || !cat) return [];
+  const info = await getRouterInfo(root);
+  if (!info.available || info.models.length === 0) return [];
+  return computeRouteSuggestions(cfg.routes as Array<{ name: string }>, info.models, cat);
+}
+
+/** Pure core (exported for tests): uncovered-capability suggestions from the
+ *  routes + roster + catalog. */
+export function computeRouteSuggestions(
+  routes: Array<{ name: string }>,
+  roster: string[],
+  cat: CapabilityCatalog,
+): RouteSuggestion[] {
+  const covered = new Set(routes.map((r) => r.name));
+  const byCap = new Map<string, { best: string; bestScore: number; models: string[] }>();
+  for (const model of roster) {
+    const entry = catalogEntryFor(model, cat);
+    if (!entry) continue;
+    for (const capability of Object.keys(entry.quality ?? {})) {
+      if (covered.has(capability)) continue; // a route already handles it
+      const s = scoreFor(model, capability, cat);
+      if (s == null) continue;
+      const cur = byCap.get(capability);
+      if (!cur) byCap.set(capability, { best: model, bestScore: s, models: [model] });
+      else {
+        cur.models.push(model);
+        if (s > cur.bestScore) {
+          cur.best = model;
+          cur.bestScore = s;
+        }
+      }
+    }
+  }
+  return [...byCap.entries()].map(([capability, v]) => ({
+    capability,
+    description: ROUTE_TEMPLATES[capability] ?? `Prompts best suited to ${capability}`,
+    model: v.best,
+    models: v.models.sort(),
+  }));
+}

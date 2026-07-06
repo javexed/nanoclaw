@@ -202,3 +202,57 @@ describe('mergeRoutesUpdate / parseClassifierRoute', () => {
     expect(() => parseClassifierRoute('nope')).toThrow(/no JSON/);
   });
 });
+
+describe('computeRouteSuggestions', () => {
+  const CAT: {
+    max_comfortable_b: number;
+    size_penalty_per_b: number;
+    entries: { pattern: string; quality: Record<string, number> }[];
+  } = {
+    max_comfortable_b: 14,
+    size_penalty_per_b: 4,
+    entries: [
+      { pattern: 'llava', quality: { vision: 85 } },
+      { pattern: 'qwen3-coder', quality: { code: 92 } },
+      { pattern: 'ornith', quality: { code: 88 } },
+      { pattern: 'gemma', quality: { general: 75, reasoning: 72 } },
+    ],
+  };
+
+  it('suggests an uncovered capability, best-scoring model, default description', async () => {
+    const { computeRouteSuggestions } = await import('./ollama-manage.js');
+    const routes = [{ name: 'code' }, { name: 'general' }]; // vision + reasoning uncovered
+    const roster = ['LLaVA:latest', 'gemma4:latest', 'ornith:latest'];
+    const out = computeRouteSuggestions(routes, roster, CAT);
+    const vision = out.find((s) => s.capability === 'vision');
+    const reasoning = out.find((s) => s.capability === 'reasoning');
+    expect(vision).toBeTruthy();
+    expect(vision!.model).toBe('LLaVA:latest');
+    expect(vision!.description).toMatch(/images/);
+    expect(reasoning!.model).toBe('gemma4:latest');
+    // code + general are covered → not suggested
+    expect(out.some((s) => s.capability === 'code')).toBe(false);
+    expect(out.some((s) => s.capability === 'general')).toBe(false);
+  });
+
+  it('returns nothing when every capability already has a route', async () => {
+    const { computeRouteSuggestions } = await import('./ollama-manage.js');
+    const routes = [{ name: 'code' }, { name: 'general' }, { name: 'reasoning' }, { name: 'vision' }];
+    const out = computeRouteSuggestions(routes, ['LLaVA:latest', 'gemma4:latest'], CAT);
+    expect(out).toEqual([]);
+  });
+
+  it('picks the higher-scoring model when several cover a capability (size penalty applies)', async () => {
+    const { computeRouteSuggestions } = await import('./ollama-manage.js');
+    // qwen3-coder:30b → 92 − (30−14)*4 = 28; ornith:latest → 88. Ornith wins.
+    const out = computeRouteSuggestions([], ['qwen3-coder:30b', 'ornith:latest'], CAT);
+    const code = out.find((s) => s.capability === 'code');
+    expect(code!.model).toBe('ornith:latest');
+    expect(code!.models).toEqual(['ornith:latest', 'qwen3-coder:30b']);
+  });
+
+  it('ignores roster models unknown to the catalog', async () => {
+    const { computeRouteSuggestions } = await import('./ollama-manage.js');
+    expect(computeRouteSuggestions([], ['mystery-model:7b'], CAT)).toEqual([]);
+  });
+});

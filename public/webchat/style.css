@@ -6370,3 +6370,27 @@ a.lightbox-btn {
   list-style: none;
   padding: 8px 0;
 }
+
+/* ── Route suggestions (Models sub-tab) ──────────────────────────────── */
+.route-suggestions {
+  margin-bottom: 12px;
+}
+.route-suggestion {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.route-suggestion-text {
+  font-size: var(--fs-sm);
+  min-width: 0;
+}
+.route-suggestion .btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}

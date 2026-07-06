@@ -141,6 +141,7 @@ import {
   getPullsSnapshot,
   getRosterRefreshState,
   dryClassify,
+  getRouteSuggestions,
   getRouterInfo,
   getRouterMetrics,
   listHostModels,
@@ -1630,6 +1631,10 @@ async function handleHttp(
     if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
     const days = Math.max(1, Math.min(30, Number(url.searchParams.get('days')) || 7));
     return json(res, 200, getRouterMetrics(days));
+  }
+  if (url.pathname === '/api/router/suggestions' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    return json(res, 200, { suggestions: await getRouteSuggestions() });
   }
   if (url.pathname === '/api/router/models' && method === 'GET') {
     if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
