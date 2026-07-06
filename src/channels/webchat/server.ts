@@ -73,6 +73,7 @@ import os from 'os';
 import path from 'path';
 
 import { DATA_DIR, GROUPS_DIR } from '../../config.js';
+import { readEnvFile } from '../../env.js';
 import { getDb, hasTable } from '../../db/connection.js';
 import { log } from '../../log.js';
 import {
@@ -2603,6 +2604,45 @@ function provisionWebchatAgentWithRoom(
 interface AgentForUI extends AgentGroup {
   room_id: string | null;
   assigned_model_id: string | null;
+  /**
+   * When no webchat model is assigned, a label derived from the agent's actual
+   * runtime provider (container_configs.provider), so the PWA can show what the
+   * agent really runs on instead of defaulting to "Built-in Anthropic". null
+   * when a model IS assigned (the PWA shows that model) or the provider is the
+   * built-in Claude path (the PWA shows its Anthropic default).
+   */
+  effective_model_label: string | null;
+}
+
+/**
+ * Derive a display label for an agent with NO assigned webchat model, from its
+ * runtime provider. Returns null for the built-in Claude path (caller shows the
+ * Anthropic default). Best-effort: the specific model is read from the agent's
+ * settings.json env stub when present (webchat's own openai-compatible
+ * assignment writes OPENAI_MODEL there); an install-wide `.env` OPENCODE_MODEL
+ * isn't per-agent so it's not surfaced here — the provider alone is accurate.
+ */
+function deriveEffectiveModelLabel(agentGroupId: string): string | null {
+  const provider = getContainerConfig(agentGroupId)?.provider ?? 'claude';
+  if (provider === 'opencode') {
+    let model: string | undefined;
+    try {
+      const p = path.join(DATA_DIR, 'v2-sessions', agentGroupId, '.claude-shared', 'settings.json');
+      const env = (JSON.parse(fs.readFileSync(p, 'utf-8')).env ?? {}) as Record<string, string>;
+      model = env.OPENAI_MODEL || env.OPENCODE_MODEL;
+    } catch {
+      // no per-agent stub — fall through to the install-wide default
+    }
+    // Install-wide fallback: this host keeps .env out of process.env, so read
+    // the file. Not per-agent, but for an install-wide opencode setup it's the
+    // model every such agent runs on.
+    if (!model) model = readEnvFile(['OPENCODE_MODEL']).OPENCODE_MODEL;
+    // Strip a leading "<provider>/" (e.g. "openai/llama3.2:3b" → "llama3.2:3b").
+    if (model) model = model.replace(/^[^/]+\//, '');
+    return model || 'OpenCode';
+  }
+  if (provider === 'codex') return 'Codex';
+  return null;
 }
 
 function toAgentForUI(g: AgentGroup): AgentForUI {
@@ -2611,7 +2651,12 @@ function toAgentForUI(g: AgentGroup): AgentForUI {
   // doesn't have to guess.
   const room = getWebchatRoom(g.folder);
   const assigned = getAssignedModelForAgent(g.id);
-  return { ...g, room_id: room ? room.id : null, assigned_model_id: assigned ? assigned.id : null };
+  return {
+    ...g,
+    room_id: room ? room.id : null,
+    assigned_model_id: assigned ? assigned.id : null,
+    effective_model_label: assigned ? null : deriveEffectiveModelLabel(g.id),
+  };
 }
 
 function resolveAgent(idOrJid: string): AgentGroup | null {

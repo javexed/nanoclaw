@@ -6182,12 +6182,28 @@ function renderAgents() {
 // Reflect the agent's status on the 3-button segmented control + hint.
 function setAgentStatusControl(status) {
   const s = status || 'active';
-  document.querySelectorAll('#agent-status-control .agent-status-btn').forEach((b) => {
+  document.querySelectorAll('#agent-status-control .setting-option').forEach((b) => {
     b.classList.toggle('active', b.dataset.status === s);
   });
-  const hint = $('#agent-status-hint');
-  if (hint) hint.textContent = AGENT_STATUS_HINTS[s] || '';
 }
+
+// Agent-detail sub-tabs: Settings (status/name/model/MCP/rooms) vs Instructions.
+// Instructions lives behind a tab so it doesn't dominate a panel that's mostly
+// used for quick status/model/wiring tweaks. All fields share one <form>, so a
+// hidden tab's values still submit on Save.
+function setAgentSubtab(name) {
+  document.querySelectorAll('#agent-edit-view .agent-subtab').forEach((t) => {
+    const on = t.dataset.subtab === name;
+    t.classList.toggle('active', on);
+    t.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  document.querySelectorAll('#agent-edit-view .agent-subtab-panel').forEach((p) => {
+    p.hidden = p.dataset.subtabPanel !== name;
+  });
+}
+document.querySelectorAll('#agent-edit-view .agent-subtab').forEach((tab) => {
+  tab.addEventListener('click', () => setAgentSubtab(tab.dataset.subtab));
+});
 
 async function openAgentDetail(id) {
   const agent = allAgents.find((b) => b.id === id);
@@ -6201,6 +6217,7 @@ async function openAgentDetail(id) {
   // Show edit view, hide create view
   $('#agent-edit-view').hidden = false;
   $('#agent-create-view').hidden = true;
+  setAgentSubtab('settings'); // always open on Settings, not the last-used tab
 
   $('#agent-detail-title').textContent = agent.name;
   $('#agent-name').value = agent.name;
@@ -6225,7 +6242,6 @@ async function openAgentDetail(id) {
   await loadAgentRooms(id);
 
   // MCP servers wired to this agent (external tool servers).
-  resetAgentMcpForm();
   renderAgentMcp(id);
 
   $('#agent-detail').hidden = false;
@@ -6246,7 +6262,7 @@ $('#agent-create-close').addEventListener('click', closeAgentDetail);
 // Status control: each button PUTs the new status, then refreshes the list so
 // the badge + (if archived) visibility update immediately.
 $('#agent-status-control').addEventListener('click', async (e) => {
-  const btn = e.target.closest('.agent-status-btn');
+  const btn = e.target.closest('.setting-option');
   if (!btn || !selectedAgentId) return;
   const status = btn.dataset.status;
   const agent = allAgents.find((b) => b.id === selectedAgentId);
@@ -6260,7 +6276,7 @@ $('#agent-status-control').addEventListener('click', async (e) => {
     });
     if (!res.ok) throw new Error('status ' + res.status);
     if (agent) agent.status = status;
-    showToast(`Agent ${status === 'active' ? 'activated' : status}`);
+    showToast(`${status[0].toUpperCase()}${status.slice(1)} — ${AGENT_STATUS_HINTS[status] || ''}`);
     renderAgents();
   } catch (err) {
     console.error('Failed to set agent status:', err);
@@ -6285,7 +6301,6 @@ let agentDetailRooms = [];
 let canManageAgentRooms = false;
 
 async function loadAgentRooms(agentId) {
-  $('#agent-add-room-form').hidden = true;
   try {
     const res = await authFetch(`/api/agents/${encodeURIComponent(agentId)}/rooms`);
     canManageAgentRooms = res.ok;
@@ -6301,6 +6316,8 @@ async function loadAgentRooms(agentId) {
 function renderAgentWiredRooms() {
   const list = $('#agent-wired-rooms');
   list.innerHTML = '';
+  const roomCount = $('#agent-rooms-count');
+  if (roomCount) roomCount.textContent = agentDetailRooms.length ? String(agentDetailRooms.length) : '';
   if (agentDetailRooms.length === 0) {
     const li = document.createElement('li');
     li.className = 'empty-note';
@@ -6339,76 +6356,6 @@ function renderAgentWiredRooms() {
   $('#agent-add-room-toggle').hidden = !canManageAgentRooms;
 }
 
-async function populateAssignRoomSelect() {
-  let rooms = [];
-  try {
-    const res = await authFetch('/api/rooms');
-    rooms = res.ok ? await res.json() : [];
-  } catch {}
-  const wiredIds = new Set(agentDetailRooms.map((r) => r.id));
-  const candidates = rooms.filter((r) => !wiredIds.has(r.id));
-  const list = $('#agent-add-room-list');
-  list.innerHTML = '';
-  if (candidates.length === 0) {
-    const li = document.createElement('li');
-    li.className = 'empty-note';
-    li.textContent = 'Already assigned to every room.';
-    list.appendChild(li);
-    updateAssignRoomSubmit();
-    return;
-  }
-  const sorted = [...candidates].sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
-  for (const room of sorted) {
-    const li = document.createElement('li');
-    li.className = 'room-add-agent-row';
-    li.dataset.roomName = (room.name || room.id).toLowerCase();
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.value = room.id;
-    cb.id = `agent-add-room-${room.id}`;
-    cb.addEventListener('change', updateAssignRoomSubmit);
-    const lbl = document.createElement('label');
-    lbl.htmlFor = cb.id;
-    lbl.textContent = room.name;
-    li.appendChild(cb);
-    li.appendChild(lbl);
-    list.appendChild(li);
-  }
-  updateAssignRoomSubmit();
-}
-
-function updateAssignRoomSubmit() {
-  const n = $('#agent-add-room-list').querySelectorAll('input[type=checkbox]:checked').length;
-  const btn = $('#agent-add-room-submit');
-  btn.disabled = n === 0;
-  btn.textContent = n === 0 ? 'Wire selected' : `Wire ${n} room${n === 1 ? '' : 's'}`;
-}
-
-async function assignSelectedRooms() {
-  if (!selectedAgentId) return;
-  const checked = [...$('#agent-add-room-list').querySelectorAll('input[type=checkbox]:checked')];
-  const roomIds = checked.map((cb) => cb.value);
-  if (roomIds.length === 0) return;
-  $('#agent-add-room-submit').disabled = true;
-  try {
-    for (const roomId of roomIds) {
-      const res = await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/agents`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kind: 'existing', id: selectedAgentId }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        showToast('Failed to assign room: ' + (err.error || res.statusText), { kind: 'error' });
-        break;
-      }
-    }
-  } finally {
-    $('#agent-add-room-form').hidden = true;
-    await loadAgentRooms(selectedAgentId);
-  }
-}
-
 async function removeRoomFromAgent(roomId, roomName) {
   if (!selectedAgentId) return;
   const confirmed = await showConfirmModal({
@@ -6435,29 +6382,40 @@ async function removeRoomFromAgent(roomId, roomName) {
   }
 }
 
-// Filter the assign-room checklist by typed text. Hides/shows rows rather than
-// re-rendering, so checkbox selections survive filtering.
-function filterAssignRoomList(text) {
-  const q = (text || '').trim().toLowerCase();
-  for (const li of $('#agent-add-room-list').querySelectorAll('li.room-add-agent-row')) {
-    li.hidden = q !== '' && !(li.dataset.roomName || '').includes(q);
-  }
-}
-
+// "+ Wire to room" opens the shared attach picker — toggle the agent in/out of
+// any room. (Rooms are created from the room list, so no "+ Add new" here.)
 $('#agent-add-room-toggle').addEventListener('click', async () => {
-  const form = $('#agent-add-room-form');
-  if (form.hidden) {
-    await populateAssignRoomSelect();
-    $('#agent-add-room-search').value = '';
-    filterAssignRoomList('');
-    form.hidden = false;
-    $('#agent-add-room-search').focus();
-  } else {
-    form.hidden = true;
-  }
+  const agentId = selectedAgentId;
+  if (!agentId) return;
+  let allRooms = [];
+  try {
+    const res = await authFetch('/api/rooms');
+    allRooms = res.ok ? await res.json() : [];
+  } catch {}
+  openAttachPicker({
+    title: 'Rooms',
+    searchPlaceholder: 'Search rooms…',
+    emptyText: 'No rooms yet.',
+    items: () => allRooms,
+    searchText: (r) => r.name || r.id,
+    name: (r) => r.name || r.id,
+    isAttached: (r) => agentDetailRooms.some((x) => x.id === r.id),
+    onToggle: async (r, add) => {
+      const res = add
+        ? await authFetch(`/api/rooms/${encodeURIComponent(r.id)}/agents`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ kind: 'existing', id: agentId }),
+          })
+        : await authFetch(`/api/rooms/${encodeURIComponent(r.id)}/agents/${encodeURIComponent(agentId)}`, {
+            method: 'DELETE',
+          });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+      showToast(add ? `Wired to ${r.name || r.id}` : `Unwired from ${r.name || r.id}`, { kind: 'success' });
+      await loadAgentRooms(agentId);
+    },
+  });
 });
-$('#agent-add-room-search').addEventListener('input', (e) => filterAssignRoomList(e.target.value));
-$('#agent-add-room-submit').addEventListener('click', assignSelectedRooms);
 
 // ── Per-agent MCP servers (attach/detach over the registry) ─────────────────
 // Servers are DEFINED in the MCP tab (the registry); the agent panel only
@@ -6466,10 +6424,6 @@ $('#agent-add-room-submit').addEventListener('click', assignSelectedRooms);
 // server never returns env/headers).
 
 let agentMcpServers = []; // servers attached to the currently-open agent
-
-function resetAgentMcpForm() {
-  $('#agent-mcp-attach-form').hidden = true;
-}
 
 async function renderAgentMcp(agentId) {
   const list = $('#agent-mcp-list');
@@ -6481,6 +6435,8 @@ async function renderAgentMcp(agentId) {
   } catch (err) {
     console.error('Failed to load MCP servers:', err);
   }
+  const mcpCount = $('#agent-mcp-count');
+  if (mcpCount) mcpCount.textContent = agentMcpServers.length ? String(agentMcpServers.length) : '';
   if (agentMcpServers.length === 0) {
     const empty = document.createElement('li');
     empty.className = 'agent-mcp-empty';
@@ -6537,67 +6493,141 @@ async function detachAgentMcp(agentId, server) {
   }
 }
 
-// Populate the attach checklist with registry servers not yet on this agent.
-async function populateAgentMcpAttachList() {
-  if (allMcpServers.length === 0) await fetchMcpServers();
-  const attached = new Set(agentMcpServers.map((s) => s.id));
-  const candidates = allMcpServers.filter((s) => !attached.has(s.id));
-  const list = $('#agent-mcp-attach-list');
+// ── Shared multi-select attach picker (MCP servers, rooms) ──────────────────
+// A single bottom-sheet reused by every "attach" surface. The caller supplies a
+// config describing the item source, how to render/search a row, whether an item
+// is already attached, and what to do on toggle. Reuses the model-picker chrome.
+let attachPickerCfg = null;
+
+function openAttachPicker(cfg) {
+  attachPickerCfg = cfg;
+  $('#attach-picker-title').textContent = cfg.title;
+  const search = $('#attach-picker-search');
+  search.value = '';
+  search.placeholder = cfg.searchPlaceholder || 'Search…';
+  const addBtn = $('#attach-picker-add-new');
+  addBtn.hidden = !cfg.onAddNew;
+  addBtn.textContent = cfg.addNewLabel || '+ Add new';
+  renderAttachPickerList('');
+  const picker = $('#attach-picker');
+  picker.hidden = false;
+  void picker.offsetHeight; // reflow so the open transition runs
+  picker.classList.add('open');
+  if (window.matchMedia('(min-width: 720px)').matches) setTimeout(() => search.focus(), 60);
+}
+
+function closeAttachPicker() {
+  const picker = $('#attach-picker');
+  picker.classList.remove('open');
+  setTimeout(() => {
+    picker.hidden = true;
+  }, 220);
+}
+
+function renderAttachPickerList(filterText) {
+  const cfg = attachPickerCfg;
+  const list = $('#attach-picker-list');
   list.innerHTML = '';
-  if (candidates.length === 0) {
-    const li = document.createElement('li');
-    li.className = 'empty-note';
-    li.textContent =
-      allMcpServers.length === 0
-        ? 'No servers in the registry yet — add one from the MCP tab'
-        : 'Every registry server is already attached';
-    list.appendChild(li);
-    updateAgentMcpAttachSubmit();
+  if (!cfg) return;
+  const q = (filterText || '').trim().toLowerCase();
+  const items = cfg.items().filter((it) => !q || cfg.searchText(it).toLowerCase().includes(q));
+  if (items.length === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'model-picker-empty';
+    empty.textContent = q ? `No matches for "${filterText}".` : cfg.emptyText || 'Nothing to show.';
+    list.appendChild(empty);
     return;
   }
-  for (const s of candidates) {
+  for (const it of items) {
+    const attached = cfg.isAttached(it);
     const li = document.createElement('li');
-    li.className = 'room-add-agent-row';
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.value = s.id;
-    cb.id = `agent-mcp-attach-${s.id}`;
-    cb.addEventListener('change', updateAgentMcpAttachSubmit);
-    const lbl = document.createElement('label');
-    lbl.htmlFor = cb.id;
-    lbl.textContent = `${s.name} — ${s.transport} · ${s.target}`;
-    li.appendChild(cb);
-    li.appendChild(lbl);
+    li.className = 'model-picker-row attach-picker-row' + (attached ? ' selected' : '');
+    li.tabIndex = 0;
+    const top = document.createElement('div');
+    top.className = 'model-picker-row-top';
+    const name = document.createElement('span');
+    name.className = 'model-picker-row-name';
+    name.textContent = cfg.name(it);
+    const toggle = document.createElement('span');
+    toggle.className = 'attach-picker-toggle';
+    toggle.textContent = attached ? '−' : '+';
+    top.append(name, toggle);
+    li.appendChild(top);
+    const meta = cfg.meta ? cfg.meta(it) : '';
+    if (meta) {
+      const sub = document.createElement('div');
+      sub.className = 'model-picker-row-sub';
+      sub.textContent = meta;
+      li.appendChild(sub);
+    }
+    const act = async () => {
+      li.style.pointerEvents = 'none';
+      try {
+        await cfg.onToggle(it, !attached);
+      } catch (err) {
+        showToast('Failed: ' + (err.message || err), { kind: 'error' });
+      }
+      renderAttachPickerList($('#attach-picker-search').value);
+    };
+    li.addEventListener('click', act);
+    li.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        act();
+      }
+    });
     list.appendChild(li);
   }
-  updateAgentMcpAttachSubmit();
 }
 
-function updateAgentMcpAttachSubmit() {
-  const n = $('#agent-mcp-attach-list').querySelectorAll('input[type=checkbox]:checked').length;
-  const btn = $('#agent-mcp-attach-submit');
-  btn.disabled = n === 0;
-  btn.textContent = n === 0 ? 'Attach selected' : `Attach ${n} server${n === 1 ? '' : 's'}`;
-}
+$('#attach-picker-close').addEventListener('click', closeAttachPicker);
+$('#attach-picker .model-picker-backdrop').addEventListener('click', closeAttachPicker);
+$('#attach-picker-search').addEventListener('input', (e) => renderAttachPickerList(e.target.value));
+$('#attach-picker-add-new').addEventListener('click', () => attachPickerCfg?.onAddNew?.());
 
+// "+ Attach server" now opens the shared picker (attach/detach any registry
+// server; "+ Add new server" creates one and auto-attaches).
 $('#agent-mcp-attach-toggle').addEventListener('click', async () => {
-  const form = $('#agent-mcp-attach-form');
-  form.hidden = !form.hidden;
-  if (!form.hidden) await populateAgentMcpAttachList();
-});
-$('#agent-mcp-attach-submit').addEventListener('click', async () => {
   const agentId = selectedAgentId;
   if (!agentId) return;
-  const ids = [...$('#agent-mcp-attach-list').querySelectorAll('input[type=checkbox]:checked')].map((c) => c.value);
-  if (ids.length === 0) return;
-  $('#agent-mcp-attach-submit').disabled = true;
+  await fetchMcpServers();
+  openAttachPicker({
+    title: 'MCP servers',
+    searchPlaceholder: 'Search servers…',
+    emptyText: 'No servers yet — use “+ Add new server”.',
+    addNewLabel: '+ Add new server',
+    items: () => allMcpServers,
+    searchText: (s) => `${s.name} ${s.transport} ${s.target}`,
+    name: (s) => s.name,
+    meta: (s) => `${s.transport} · ${s.target}`,
+    isAttached: (s) => agentMcpServers.some((a) => a.id === s.id),
+    onToggle: (s, add) =>
+      setAgentMcp(agentId, add ? { add: [s.id] } : { remove: [s.id] }, add ? `Attached ${s.name}` : `Detached ${s.name}`),
+    onAddNew: () => {
+      mcpAddInProgress = true;
+      mcpAgentForAdd = agentId;
+      closeAttachPicker();
+      setTimeout(() => $('#create-mcp-btn').click(), 180);
+    },
+  });
+});
+// State for the attach picker's "+ Add new server": on a successful create,
+// maybeAttachAfterMcpAdd auto-attaches the new server to the agent and returns.
+let mcpAddInProgress = false;
+let mcpAgentForAdd = null;
+async function maybeAttachAfterMcpAdd(newId, name) {
+  if (!mcpAddInProgress) return;
+  const agentId = mcpAgentForAdd;
+  mcpAddInProgress = false;
+  mcpAgentForAdd = null;
+  if (!agentId || !newId) return;
   try {
-    await setAgentMcp(agentId, { add: ids }, `Attached ${ids.length} server${ids.length === 1 ? '' : 's'}`);
-    $('#agent-mcp-attach-form').hidden = true;
+    await setAgentMcp(agentId, { add: [newId] }, `Attached ${name}`);
   } catch (err) {
     showToast('Attach failed: ' + (err.message || err), { kind: 'error' });
   }
-});
+  await openAgentDetail(agentId);
+}
 
 // Save existing agent
 $('#agent-detail-form').addEventListener('submit', async (e) => {
@@ -9577,9 +9607,13 @@ async function createMcpServer(body, btn) {
       body: JSON.stringify(body),
     });
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    const created = await res.json().catch(() => ({}));
     showToast(`Added ${body.name}`, { kind: 'success' });
     closeMcpDetail();
     await fetchMcpServers();
+    // If this create was launched from an agent's "+ Add new server", attach
+    // it to that agent and return to its settings (mirrors the models picker).
+    await maybeAttachAfterMcpAdd(created.id || allMcpServers.find((s) => s.name === body.name)?.id, body.name);
   } catch (err) {
     showToast('Add failed: ' + (err.message || err), { kind: 'error' });
   } finally {
@@ -9682,7 +9716,10 @@ function refreshAgentModelTrigger() {
   const metaEl = trigger.querySelector('.model-picker-trigger-meta');
   if (!id) {
     nameEl.textContent = 'Default';
-    metaEl.textContent = 'Built-in Anthropic';
+    // No webchat model assigned. If the agent runs on a non-Claude provider,
+    // surface its real model instead of the misleading "Built-in Anthropic".
+    const derived = allAgents.find((a) => a.id === selectedAgentId)?.effective_model_label;
+    metaEl.textContent = derived ? `${derived} · auto-detected` : 'Built-in Anthropic';
     return;
   }
   const m = allModels.find((mm) => mm.id === id);
@@ -9751,12 +9788,16 @@ function renderPickerList(filterText) {
   // Default row — always pinned at the top, even when there's a search query.
   // We never filter it out (the user might be searching to confirm "yeah, no
   // model here matches what I want, fall back to default").
+  // When no model is assigned but the agent runs on a non-Claude provider,
+  // the Default row's sub should name that model — showing "Built-in Anthropic"
+  // there would be contradictory.
+  const derived = allAgents.find((a) => a.id === selectedAgentId)?.effective_model_label;
   const defaultRow = createPickerRow(
     {
       id: '',
       isDefault: true,
       name: 'Default',
-      sub: 'Built-in Anthropic',
+      sub: derived ? `${derived} · auto-detected` : 'Built-in Anthropic',
     },
     currentSelected,
   );
