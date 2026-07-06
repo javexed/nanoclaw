@@ -6327,8 +6327,21 @@ function renderAgentWiredRooms() {
   for (const room of agentDetailRooms) {
     const li = document.createElement('li');
     const name = document.createElement('span');
-    name.className = 'room-wired-name';
+    name.className = 'room-wired-name room-wired-name-link';
     name.textContent = room.name;
+    // Mirror of the room-settings → agent jump: click a room to open its
+    // settings (openRoomDetail handles any roomId; it closes this agent panel).
+    name.setAttribute('role', 'button');
+    name.setAttribute('tabindex', '0');
+    name.title = `Open ${room.name} settings`;
+    const openRoomSettings = () => openRoomDetail(room.id);
+    name.addEventListener('click', openRoomSettings);
+    name.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        openRoomSettings();
+      }
+    });
     if (room.is_prime) {
       const badge = document.createElement('span');
       badge.className = 'room-wired-prime-badge';
