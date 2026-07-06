@@ -12,6 +12,7 @@ import fs from 'fs';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { replaceDestinations, type DestinationRow } from '../../db/session-db.js';
+import { getSessionsByAgentGroup } from '../../db/sessions.js';
 import { log } from '../../log.js';
 import { inboundDbPath, openInboundDb } from '../../session-manager.js';
 import { getDestinations } from './db/agent-destinations.js';
@@ -56,4 +57,32 @@ export function writeDestinations(agentGroupId: string, sessionId: string): void
     db.close();
   }
   log.debug('Destination map written', { sessionId, count: resolved.length });
+}
+
+/**
+ * Project the current destination map into EVERY active session of the group,
+ * so a container that's already running picks up destinations added after it
+ * spawned — without a restart. Safe to call from any destination-edit path;
+ * the agent-runner resolves destinations live from inbound.db per turn
+ * (getAllDestinations / findByName), so the projection alone lets the agent
+ * both see and address the new target on its next turn.
+ *
+ * This is the light counterpart to the CLI's refreshAgentSessions (which also
+ * archives SDK state + restarts). Use this when the edit shouldn't disturb a
+ * possibly mid-turn agent — e.g. adding an agent to a shared room, which must
+ * not kill the peers already working in it.
+ */
+export function projectDestinationsToActiveSessions(agentGroupId: string): void {
+  for (const s of getSessionsByAgentGroup(agentGroupId)) {
+    if (s.status !== 'active') continue;
+    try {
+      writeDestinations(agentGroupId, s.id);
+    } catch (err) {
+      log.warn('projectDestinationsToActiveSessions failed; agent picks it up on next spawn', {
+        agentGroupId,
+        sessionId: s.id,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 }
