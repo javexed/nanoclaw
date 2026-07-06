@@ -8569,20 +8569,27 @@ async function probeRoutingAvailability() {
   if (!routingAvailable && manageTab === 'routing') switchManageTab('agents');
 }
 
+// Which router (routing profile) the tab is currently editing. null → the
+// server picks the primary (auto).
+let routingCurrentRouter = null;
+
 async function loadRoutingTab() {
   try {
+    const q = routingCurrentRouter ? `?router=${encodeURIComponent(routingCurrentRouter)}` : '';
     const [routesRes, rosterRes] = await Promise.all([
-      authFetch('/api/router/routes'),
+      authFetch('/api/router/routes' + q),
       authFetch('/api/router/models'),
     ]);
     if (!routesRes.ok) throw new Error((await routesRes.json()).error || routesRes.status);
     routingDraft = await routesRes.json();
+    routingCurrentRouter = routingDraft.router ?? null; // the server tells us which it returned
     routingRouterInfo = rosterRes.ok ? await rosterRes.json() : null;
   } catch (err) {
     showToast('Routing config unavailable: ' + err.message, { kind: 'error' });
     return;
   }
   if (allModels.length === 0) await fetchModels(); // ± states need the registry
+  renderRouterPicker();
   renderRouteList();
   renderRouterRoster();
   renderRouteSuggestions();
@@ -8590,6 +8597,74 @@ async function loadRoutingTab() {
   $('#routing-bench-result').hidden = true;
   $('#routing-bench-result-log').hidden = true;
 }
+
+// The router (profile) picker: a dropdown of all routers + new/delete. Shown
+// only when the config exposes a routers list (multi-router aware). Switching
+// reloads the tab for the selected router.
+function renderRouterPicker() {
+  const sel = $('#router-select');
+  const names = routingDraft?.routers ?? [routingCurrentRouter ?? 'auto'];
+  const picker = $('#router-picker');
+  // With a single router the picker is redundant — hide it until there's a choice.
+  picker.hidden = names.length <= 1;
+  sel.innerHTML = '';
+  for (const n of names) {
+    const o = document.createElement('option');
+    o.value = n;
+    o.textContent = n;
+    if (n === routingCurrentRouter) o.selected = true;
+    sel.appendChild(o);
+  }
+  $('#router-delete-btn').disabled = names.length <= 1;
+}
+
+$('#router-select')?.addEventListener('change', (e) => {
+  routingCurrentRouter = e.target.value;
+  loadRoutingTab();
+});
+
+$('#router-new-btn')?.addEventListener('click', async () => {
+  const name = (prompt('New routing profile name (letters, digits, dash):', '') || '').trim();
+  if (!name) return;
+  try {
+    const res = await authFetch('/api/router/routers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.status);
+    routingCurrentRouter = name; // clone of the current profile; edit from here
+    showToast(`Created routing profile "${name}" (cloned)`, { kind: 'success' });
+    await fetchModels(); // the new router auto-registered as a model
+    loadRoutingTab();
+  } catch (err) {
+    showToast('Could not create profile: ' + err.message, { kind: 'error' });
+  }
+});
+
+$('#router-delete-btn')?.addEventListener('click', async () => {
+  const name = routingCurrentRouter;
+  if (!name) return;
+  const ok = await showConfirmModal({
+    title: 'Delete routing profile',
+    body: `Delete the "${name}" routing profile? Agents must be unassigned from it first.`,
+    confirmLabel: 'Delete',
+    destructive: true,
+  });
+  if (!ok) return;
+  try {
+    const res = await authFetch('/api/router/routers/' + encodeURIComponent(name), { method: 'DELETE' });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.status);
+    routingCurrentRouter = null; // fall back to primary
+    showToast(`Deleted "${name}"`);
+    await fetchModels();
+    loadRoutingTab();
+  } catch (err) {
+    showToast('Could not delete: ' + err.message, { kind: 'error' });
+  }
+});
 
 // Routing pane has three sub-tabs: Rules (bench + routes), Models (the router
 // roster with +/− select toggles + suggestions), and Logs (recent decisions).
@@ -8718,7 +8793,8 @@ $('#roster-refresh-btn')?.addEventListener('click', runRosterRefresh);
 // PUT the whole draft (routes + default + live controls) — the server
 // validates; the hook picks it up on the next request.
 async function saveRoutingConfig() {
-  const res = await authFetch('/api/router/routes', {
+  const q = routingCurrentRouter ? `?router=${encodeURIComponent(routingCurrentRouter)}` : '';
+  const res = await authFetch('/api/router/routes' + q, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     // Only routes + default_route are editable in the UI. Omitting `live`

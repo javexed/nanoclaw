@@ -151,6 +151,10 @@ import {
   recentDecisions,
   type RoutesUpdate,
   writeRoutesConfig,
+  listRouters,
+  routerView,
+  addRouter,
+  deleteRouter,
   parseConfiguredHosts,
   startPull,
   startRosterRefresh,
@@ -1584,8 +1588,14 @@ async function handleHttp(
     if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
     const cfg = readRoutesConfig();
     if (!cfg) return json(res, 404, { error: 'Routing not installed' });
-    const pr = primaryRouter(cfg); // multi-router: the tab shows the primary router
-    return json(res, 200, { routes: pr.routes, live: cfg.live ?? null, default_route: pr.default_route ?? null });
+    const view = routerView(cfg, url.searchParams.get('router') ?? undefined);
+    return json(res, 200, {
+      routers: listRouters(cfg),
+      router: view.name,
+      routes: view.routes,
+      default_route: view.default_route ?? null,
+      live: cfg.live ?? null,
+    });
   }
   if (url.pathname === '/api/router/routes' && method === 'PUT') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
@@ -1601,9 +1611,78 @@ async function handleHttp(
     const cfg = readRoutesConfig();
     if (!cfg) return json(res, 404, { error: 'Routing not installed' });
     try {
-      const merged = mergeRoutesUpdate(cfg, update);
+      const target = url.searchParams.get('router') ?? undefined;
+      const merged = mergeRoutesUpdate(cfg, update, target);
       writeRoutesConfig(merged);
-      return json(res, 200, { ok: true, routes: merged.routes, live: merged.live ?? null, default_route: merged.default_route ?? null });
+      const view = routerView(merged, target);
+      return json(res, 200, {
+        ok: true,
+        routers: listRouters(merged),
+        router: view.name,
+        routes: view.routes,
+        default_route: view.default_route ?? null,
+        live: merged.live ?? null,
+      });
+    } catch (err) {
+      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  if (url.pathname === '/api/router/routers' && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { name?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    const cfg = readRoutesConfig();
+    if (!cfg) return json(res, 404, { error: 'Routing not installed' });
+    try {
+      const next = addRouter(cfg, name); // clones the primary router as a starting point
+      writeRoutesConfig(next);
+      // Register the router as an openai-compatible model so agents can assign
+      // it (the virtual model name = the router name, at the router endpoint).
+      const endpoint = (await getRouterInfo()).endpoint;
+      if (!listWebchatModels().some((m) => m.model_id === name && m.endpoint === endpoint)) {
+        createWebchatModel({
+          id: randomUUID(),
+          name,
+          kind: 'openai-compatible',
+          endpoint,
+          model_id: name,
+          credential_ref: null,
+          created_at: Date.now(),
+        });
+      }
+      return json(res, 200, { ok: true, routers: listRouters(next), router: name });
+    } catch (err) {
+      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  const routerDelMatch = url.pathname.match(/^\/api\/router\/routers\/([^/]+)$/);
+  if (routerDelMatch && method === 'DELETE') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const name = decodeURIComponent(routerDelMatch[1]);
+    const cfg = readRoutesConfig();
+    if (!cfg) return json(res, 404, { error: 'Routing not installed' });
+    // Refuse while an agent is still assigned to this router's model.
+    const model = listWebchatModels().find((m) => m.model_id === name);
+    if (model) {
+      const assigned = getAgentsAssignedToModel(model.id);
+      if (assigned.length > 0) {
+        return json(res, 409, { error: `router "${name}" is assigned to ${assigned.length} agent(s) — unassign first` });
+      }
+    }
+    try {
+      const next = deleteRouter(cfg, name);
+      writeRoutesConfig(next);
+      if (model) deleteWebchatModel(model.id);
+      return json(res, 200, { ok: true, routers: listRouters(next) });
     } catch (err) {
       return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
     }

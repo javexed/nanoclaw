@@ -1076,6 +1076,13 @@
             <button id="create-mcp-btn" class="btn btn-secondary btn-list-footer">+ New server</button>
           </div>
           <div id="mtab-routing" class="manage-pane" role="tabpanel" hidden>
+            <div id="router-picker" class="router-picker">
+              <label class="router-picker-label">Router
+                <select id="router-select"></select>
+              </label>
+              <button id="router-new-btn" class="btn btn-ghost" type="button" title="New routing profile">+ New</button>
+              <button id="router-delete-btn" class="btn btn-ghost router-delete" type="button" title="Delete this profile">Delete</button>
+            </div>
             <div class="routing-subtabs" role="tablist">
               <button class="routing-subtab active" data-rsub="rules" role="tab" aria-selected="true">Rules</button>
               <button class="routing-subtab" data-rsub="models" role="tab" aria-selected="false">Models</button>

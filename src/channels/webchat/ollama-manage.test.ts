@@ -282,3 +282,41 @@ describe('primaryRouter / multi-router compat', () => {
     expect(merged.routes).toBeUndefined(); // no top-level routes leaked
   });
 });
+
+describe('router management (picker)', () => {
+  it('listRouters orders auto first; routerView returns the named router', async () => {
+    const { listRouters, routerView } = await import('./ollama-manage.js');
+    const cfg = { routers: { 'auto-vision': { routes: [{ name: 'v' }], default_route: 'v' }, auto: { routes: [{ name: 'code', model: 'x' }], default_route: 'code' } } };
+    expect(listRouters(cfg)).toEqual(['auto', 'auto-vision']);
+    expect(routerView(cfg, 'auto-vision').routes).toEqual([{ name: 'v' }]);
+    expect(routerView(cfg, 'nope').name).toBe('auto'); // unknown → primary
+  });
+
+  it('addRouter clones the primary and converts single-router configs', async () => {
+    const { addRouter } = await import('./ollama-manage.js');
+    const single = { classifier: {}, default_route: 'general', live: { enabled: true }, routes: [{ name: 'general', model: 'g' }] };
+    const next = addRouter(single, 'auto-cheap') as any;
+    expect(Object.keys(next.routers).sort()).toEqual(['auto', 'auto-cheap']);
+    expect(next.routers['auto-cheap'].routes).toEqual([{ name: 'general', model: 'g' }]); // cloned
+    expect(next.routes).toBeUndefined(); // converted away from single-router
+    expect(() => addRouter(next, 'auto')).toThrow(/already exists/);
+    expect(() => addRouter(next, 'bad name!')).toThrow(/1-32/);
+  });
+
+  it('deleteRouter refuses the last router', async () => {
+    const { deleteRouter } = await import('./ollama-manage.js');
+    const cfg = { routers: { auto: { routes: [] }, 'auto-cheap': { routes: [] } } };
+    expect(Object.keys((deleteRouter(cfg, 'auto-cheap') as any).routers)).toEqual(['auto']);
+    const one = { routers: { auto: { routes: [] } } };
+    expect(() => deleteRouter(one, 'auto')).toThrow(/last router/);
+  });
+
+  it('mergeRoutesUpdate targets a named router, leaving siblings untouched', async () => {
+    const { mergeRoutesUpdate } = await import('./ollama-manage.js');
+    const existing = { routers: { auto: { routes: [{ name: 'a' }] }, 'auto-cheap': { routes: [{ name: 'old' }] } } };
+    const merged = mergeRoutesUpdate(existing, { routes: [{ name: 'code', description: 'writing code stuff', model: 'qwen' }] }, 'auto-cheap') as any;
+    expect(merged.routers['auto-cheap'].routes[0]).toMatchObject({ name: 'code', model: 'qwen' });
+    expect(merged.routers.auto.routes).toEqual([{ name: 'a' }]); // untouched
+    expect(() => mergeRoutesUpdate(existing, { routes: [{ name: 'x', description: 'valid enough', model: 'm' }] }, 'ghost')).toThrow(/no router named/);
+  });
+});

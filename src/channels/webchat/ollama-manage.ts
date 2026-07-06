@@ -599,7 +599,11 @@ export function primaryRouter(cfg: Record<string, unknown>): { routes: RouteDef[
  * install's concern); everything else the editor owns. Throws with a
  * human-readable message on invalid input.
  */
-export function mergeRoutesUpdate(existing: Record<string, unknown>, update: RoutesUpdate): Record<string, unknown> {
+export function mergeRoutesUpdate(
+  existing: Record<string, unknown>,
+  update: RoutesUpdate,
+  routerName?: string,
+): Record<string, unknown> {
   if (!Array.isArray(update.routes) || update.routes.length === 0) throw new Error('at least one route is required');
   const seen = new Set<string>();
   for (const r of update.routes) {
@@ -630,8 +634,10 @@ export function mergeRoutesUpdate(existing: Record<string, unknown>, update: Rou
   // Multi-router config: edit the PRIMARY router in place; single-router:
   // write the top-level fields as before.
   if (merged.routers && typeof merged.routers === 'object') {
-    const name = primaryRouterName(merged);
-    const routers = { ...(merged.routers as Record<string, Record<string, unknown>>) };
+    const map = merged.routers as Record<string, Record<string, unknown>>;
+    const name = routerName ?? primaryRouterName(merged);
+    if (!(name in map)) throw new Error(`no router named "${name}"`);
+    const routers = { ...map };
     routers[name] = { ...(routers[name] ?? {}), routes: newRoutes };
     if (update.default_route !== undefined) routers[name].default_route = update.default_route;
     merged.routers = routers;
@@ -659,6 +665,70 @@ export function writeRoutesConfig(cfg: Record<string, unknown>, root = process.c
   const tmp = p + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\n');
   fs.renameSync(tmp, p);
+}
+
+// ── Router management (Phase 2 picker) ─────────────────────────────────────
+
+/** Ordered router names — `auto` first, then the rest. Normalizes old format. */
+export function listRouters(cfg: Record<string, unknown>): string[] {
+  const routers = cfg.routers as Record<string, unknown> | undefined;
+  const names =
+    routers && typeof routers === 'object'
+      ? Object.keys(routers)
+      : [((cfg.live as { model_name?: string } | undefined)?.model_name) ?? 'auto'];
+  return names.sort((a, b) => (a === 'auto' ? -1 : b === 'auto' ? 1 : a.localeCompare(b)));
+}
+
+/** The named router's routes + default_route (falls back to the primary). */
+export function routerView(cfg: Record<string, unknown>, name?: string): { name: string; routes: RouteDef[]; default_route?: string } {
+  const routers = cfg.routers as Record<string, { routes?: RouteDef[]; default_route?: string }> | undefined;
+  if (routers && typeof routers === 'object') {
+    const n = name && name in routers ? name : primaryRouterName(cfg);
+    const r = routers[n] ?? {};
+    return { name: n, routes: r.routes ?? [], default_route: r.default_route };
+  }
+  const pr = primaryRouter(cfg);
+  return { name: primaryRouterName(cfg), routes: pr.routes, default_route: pr.default_route };
+}
+
+/** Convert a config to the multi-router shape in memory (no-op if already). */
+function toMultiRouter(cfg: Record<string, unknown>): Record<string, unknown> {
+  if (cfg.routers && typeof cfg.routers === 'object') return { ...cfg };
+  const name = ((cfg.live as { model_name?: string } | undefined)?.model_name) ?? 'auto';
+  const { routes, default_route, live, classifier } = cfg as Record<string, unknown>;
+  return {
+    classifier,
+    live: { enabled: Boolean((live as { enabled?: boolean } | undefined)?.enabled) },
+    routers: {
+      [name]: { default_route, timeout_ms: (live as { timeout_ms?: number } | undefined)?.timeout_ms ?? 5000, routes: routes ?? [] },
+    },
+  };
+}
+
+/** Add a router, cloning the primary router's routes as the starting point.
+ *  Converts a single-router config to multi-router first. Returns the new cfg. */
+export function addRouter(cfg: Record<string, unknown>, name: string): Record<string, unknown> {
+  if (!/^[a-z0-9_-]{1,32}$/i.test(name)) throw new Error('router name must be 1-32 letters, digits, dash or underscore');
+  const next = toMultiRouter(cfg);
+  const routers = next.routers as Record<string, unknown>;
+  if (name in routers) throw new Error(`router "${name}" already exists`);
+  const seed = routerView(cfg); // clone the primary as a starting point
+  next.routers = {
+    ...routers,
+    [name]: { default_route: seed.default_route, timeout_ms: 8000, routes: JSON.parse(JSON.stringify(seed.routes)) },
+  };
+  return next;
+}
+
+/** Remove a router. Refuses the last one. Returns the new cfg. */
+export function deleteRouter(cfg: Record<string, unknown>, name: string): Record<string, unknown> {
+  const next = toMultiRouter(cfg);
+  const routers = { ...(next.routers as Record<string, unknown>) };
+  if (!(name in routers)) throw new Error(`no router named "${name}"`);
+  if (Object.keys(routers).length <= 1) throw new Error('cannot delete the last router');
+  delete routers[name];
+  next.routers = routers;
+  return next;
 }
 
 // The classifier prompt contract — KEEP IN SYNC with router_hook.py
