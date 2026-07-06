@@ -522,6 +522,7 @@ applySettings();
 function openSettings() {
   renderSettingsModal();
   renderCredentialsSettings();
+  renderRoutingSetupSettings();
   $('#settings-overlay').hidden = false;
   // Focus trap
   const modal = $('#settings-overlay .modal');
@@ -530,6 +531,161 @@ function openSettings() {
 }
 function closeSettings() {
   $('#settings-overlay').hidden = true;
+}
+
+// ── Settings → "Set up routing" (one-click add-routing install) ─────────────
+// Owner-only (the /api/router/install endpoint 403s otherwise, hiding the whole
+// section). Scaffolds routing + pulls the classifier model, then the Routing tab
+// appears via probeRoutingAvailability().
+let routingInstallWired = false;
+let routingInstallActive = false;
+
+function renderRoutingInstallProgress(st) {
+  const log = $('#routing-install-log');
+  const bar = $('#routing-pull-bar');
+  const label = $('#routing-pull-label');
+  log.textContent = (st.lines || []).slice(-12).join('\n') || 'Starting…';
+  log.scrollTop = log.scrollHeight;
+  const pull = st.pull;
+  if (pull) {
+    bar.hidden = false;
+    label.hidden = false;
+    const pct = pull.total > 0 ? Math.min(100, Math.round((100 * pull.completed) / pull.total)) : 0;
+    bar.querySelector('span').style.width = pct + '%';
+    if (pull.status === 'pulling') label.textContent = 'Classifier model: ' + (pull.detail || 'downloading…') + ' (' + pct + '%)';
+    else if (pull.status === 'success') label.textContent = 'Classifier model ready.';
+    else label.textContent = 'Classifier model pull failed: ' + (pull.error || '');
+  } else {
+    bar.hidden = true;
+    label.hidden = true;
+  }
+}
+
+// Poll until the install chain finishes (Routing tab appears then) AND the model
+// pull is no longer downloading (so the progress bar reaches completion).
+async function pollRoutingInstall() {
+  if (routingInstallActive) return;
+  routingInstallActive = true;
+  const btn = $('#routing-install-btn');
+  $('#routing-install-progress').hidden = false;
+  btn.disabled = true;
+  let chainHandled = false;
+  try {
+    while (true) {
+      const st = await (await authFetch('/api/router/install')).json();
+      renderRoutingInstallProgress(st);
+      if (!st.running && !chainHandled) {
+        chainHandled = true;
+        if (st.exitCode === 0) {
+          showToast('Routing installed — shadow mode. Open the Routing tab to review and go live.', { kind: 'success' });
+          await probeRoutingAvailability(); // un-hides the Routing tab + menu item
+        } else {
+          showToast('Routing setup failed — see log', { kind: 'error' });
+          break;
+        }
+      }
+      const pullDone = !st.pull || st.pull.status !== 'pulling';
+      if (!st.running && pullDone) break;
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  } catch (err) {
+    showToast('Routing setup error: ' + err.message, { kind: 'error' });
+  } finally {
+    routingInstallActive = false;
+    renderRoutingSetupSettings(); // reflect installed state / re-enable
+  }
+}
+
+async function runRoutingInstall() {
+  const btn = $('#routing-install-btn');
+  const log = $('#routing-install-log');
+  $('#routing-install-progress').hidden = false;
+  btn.disabled = true;
+  log.textContent = 'Starting…';
+  try {
+    const res = await authFetch('/api/router/install', { method: 'POST' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      if (err.code === 'litellm-not-installed') {
+        log.textContent = 'LiteLLM is not installed. Run /add-litellm first, then retry.';
+        showToast('Install LiteLLM first (/add-litellm)', { kind: 'error' });
+      } else {
+        log.textContent = 'Install failed: ' + (err.error || res.status);
+        showToast('Routing setup failed', { kind: 'error' });
+      }
+      btn.disabled = false;
+      return;
+    }
+    pollRoutingInstall();
+  } catch (err) {
+    log.textContent = 'Install failed: ' + err.message;
+    showToast('Routing setup failed', { kind: 'error' });
+    btn.disabled = false;
+  }
+}
+
+async function renderRoutingSetupSettings() {
+  const section = $('#settings-routing');
+  let st;
+  try {
+    const res = await authFetch('/api/router/install');
+    if (!res.ok) { section.hidden = true; return; } // 403 (non-owner) etc. → no surface
+    st = await res.json();
+  } catch {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+
+  const btn = $('#routing-install-btn');
+  const desc = $('#routing-setup-desc');
+  const installedNote = $('#routing-installed-note');
+  const progress = $('#routing-install-progress');
+  const btnRow = btn.parentElement;
+  if (!desc.dataset.default) desc.dataset.default = desc.textContent;
+
+  if (!routingInstallWired) {
+    routingInstallWired = true;
+    btn.addEventListener('click', runRoutingInstall);
+  }
+
+  // "Busy" = the install chain is running OR the classifier model is still
+  // downloading. Either way, show the progress surfaces and keep polling.
+  const pulling = Boolean(st.pull && st.pull.status === 'pulling');
+  const busy = st.running || pulling;
+
+  // Already scaffolded → point at the Routing tab (routes.json exists). Keep the
+  // pull bar visible if the classifier model is still coming down.
+  if (st.installed) {
+    btnRow.hidden = true;
+    desc.hidden = true;
+    installedNote.hidden = false;
+    if (busy) {
+      progress.hidden = false;
+      renderRoutingInstallProgress(st);
+      pollRoutingInstall();
+    } else {
+      progress.hidden = true;
+    }
+    return;
+  }
+  installedNote.hidden = true;
+  desc.hidden = false;
+  btnRow.hidden = false;
+  if (!st.litellmReady) {
+    btn.disabled = true;
+    desc.textContent = 'Install the LiteLLM router first (run /add-litellm), then layer routing on here.';
+  } else {
+    btn.disabled = busy;
+    desc.textContent = desc.dataset.default;
+  }
+  if (busy) {
+    progress.hidden = false;
+    renderRoutingInstallProgress(st);
+    pollRoutingInstall(); // resume streaming if a reopen happened mid-install
+  } else {
+    progress.hidden = true;
+  }
 }
 
 // ── Sidebar overflow menu (Dashboard / Permissions / Settings) ──────────────

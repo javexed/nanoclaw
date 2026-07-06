@@ -3450,6 +3450,11 @@ a.lightbox-btn {
   flex-direction: column;
   gap: 8px;
 }
+/* `display: flex` above beats the [hidden] UA rule, so a hidden group would
+   still show — restore it (e.g. the routing "Set up" button once installed). */
+.setting-group[hidden] {
+  display: none;
+}
 .setting-label {
   font-size: 0.8rem;
   color: var(--text-dim);
