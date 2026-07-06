@@ -4241,6 +4241,7 @@ a.lightbox-btn {
   overflow-y: auto;
 }
 #model-list li,
+#route-list li,
 #mcp-list li {
   padding: 8px 12px;
   cursor: pointer;
@@ -4253,15 +4254,19 @@ a.lightbox-btn {
   transition: background 0.15s;
 }
 #model-list li:hover,
+#route-list li:hover,
 #mcp-list li:hover {
   background: var(--surface2);
 }
 #model-list li.active,
+#route-list li.active,
 #mcp-list li.active {
   background: var(--surface2);
   box-shadow: inset 0 0 8px color-mix(in srgb, var(--accent) 15%, transparent);
 }
 #model-list .model-kind-badge,
+#route-list .model-kind-badge,
+#route-detail .model-kind-badge,
 #model-detail .model-kind-badge,
 #mcp-list .model-kind-badge {
   font-size: 0.6rem;
@@ -4288,6 +4293,7 @@ a.lightbox-btn {
   color: var(--bg);
 }
 #model-list .model-row-name,
+#route-list .model-row-name,
 #mcp-list .model-row-name {
   flex: 1;
   min-width: 0;
@@ -4296,6 +4302,7 @@ a.lightbox-btn {
   white-space: nowrap;
 }
 #model-list .model-row-uses,
+#route-list .model-row-uses,
 #mcp-list .model-row-uses {
   font-size: 0.667rem;
   color: var(--text-dim, var(--text));
@@ -6157,58 +6164,6 @@ a.lightbox-btn {
   width: 80px;
   margin: 0 4px;
 }
-.routing-route {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 6px 8px;
-  margin-bottom: 8px;
-  background: var(--pre-bg);
-}
-.routing-route-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.routing-route-name {
-  flex: 1;
-  min-width: 0;
-  font-weight: 600;
-  font-size: var(--fs-sm);
-  background: transparent;
-  border: none;
-  border-bottom: 1px dashed var(--border);
-  color: var(--text);
-  padding: 2px 0;
-}
-.routing-pin {
-  font-size: var(--fs-xs);
-  color: var(--text-dim);
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  white-space: nowrap;
-}
-.routing-route-del {
-  font-size: var(--fs-sm);
-  padding: 0 7px;
-}
-.routing-route-desc {
-  width: 100%;
-  margin-top: 6px;
-  font-size: var(--fs-sm);
-  resize: vertical;
-}
-.routing-bind-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 6px;
-}
-.routing-bind-row select {
-  flex: 1;
-  min-width: 0;
-  font-size: var(--fs-sm);
-}
 .routing-save-note {
   font-size: var(--fs-xs);
   color: var(--text-dim);
@@ -6249,4 +6204,30 @@ a.lightbox-btn {
 }
 .routing-decision-row.err {
   color: var(--warning-strong);
+}
+
+/* ── Routing tab: sections below the route list ──────────────────────── */
+.routing-sections {
+  margin-top: 18px;
+}
+.routing-sections .ollama-hosts-title {
+  margin-top: 16px;
+}
+.routing-sections .ollama-hosts-title:first-child {
+  margin-top: 0;
+}
+.routing-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-top: 16px;
+}
+.routing-section-head .ollama-hosts-title {
+  margin: 0 4px 6px;
+}
+.route-flags {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 0 6px;
 }
