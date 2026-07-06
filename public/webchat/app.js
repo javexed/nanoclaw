@@ -649,12 +649,24 @@ async function renderRoutingSetupSettings() {
     btn.addEventListener('click', runRoutingInstall);
   }
 
-  // Already scaffolded (and not mid-install) → point at the Routing tab.
-  if (st.installed && !st.running) {
+  // "Busy" = the install chain is running OR the classifier model is still
+  // downloading. Either way, show the progress surfaces and keep polling.
+  const pulling = Boolean(st.pull && st.pull.status === 'pulling');
+  const busy = st.running || pulling;
+
+  // Already scaffolded → point at the Routing tab (routes.json exists). Keep the
+  // pull bar visible if the classifier model is still coming down.
+  if (st.installed) {
     btnRow.hidden = true;
-    progress.hidden = true;
     desc.hidden = true;
     installedNote.hidden = false;
+    if (busy) {
+      progress.hidden = false;
+      renderRoutingInstallProgress(st);
+      pollRoutingInstall();
+    } else {
+      progress.hidden = true;
+    }
     return;
   }
   installedNote.hidden = true;
@@ -664,10 +676,10 @@ async function renderRoutingSetupSettings() {
     btn.disabled = true;
     desc.textContent = 'Install the LiteLLM router first (run /add-litellm), then layer routing on here.';
   } else {
-    btn.disabled = st.running;
+    btn.disabled = busy;
     desc.textContent = desc.dataset.default;
   }
-  if (st.running) {
+  if (busy) {
     progress.hidden = false;
     renderRoutingInstallProgress(st);
     pollRoutingInstall(); // resume streaming if a reopen happened mid-install
