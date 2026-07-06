@@ -256,3 +256,29 @@ describe('computeRouteSuggestions', () => {
     expect(computeRouteSuggestions([], ['mystery-model:7b'], CAT)).toEqual([]);
   });
 });
+
+describe('primaryRouter / multi-router compat', () => {
+  it('primaryRouter reads the primary (auto) router from a multi-router config', async () => {
+    const { primaryRouter, primaryRouterName } = await import('./ollama-manage.js');
+    const cfg = { routers: { 'auto-vision': { routes: [{ name: 'v' }], default_route: 'v' }, auto: { routes: [{ name: 'code', model: 'x' }], default_route: 'code' } } };
+    expect(primaryRouterName(cfg)).toBe('auto'); // auto preferred over first key
+    expect(primaryRouter(cfg).routes).toEqual([{ name: 'code', model: 'x' }]);
+    expect(primaryRouter(cfg).default_route).toBe('code');
+  });
+
+  it('primaryRouter falls back to top-level routes for the old single-router format', async () => {
+    const { primaryRouter } = await import('./ollama-manage.js');
+    const cfg = { default_route: 'general', routes: [{ name: 'general', model: 'g' }] };
+    expect(primaryRouter(cfg).routes).toEqual([{ name: 'general', model: 'g' }]);
+    expect(primaryRouter(cfg).default_route).toBe('general');
+  });
+
+  it('mergeRoutesUpdate writes edits into the primary router when multi-router', async () => {
+    const { mergeRoutesUpdate } = await import('./ollama-manage.js');
+    const existing = { routers: { auto: { routes: [], default_route: 'code' }, 'auto-vision': { routes: [{ name: 'v' }] } } };
+    const merged = mergeRoutesUpdate(existing, { routes: [{ name: 'code', description: 'writing code stuff', model: 'ornith' }], default_route: 'code' }) as any;
+    expect(merged.routers.auto.routes[0]).toMatchObject({ name: 'code', model: 'ornith' });
+    expect(merged.routers['auto-vision'].routes).toEqual([{ name: 'v' }]); // sibling untouched
+    expect(merged.routes).toBeUndefined(); // no top-level routes leaked
+  });
+});
