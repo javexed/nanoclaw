@@ -133,7 +133,7 @@ if [ -z "$INST" ]; then fail "no install-webchat.sh on $CHANNEL"; else
       e2e/*|playwright.config.ts) covered=yes ;;                                   # dev-only e2e infra — intentionally not installed
       webchat-hooks/*) covered=yes ;;                                              # provider overlays (step 2d) — applied/copied by name
       README.md|CHANGELOG.md) covered=yes ;;                                       # root project docs — branch documents the GUI; overlay never patches them
-      .claude/skills/*|docs/design/llm-router.md|docs/design/add-litellm.md) covered=yes ;; # repo-resident skills + their design docs — installed via their own /add-* skill, not the webchat overlay
+      .claude/skills/*|docs/design/*|docs/showcase/*) covered=yes ;;                 # repo-resident skills + design/showcase docs — repo documentation, not delivered by the webchat overlay
     esac
     [ "$covered" = no ] && uncovered="${uncovered}${f}"$'\n'
   done < <(git diff --name-only "$BASE" "$CHANNEL")
@@ -200,6 +200,12 @@ WEBCHAT_HOOK_ALLOWLIST=(
   src/host-sweep.ts
   src/cli/resources/groups.ts
   src/cli/resources/groups.test.ts
+  src/db/sessions.ts
+  src/modules/agent-to-agent/write-destinations.ts
+  src/modules/agent-to-agent/write-destinations.test.ts
+  src/modules/self-mod/apply.ts
+  src/modules/self-mod/apply.test.ts
+  src/modules/approvals/response-handler.test.ts
 )
 DECLARED=$(git show "$CHANNEL:install-webchat.sh" 2>/dev/null \
   | awk '/^HOOK_FILES=\(/{f=1;next} f&&/^\)/{f=0} f{gsub(/^[ \t]+/,"");print}')

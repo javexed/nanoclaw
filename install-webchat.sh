@@ -251,6 +251,12 @@ HOOK_FILES=(
   src/host-sweep.ts
   src/cli/resources/groups.ts
   src/cli/resources/groups.test.ts
+  src/db/sessions.ts
+  src/modules/agent-to-agent/write-destinations.ts
+  src/modules/agent-to-agent/write-destinations.test.ts
+  src/modules/self-mod/apply.ts
+  src/modules/self-mod/apply.test.ts
+  src/modules/approvals/response-handler.test.ts
 )
 CONFLICTS=()
 echo "→ Applying webchat core-file hooks …"
