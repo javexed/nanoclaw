@@ -8373,9 +8373,27 @@ async function loadRoutingTab() {
   $('#routing-timeout').value = (routingDraft.live && routingDraft.live.timeout_ms) || 5000;
   renderRouteList();
   renderRouterRoster();
-  refreshRoutingDecisions();
+  if (routingSubtab === 'log') refreshRoutingDecisions();
   $('#routing-bench-result').hidden = true;
 }
+
+// Routing pane has two sub-tabs: Rules (routes + classifier + router models)
+// and Log (recent decisions) — the log is present but tucked out of the way.
+let routingSubtab = 'rules';
+function switchRoutingSubtab(which) {
+  routingSubtab = which;
+  document.querySelectorAll('.routing-subtab').forEach((b) => {
+    const on = b.dataset.rsub === which;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  $('#rsub-rules').hidden = which !== 'rules';
+  $('#rsub-log').hidden = which !== 'log';
+  if (which === 'log') refreshRoutingDecisions();
+}
+document.querySelectorAll('.routing-subtab').forEach((b) => {
+  b.addEventListener('click', () => switchRoutingSubtab(b.dataset.rsub));
+});
 
 // Router models: the LiteLLM roster with the same +/− selection controls as
 // the Ollama host cards — one row per roster model, nothing else.

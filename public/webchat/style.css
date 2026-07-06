@@ -6259,3 +6259,27 @@ a.lightbox-btn {
   font-style: italic;
   opacity: 0.7;
 }
+
+/* ── Routing sub-tabs (Rules / Log) ──────────────────────────────────── */
+.routing-subtabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+.routing-subtab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  padding: 4px 8px;
+  cursor: pointer;
+  transition: var(--transition);
+}
+.routing-subtab:hover {
+  color: var(--text);
+}
+.routing-subtab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
