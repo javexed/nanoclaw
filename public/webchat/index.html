@@ -1059,28 +1059,35 @@
             <button id="create-mcp-btn" class="btn btn-secondary btn-list-footer">+ New server</button>
           </div>
           <div id="mtab-routing" class="manage-pane" role="tabpanel" hidden>
-            <ul id="route-list"></ul>
-            <button id="create-route-btn" class="btn btn-secondary btn-list-footer">+ Add route</button>
-            <div class="routing-sections">
-              <div class="ollama-hosts-title">Classifier</div>
-              <div class="routing-live-row">
-                <label><input type="checkbox" id="routing-live-enabled" /> Live routing via “auto”</label>
-                <label class="routing-timeout-label">Classify timeout
-                  <input type="number" id="routing-timeout" min="1000" max="30000" step="500" /> ms
-                </label>
-              </div>
+            <div class="routing-subtabs" role="tablist">
+              <button class="routing-subtab active" data-rsub="rules" role="tab" aria-selected="true">Rules</button>
+              <button class="routing-subtab" data-rsub="models" role="tab" aria-selected="false">Models</button>
+              <button class="routing-subtab" data-rsub="logs" role="tab" aria-selected="false">Logs</button>
+            </div>
+            <div id="rsub-rules" class="routing-subpane" role="tabpanel">
               <div class="routing-bench-row">
                 <input id="routing-bench-input" type="text" placeholder="Type a prompt to classify…" />
                 <button id="routing-bench-run" class="btn btn-secondary" type="button">Classify</button>
               </div>
               <div id="routing-bench-result" class="routing-bench-result" hidden></div>
+              <ul id="route-list"></ul>
+              <button id="create-route-btn" class="btn btn-secondary btn-list-footer">+ Add route</button>
+            </div>
+            <div id="rsub-models" class="routing-subpane" role="tabpanel" hidden>
               <div class="routing-section-head">
                 <span class="ollama-hosts-title">Router models</span>
                 <button id="roster-refresh-btn" class="btn btn-ghost ollama-card-action" type="button" title="Re-run the router installers so newly pulled models join the roster (brief router restart)">Refresh roster…</button>
               </div>
               <ul id="router-roster-list" class="ollama-model-list"></ul>
               <pre id="roster-refresh-log" class="roster-refresh-log" hidden></pre>
-              <div class="ollama-hosts-title routing-decisions-title">Recent decisions</div>
+            </div>
+            <div id="rsub-logs" class="routing-subpane" role="tabpanel" hidden>
+              <div class="routing-bench-row">
+                <input id="routing-bench-input-log" type="text" placeholder="Type a prompt to classify…" />
+                <button id="routing-bench-run-log" class="btn btn-secondary" type="button">Classify</button>
+              </div>
+              <div id="routing-bench-result-log" class="routing-bench-result" hidden></div>
+              <div class="ollama-hosts-title">Recent decisions</div>
               <div id="routing-decisions-list" class="routing-decisions-list"></div>
             </div>
           </div>

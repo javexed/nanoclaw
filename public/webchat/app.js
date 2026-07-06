@@ -8399,13 +8399,31 @@ async function loadRoutingTab() {
     return;
   }
   if (allModels.length === 0) await fetchModels(); // ± states need the registry
-  $('#routing-live-enabled').checked = Boolean(routingDraft.live && routingDraft.live.enabled);
-  $('#routing-timeout').value = (routingDraft.live && routingDraft.live.timeout_ms) || 5000;
   renderRouteList();
   renderRouterRoster();
-  refreshRoutingDecisions();
+  if (routingSubtab === 'logs') refreshRoutingDecisions();
   $('#routing-bench-result').hidden = true;
+  $('#routing-bench-result-log').hidden = true;
 }
+
+// Routing pane has two sub-tabs: Rules (routes + classifier + router models)
+// and Log (recent decisions) — the log is present but tucked out of the way.
+let routingSubtab = 'rules';
+function switchRoutingSubtab(which) {
+  routingSubtab = which;
+  document.querySelectorAll('.routing-subtab').forEach((b) => {
+    const on = b.dataset.rsub === which;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  $('#rsub-rules').hidden = which !== 'rules';
+  $('#rsub-models').hidden = which !== 'models';
+  $('#rsub-logs').hidden = which !== 'logs';
+  if (which === 'logs') refreshRoutingDecisions();
+}
+document.querySelectorAll('.routing-subtab').forEach((b) => {
+  b.addEventListener('click', () => switchRoutingSubtab(b.dataset.rsub));
+});
 
 // Router models: the LiteLLM roster with the same +/− selection controls as
 // the Ollama host cards — one row per roster model, nothing else.
@@ -8472,8 +8490,11 @@ async function saveRoutingConfig() {
       routes: routingDraft.routes,
       default_route: routingDraft.default_route,
       live: {
-        enabled: $('#routing-live-enabled').checked,
-        timeout_ms: Number($('#routing-timeout').value) || 5000,
+        // Live routing and classify timeout stay at their configured values;
+        // both controls were removed from the UI (live-routing was a footgun
+        // for 'auto'-assigned agents; timeout is an install-tuning detail).
+        enabled: routingDraft.live ? routingDraft.live.enabled !== false : true,
+        timeout_ms: routingDraft.live?.timeout_ms ?? 5000,
       },
     }),
   });
@@ -8637,25 +8658,13 @@ $('#create-route-btn')?.addEventListener('click', () => {
   openRouteDetail(routingDraft.routes.length - 1);
 });
 
-// Classifier controls save immediately — same immediacy as +/− elsewhere.
-for (const id of ['routing-live-enabled', 'routing-timeout']) {
-  document.getElementById(id)?.addEventListener('change', async () => {
-    try {
-      await saveRoutingConfig();
-      showToast('Classifier settings saved', { kind: 'success' });
-    } catch (err) {
-      showToast('Save failed: ' + err.message, { kind: 'error' });
-    }
-  });
-}
-
-async function runRoutingBench() {
-  const input = $('#routing-bench-input');
-  const out = $('#routing-bench-result');
-  const prompt = input.value.trim();
+// The classify bench appears at the top of BOTH sub-tabs (Rules and Log), so
+// tuning and log-reading each have the tester at hand. One helper, two mounts.
+async function runBench(inputEl, outEl) {
+  const prompt = inputEl.value.trim();
   if (!prompt) return;
-  out.hidden = false;
-  out.textContent = 'Classifying…';
+  outEl.hidden = false;
+  outEl.textContent = 'Classifying…';
   try {
     const res = await authFetch('/api/router/classify', {
       method: 'POST',
@@ -8664,15 +8673,22 @@ async function runRoutingBench() {
     });
     const body = await res.json();
     if (!res.ok) throw new Error(body.error || res.status);
-    out.textContent = `→ ${body.route} · ${body.model ?? '(no binding)'} · ${body.ms} ms`;
+    outEl.textContent = `→ ${body.route} · ${body.model ?? '(no binding)'} · ${body.ms} ms`;
   } catch (err) {
-    out.textContent = 'Classifier error: ' + err.message;
+    outEl.textContent = 'Classifier error: ' + err.message;
   }
 }
-$('#routing-bench-run')?.addEventListener('click', runRoutingBench);
-$('#routing-bench-input')?.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') runRoutingBench();
-});
+function wireBench(inputId, runId, outId) {
+  const input = document.getElementById(inputId);
+  const out = document.getElementById(outId);
+  if (!input || !out) return;
+  document.getElementById(runId)?.addEventListener('click', () => runBench(input, out));
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') runBench(input, out);
+  });
+}
+wireBench('routing-bench-input', 'routing-bench-run', 'routing-bench-result');
+wireBench('routing-bench-input-log', 'routing-bench-run-log', 'routing-bench-result-log');
 // Startup probe (deferred so auth is settled before the first owner-gated call).
 setTimeout(probeRoutingAvailability, 3000);
 

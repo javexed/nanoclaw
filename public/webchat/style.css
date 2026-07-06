@@ -6332,3 +6332,41 @@ a.lightbox-btn {
   font-style: italic;
   opacity: 0.7;
 }
+
+/* ── Routing sub-tabs (Rules / Log) ──────────────────────────────────── */
+.routing-subtabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+.routing-subtab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  padding: 4px 8px;
+  cursor: pointer;
+  transition: var(--transition);
+}
+.routing-subtab:hover {
+  color: var(--text);
+}
+.routing-subtab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+/* The visible routing sub-pane is the scroll container (the sub-tab bar
+   stays pinned above it); without this the pane grows past the panel and
+   the classifier / router-models sections below the route list can't be
+   reached. */
+.routing-subpane {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+#route-list {
+  list-style: none;
+  padding: 8px 0;
+}
