@@ -3,7 +3,7 @@
 **Status:** prototype (`proto/user-creds-oauth-onecli`) — reworked from the original
 host-encrypted design to **vault-only** (OneCLI carries the token). Core transport
 **validated end-to-end** (2026-06-22, see §8.1).
-**Extends:** [userCreds.md](userCreds.md) — the per-member-session architecture (session keying, identity derivation, fan-out, approval routing) is defined there; this doc covers only the OAuth/subscription delta.
+**Extends:** [user-credentials.md](user-credentials.md) — the per-member-session architecture (session keying, identity derivation, fan-out, approval routing) is defined there; this doc covers only the OAuth/subscription delta.
 
 **Resolved decisions (owner sign-off):**
 - §2 gating — **both**: a per-room owner/admin toggle (`oauth_allowed`, default
@@ -135,7 +135,7 @@ revoked — identical for both credential kinds.
 
 ## 7. Touch points
 
-- `src/db/migrations/021-user-creds-oauth.ts` — `cred_type` column only.
+- `src/db/migrations/021-byok-oauth.ts` — `cred_type` column only.
 - `src/modules/user-credentials/db.ts` — `cred_type` + `userHasActiveOauth()`; one unified
   `upsertuser credentialsCredential(…, credType)`. **No crypto, no token columns.**
 - `src/modules/user-credentials/onboard.ts` — `onboarduser credentialsOauth` shares the API-key path

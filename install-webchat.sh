@@ -184,8 +184,8 @@ NEW_PATHS=(
   src/db/migrations/023-byok-user-credentials.ts
   src/db/migrations/024-rename-user-credentials.ts
   setup/get-oauth-token.sh
-  docs/design/user-credentials.md
-  docs/design/user-credentials-oauth.md
+  docs/webchat/user-credentials.md
+  docs/webchat/user-credentials-oauth.md
   docs/webchat/threads.md
   docs/webchat/threads-qa.md
   docs/webchat/thread-engaged-agents.md

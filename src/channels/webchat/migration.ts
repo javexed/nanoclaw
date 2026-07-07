@@ -524,7 +524,7 @@ export const moduleWebchatRoomCredentialMode: Migration = {
  * UserCreds OAuth: per-room toggle allowing members to connect a Claude *subscription*
  * (OAuth) token, orthogonal to `credential_mode` (which governs API-key UserCreds).
  * Off by default — a room never accepts OAuth tokens until an owner/admin opts
- * in. See docs/design/user-creds-oauth.md.
+ * in. See docs/webchat/user-credentials-oauth.md.
  */
 export const moduleWebchatRoomOauthAllowed: Migration = {
   version: 109,
