@@ -1,7 +1,7 @@
 /**
  * Slice 0 — per-room threads storage layer: the migration (thread tables +
  * thread_id column), thread CRUD, thread-partitioned message read/write, and
- * per-thread read markers. See docs/design/webchat-threads.md §3,§9.
+ * per-thread read markers. See docs/webchat/webchat-threads.md §3,§9.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 

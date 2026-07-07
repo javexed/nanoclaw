@@ -1,7 +1,7 @@
 /**
  * Tests for the per-thread engaged-agents set (webchat_thread_engaged).
  * The 'main' thread (regular chat) can never engage — it stays mention-only.
- * See docs/design/thread-engaged-agents.md.
+ * See docs/webchat/thread-engaged-agents.md.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 

@@ -152,10 +152,10 @@ rm -rf \
   setup/get-oauth-token.sh \
   docs/design/user-credentials.md \
   docs/design/user-credentials-oauth.md \
-  docs/design/webchat-threads.md \
-  docs/design/webchat-threads-qa.md \
-  docs/design/thread-engaged-agents.md \
-  docs/design/webchat-thread-context-sync.md
+  docs/webchat/webchat-threads.md \
+  docs/webchat/webchat-threads-qa.md \
+  docs/webchat/thread-engaged-agents.md \
+  docs/webchat/webchat-thread-context-sync.md
 
 # ── 4. Unwire the channels barrel ────────────────────────────────────────
 if grep -qF "'./webchat/index.js'" src/channels/index.ts; then
