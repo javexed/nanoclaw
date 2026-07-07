@@ -460,6 +460,8 @@ export interface RouterInfo {
  * the roster — it exists only in the routing hook.
  */
 export async function getRouterInfo(root = process.cwd()): Promise<RouterInfo> {
+  // LiteLLM's default port from /add-litellm — mirrored in bind-routes.mjs and
+  // the app.js roster-endpoint regex; change all three together if it moves.
   const endpoint = 'http://host.docker.internal:4000/v1';
   if (!fs.existsSync(path.join(root, 'data/litellm/config.yaml'))) {
     return { available: false, endpoint, models: [] };

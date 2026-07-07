@@ -8304,7 +8304,8 @@ function findSelectable(kind, endpoint, modelId) {
     if (kind === 'ollama') return r.kind === 'ollama' && norm(r.endpoint) === norm(endpoint);
     // Router rows: any openai-compatible registration pointing at the router,
     // whichever host form an older registration used (127.0.0.1 vs
-    // host.docker.internal, with or without /v1).
+    // host.docker.internal, with or without /v1). Port 4000 is LiteLLM's
+    // /add-litellm default — mirrored in ollama-manage.ts and bind-routes.mjs.
     return r.kind === 'openai-compatible' && /:4000(\/v1)?$/.test(norm(r.endpoint));
   });
 }
@@ -8770,11 +8771,11 @@ async function runRosterRefresh() {
   log.hidden = false;
   log.textContent = 'Starting…';
   try {
-    const res = await authFetch('/api/litellm/roster-refresh', { method: 'POST' });
+    const res = await authFetch('/api/router/roster-refresh', { method: 'POST' });
     if (!res.ok) throw new Error((await res.json()).error || res.status);
     while (true) {
       await new Promise((r) => setTimeout(r, 2000));
-      const st = await (await authFetch('/api/litellm/roster-refresh')).json();
+      const st = await (await authFetch('/api/router/roster-refresh')).json();
       log.textContent = st.lines.slice(-12).join('\n');
       log.scrollTop = log.scrollHeight;
       if (!st.running) {
