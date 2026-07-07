@@ -142,7 +142,7 @@ device-auth URL + token, storing it in the vault like any other credential.
 Route each turn to the *right* model — send the simple ones to a small local model,
 keep a frontier model for the hard ones. The whole stack installs with **one click**:
 
-- **"Set up routing"** in Settings (see the shot above) pulls the **Arch-Router**
+- **"Set up auto routing"** in Settings (see the shot above) pulls the **Arch-Router**
   classifier (with a progress bar), runs the installer, points the classifier at
   your Ollama, and **auto-binds** the default routes to your roster — no shell.
 - The **Auto routing tab** then appears, with **Rules / Models / Logs** sub-tabs: a routes
