@@ -109,8 +109,8 @@ new it's a no-op toast. Deltas land at main's current end in order.
 ## 6. Demarcation
 
 Each copied block is preceded by a synthetic divider message (a distinct
-`message_type`/kind, e.g. `context-divider`, with text *"Pulled from main"* /
-*"Pushed from #threadtitle"* and a timestamp). The client renders it as a labeled
+`message_type`/kind, e.g. `context-divider`, with text *"Pulled from main chat"* /
+*"Pushed from thread"* and a timestamp). The client renders it as a labeled
 rule so imported content is never confused with native conversation. Dividers are
 display-only — they are NOT written to agent sessions.
 
