@@ -118,6 +118,41 @@ id `auto` — assigning it to an agent group behaves like any other
 openai-compatible model (the group runs on OpenCode; each turn's model is
 picked per prompt).
 
+## Multiple routers — reusable routing profiles
+
+One `auto` is the simple case; you can define several named routers (routing
+profiles), each with its own routes and bindings, all sharing the one
+classifier and the one roster. An agent picks its behaviour by which virtual
+model it's assigned — same `:4000` endpoint, different name (`auto`,
+`auto-vision`, `auto-cheap`, …).
+
+The multi-router `routes.json` shape:
+
+```json
+{
+  "classifier": { … },              // shared — one Arch-Router
+  "live": { "enabled": true },      // global kill-switch
+  "routers": {
+    "auto":        { "default_route": "general", "timeout_ms": 8000, "routes": [ … ] },
+    "auto-vision": { "default_route": "general", "timeout_ms": 8000, "routes": [ … ] }
+  }
+}
+```
+
+The pre-multi-router shape (top-level `routes`/`default_route`/`live.model_name`)
+still works — the hook, binder, and recalibration read both. To move to the
+map so you can add profiles, run once:
+
+```bash
+node .claude/skills/add-routing/resources/migrate-routes-multi.mjs   # [--dry-run]
+```
+
+It converts your current single router into `routers.auto` (idempotent). Then
+add more entries under `routers`, register each name as an openai-compatible
+model (as above), and assign. `bind-routes.mjs` binds every router from the
+shared roster; recalibration tunes each router's timeout from its own traffic;
+decision-log lines carry a `"router"` field.
+
 ## Escalation — the confidence floor as a route (Phase 3, §16c)
 
 Arch-Router yields no confidence score, so the floor is realized as an

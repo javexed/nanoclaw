@@ -171,3 +171,40 @@ class LiveRouting(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RoutersNormalize(unittest.TestCase):
+    def test_old_format_normalizes_to_single_router(self):
+        from router_hook import _routers, _primary_router_name
+
+        cfg = {"live": {"model_name": "auto", "timeout_ms": 8000}, "default_route": "general",
+               "routes": [{"name": "code", "model": "x"}]}
+        m = _routers(cfg)
+        self.assertEqual(list(m.keys()), ["auto"])
+        self.assertEqual(m["auto"]["default_route"], "general")
+        self.assertEqual(_primary_router_name(cfg, m), "auto")
+
+    def test_new_format_passthrough(self):
+        from router_hook import _routers
+
+        cfg = {"routers": {"auto": {"routes": []}, "auto-vision": {"routes": []}}}
+        self.assertEqual(list(_routers(cfg).keys()), ["auto", "auto-vision"])
+
+    def test_bindings_and_escalate_operate_per_router(self):
+        from router_hook import _bindings, _escalate_routes, _default_binding
+
+        router = {"default_route": "gen", "routes": [
+            {"name": "code", "model": "ornith"},
+            {"name": "gen", "model": "gemma"},
+            {"name": "hard", "escalate": True},
+        ]}
+        self.assertEqual(_bindings(router), {"code": "ornith", "gen": "gemma"})
+        self.assertEqual(_escalate_routes(router), {"hard"})
+        self.assertEqual(_default_binding(router), "gemma")
+
+    def test_primary_router_falls_back_to_first(self):
+        from router_hook import _primary_router_name
+
+        cfg = {}  # no live.model_name
+        m = {"auto-vision": {"routes": []}, "auto": {"routes": []}}
+        self.assertEqual(_primary_router_name(cfg, m), "auto-vision")  # first defined

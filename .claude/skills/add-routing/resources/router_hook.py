@@ -6,17 +6,28 @@ SHADOW (always on): on every completion request it FIRE-AND-FORGETS a
 classification task (Arch-Router on a LAN Ollama) and logs the decision to a
 JSONL file. It NEVER modifies the request and NEVER blocks it.
 
-LIVE (Phase 2, flag-gated): when routes.json carries `"live": {"enabled": true}`
-and the request names the virtual model (`live.model_name`, default "auto"),
-the hook classifies SYNCHRONOUSLY and rewrites data["model"] to the bound
-roster model before the router picks a deployment. Failure posture: any
-classifier problem (host asleep, timeout, bad JSON, unknown route, route
-"other") falls back to the default_route's binding — a request for "auto"
-never fails because of routing. Live classification holds the request, so it
-uses its own tighter timeout (`live.timeout_ms`, default 5000ms).
+LIVE (flag-gated): routes.json defines one or more named ROUTERS (reusable
+routing profiles). When `"live": {"enabled": true}` and a request names a
+router (its map key — the virtual model an agent is assigned, e.g. "auto" or
+"auto-vision"), the hook classifies SYNCHRONOUSLY against THAT router's routes
+and rewrites data["model"] to the bound roster model before the router picks a
+deployment. Every router shares the one classifier and the one roster; they
+differ only in their routes (rules) and bindings (models). Failure posture:
+any classifier problem (host asleep, timeout, bad JSON, unknown route, route
+"other") falls back to that router's default_route binding — a routed request
+never fails because of routing.
+
+Config shape (routes.json):
+  { "classifier": {...},              # shared — one Arch-Router
+    "live": { "enabled": true },      # global kill-switch
+    "routers": {                      # up to a handful of profiles
+      "auto":        { "default_route": ..., "timeout_ms": ..., "routes": [...] },
+      "auto-vision": { ... } } }
+The pre-multi-router format (top-level "routes"/"default_route"/"live.model_name")
+is still read — `_routers()` normalizes it to a single-entry map in memory.
 
 Files (mounted from the host's data/litellm/routing/):
-  /app/routing/routes.json           route catalog + classifier endpoint + live flag
+  /app/routing/routes.json           router catalog + classifier endpoint + live flag
   /app/routing/routing-shadow.jsonl  one line per decision (shadow and live)
 
 Requests naming a concrete roster model are never rewritten, live flag or not.
@@ -58,6 +69,35 @@ def _load_routes():
         return json.load(f)
 
 
+def _routers(cfg):
+    """The map of named routers {name: {routes, default_route, timeout_ms}}.
+
+    New format carries `cfg["routers"]` directly. The pre-multi-router format
+    (top-level routes/default_route + live.model_name) is normalized here to a
+    single-entry map so the hook logic is uniform. KEEP-IN-SYNC with the same
+    normalize in bind-routes.mjs / recalibrate.mjs."""
+    if isinstance(cfg.get("routers"), dict):
+        return cfg["routers"]
+    name = (cfg.get("live") or {}).get("model_name", "auto")
+    return {
+        name: {
+            "routes": cfg.get("routes", []),
+            "default_route": cfg.get("default_route"),
+            "timeout_ms": (cfg.get("live") or {}).get("timeout_ms", 5000),
+        }
+    }
+
+
+def _primary_router_name(cfg, routers):
+    """Which router the shadow path classifies against (shadow requests name a
+    concrete model, not a router, so there's no router in-band). Prefer the
+    legacy `live.model_name` if it's a real router; else the first defined."""
+    name = (cfg.get("live") or {}).get("model_name")
+    if name and name in routers:
+        return name
+    return next(iter(routers), None)
+
+
 def _strip_system_wrapper(text):
     """NanoClaw's agent-runner prepends '<system>…</system>' inside the USER
     message (OpenCode has no separate system channel there). Classify on the
@@ -94,21 +134,21 @@ def _parse_route(raw):
     return json.loads(raw[start : end + 1].replace("'", '"'))["route"]
 
 
-def _bindings(cfg):
-    return {r["name"]: r.get("model") for r in cfg["routes"] if r.get("model")}
+def _bindings(router):
+    return {r["name"]: r.get("model") for r in router.get("routes", []) if r.get("model")}
 
 
-def _escalate_routes(cfg):
+def _escalate_routes(router):
     """Routes with `"escalate": true` have no local binding — a live match
     rejects the request with a no_adequate_model marker so NanoClaw's
     per-group fallback_provider re-runs the turn on a stronger provider
     (llm-router §16c). The confidence floor, realized as a route: describe
     what's beyond the local roster and let Arch-Router match it."""
-    return {r["name"] for r in cfg["routes"] if r.get("escalate")}
+    return {r["name"] for r in router.get("routes", []) if r.get("escalate")}
 
 
-def _default_binding(cfg):
-    return _bindings(cfg).get(cfg.get("default_route"))
+def _default_binding(router):
+    return _bindings(router).get(router.get("default_route"))
 
 
 def _append_log(entry):
@@ -119,9 +159,10 @@ def _append_log(entry):
         pass  # a logging failure must never surface
 
 
-async def _classify(cfg, prompt_text, timeout_ms=None):
-    """One Arch-Router call → route name. Raises on any failure."""
-    route_descs = [{"name": r["name"], "description": r["description"]} for r in cfg["routes"]]
+async def _classify(cfg, router, prompt_text, timeout_ms=None):
+    """One Arch-Router call → route name, against THIS router's routes. Raises
+    on any failure. The classifier itself (cfg["classifier"]) is shared."""
+    route_descs = [{"name": r["name"], "description": r["description"]} for r in router.get("routes", [])]
     conversation = [{"role": "user", "content": prompt_text}]
     content = (
         TASK_INSTRUCTION.format(routes=json.dumps(route_descs), conversation=json.dumps(conversation))
@@ -148,7 +189,8 @@ async def _classify(cfg, prompt_text, timeout_ms=None):
 
 
 async def _classify_and_log(requested_model, prompt_text):
-    """Shadow path: fire-and-forget, the request is long gone."""
+    """Shadow path: fire-and-forget, the request is long gone. Classifies
+    against the primary router (shadow requests name a concrete model)."""
     t0 = time.time()
     entry = {
         "ts": int(t0 * 1000),
@@ -160,34 +202,43 @@ async def _classify_and_log(requested_model, prompt_text):
     }
     try:
         cfg = _load_routes()
-        route = await _classify(cfg, prompt_text)
+        routers = _routers(cfg)
+        name = _primary_router_name(cfg, routers)
+        if not name:
+            return
+        router = routers[name]
+        entry["router"] = name
+        route = await _classify(cfg, router, prompt_text)
         entry["route"] = route
-        if route in _escalate_routes(cfg):
+        if route in _escalate_routes(router):
             entry["bound_model"] = "__escalate__"
         else:
-            entry["bound_model"] = _bindings(cfg).get(route) or _default_binding(cfg)
+            entry["bound_model"] = _bindings(router).get(route) or _default_binding(router)
     except Exception as e:  # classifier host asleep, timeout, parse failure — log and move on
         entry["error"] = f"{type(e).__name__}: {e}"[:200]
     entry["ms"] = int((time.time() - t0) * 1000)
     _append_log(entry)
 
 
-async def _route_live(cfg, live, data, prompt_text):
-    """Live path: classify while the request waits, then rewrite data["model"]."""
+async def _route_live(cfg, router, router_name, data, prompt_text):
+    """Live path: classify while the request waits, then rewrite data["model"]
+    to the matched route's binding in THIS router."""
     t0 = time.time()
     entry = {
         "ts": int(t0 * 1000),
         "mode": "live",
+        "router": router_name,
         "requested_model": data.get("model"),
         "prompt_head": prompt_text[:160],
         "route": "__error__",
         "ms": 0,
     }
-    target = _default_binding(cfg)
+    target = _default_binding(router)
     try:
-        route = await _classify(cfg, prompt_text, timeout_ms=live.get("timeout_ms", 5000))
+        timeout_ms = router.get("timeout_ms") or (cfg.get("live") or {}).get("timeout_ms", 5000)
+        route = await _classify(cfg, router, prompt_text, timeout_ms=timeout_ms)
         entry["route"] = route
-        if route in _escalate_routes(cfg):
+        if route in _escalate_routes(router):
             # No adequate local model (§16c). Reject fast — before any
             # generation — with a greppable marker; the agent-runner's
             # fallback_provider seam re-runs the turn on a stronger provider.
@@ -202,7 +253,7 @@ async def _route_live(cfg, live, data, prompt_text):
                 detail=f"no_adequate_model: prompt classified to route '{route}' — no local binding, escalate",
             )
         # Unknown route or "other" → default binding, same as an error.
-        target = _bindings(cfg).get(route) or target
+        target = _bindings(router).get(route) or target
     except HTTPException:
         raise
     except Exception as e:
@@ -229,8 +280,11 @@ class ShadowRouter(CustomLogger):
             except Exception:
                 pass
             live = (cfg or {}).get("live") or {}
-            if cfg and live.get("enabled") and data.get("model") == live.get("model_name", "auto"):
-                return await _route_live(cfg, live, data, text)
+            if cfg and live.get("enabled"):
+                routers = _routers(cfg)
+                model = data.get("model")
+                if model in routers:
+                    return await _route_live(cfg, routers[model], model, data, text)
             # Fire-and-forget: the request proceeds untouched immediately.
             asyncio.get_running_loop().create_task(_classify_and_log(data.get("model", "?"), text))
         except HTTPException:

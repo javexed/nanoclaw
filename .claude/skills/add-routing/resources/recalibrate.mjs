@@ -156,6 +156,14 @@ export function splitForRotation(entries, nowMs, keepDays) {
   };
 }
 
+/** Named routers {name:{routes,default_route,timeout_ms}}; normalizes the
+ *  pre-multi-router format. KEEP-IN-SYNC with router_hook.py / bind-routes.mjs. */
+export function routers(cfg) {
+  if (cfg.routers && typeof cfg.routers === 'object') return cfg.routers;
+  const name = cfg.live?.model_name ?? 'auto';
+  return { [name]: { routes: cfg.routes ?? [], default_route: cfg.default_route, timeout_ms: cfg.live?.timeout_ms ?? 5000 } };
+}
+
 // ── CLI ────────────────────────────────────────────────────────────────────
 
 function main() {
@@ -192,12 +200,28 @@ function main() {
   process.stdout.write(report);
   console.error(`[recalibrate] report → ${reportPath}`);
 
-  if (flag('--apply') && rec && routes?.live) {
-    routes.live.timeout_ms = rec.recommended;
-    const tmp = routesPath + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(routes, null, 2) + '\n');
-    fs.renameSync(tmp, routesPath);
-    console.error(`[recalibrate] applied live.timeout_ms=${rec.recommended} (was ${currentTimeout ?? 'unset'})`);
+  // Tune each router's classify timeout from ITS OWN observed latency. New
+  // format writes router.timeout_ms; the old single-router format writes
+  // live.timeout_ms (the normalized router aliases it). A router with no
+  // traffic in the window is left untouched.
+  if (flag('--apply') && routes) {
+    const rmap = routers(routes);
+    const applied = [];
+    for (const [name, router] of Object.entries(rmap)) {
+      const rEntries = windowed.filter((e) => (e.router ?? name) === name);
+      const cur = router.timeout_ms ?? routes.live?.timeout_ms ?? null;
+      const r = recommendTimeout(computeMetrics(rEntries), cur);
+      if (!r) continue;
+      if (routes.routers) router.timeout_ms = r.recommended;
+      else if (routes.live) routes.live.timeout_ms = r.recommended;
+      applied.push(`${name}=${r.recommended} (was ${cur ?? 'unset'})`);
+    }
+    if (applied.length > 0) {
+      const tmp = routesPath + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(routes, null, 2) + '\n');
+      fs.renameSync(tmp, routesPath);
+      console.error(`[recalibrate] applied timeout(s): ${applied.join(', ')}`);
+    }
   }
 
   if (flag('--rotate') && all.length > 0) {
