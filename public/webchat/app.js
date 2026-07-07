@@ -343,10 +343,13 @@ async function renderCredentialsSettings() {
     btn.classList.toggle('active', btn.dataset.value === cfg.defaultMode);
   });
   // Allowed providers — pill toggles (multi-select). "on" = accept BOTH a key
-  // and a subscription for that provider.
+  // and a subscription for that provider. Displayed with AND (not OR) so the
+  // pill can't read "on" while one half (e.g. OAuth) is actually off — that
+  // mismatch hid the "Connect to <provider>" (OAuth) action even though the
+  // pill looked enabled (allowClaudeOauth defaults off, allowAnthropicKey on).
   const providerOn = {
-    claude: !!(cfg.allowAnthropicKey || cfg.allowClaudeOauth),
-    codex: !!(cfg.allowOpenaiKey || cfg.allowCodexOauth),
+    claude: !!(cfg.allowAnthropicKey && cfg.allowClaudeOauth),
+    codex: !!(cfg.allowOpenaiKey && cfg.allowCodexOauth),
   };
   // Greyed-but-clickable when unavailable, so a click can explain why (rather
   // than a native `disabled` button that swallows the click). Claude is always
@@ -380,6 +383,9 @@ async function renderCredentialsSettings() {
         document
           .querySelectorAll('#cred-default-mode .setting-option')
           .forEach((b) => b.classList.toggle('active', b === btn));
+        // The effective mode for the open room may have changed — refresh its
+        // credential banner so the connect controls appear/disappear at once.
+        if (currentRoom) updateUserCredsBanner(currentRoom);
       }
     });
   });
@@ -403,7 +409,13 @@ async function renderCredentialsSettings() {
       const [keyFlag, oauthFlag] = PROVIDER_FLAGS[p] || [];
       if (!keyFlag) return;
       const on = !btn.classList.contains('active'); // flipping to this state
-      if (await putConfig({ [keyFlag]: on, [oauthFlag]: on })) btn.classList.toggle('active', on);
+      if (await putConfig({ [keyFlag]: on, [oauthFlag]: on })) {
+        btn.classList.toggle('active', on);
+        // Reflect the policy change in the open chat's credential banner right
+        // away (show/hide "Connect to <provider>") instead of waiting for the
+        // next room open — the gap that made enabling OAuth look like a no-op.
+        if (currentRoom) updateUserCredsBanner(currentRoom);
+      }
     });
   });
 }
