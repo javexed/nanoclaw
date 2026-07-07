@@ -213,7 +213,7 @@
                 <button class="overflow-item" data-action="models" role="menuitem">
                   <svg class="icon" aria-hidden="true"><use href="#i-cpu"></use></svg>&nbsp;&nbsp;Models
                 </button>
-                <button class="overflow-item" data-action="mcp" role="menuitem">
+                <button id="overflow-mcp" class="overflow-item" data-action="mcp" role="menuitem" hidden>
                   <svg class="icon" aria-hidden="true"><use href="#i-plug"></use></svg>&nbsp;&nbsp;MCP
                 </button>
                 <button class="overflow-item" data-action="routing" role="menuitem" hidden>
@@ -1056,7 +1056,7 @@
             <button class="manage-tab" data-mtab="models" role="tab" aria-selected="false" aria-controls="mtab-models">
               Models
             </button>
-            <button class="manage-tab" data-mtab="mcp" role="tab" aria-selected="false" aria-controls="mtab-mcp">
+            <button id="mtab-mcp-btn" class="manage-tab" data-mtab="mcp" role="tab" aria-selected="false" aria-controls="mtab-mcp" hidden>
               MCP
             </button>
             <button class="manage-tab" data-mtab="routing" role="tab" aria-selected="false" aria-controls="mtab-routing" hidden>

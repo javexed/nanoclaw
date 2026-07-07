@@ -1509,17 +1509,19 @@ async function handleHttp(
   // same field `ncl groups config add-mcp-server` writes and the container
   // reads — and restarts the group's containers. List responses never include
   // env/headers (they may hold credentials).
+  // MCP registry is admin-only (scoped admin or higher) — end to end.
   if (url.pathname === '/api/mcp-servers' && method === 'GET') {
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
     return json(res, 200, listMcpServersForUI());
   }
   if (url.pathname === '/api/mcp-servers' && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
     return createMcpServerHandler(req, res);
   }
   if (url.pathname === '/api/mcp-servers/probe' && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
     return probeMcpServerHandler(req, res);
   }
   const mcpServerIdMatch = url.pathname.match(/^\/api\/mcp-servers\/([^/]+)$/);

@@ -5453,6 +5453,11 @@ async function probeIsOwner() {
       // response — isOwnerView must stay owner-only since it gates owner-only
       // write controls (e.g. room assignment).
       $('#overflow-permissions').hidden = false;
+      // MCP registry is admin-only too — reveal its menu item + manage-tab.
+      const mcpItem = $('#overflow-mcp');
+      if (mcpItem) mcpItem.hidden = false;
+      const mcpTab = $('#mtab-mcp-btn');
+      if (mcpTab) mcpTab.hidden = false;
       const list = await users.json().catch(() => []);
       const me = Array.isArray(list) ? list.find((u) => u.id === myUserId) : null;
       isOwnerView = !!(me && userIsOwner(me));
