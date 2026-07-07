@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseParamB, matchCatalog, scoreModel, chooseBindings, applyDecisions, mergeCatalog } from './bind-routes.mjs';
+import { parseParamB, matchCatalog, scoreModel, chooseBindings, applyDecisions, mergeCatalog, routers } from './bind-routes.mjs';
 
 const CATALOG = {
   max_comfortable_b: 14,
@@ -83,4 +83,33 @@ test('mergeCatalog puts local entries first and lets knobs override', () => {
 test('unknown roster models are reported', () => {
   const { unknown } = chooseBindings(structuredClone(ROUTES), ['brand-new-thing:8b'], CATALOG);
   assert.deepEqual(unknown, ['brand-new-thing:8b']);
+});
+
+test('routers(): old single-router format normalizes to a one-entry map', () => {
+  const cfg = { live: { model_name: 'auto', timeout_ms: 8000 }, default_route: 'general', routes: [{ name: 'code', model: 'x' }] };
+  const m = routers(cfg);
+  assert.deepEqual(Object.keys(m), ['auto']);
+  assert.equal(m.auto.routes, cfg.routes); // SAME reference — mutations write back
+  assert.equal(m.auto.default_route, 'general');
+});
+
+test('routers(): new multi-router format passes through unchanged', () => {
+  const cfg = { routers: { auto: { routes: [] }, 'auto-vision': { routes: [] } } };
+  assert.deepEqual(Object.keys(routers(cfg)), ['auto', 'auto-vision']);
+});
+
+test('multi-router: each router binds independently from the shared roster', () => {
+  const cfg = {
+    routers: {
+      auto: { routes: [{ name: 'code', model: 'old' }] },
+      'auto-general': { routes: [{ name: 'general', model: 'old' }] },
+    },
+  };
+  const roster = ['ornith:latest', 'gemma4:latest'];
+  for (const [, router] of Object.entries(routers(cfg))) {
+    const { decisions } = chooseBindings(router, roster, CATALOG);
+    applyDecisions(router, decisions);
+  }
+  assert.equal(cfg.routers.auto.routes[0].model, 'ornith:latest'); // code → ornith (88)
+  assert.equal(cfg.routers['auto-general'].routes[0].model, 'gemma4:latest'); // general → gemma (75)
 });
