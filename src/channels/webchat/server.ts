@@ -3576,15 +3576,25 @@ interface ModelForUI extends WebchatModel {
   agents_assigned: number;
   /** Named assignees so the detail panel can say WHO, not just how many. */
   agents: Array<{ id: string; name: string }>;
+  /**
+   * Rooms this model reaches transitively — the union of rooms wired to any
+   * agent it's assigned to — so the detail panel can link straight to them.
+   */
+  rooms: Array<{ id: string; name: string }>;
 }
 
 function listModelsForUI(): ModelForUI[] {
   return listWebchatModels().map((m) => {
     const ids = getAgentsAssignedToModel(m.id);
+    const roomMap = new Map<string, { id: string; name: string }>();
+    for (const id of ids) {
+      for (const r of getWebchatRoomsForAgent(id)) roomMap.set(r.id, { id: r.id, name: r.name });
+    }
     return {
       ...m,
       agents_assigned: ids.length,
       agents: ids.map((id) => ({ id, name: getAgentGroup(id)?.name ?? id })),
+      rooms: [...roomMap.values()],
     };
   });
 }

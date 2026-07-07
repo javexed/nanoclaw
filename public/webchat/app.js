@@ -9243,6 +9243,26 @@ async function openModelDetail(id) {
     usage.textContent = 'Not assigned to any agent yet.';
   }
 
+  // Rooms this model reaches (via its assigned agents) — click one to open its
+  // settings. Hidden entirely when the model isn't wired into any room.
+  const roomsEl = $('#model-detail-rooms');
+  roomsEl.innerHTML = '';
+  if (model.rooms && model.rooms.length > 0) {
+    roomsEl.hidden = false;
+    roomsEl.appendChild(document.createTextNode('In rooms: '));
+    for (const r of model.rooms) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'model-assignee-chip model-room-chip';
+      chip.textContent = r.name;
+      chip.title = 'Open room settings';
+      chip.addEventListener('click', () => openRoomDetail(r.id));
+      roomsEl.appendChild(chip);
+    }
+  } else {
+    roomsEl.hidden = true;
+  }
+
   $('#model-detail').hidden = false;
   $('#members-panel').hidden = true;
 }
