@@ -6420,3 +6420,27 @@ a.lightbox-btn {
   line-height: 1.4;
   margin: 0 2px 10px;
 }
+
+/* ── Router (profile) picker ──────────────────────────────────────────── */
+.router-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.router-picker-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  flex: 1;
+  min-width: 0;
+}
+.router-picker-label select {
+  flex: 1;
+  min-width: 0;
+}
+.router-picker .router-delete:not(:disabled) {
+  color: var(--danger);
+}

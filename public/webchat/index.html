@@ -1076,16 +1076,20 @@
             <button id="create-mcp-btn" class="btn btn-secondary btn-list-footer">+ New server</button>
           </div>
           <div id="mtab-routing" class="manage-pane" role="tabpanel" hidden>
+            <div id="router-picker" class="router-picker">
+              <label class="router-picker-label">Router
+                <select id="router-select"></select>
+              </label>
+              <button id="router-new-btn" class="btn btn-ghost" type="button" title="New routing profile">+ New</button>
+              <button id="router-delete-btn" class="btn btn-ghost router-delete" type="button" title="Delete this profile">Delete</button>
+            </div>
             <div class="routing-subtabs" role="tablist">
               <button class="routing-subtab active" data-rsub="rules" role="tab" aria-selected="true">Rules</button>
               <button class="routing-subtab" data-rsub="models" role="tab" aria-selected="false">Models</button>
               <button class="routing-subtab" data-rsub="logs" role="tab" aria-selected="false">Logs</button>
             </div>
             <div id="rsub-rules" class="routing-subpane" role="tabpanel">
-              <p class="routing-intro">
-                Each route sends matching prompts to a model. Routing applies to agents
-                assigned the <strong>auto</strong> model; test a prompt below to see where it lands.
-              </p>
+              <p class="routing-intro" id="routing-intro"></p>
               <div class="routing-bench-row">
                 <input id="routing-bench-input" type="text" placeholder="Type a prompt to classify…" />
                 <button id="routing-bench-run" class="btn btn-secondary" type="button">Classify</button>
