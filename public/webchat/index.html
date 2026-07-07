@@ -402,6 +402,7 @@
             <div id="typing-indicator" class="typing-indicator" aria-hidden="true"></div>
             <div id="file-preview" class="file-preview" hidden></div>
             <form id="message-form">
+              <div id="slash-menu" class="slash-menu" role="listbox" aria-label="Commands" hidden></div>
               <button type="button" id="file-picker" class="file-picker-btn" title="Upload file">
                 <svg class="icon" aria-hidden="true"><use href="#i-paperclip"></use></svg>
               </button>
@@ -501,6 +502,14 @@
                   <div id="agent-rooms-section" class="agent-rooms-section">
                     <ul id="agent-wired-rooms" class="room-wired-agents"></ul>
                     <button type="button" id="agent-add-room-toggle" class="btn btn-secondary">+ Wire to room</button>
+                  </div>
+                </details>
+                <!-- Active sessions — reset a stuck/thrashing one (injects /clear),
+                     including background a2a sessions no room-typed command reaches. -->
+                <details class="agent-accordion">
+                  <summary class="agent-accordion-summary"><span class="form-label">Sessions</span><span class="agent-accordion-count" id="agent-sessions-count"></span></summary>
+                  <div id="agent-sessions-section" class="agent-sessions-section">
+                    <ul id="agent-sessions-list" class="agent-sessions-list"></ul>
                   </div>
                 </details>
                 </div>

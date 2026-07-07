@@ -96,7 +96,8 @@ import {
 } from '../../db/agent-groups.js';
 import { createMessagingGroupAgent, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import { syncSessionContext, type ContextMessage } from '../../session-manager.js';
-import { getPendingApproval, getSessionsByAgentGroup } from '../../db/sessions.js';
+import { getPendingApproval, getSession, getSessionsByAgentGroup } from '../../db/sessions.js';
+import { insertMessage, openInboundDb } from '../../db/session-db.js';
 import { killContainer } from '../../container-runner.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { initGroupFilesystem } from '../../group-init.js';
@@ -1552,6 +1553,40 @@ async function handleHttp(
     return setAgentStatusHandler(req, res, group.id);
   }
 
+  // ── Sessions (list + reset) ────────────────────────────────────────────
+  // Lets an admin reach an agent's sessions — including background a2a
+  // sessions no room-typed /clear can target — and reset one (inject /clear).
+  const agentSessionsMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/sessions$/);
+  if (agentSessionsMatch && method === 'GET') {
+    const group = resolveAgent(decodeURIComponent(agentSessionsMatch[1]));
+    if (!group) return json(res, 404, { error: 'Agent not found' });
+    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+    const sessions = getSessionsByAgentGroup(group.id)
+      .filter((s) => s.status === 'active')
+      .map((s) => ({
+        id: s.id,
+        thread_id: s.thread_id,
+        container_status: s.container_status,
+        last_active: s.last_active,
+      }));
+    return json(res, 200, { sessions });
+  }
+  const sessionResetMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/reset$/);
+  if (sessionResetMatch && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const session = getSession(decodeURIComponent(sessionResetMatch[1]));
+    if (!session) return json(res, 404, { error: 'Session not found' });
+    if (!hasAdminPrivilege(userId, session.agent_group_id)) {
+      return json(res, 403, { error: 'Admin privilege required' });
+    }
+    try {
+      resetSession(session.agent_group_id, session.id);
+      return json(res, 200, { ok: true });
+    } catch (err) {
+      return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
   // ── Models ────────────────────────────────────────────────────────────
   if (url.pathname === '/api/models' && method === 'GET') {
     return json(res, 200, listModelsForUI());
@@ -2769,6 +2804,32 @@ function toAgentForUI(g: AgentGroup): AgentForUI {
     assigned_model_id: assigned ? assigned.id : null,
     effective_model_label: assigned ? null : deriveEffectiveModelLabel(g.id),
   };
+}
+
+// Reset a session by injecting a /clear command into its inbound.db — exactly
+// what a room-typed /clear does, but reachable for background a2a sessions.
+// The poll-loop processes /clear before any query, so the poisoned continuation
+// is dropped before the next turn runs. The host owns inbound.db (single writer).
+function resetSession(agentGroupId: string, sessionId: string): void {
+  const dbPath = path.join(DATA_DIR, 'v2-sessions', agentGroupId, sessionId, 'inbound.db');
+  if (!fs.existsSync(dbPath)) throw new Error('session inbound.db not found');
+  const db = openInboundDb(dbPath);
+  try {
+    insertMessage(db, {
+      id: `${randomUUID()}:${agentGroupId}`,
+      kind: 'chat',
+      timestamp: new Date().toISOString(),
+      platformId: 'webchat',
+      channelType: 'webchat',
+      threadId: null,
+      content: JSON.stringify({ text: '/clear', sender: 'operator', senderId: 'webchat:operator', senderName: 'operator' }),
+      processAfter: null,
+      recurrence: null,
+      trigger: 1,
+    });
+  } finally {
+    db.close();
+  }
 }
 
 function resolveAgent(idOrJid: string): AgentGroup | null {
