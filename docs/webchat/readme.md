@@ -15,7 +15,7 @@
 
 Not Slack. Not a hosted widget. Your agents, your keys, your machine.
 
-**→ [Full feature guide](./webchat-guide.md)** — getting started + a screenshot tour of every component.
+**→ [Full feature guide](./guide.md)** — getting started + a screenshot tour of every component.
 
 <!-- ![Lobby with @mentions, threads, and the operator sidebar](./screenshots/lobby.png) -->
 > _Hero screenshot here (lobby + thread sidebar)._
@@ -36,11 +36,11 @@ It flows through NanoClaw's normal router and session model — it's a **channel
 
 ## Screenshots
 
-Real shots from a live install — the redesigned agent panel and the routing console:
+Real shots from a live install — the redesigned agent panel and the Auto routing console:
 
-| Agent settings — Settings / Instructions tabs | Routing console — Rules + classify bench |
+| Agent settings — Settings / Instructions tabs | Auto routing console — Rules + classify bench |
 |---|---|
-| ![Agent settings panel](./screenshots/agent-settings.png) | ![Routing console](./screenshots/routing.png) |
+| ![Agent settings panel](./screenshots/agent-settings.png) | ![Auto routing console](./screenshots/routing.png) |
 
 _The hero lobby GIF and the DM / approvals / permissions / wiring shots come from a **populated** demo install — see [screenshots/CAPTURE.md](./screenshots/CAPTURE.md)._
 
@@ -75,12 +75,12 @@ _The hero lobby GIF and the DM / approvals / permissions / wiring shots come fro
 | **Agents** | Create, wire to rooms, edit instructions, set status, assign a model, attach MCP servers — and **draft a new agent from a prompt** (host-side, via OneCLI). The settings panel splits into a **Settings** tab (status pills, model picker, a shared MCP/Rooms attach picker) and an **Instructions** tab. |
 | **Models** | Register Anthropic / Ollama / OpenAI-compatible models with live discovery + probe (SSRF-guarded), assign per agent (written to the group's settings; containers pick it up on their next spawn). |
 | **Ollama hosts** | Manage Ollama endpoints, stream model **pulls** with progress, refresh the router roster. |
-| **Local-model routing** | A **"Set up routing"** button installs and configures the whole stack in one click — pulls the Arch-Router classifier (progress bar), scaffolds routing, auto-binds routes. Then the **Routing tab** (Rules / Logs sub-tabs) gives a routes editor, a live **test bench**, a **decisions tail**, and shadow-vs-live **metrics**: score each turn and send the simple ones to a local model while keeping a frontier model for the hard ones. Starts in shadow mode. |
+| **Local-model routing** | A **"Set up auto routing"** button installs and configures the whole stack in one click — pulls the Arch-Router classifier (progress bar), scaffolds routing, auto-binds routes. Then the **Auto routing tab** (Rules / Models / Logs sub-tabs) gives a routes editor, a live **test bench**, a **decisions tail**, and shadow-vs-live **metrics**: score each turn and send the simple ones to a local model while keeping a frontier model for the hard ones. Define **multiple routing profiles** (a picker creates named routers sharing one classifier + roster) and assign one per agent. Starts in shadow mode. |
 | **Approvals** | Interactive approve/reject inbox for credentialed actions, in-room and in a per-approver DM inbox. |
 | **Permissions** | Manage users, roles, and members. |
 | **Topology / Wiring** | See and edit which agents and models are reachable from which rooms. |
 
-> BYOK ships in the box (Anthropic API-key path). The **local-routing engine** (LiteLLM + Arch-Router classifier) installs right from the console's **"Set up routing"** button — or via the `/add-litellm` + `/add-routing` skills; the console degrades to "not installed" until it's there.
+> BYOK ships in the box (Anthropic API-key path). The **local-routing engine** (LiteLLM + Arch-Router classifier) installs right from the console's **"Set up auto routing"** button — or via the `/add-litellm` + `/add-routing` skills; the console degrades to "not installed" until it's there.
 
 ## Install
 
@@ -127,7 +127,7 @@ You still need a working NanoClaw fork — **this is not NanoClaw itself**.
 - A channel **adapter** (`src/channels/webchat/`) that registers with NanoClaw's router; messages flow through the normal session model, not a side channel.
 - History in a webchat-owned set of tables in the host's central SQLite DB; credentials injected per-request by the OneCLI gateway (none in env or chat).
 
-See **[docs/design/webchat.md](../design/webchat.md)** for the full architecture and feature reference.
+See **[docs/webchat/webchat.md](./webchat.md)** for the full architecture and feature reference.
 
 ## License
 

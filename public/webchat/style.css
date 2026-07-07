@@ -6113,6 +6113,20 @@ a.lightbox-btn {
   margin: 0 3px 2px 0;
   background: var(--pre-bg);
 }
+/* Room chips in the model detail are buttons — reset UA styling and mark them
+   as clickable (they open the room's settings). */
+.model-room-chip {
+  cursor: pointer;
+  font-family: inherit;
+  color: var(--text-dim);
+  transition:
+    border-color 0.15s,
+    color 0.15s;
+}
+.model-room-chip:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
 .ollama-model-list li.linkable {
   cursor: pointer;
   border-radius: var(--radius-sm);
@@ -6419,4 +6433,28 @@ a.lightbox-btn {
   color: var(--text-dim);
   line-height: 1.4;
   margin: 0 2px 10px;
+}
+
+/* ── Router (profile) picker ──────────────────────────────────────────── */
+.router-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.router-picker-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  flex: 1;
+  min-width: 0;
+}
+.router-picker-label select {
+  flex: 1;
+  min-width: 0;
+}
+.router-picker .router-delete:not(:disabled) {
+  color: var(--danger);
 }

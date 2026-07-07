@@ -122,7 +122,7 @@ export function setSenderScopeGate(fn: SenderScopeGateFn): void {
  * engagement doesn't apply (non-webchat, regular chat, agent-authored fan-out, or
  * nothing engaged) — the router then uses the normal engage_mode logic. When no
  * resolver is registered (module absent) it's always `null`. See
- * docs/design/thread-engaged-agents.md.
+ * docs/webchat/thread-engaged-agents.md.
  */
 export interface EngagedDecision {
   engaged: string[]; // engaged agent_group_ids — passed to each container as a hint
@@ -337,7 +337,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   // Engaged-agents overlay (webchat threads): resolve once. Non-null means this
   // thread routes by its engaged set (auto-engaging @mentioned agents) instead of
   // the per-wiring engage_mode. Null → normal routing (regular chat, non-webchat,
-  // agent fan-out, or nothing engaged). See docs/design/thread-engaged-agents.md.
+  // agent fan-out, or nothing engaged). See docs/webchat/thread-engaged-agents.md.
   const engagedDecision = engagedResolver ? engagedResolver(mg, event.threadId, messageText, senderAgentGroupId) : null;
 
   let engagedCount = 0;
@@ -541,7 +541,7 @@ async function deliverToAgent(
   wake: boolean,
   // Optional routing hints merged into the message content JSON (engaged-agents:
   // responseExpectation / engagedAgents / isPeerReply). Ignored by readers that
-  // don't look for them. See docs/design/thread-engaged-agents.md.
+  // don't look for them. See docs/webchat/thread-engaged-agents.md.
   hints?: Record<string, unknown>,
 ): Promise<void> {
   // Apply the adapter thread policy: threaded adapter in a group chat →

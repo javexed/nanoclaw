@@ -633,7 +633,7 @@ export const moduleWebchatCredentialsConfig: Migration = {
 /**
  * Per-room threads. A webchat "thread" maps to an agent session via `thread_id`
  * (the session key), so each thread is an isolated conversation. See
- * docs/design/webchat-threads.md.
+ * docs/webchat/threads.md.
  *
  *   - `webchat_threads` is the thread registry; `thread_id` becomes
  *     `session.thread_id` for that room. Ids: 'main' (implicit default),
@@ -698,7 +698,7 @@ export const moduleWebchatThreads: Migration = {
  * Per-thread "engaged agents" set. A row means agent_group_id is engaged in
  * (room_id, thread_id): it receives every message in that thread and is expected
  * to reply when addressed. Never written for the 'main' thread (the regular chat
- * stays mention-only). See docs/design/thread-engaged-agents.md.
+ * stays mention-only). See docs/webchat/thread-engaged-agents.md.
  */
 export const moduleWebchatThreadEngaged: Migration = {
   version: 117,
@@ -750,7 +750,7 @@ export const moduleWebchatRoomPinOrder: Migration = {
  *     thread messages (skip the pulled-in prefix) and the client mark imports.
  *   - webchat_thread_sync — per-thread high-water marks so pull/push are
  *     incremental (each sync appends only the source delta; no duplicates).
- * See docs/design/webchat-thread-context-sync.md.
+ * See docs/webchat/thread-context-sync.md.
  */
 export const moduleWebchatThreadContextSync: Migration = {
   version: 118,

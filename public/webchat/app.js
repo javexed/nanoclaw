@@ -577,10 +577,10 @@ async function pollRoutingInstall() {
       if (!st.running && !chainHandled) {
         chainHandled = true;
         if (st.exitCode === 0) {
-          showToast('Routing installed — shadow mode. Open the Routing tab to review and go live.', { kind: 'success' });
-          await probeRoutingAvailability(); // un-hides the Routing tab + menu item
+          showToast('Auto routing installed — shadow mode. Open the Auto routing tab to review and go live.', { kind: 'success' });
+          await probeRoutingAvailability(); // un-hides the Auto routing tab + menu item
         } else {
-          showToast('Routing setup failed — see log', { kind: 'error' });
+          showToast('Auto routing setup failed — see log', { kind: 'error' });
           break;
         }
       }
@@ -589,7 +589,7 @@ async function pollRoutingInstall() {
       await new Promise((r) => setTimeout(r, 2000));
     }
   } catch (err) {
-    showToast('Routing setup error: ' + err.message, { kind: 'error' });
+    showToast('Auto routing setup error: ' + err.message, { kind: 'error' });
   } finally {
     routingInstallActive = false;
     renderRoutingSetupSettings(); // reflect installed state / re-enable
@@ -611,7 +611,7 @@ async function runRoutingInstall() {
         showToast('Install LiteLLM first (/add-litellm)', { kind: 'error' });
       } else {
         log.textContent = 'Install failed: ' + (err.error || res.status);
-        showToast('Routing setup failed', { kind: 'error' });
+        showToast('Auto routing setup failed', { kind: 'error' });
       }
       btn.disabled = false;
       return;
@@ -619,7 +619,7 @@ async function runRoutingInstall() {
     pollRoutingInstall();
   } catch (err) {
     log.textContent = 'Install failed: ' + err.message;
-    showToast('Routing setup failed', { kind: 'error' });
+    showToast('Auto routing setup failed', { kind: 'error' });
     btn.disabled = false;
   }
 }
@@ -2070,7 +2070,7 @@ async function toggleRoomHide(roomId, hide) {
 // ── Threads ─────────────────────────────────────────────────────────────────
 // A webchat thread maps to an isolated agent session. The sidebar nests a
 // room's threads under it; switching a thread re-joins the room scoped to that
-// thread (server filters history). See docs/design/webchat-threads.md.
+// thread (server filters history). See docs/webchat/threads.md.
 let currentThread = 'main';
 let threadCreating = false; // true while the inline "new thread" input is open
 let threadAddRoom = null; // room id whose row is showing the inline new-thread input
@@ -2334,7 +2334,7 @@ function openThread(threadId) {
 
 // The breadcrumb + pull/push/delete controls only make sense inside a topic
 // thread — the main chat ('main') is the trunk both directions sync against, so
-// it has nothing of its own to pull/push. See webchat-thread-context-sync.md.
+// it has nothing of its own to pull/push. See thread-context-sync.md.
 function updateThreadSyncControls() {
   const inThread = !!(currentRoom && currentThread && currentThread !== 'main');
   // The header thread switcher shows whenever a room is open (CSS gates it to
@@ -2955,7 +2955,7 @@ function appendMessage(msg, statusText, beforeNode) {
     return;
   }
   // Context-sync divider: a labelled rule marking where pulled/pushed messages
-  // begin. See docs/design/webchat-thread-context-sync.md.
+  // begin. See docs/webchat/thread-context-sync.md.
   if (msg.message_type === 'context-divider') {
     const rule = document.createElement('div');
     rule.className = 'context-divider';
@@ -8304,7 +8304,8 @@ function findSelectable(kind, endpoint, modelId) {
     if (kind === 'ollama') return r.kind === 'ollama' && norm(r.endpoint) === norm(endpoint);
     // Router rows: any openai-compatible registration pointing at the router,
     // whichever host form an older registration used (127.0.0.1 vs
-    // host.docker.internal, with or without /v1).
+    // host.docker.internal, with or without /v1). Port 4000 is LiteLLM's
+    // /add-litellm default — mirrored in ollama-manage.ts and bind-routes.mjs.
     return r.kind === 'openai-compatible' && /:4000(\/v1)?$/.test(norm(r.endpoint));
   });
 }
@@ -8569,20 +8570,27 @@ async function probeRoutingAvailability() {
   if (!routingAvailable && manageTab === 'routing') switchManageTab('agents');
 }
 
+// Which router (routing profile) the tab is currently editing. null → the
+// server picks the primary (auto).
+let routingCurrentRouter = null;
+
 async function loadRoutingTab() {
   try {
+    const q = routingCurrentRouter ? `?router=${encodeURIComponent(routingCurrentRouter)}` : '';
     const [routesRes, rosterRes] = await Promise.all([
-      authFetch('/api/router/routes'),
+      authFetch('/api/router/routes' + q),
       authFetch('/api/router/models'),
     ]);
     if (!routesRes.ok) throw new Error((await routesRes.json()).error || routesRes.status);
     routingDraft = await routesRes.json();
+    routingCurrentRouter = routingDraft.router ?? null; // the server tells us which it returned
     routingRouterInfo = rosterRes.ok ? await rosterRes.json() : null;
   } catch (err) {
-    showToast('Routing config unavailable: ' + err.message, { kind: 'error' });
+    showToast('Auto routing config unavailable: ' + err.message, { kind: 'error' });
     return;
   }
   if (allModels.length === 0) await fetchModels(); // ± states need the registry
+  renderRouterPicker();
   renderRouteList();
   renderRouterRoster();
   renderRouteSuggestions();
@@ -8590,6 +8598,81 @@ async function loadRoutingTab() {
   $('#routing-bench-result').hidden = true;
   $('#routing-bench-result-log').hidden = true;
 }
+
+// The router (profile) picker: a dropdown of all routers + new/delete. Shown
+// only when the config exposes a routers list (multi-router aware). Switching
+// reloads the tab for the selected router.
+function renderRouterPicker() {
+  const sel = $('#router-select');
+  const names = routingDraft?.routers ?? [routingCurrentRouter ?? 'auto'];
+  const picker = $('#router-picker');
+  // With a single router the picker is redundant — hide it until there's a choice.
+  picker.hidden = names.length <= 1;
+  sel.innerHTML = '';
+  for (const n of names) {
+    const o = document.createElement('option');
+    o.value = n;
+    o.textContent = n;
+    if (n === routingCurrentRouter) o.selected = true;
+    sel.appendChild(o);
+  }
+  $('#router-delete-btn').disabled = names.length <= 1;
+
+  // Intro reflects the selected profile — assign THIS profile's model to route through it.
+  const intro = $('#routing-intro');
+  if (intro) {
+    const name = routingCurrentRouter ?? 'auto';
+    intro.innerHTML = `Each route sends matching prompts to a model. Assign the <strong>${esc(name)}</strong> model to an agent to route through this profile; test a prompt below to see where it lands.`;
+  }
+}
+
+$('#router-select')?.addEventListener('change', (e) => {
+  routingCurrentRouter = e.target.value;
+  loadRoutingTab();
+});
+
+$('#router-new-btn')?.addEventListener('click', async () => {
+  const name = (prompt('New routing profile name (letters, digits, dash):', '') || '').trim();
+  if (!name) return;
+  try {
+    const res = await authFetch('/api/router/routers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.status);
+    routingCurrentRouter = name; // clone of the current profile; edit from here
+    showToast(`Created routing profile "${name}" (cloned)`, { kind: 'success' });
+    await fetchModels(); // the new router auto-registered as a model
+    loadRoutingTab();
+  } catch (err) {
+    showToast('Could not create profile: ' + err.message, { kind: 'error' });
+  }
+});
+
+$('#router-delete-btn')?.addEventListener('click', async () => {
+  const name = routingCurrentRouter;
+  if (!name) return;
+  const ok = await showConfirmModal({
+    title: 'Delete routing profile',
+    body: `Delete the "${name}" routing profile? Agents must be unassigned from it first.`,
+    confirmLabel: 'Delete',
+    destructive: true,
+  });
+  if (!ok) return;
+  try {
+    const res = await authFetch('/api/router/routers/' + encodeURIComponent(name), { method: 'DELETE' });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.status);
+    routingCurrentRouter = null; // fall back to primary
+    showToast(`Deleted "${name}"`);
+    await fetchModels();
+    loadRoutingTab();
+  } catch (err) {
+    showToast('Could not delete: ' + err.message, { kind: 'error' });
+  }
+});
 
 // Routing pane has three sub-tabs: Rules (bench + routes), Models (the router
 // roster with +/− select toggles + suggestions), and Logs (recent decisions).
@@ -8688,11 +8771,11 @@ async function runRosterRefresh() {
   log.hidden = false;
   log.textContent = 'Starting…';
   try {
-    const res = await authFetch('/api/litellm/roster-refresh', { method: 'POST' });
+    const res = await authFetch('/api/router/roster-refresh', { method: 'POST' });
     if (!res.ok) throw new Error((await res.json()).error || res.status);
     while (true) {
       await new Promise((r) => setTimeout(r, 2000));
-      const st = await (await authFetch('/api/litellm/roster-refresh')).json();
+      const st = await (await authFetch('/api/router/roster-refresh')).json();
       log.textContent = st.lines.slice(-12).join('\n');
       log.scrollTop = log.scrollHeight;
       if (!st.running) {
@@ -8718,7 +8801,8 @@ $('#roster-refresh-btn')?.addEventListener('click', runRosterRefresh);
 // PUT the whole draft (routes + default + live controls) — the server
 // validates; the hook picks it up on the next request.
 async function saveRoutingConfig() {
-  const res = await authFetch('/api/router/routes', {
+  const q = routingCurrentRouter ? `?router=${encodeURIComponent(routingCurrentRouter)}` : '';
+  const res = await authFetch('/api/router/routes' + q, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     // Only routes + default_route are editable in the UI. Omitting `live`
@@ -8972,12 +9056,17 @@ setTimeout(probeRoutingAvailability, 3000);
 async function refreshRoutingDecisions() {
   const list = $('#routing-decisions-list');
   try {
-    const res = await authFetch('/api/router/decisions?limit=15');
+    // Over-fetch and filter client-side to the selected profile — the log
+    // interleaves every router's traffic. (Legacy lines with no `router` field
+    // are attributed to the primary `auto`.)
+    const res = await authFetch('/api/router/decisions?limit=60');
     if (!res.ok) throw new Error(res.status);
-    const { decisions } = await res.json();
+    let { decisions } = await res.json();
+    const cur = routingCurrentRouter ?? 'auto';
+    decisions = decisions.filter((d) => (d.router ?? 'auto') === cur).slice(0, 15);
     list.innerHTML = '';
     if (decisions.length === 0) {
-      list.innerHTML = '<div class="ollama-muted">No decisions yet</div>';
+      list.innerHTML = `<div class="ollama-muted">No decisions yet for ${esc(cur)}</div>`;
       return;
     }
     for (const d of decisions) {
@@ -9153,6 +9242,26 @@ async function openModelDetail(id) {
     }
   } else {
     usage.textContent = 'Not assigned to any agent yet.';
+  }
+
+  // Rooms this model reaches (via its assigned agents) — click one to open its
+  // settings. Hidden entirely when the model isn't wired into any room.
+  const roomsEl = $('#model-detail-rooms');
+  roomsEl.innerHTML = '';
+  if (model.rooms && model.rooms.length > 0) {
+    roomsEl.hidden = false;
+    roomsEl.appendChild(document.createTextNode('In rooms: '));
+    for (const r of model.rooms) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'model-assignee-chip model-room-chip';
+      chip.textContent = r.name;
+      chip.title = 'Open room settings';
+      chip.addEventListener('click', () => openRoomDetail(r.id));
+      roomsEl.appendChild(chip);
+    }
+  } else {
+    roomsEl.hidden = true;
   }
 
   $('#model-detail').hidden = false;

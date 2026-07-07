@@ -112,6 +112,20 @@ export function mergeCatalog(stock, local) {
   };
 }
 
+/**
+ * The map of named routers {name: {routes, default_route, …}}. New format
+ * carries cfg.routers directly; the pre-multi-router format (top-level routes)
+ * is normalized to a single-entry map here. For the old format the returned
+ * router's `.routes` is the SAME array reference as cfg.routes, so mutating it
+ * (applyDecisions) and writing cfg back preserves the old on-disk shape.
+ * KEEP-IN-SYNC with _routers() in router_hook.py / recalibrate.mjs.
+ */
+export function routers(cfg) {
+  if (cfg.routers && typeof cfg.routers === 'object') return cfg.routers;
+  const name = cfg.live?.model_name ?? 'auto';
+  return { [name]: { routes: cfg.routes ?? [], default_route: cfg.default_route, timeout_ms: cfg.live?.timeout_ms ?? 5000 } };
+}
+
 // ── CLI ────────────────────────────────────────────────────────────────────
 
 async function fetchRoster() {
@@ -141,28 +155,40 @@ async function main() {
   const rosterArg = opt('--roster', null);
   const roster = rosterArg ? rosterArg.split(',').map((s) => s.trim()) : await fetchRoster();
 
-  const { decisions, unknown } = chooseBindings(routesCfg, roster, catalog);
-  for (const d of decisions) {
-    const mark = d.pinned ? 'pinned' : d.changed ? `→ ${d.chosen} (score ${d.score})` : `= ${d.chosen ?? '(none)'}`;
-    console.log(`${d.route.padEnd(10)} ${d.pinned ? '' : (d.current ?? '(none)') + ' '}${mark}`);
+  // Bind every router independently (each draws from the same shared roster).
+  // applyDecisions mutates the router's routes in place; for the old format
+  // that's the same array as routesCfg.routes, so writing routesCfg back keeps
+  // its original shape.
+  const routerMap = routers(routesCfg);
+  const multi = Object.keys(routerMap).length > 1;
+  let totalChanges = 0;
+  for (const [name, router] of Object.entries(routerMap)) {
+    if (multi) console.log(`\n[${name}]`);
+    const { decisions, unknown } = chooseBindings(router, roster, catalog);
+    for (const d of decisions) {
+      const mark = d.pinned ? 'pinned' : d.changed ? `→ ${d.chosen} (score ${d.score})` : `= ${d.chosen ?? '(none)'}`;
+      console.log(`${d.route.padEnd(10)} ${d.pinned ? '' : (d.current ?? '(none)') + ' '}${mark}`);
+    }
+    if (unknown.length > 0) {
+      console.log(`unknown to catalog (never auto-bound): ${unknown.join(', ')} — add to capabilities.local.json`);
+    }
+    const changes = decisions.filter((d) => d.changed);
+    totalChanges += changes.length;
+    if (changes.length > 0 && flag('--apply')) applyDecisions(router, decisions);
   }
-  if (unknown.length > 0) {
-    console.log(`unknown to catalog (never auto-bound): ${unknown.join(', ')} — add to capabilities.local.json`);
-  }
-  const changes = decisions.filter((d) => d.changed);
-  if (changes.length === 0) {
-    console.log('no binding changes.');
+
+  if (totalChanges === 0) {
+    console.log('\nno binding changes.');
     return;
   }
   if (!flag('--apply')) {
-    console.log(`${changes.length} change(s) NOT applied (dry run — pass --apply).`);
+    console.log(`\n${totalChanges} change(s) NOT applied (dry run — pass --apply).`);
     return;
   }
-  applyDecisions(routesCfg, decisions);
   const tmp = routesPath + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(routesCfg, null, 2) + '\n');
   fs.renameSync(tmp, routesPath);
-  console.log(`applied ${changes.length} binding change(s) to ${routesPath}.`);
+  console.log(`\napplied ${totalChanges} binding change(s) to ${routesPath}.`);
 }
 
 if (process.argv[1] && import.meta.url.endsWith(path.basename(process.argv[1]))) {

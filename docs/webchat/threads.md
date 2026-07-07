@@ -10,7 +10,7 @@ topic thread routes; an unknown id falls back to main rather than spawning).
 
 A thread starts with no context (its own session). To move conversation between
 a thread and the room's regular chat, see
-**[webchat-thread-context-sync.md](webchat-thread-context-sync.md)** (verbatim,
+**[thread-context-sync.md](thread-context-sync.md)** (verbatim,
 additive pull ↓ / push ↑ with per-thread high-water marks).
 
 ## 1. Goal & model

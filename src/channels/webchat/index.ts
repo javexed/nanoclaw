@@ -90,7 +90,7 @@ function createAdapter(): ChannelAdapter {
     // Threads on: the router keys a per-thread session per (room, thread). A
     // null/main thread keys the legacy null-thread session, so thread-less rooms
     // are unchanged until the client sends a real thread id. See
-    // docs/design/webchat-threads.md and threadToSessionKey().
+    // docs/webchat/threads.md and threadToSessionKey().
     supportsThreads: true,
 
     async setup(config: ChannelSetup): Promise<void> {
@@ -390,7 +390,7 @@ registerChannelAdapter('webchat', {
 // to it. The backend (resolveEngagedDecision, webchat_thread_engaged table,
 // /engaged endpoints) is left dormant; re-wire it via setEngagedResolver to turn
 // it back on, or remove it when the future "separate conversations" model lands.
-// See docs/design/thread-engaged-agents.md.
+// See docs/webchat/thread-engaged-agents.md.
 
 // Lenient output for ollama-backed groups: a small local model rarely emits the
 // <message to="..."> envelope the runner requires, so its replies would be

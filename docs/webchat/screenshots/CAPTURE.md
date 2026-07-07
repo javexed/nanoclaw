@@ -1,6 +1,6 @@
 # Screenshots to capture (from a live install)
 
-Drop PNGs here with these names; webchat-readme.md and webchat-guide.md reference them.
+Drop PNGs here with these names; readme.md and guide.md reference them.
 Capture at a consistent width (≈1280px), dark theme reads best.
 
 **Captured** (already in this dir, from a live install):
@@ -8,7 +8,7 @@ Capture at a consistent width (≈1280px), dark theme reads best.
 | File | Shows |
 |------|-------|
 | `agent-settings.png` | The redesigned agent panel — Settings / Instructions sub-tabs, status pills, model picker, shared MCP/Rooms attach accordions. |
-| `routing.png` | The Routing console — Rules / Models / Logs sub-tabs, the classify test bench, and capability routes bound to a model. |
+| `routing.png` | The Auto routing console — Rules / Models / Logs sub-tabs, the classify test bench, and capability routes bound to a model. |
 
 **Still to capture** (need a *populated* demo install — several agents, rooms, a DM, a pending approval):
 
@@ -24,4 +24,4 @@ Capture at a consistent width (≈1280px), dark theme reads best.
 Tips:
 - Use placeholder/non-sensitive room and agent names.
 - Redact any real handles/emails.
-- A short screen-capture GIF of switching threads + an agent replying makes the best hero — add as `demo.gif` and reference it at the top of webchat-readme.md.
+- A short screen-capture GIF of switching threads + an agent replying makes the best hero — add as `demo.gif` and reference it at the top of readme.md.

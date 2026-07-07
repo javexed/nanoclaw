@@ -49,7 +49,7 @@ export interface WebchatMessage {
   file_meta?: FileMeta | null;
   created_at: number;
   /** Provenance for thread context sync: null=native, 'pulled' (from main),
-   *  'pushed' (up from a thread). See docs/design/webchat-thread-context-sync.md. */
+   *  'pushed' (up from a thread). See docs/webchat/thread-context-sync.md. */
   origin?: 'pulled' | 'pushed' | null;
 }
 
@@ -992,7 +992,7 @@ export function getWebchatMessagesBeforeId(
 // ── Threads ──
 // A webchat thread maps to an agent session (thread_id = session.thread_id), so
 // each thread is an isolated conversation. 'main' is every room's implicit
-// default thread. See docs/design/webchat-threads.md.
+// default thread. See docs/webchat/threads.md.
 
 export const MAIN_THREAD = 'main';
 
@@ -1163,7 +1163,7 @@ export function deleteWebchatThread(roomId: string, threadId: string): void {
 
 // ── Thread context sync (pull / push) ──
 // High-water marks + verbatim copy helpers for moving conversation between a
-// thread and main. See docs/design/webchat-thread-context-sync.md.
+// thread and main. See docs/webchat/thread-context-sync.md.
 
 export interface ThreadSyncMarks {
   pulled: number; // newest main created_at pulled into this thread
@@ -1291,7 +1291,7 @@ export function insertSyncedMessages(
 // ── Per-thread engaged agents ──
 // A row = agent_group_id is engaged in (room_id, thread_id): it receives every
 // message in that thread and replies when addressed. Never the 'main' thread —
-// the regular chat stays mention-only. See docs/design/thread-engaged-agents.md.
+// the regular chat stays mention-only. See docs/webchat/thread-engaged-agents.md.
 
 /** Engage an agent in a thread (idempotent). No-op for the 'main' thread. */
 export function engageAgent(roomId: string, threadId: string, agentGroupId: string, ts: number = Date.now()): void {

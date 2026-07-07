@@ -217,7 +217,7 @@
                   <svg class="icon" aria-hidden="true"><use href="#i-plug"></use></svg>&nbsp;&nbsp;MCP
                 </button>
                 <button class="overflow-item" data-action="routing" role="menuitem" hidden>
-                  <svg class="icon" aria-hidden="true"><use href="#i-route"></use></svg>&nbsp;&nbsp;Routing
+                  <svg class="icon" aria-hidden="true"><use href="#i-route"></use></svg>&nbsp;&nbsp;Auto routing
                 </button>
                 <button class="overflow-item" data-action="topology" role="menuitem">
                   <svg class="icon" aria-hidden="true"><use href="#i-workflow"></use></svg>&nbsp;&nbsp;Topology
@@ -309,7 +309,7 @@
             <!-- Thread context-sync + delete controls — shown only inside a topic
                  thread. Pull copies the main chat into this thread; push copies
                  this thread's messages up; delete removes the thread. See
-                 webchat-thread-context-sync.md. -->
+                 thread-context-sync.md. -->
             <div id="thread-sync" class="thread-sync" hidden>
               <button id="thread-pull" class="thread-sync-btn" type="button" title="Pull main chat into this thread">
                 <svg class="icon" aria-hidden="true"><use href="#i-arrow-down"></use></svg>
@@ -773,6 +773,7 @@
                   <select id="model-discover-select" hidden></select>
                 </label>
                 <p id="model-detail-usage" class="room-prime-note"></p>
+                <p id="model-detail-rooms" class="room-prime-note" hidden></p>
                 <div class="agent-detail-actions">
                   <button type="submit" class="btn btn-primary">Save</button>
                 </div>
@@ -1050,7 +1051,7 @@
               MCP
             </button>
             <button class="manage-tab" data-mtab="routing" role="tab" aria-selected="false" aria-controls="mtab-routing" hidden>
-              Routing
+              Auto routing
             </button>
           </div>
           <button id="manage-sort-az" class="sort-icon-btn" type="button" aria-pressed="false" title="Sort A–Z" aria-label="Sort A–Z">
@@ -1076,16 +1077,20 @@
             <button id="create-mcp-btn" class="btn btn-secondary btn-list-footer">+ New server</button>
           </div>
           <div id="mtab-routing" class="manage-pane" role="tabpanel" hidden>
+            <div id="router-picker" class="router-picker">
+              <label class="router-picker-label">Router
+                <select id="router-select"></select>
+              </label>
+              <button id="router-new-btn" class="btn btn-ghost" type="button" title="New routing profile">+ New</button>
+              <button id="router-delete-btn" class="btn btn-ghost router-delete" type="button" title="Delete this profile">Delete</button>
+            </div>
             <div class="routing-subtabs" role="tablist">
               <button class="routing-subtab active" data-rsub="rules" role="tab" aria-selected="true">Rules</button>
               <button class="routing-subtab" data-rsub="models" role="tab" aria-selected="false">Models</button>
               <button class="routing-subtab" data-rsub="logs" role="tab" aria-selected="false">Logs</button>
             </div>
             <div id="rsub-rules" class="routing-subpane" role="tabpanel">
-              <p class="routing-intro">
-                Each route sends matching prompts to a model. Routing applies to agents
-                assigned the <strong>auto</strong> model; test a prompt below to see where it lands.
-              </p>
+              <p class="routing-intro" id="routing-intro"></p>
               <div class="routing-bench-row">
                 <input id="routing-bench-input" type="text" placeholder="Type a prompt to classify…" />
                 <button id="routing-bench-run" class="btn btn-secondary" type="button">Classify</button>
@@ -1519,10 +1524,10 @@
               <p class="cred-hint" id="routing-setup-desc">
                 Layer a capability classifier onto your LiteLLM router: pulls the Arch-Router
                 model, installs the routing hook, and binds your models to default routes.
-                Starts in shadow mode — a Routing tab appears where you review decisions and go live.
+                Starts in shadow mode — an Auto routing tab appears where you review decisions and go live.
               </p>
               <div class="setting-group">
-                <button id="routing-install-btn" class="btn btn-secondary" type="button">Set up routing</button>
+                <button id="routing-install-btn" class="btn btn-secondary" type="button">Set up auto routing</button>
               </div>
               <div id="routing-install-progress" hidden>
                 <div class="ollama-pull-bar" id="routing-pull-bar" hidden><span style="width:0%"></span></div>
@@ -1530,7 +1535,7 @@
                 <pre id="routing-install-log" class="roster-refresh-log"></pre>
               </div>
               <p class="cred-hint" id="routing-installed-note" hidden>
-                Routing is installed (shadow mode). Open the Routing tab (kebab menu → Routing)
+                Auto routing is installed (shadow mode). Open the Auto routing tab (kebab menu → Auto routing)
                 to review classifier decisions and switch it live.
               </p>
             </div>

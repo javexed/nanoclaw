@@ -1,7 +1,7 @@
 # Webchat thread context sync (pull / push)
 
 Status: **built**. Webchat-scoped (threads). Composes with
-`webchat-threads.md`; supersedes the §14 stub in `thread-engaged-agents.md`.
+`threads.md`; supersedes the §14 stub in `thread-engaged-agents.md`.
 
 Implementation: db helpers (`getThreadSyncMarks`, `setThreadSyncMark`,
 `getSyncDelta`, `insertSyncedMessages`) + `origin` column / `webchat_thread_sync`

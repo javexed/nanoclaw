@@ -10,8 +10,8 @@ A local-first chat desk **and** operator console for your [NanoClaw](https://git
 agents — one installable PWA bound to `127.0.0.1`. This guide walks the whole
 surface: get it running, then a deep dive into each component.
 
-> New here? The [README](./webchat-readme.md) is the one-page pitch; this is the tour.
-> For architecture + APIs, see the [design doc](../design/webchat.md).
+> New here? The [README](./readme.md) is the one-page pitch; this is the tour.
+> For architecture + APIs, see the [design doc](./webchat.md).
 
 ---
 
@@ -37,7 +37,7 @@ bash configure-webchat.sh                                    # auth, TLS, Web Pu
 
 **First run.** Open `http://127.0.0.1:3100`. On localhost you're signed in as the
 **owner** automatically — no password. The left sidebar is your rooms; the top-left
-**⊞** and **⋯** open the operator surfaces (Agents, Models, MCP, Routing, Dashboard,
+**⊞** and **⋯** open the operator surfaces (Agents, Models, MCP, Auto routing, Dashboard,
 Permissions, Wiring, Settings, Help).
 
 **Not sure how the pieces fit?** The built-in **Help** page explains the model in
@@ -142,19 +142,25 @@ device-auth URL + token, storing it in the vault like any other credential.
 Route each turn to the *right* model — send the simple ones to a small local model,
 keep a frontier model for the hard ones. The whole stack installs with **one click**:
 
-- **"Set up routing"** in Settings (see the shot above) pulls the **Arch-Router**
+- **"Set up auto routing"** in Settings (see the shot above) pulls the **Arch-Router**
   classifier (with a progress bar), runs the installer, points the classifier at
   your Ollama, and **auto-binds** the default routes to your roster — no shell.
-- The **Routing tab** then appears, with **Rules / Models / Logs** sub-tabs: a routes
+- The **Auto routing tab** then appears, with **Rules / Models / Logs** sub-tabs: a routes
   editor (each capability route — code / reasoning / general / … — bound to a model),
   a live **classify test bench**, per-route suggestions when a roster model has an
   uncovered capability, a **decisions log**, and shadow-vs-live **metrics**.
 
-![The Routing console — Rules sub-tab, classify bench, and capability routes](./screenshots/routing.png)
+![The Auto routing console — Rules sub-tab, classify bench, and capability routes](./screenshots/routing.png)
 
 It starts in **shadow mode** — every request is classified and logged, but nothing
 about routing changes — so you can calibrate risk-free, then flip it **live** from
 the tab. *(Or install via `/add-litellm` + `/add-routing` instead of the button.)*
+
+You can define **more than one routing profile** — a picker (New / Delete) at the top
+of the tab creates named routers (`auto`, `auto-vision`, `auto-cheap`, …), each with
+its own rules and bindings but all sharing the one classifier and roster. An agent
+picks a profile by which virtual model it's assigned; **New** clones the current
+profile and registers it as an assignable model, so you never edit JSON.
 
 ---
 
@@ -284,4 +290,4 @@ http.createServer(async (req, res) => {
 ---
 
 *Architecture, the full REST surface, storage, and the ship model:
-**[docs/design/webchat.md](../design/webchat.md)**.*
+**[docs/webchat/webchat.md](./webchat.md)**.*

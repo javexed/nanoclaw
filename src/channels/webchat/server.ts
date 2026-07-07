@@ -146,10 +146,15 @@ import {
   getRouterMetrics,
   listHostModels,
   mergeRoutesUpdate,
+  primaryRouter,
   readRoutesConfig,
   recentDecisions,
   type RoutesUpdate,
   writeRoutesConfig,
+  listRouters,
+  routerView,
+  addRouter,
+  deleteRouter,
   parseConfiguredHosts,
   startPull,
   startRosterRefresh,
@@ -1129,7 +1134,7 @@ async function handleHttp(
   }
 
   // ── Threads (per-room) ────────────────────────────────────────────────
-  // A thread maps to an agent session; see docs/design/webchat-threads.md.
+  // A thread maps to an agent session; see docs/webchat/threads.md.
   // List/read/create/rename are member-gated; delete (destroys history + tears
   // down the thread's session) is owner-only.
   const roomThreadReadMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads\/([^/]+)\/read$/);
@@ -1214,7 +1219,7 @@ async function handleHttp(
   // broadcast the copies, and advance the per-thread high-water mark so repeat
   // syncs only carry genuinely new messages. The 'main' regular chat is the
   // shared trunk; only a topic thread can pull from / push to it.
-  // See docs/design/webchat-thread-context-sync.md.
+  // See docs/webchat/thread-context-sync.md.
   const roomThreadPullMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads\/([^/]+)\/(pull|push)$/);
   if (roomThreadPullMatch && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
@@ -1256,7 +1261,7 @@ async function handleHttp(
   // nothing is a footgun. When off, the routes fall through to the default 404.
   // To bring the subsystem back: flip this flag AND add the setEngagedResolver
   // wiring. GET lists, POST engages, DELETE disengages; the 'main' thread can
-  // never engage. See docs/design/thread-engaged-agents.md.
+  // never engage. See docs/webchat/thread-engaged-agents.md.
   const ENGAGED_AGENTS_ENABLED: boolean = false;
   const roomThreadEngagedMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads\/([^/]+)\/engaged$/);
   if (ENGAGED_AGENTS_ENABLED && roomThreadEngagedMatch && method === 'GET') {
@@ -1583,7 +1588,14 @@ async function handleHttp(
     if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
     const cfg = readRoutesConfig();
     if (!cfg) return json(res, 404, { error: 'Routing not installed' });
-    return json(res, 200, { routes: cfg.routes, live: cfg.live ?? null, default_route: cfg.default_route ?? null });
+    const view = routerView(cfg, url.searchParams.get('router') ?? undefined);
+    return json(res, 200, {
+      routers: listRouters(cfg),
+      router: view.name,
+      routes: view.routes,
+      default_route: view.default_route ?? null,
+      live: cfg.live ?? null,
+    });
   }
   if (url.pathname === '/api/router/routes' && method === 'PUT') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
@@ -1599,9 +1611,78 @@ async function handleHttp(
     const cfg = readRoutesConfig();
     if (!cfg) return json(res, 404, { error: 'Routing not installed' });
     try {
-      const merged = mergeRoutesUpdate(cfg, update);
+      const target = url.searchParams.get('router') ?? undefined;
+      const merged = mergeRoutesUpdate(cfg, update, target);
       writeRoutesConfig(merged);
-      return json(res, 200, { ok: true, routes: merged.routes, live: merged.live ?? null, default_route: merged.default_route ?? null });
+      const view = routerView(merged, target);
+      return json(res, 200, {
+        ok: true,
+        routers: listRouters(merged),
+        router: view.name,
+        routes: view.routes,
+        default_route: view.default_route ?? null,
+        live: merged.live ?? null,
+      });
+    } catch (err) {
+      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  if (url.pathname === '/api/router/routers' && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { name?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    const cfg = readRoutesConfig();
+    if (!cfg) return json(res, 404, { error: 'Routing not installed' });
+    try {
+      const next = addRouter(cfg, name); // clones the primary router as a starting point
+      writeRoutesConfig(next);
+      // Register the router as an openai-compatible model so agents can assign
+      // it (the virtual model name = the router name, at the router endpoint).
+      const endpoint = (await getRouterInfo()).endpoint;
+      if (!listWebchatModels().some((m) => m.model_id === name && m.endpoint === endpoint)) {
+        createWebchatModel({
+          id: randomUUID(),
+          name,
+          kind: 'openai-compatible',
+          endpoint,
+          model_id: name,
+          credential_ref: null,
+          created_at: Date.now(),
+        });
+      }
+      return json(res, 200, { ok: true, routers: listRouters(next), router: name });
+    } catch (err) {
+      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  const routerDelMatch = url.pathname.match(/^\/api\/router\/routers\/([^/]+)$/);
+  if (routerDelMatch && method === 'DELETE') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const name = decodeURIComponent(routerDelMatch[1]);
+    const cfg = readRoutesConfig();
+    if (!cfg) return json(res, 404, { error: 'Routing not installed' });
+    // Refuse while an agent is still assigned to this router's model.
+    const model = listWebchatModels().find((m) => m.model_id === name);
+    if (model) {
+      const assigned = getAgentsAssignedToModel(model.id);
+      if (assigned.length > 0) {
+        return json(res, 409, { error: `router "${name}" is assigned to ${assigned.length} agent(s) — unassign first` });
+      }
+    }
+    try {
+      const next = deleteRouter(cfg, name);
+      writeRoutesConfig(next);
+      if (model) deleteWebchatModel(model.id);
+      return json(res, 200, { ok: true, routers: listRouters(next) });
     } catch (err) {
       return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
     }
@@ -1666,11 +1747,11 @@ async function handleHttp(
       return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
     }
   }
-  if (url.pathname === '/api/litellm/roster-refresh' && method === 'GET') {
+  if (url.pathname === '/api/router/roster-refresh' && method === 'GET') {
     if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
     return json(res, 200, getRosterRefreshState());
   }
-  if (url.pathname === '/api/litellm/roster-refresh' && method === 'POST') {
+  if (url.pathname === '/api/router/roster-refresh' && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
     const started = startRosterRefresh();
@@ -2189,7 +2270,7 @@ function sessionsForThreadKey(messagingGroupId: string, sessionKey: string | nul
  * keyed under — both directions track progress against that one row so a push and
  * a pull on the same thread don't share a mark. Returns the number of messages
  * copied (excluding the divider; 0 = nothing new). See
- * docs/design/webchat-thread-context-sync.md.
+ * docs/webchat/thread-context-sync.md.
  */
 export function syncThreadContext(opts: {
   roomId: string;
@@ -2271,7 +2352,7 @@ const ENGAGE_FOLDER_ESCAPE_RE = /[.*+?^${}()|[\]\\]/g;
  * un-addressed message → a one-agent thread keeps replying without re-mention) or
  * 'defer' (engaged but someone else was addressed → receives context, no reply).
  * Returns null when engagement doesn't apply so the router falls back to normal
- * mention-only routing. See docs/design/thread-engaged-agents.md.
+ * mention-only routing. See docs/webchat/thread-engaged-agents.md.
  */
 export function resolveEngagedDecision(
   mg: MessagingGroup,
@@ -3495,15 +3576,25 @@ interface ModelForUI extends WebchatModel {
   agents_assigned: number;
   /** Named assignees so the detail panel can say WHO, not just how many. */
   agents: Array<{ id: string; name: string }>;
+  /**
+   * Rooms this model reaches transitively — the union of rooms wired to any
+   * agent it's assigned to — so the detail panel can link straight to them.
+   */
+  rooms: Array<{ id: string; name: string }>;
 }
 
 function listModelsForUI(): ModelForUI[] {
   return listWebchatModels().map((m) => {
     const ids = getAgentsAssignedToModel(m.id);
+    const roomMap = new Map<string, { id: string; name: string }>();
+    for (const id of ids) {
+      for (const r of getWebchatRoomsForAgent(id)) roomMap.set(r.id, { id: r.id, name: r.name });
+    }
     return {
       ...m,
       agents_assigned: ids.length,
       agents: ids.map((id) => ({ id, name: getAgentGroup(id)?.name ?? id })),
+      rooms: [...roomMap.values()],
     };
   });
 }
