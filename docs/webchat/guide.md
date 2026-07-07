@@ -10,7 +10,7 @@ A local-first chat desk **and** operator console for your [NanoClaw](https://git
 agents — one installable PWA bound to `127.0.0.1`. This guide walks the whole
 surface: get it running, then a deep dive into each component.
 
-> New here? The [README](./webchat-readme.md) is the one-page pitch; this is the tour.
+> New here? The [README](./readme.md) is the one-page pitch; this is the tour.
 > For architecture + APIs, see the [design doc](./webchat.md).
 
 ---

@@ -186,10 +186,10 @@ NEW_PATHS=(
   setup/get-oauth-token.sh
   docs/design/user-credentials.md
   docs/design/user-credentials-oauth.md
-  docs/webchat/webchat-threads.md
-  docs/webchat/webchat-threads-qa.md
+  docs/webchat/threads.md
+  docs/webchat/threads-qa.md
   docs/webchat/thread-engaged-agents.md
-  docs/webchat/webchat-thread-context-sync.md
+  docs/webchat/thread-context-sync.md
 )
 echo "→ Copying webchat-owned files …"
 git checkout "$BR" -- "${NEW_PATHS[@]}"

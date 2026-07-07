@@ -8,8 +8,8 @@ agent groups → sessions), exactly like Discord/Slack/Telegram.
 
 This is the overview. Focused design docs cover the harder subsystems in depth:
 
-- Threads: [webchat-threads.md](webchat-threads.md), [webchat-threads-qa.md](webchat-threads-qa.md)
-- Thread context sync: [webchat-thread-context-sync.md](webchat-thread-context-sync.md)
+- Threads: [threads.md](threads.md), [threads-qa.md](threads-qa.md)
+- Thread context sync: [thread-context-sync.md](thread-context-sync.md)
 - Thread-engaged agents (dormant): [thread-engaged-agents.md](thread-engaged-agents.md)
 - Per-member credentials (BYOK): [user-credentials.md](../design/user-credentials.md), [user-credentials-oauth.md](../design/user-credentials-oauth.md)
 - Local-model routing: [llm-router.md](../design/llm-router.md), [add-litellm.md](../design/add-litellm.md)
