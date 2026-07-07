@@ -169,7 +169,7 @@ preserved by fan-out (sender `trigger:1`, others `trigger:0`).
 - **Ollama host management** — list hosts, stream model **pulls** with progress,
   refresh the router roster.
 - **Local-model routing** — a console over a LiteLLM + Arch-Router classifier stack.
-  A **"Set up routing"** button in Settings installs and configures it in one flow
+  A **"Set up auto routing"** button in Settings installs and configures it in one flow
   (`POST /api/router/install`: pulls the classifier model with a progress bar, runs
   the `add-routing` installer, points the classifier at `host.docker.internal`, and
   auto-binds routes to the roster) — no shell required; it can still be installed via

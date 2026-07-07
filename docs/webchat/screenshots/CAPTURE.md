@@ -8,7 +8,7 @@ Capture at a consistent width (≈1280px), dark theme reads best.
 | File | Shows |
 |------|-------|
 | `agent-settings.png` | The redesigned agent panel — Settings / Instructions sub-tabs, status pills, model picker, shared MCP/Rooms attach accordions. |
-| `routing.png` | The Routing console — Rules / Models / Logs sub-tabs, the classify test bench, and capability routes bound to a model. |
+| `routing.png` | The Auto routing console — Rules / Models / Logs sub-tabs, the classify test bench, and capability routes bound to a model. |
 
 **Still to capture** (need a *populated* demo install — several agents, rooms, a DM, a pending approval):
 
