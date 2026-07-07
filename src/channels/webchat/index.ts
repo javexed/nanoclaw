@@ -90,7 +90,7 @@ function createAdapter(): ChannelAdapter {
     // Threads on: the router keys a per-thread session per (room, thread). A
     // null/main thread keys the legacy null-thread session, so thread-less rooms
     // are unchanged until the client sends a real thread id. See
-    // docs/webchat/webchat-threads.md and threadToSessionKey().
+    // docs/webchat/threads.md and threadToSessionKey().
     supportsThreads: true,
 
     async setup(config: ChannelSetup): Promise<void> {

@@ -224,7 +224,7 @@ the hook surface — minimal.
 ## 14. Thread context sync (pull / push) — moved to its own spec
 
 The "snapshot main → thread" and "push thread → main" idea is now fully specced in
-**[webchat-thread-context-sync.md](webchat-thread-context-sync.md)**: symmetric,
+**[thread-context-sync.md](thread-context-sync.md)**: symmetric,
 verbatim, additive pull/push with per-direction high-water marks (incremental, no
 duplicates), origin-marked copies, demarcation dividers, header controls shown
 in-thread, and a phased build plan. It moves *messages* (transcript + agent

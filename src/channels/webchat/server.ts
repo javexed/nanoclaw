@@ -1134,7 +1134,7 @@ async function handleHttp(
   }
 
   // ── Threads (per-room) ────────────────────────────────────────────────
-  // A thread maps to an agent session; see docs/webchat/webchat-threads.md.
+  // A thread maps to an agent session; see docs/webchat/threads.md.
   // List/read/create/rename are member-gated; delete (destroys history + tears
   // down the thread's session) is owner-only.
   const roomThreadReadMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads\/([^/]+)\/read$/);
@@ -1219,7 +1219,7 @@ async function handleHttp(
   // broadcast the copies, and advance the per-thread high-water mark so repeat
   // syncs only carry genuinely new messages. The 'main' regular chat is the
   // shared trunk; only a topic thread can pull from / push to it.
-  // See docs/webchat/webchat-thread-context-sync.md.
+  // See docs/webchat/thread-context-sync.md.
   const roomThreadPullMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads\/([^/]+)\/(pull|push)$/);
   if (roomThreadPullMatch && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
@@ -2270,7 +2270,7 @@ function sessionsForThreadKey(messagingGroupId: string, sessionKey: string | nul
  * keyed under — both directions track progress against that one row so a push and
  * a pull on the same thread don't share a mark. Returns the number of messages
  * copied (excluding the divider; 0 = nothing new). See
- * docs/webchat/webchat-thread-context-sync.md.
+ * docs/webchat/thread-context-sync.md.
  */
 export function syncThreadContext(opts: {
   roomId: string;

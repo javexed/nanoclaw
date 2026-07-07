@@ -8,8 +8,8 @@ agent groups → sessions), exactly like Discord/Slack/Telegram.
 
 This is the overview. Focused design docs cover the harder subsystems in depth:
 
-- Threads: [webchat-threads.md](webchat-threads.md), [webchat-threads-qa.md](webchat-threads-qa.md)
-- Thread context sync: [webchat-thread-context-sync.md](webchat-thread-context-sync.md)
+- Threads: [threads.md](threads.md), [threads-qa.md](threads-qa.md)
+- Thread context sync: [thread-context-sync.md](thread-context-sync.md)
 - Thread-engaged agents (dormant): [thread-engaged-agents.md](thread-engaged-agents.md)
 - Per-member credentials (BYOK): [user-credentials.md](../design/user-credentials.md), [user-credentials-oauth.md](../design/user-credentials-oauth.md)
 - Local-model routing: [llm-router.md](../design/llm-router.md), [add-litellm.md](../design/add-litellm.md)
@@ -173,12 +173,15 @@ preserved by fan-out (sender `trigger:1`, others `trigger:0`).
   (`POST /api/router/install`: pulls the classifier model with a progress bar, runs
   the `add-routing` installer, points the classifier at `host.docker.internal`, and
   auto-binds routes to the roster) — no shell required; it can still be installed via
-  `/add-litellm` + `/add-routing` instead. Once installed the **Routing tab** appears
-  (hidden until `routes.json` exists) with **Rules** and **Logs** sub-tabs: a routes
+  `/add-litellm` + `/add-routing` instead. Once installed the **Auto routing tab** appears
+  (hidden until `routes.json` exists) with **Rules**, **Models**, and **Logs** sub-tabs: a routes
   editor with a live **test bench** and per-route suggestions when a roster model has
   an uncovered capability, a **decisions tail** (`routing-shadow.jsonl`) and
   shadow-vs-live **metrics**, the router roster, and a roster-refresh that re-runs
-  the installers and re-binds. Starts in **shadow mode**; the operator flips it live
+  the installers and re-binds. A **router picker** (New / Delete) defines multiple
+  named routing profiles (`auto`, `auto-vision`, …) sharing one classifier + roster;
+  the sub-tabs operate on the selected profile, and an agent picks one by its assigned
+  virtual model. Starts in **shadow mode**; the operator flips it live
   from the tab. Degrades cleanly to "not installed" when `data/litellm/*` is absent.
 - **MCP registry** — register / probe (real MCP client, lists tools) / assign MCP
   servers to agents; syncs into `container_configs.mcp_servers`, co-existing with

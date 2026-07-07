@@ -1,7 +1,7 @@
 /**
  * Tests for the thread context-sync foundation: high-water marks, delta
  * selection (native-only, since-ts, fresh cap), and verbatim copy insertion.
- * See docs/webchat/webchat-thread-context-sync.md.
+ * See docs/webchat/thread-context-sync.md.
  */
 import { randomUUID } from 'crypto';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';

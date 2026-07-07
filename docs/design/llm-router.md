@@ -425,3 +425,44 @@ up front, it touches the single-pane/monitoring stance (§7).
 4. Threshold recalibration (16e tier-1).
 5. ε-exploration, then periodic router retrain (16e tier-2).
 6. *(opt-in, later)* post-flight quality judge (16d).
+
+### 16g. Multiple routers — reusable routing profiles (shipped)
+
+The classifier of 16b is one **routing profile**. Several can coexist: a
+`routes.json` may define **many named routers**, each with its own routes and
+bindings, all sharing the **one** Arch-Router classifier and the **one** roster.
+They differ only in their rules (what a route means) and bindings (which model
+each route maps to).
+
+An agent selects a profile by **which virtual model it's assigned** — same
+LiteLLM `:4000` endpoint, a different model name (`auto`, `auto-vision`,
+`auto-cheap`, …). The pre-call hook keys `data["model"]` against the routers map
+and classifies against **that** router's routes; escalation (16c), the decision
+log, binder, and recalibration are all per-router (log lines carry a `router`
+field). This is how, e.g., a vision-first agent and a cost-first agent run off
+the same infrastructure with different behaviour.
+
+Config shape:
+
+```json
+{ "classifier": { … },              // shared — one Arch-Router
+  "live": { "enabled": true },      // global kill-switch
+  "routers": {
+    "auto":        { "default_route": "general", "timeout_ms": 8000, "routes": [ … ] },
+    "auto-vision": { "default_route": "general", "timeout_ms": 8000, "routes": [ … ] } } }
+```
+
+**Back-compatible:** the pre-multi-router shape (top-level
+`routes`/`default_route`/`live.model_name`) is normalized to a single-entry map
+in memory, so the hook, binder, recalibration, and the webchat readers all read
+either shape. An idempotent `migrate-routes-multi.mjs` converts single → multi
+when you want to add profiles.
+
+**GUI (webchat "Auto routing" tab):** a **router picker** (dropdown + New +
+Delete) selects which profile the Rules / Models / Logs sub-tabs operate on —
+hidden until there's more than one. **New** clones the primary profile as a
+starting point and auto-registers it as an assignable openai-compatible model;
+**Delete** refuses the last router and any router still assigned to an agent.
+Realized in `.claude/skills/add-routing` (hook/binder/recalibration) and the
+webchat channel (picker + `primaryRouter`/`listRouters`/`addRouter` server
+helpers).
