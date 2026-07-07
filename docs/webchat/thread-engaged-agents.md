@@ -56,7 +56,7 @@ This mirrors `Artificer-Innovations/nanoclaw-webchat`'s "engaged agents" model.
   + the client WS `switch(msg.type)` (app.js:1010) — add one event type.
 - **History sync** on engage: `syncSessionContext` (session-manager.ts:310).
 
-## 3. Data model (new)
+## 3. Data model (built, dormant)
 
 One new webchat-owned table (migration in `channels/webchat/migration.ts`,
 helpers in `channels/webchat/db.ts`):
@@ -76,7 +76,7 @@ Helpers: `engageAgent(room, thread, agentGroupId)`, `disengageAgent(...)`,
 `getEngagedAgents(room, thread) → agentGroupId[]`, and cascade deletes in
 `deleteWebchatThread` / `deleteWebchatRoom` (mirror the existing prime cleanup).
 
-## 4. Routing (the core change — `src/router.ts`)
+## 4. Routing (built, dormant — `src/router.ts`)
 
 In the fan-out loop (`routeInbound`, ~router.ts:300-368), for **webchat
 group rooms on a non-`main` thread**, resolve the engaged set once and change the

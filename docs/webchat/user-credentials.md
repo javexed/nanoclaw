@@ -1,7 +1,7 @@
 # Design: Shared-room user credentials via per-member containers
 
 **Status:** shipping — the core architecture behind `/add-userCreds`.
-**Extended by:** [user-creds-oauth.md](user-creds-oauth.md) — the Claude **subscription** (OAuth) variant builds on everything here.
+**Extended by:** [user-credentials-oauth.md](user-credentials-oauth.md) — the Claude **subscription** (OAuth) variant builds on everything here.
 
 ## 1. Goal
 
@@ -95,7 +95,7 @@ transcript the next time they speak.
 - **`webchat_room_settings.credential_mode`**: `disabled` (default) | `optional`
   | `required` (§10).
 - The OAuth variant adds a `cred_type` discriminator only; the token lives in the
-  OneCLI vault like an API key — see [user-creds-oauth.md](user-creds-oauth.md).
+  OneCLI vault like an API key — see [user-credentials-oauth.md](user-credentials-oauth.md).
 
 ## 8. Flow
 
@@ -160,7 +160,7 @@ Per the room's `credential_mode`:
 
 - **user-credentials-owned:** `src/modules/user-credentials/` (identity, db, onboard, onecli-admin,
   fanout, crypto, index), migrations `020-user-creds-credentials.ts` /
-  `021-user-creds-oauth.ts`.
+  `021-byok-oauth.ts`.
 - **Core hooks (additive):** `src/router.ts` (per-member keying + no-key drop),
   `src/container-runtime.ts` (resolver registration), `src/container-runner.ts`
   (spawn identity + env), `src/modules/approvals/onecli-approvals.ts` (approval
