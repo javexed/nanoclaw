@@ -1,11 +1,11 @@
 # Per-room threads — QA script
 
-Interactive checklist for `feat/webchat-threads` (PR #72). The backend is
-unit-tested (278 pass); this validates the **slice-4 UI**, which can't be
-unit-tested. Run on a **dev/throwaway instance**, not the live install.
+Interactive checklist for the **per-room threads** UI (shipped — design in
+[threads.md](threads.md)). The backend is unit-tested; this validates the UI,
+which can't be. Run on a **dev/throwaway instance**, not the live install.
 
 ## Setup
-- Pull `feat/webchat-threads`, `pnpm install && pnpm run build`, `./container/build.sh`, restart the host. Open the webchat PWA.
+- On a dev instance with the webchat channel installed: `pnpm run build`, `./container/build.sh`, restart the host, then open the webchat PWA.
 - Have a room wired to **two agents** (Sarah + Max) for the multi-agent checks, and one room with a **single agent** for the no-regression check. Be signed in as **owner** (delete is owner-only).
 
 ## 1. No regression (thread-less room)
