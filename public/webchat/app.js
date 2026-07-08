@@ -4165,6 +4165,16 @@ function sendCurrentMessage() {
   }
 
   if (!text) return;
+  // Bulk "/clear all" / "/compact all" fan out host-side to every session of
+  // the room's agent(s) — intercepted here, not delivered as a chat message.
+  const bulk = BULK_COMMANDS[text.toLowerCase()];
+  if (bulk) {
+    input.value = '';
+    input.style.height = 'auto';
+    $('#slash-menu').hidden = true;
+    setTimeout(() => broadcastSessionCommand(bulk), 0);
+    return;
+  }
   // Don't send into a non-open socket — like the read/typing/interrupt sends.
   // ws.send on a CONNECTING/CLOSING socket throws or silently drops; bail and
   // keep the input so the user can resend once reconnected.
@@ -4185,6 +4195,33 @@ function sendCurrentMessage() {
   scrollToBottom();
   input.value = '';
   input.style.height = 'auto';
+}
+
+// Fan a bulk command (/clear or /compact) out to every active session of the
+// room's agent(s) — the "… all" slash commands. The server resolves the room's
+// wired agents and enforces admin (incl. their background a2a sessions).
+async function broadcastSessionCommand(command) {
+  if (!currentRoom) return;
+  const verb = command === '/clear' ? 'Reset' : 'Compact';
+  const ok = await showConfirmModal({
+    title: `${verb} all sessions`,
+    body: `${verb} every active session of this room's agent(s) — including background agent-to-agent sessions${command === '/clear' ? '. Each drops its context and starts fresh on the next turn.' : '.'}`,
+    confirmLabel: verb,
+    destructive: command === '/clear',
+  });
+  if (!ok) return;
+  try {
+    const res = await authFetch(`/api/rooms/${encodeURIComponent(currentRoom)}/sessions/broadcast`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.status);
+    showToast(`${verb} queued for ${body.count} session(s)`, { kind: 'success' });
+  } catch (err) {
+    showToast(`${verb} all failed: ${err.message}`, { kind: 'error' });
+  }
 }
 
 $('#message-form').addEventListener('submit', (e) => {
@@ -4220,21 +4257,33 @@ $('#message-input').addEventListener('keydown', (e) => {
 // you're in, not background a2a sessions (use the agent's Sessions panel for those).
 const SLASH_COMMANDS = [
   { cmd: '/clear', desc: 'Reset this session — drop context, start fresh' },
+  { cmd: '/clear all', desc: "Reset ALL of this agent's sessions (incl. background a2a)" },
   { cmd: '/compact', desc: 'Compact the context now' },
+  { cmd: '/compact all', desc: "Compact ALL of this agent's sessions" },
   { cmd: '/context', desc: 'Show context-window usage' },
   { cmd: '/cost', desc: 'Show token cost so far' },
   { cmd: '/files', desc: 'List files in the workspace' },
 ];
+// The bulk "… all" commands fan out host-side to every session of the room's
+// agent(s); they're intercepted on send rather than delivered as chat.
+const BULK_COMMANDS = { '/clear all': '/clear', '/compact all': '/compact' };
 let slashMatches = [];
 let slashActive = 0;
 
 function updateSlashMenu() {
+  const menu = $('#slash-menu');
+  // These commands are all admin-only (see command-gate.ts) — don't surface
+  // them to non-admins, who'd only get "Permission denied".
+  if (!isAdminView) {
+    slashMatches = [];
+    menu.hidden = true;
+    return;
+  }
   const input = $('#message-input');
   const v = input.value;
-  // Only while typing the command word itself: "/" then word chars, nothing after.
-  const m = /^\/([a-z-]*)$/i.exec(v);
-  slashMatches = m ? SLASH_COMMANDS.filter((c) => c.cmd.startsWith('/' + m[1].toLowerCase())) : [];
-  const menu = $('#slash-menu');
+  // Match while typing a command, incl. the "/clear all" form (one trailing word).
+  const m = /^\/[a-z-]*( [a-z-]*)?$/i.exec(v);
+  slashMatches = m ? SLASH_COMMANDS.filter((c) => c.cmd.startsWith(v.toLowerCase())) : [];
   if (slashMatches.length === 0) {
     menu.hidden = true;
     return;
@@ -4260,9 +4309,19 @@ function pickSlash(i) {
   const c = slashMatches[i];
   if (!c) return;
   const input = $('#message-input');
-  input.value = c.cmd + ' ';
   slashMatches = [];
   $('#slash-menu').hidden = true;
+  // Bulk "… all" commands are actions, not text — fire them straight away
+  // instead of dropping them in the composer to be sent. Defer past this
+  // keypress so the confirm modal doesn't catch the same Enter and auto-confirm.
+  const bulk = BULK_COMMANDS[c.cmd];
+  if (bulk) {
+    input.value = '';
+    input.style.height = 'auto';
+    setTimeout(() => broadcastSessionCommand(bulk), 0);
+    return;
+  }
+  input.value = c.cmd + ' ';
   input.focus();
 }
 
@@ -5410,6 +5469,7 @@ let permsUsers = []; // cached most-recent /api/users result
 let permsSelectedUserId = null;
 let myUserId = null; // populated by probeIsOwner via /api/auth/check
 let isOwnerView = false; // set by probeIsOwner — gates owner-only write controls (e.g. room assignment)
+let isAdminView = false; // set by probeIsOwner — true for any admin+ (gates the slash menu, MCP)
 
 function openPermissions() {
   closeAgentDetail();
@@ -5453,6 +5513,8 @@ async function probeIsOwner() {
       // response — isOwnerView must stay owner-only since it gates owner-only
       // write controls (e.g. room assignment).
       $('#overflow-permissions').hidden = false;
+      // /api/users success = admin+ → gates the admin-only slash menu.
+      isAdminView = true;
       // MCP registry is admin-only too — reveal its menu item + manage-tab.
       const mcpItem = $('#overflow-mcp');
       if (mcpItem) mcpItem.hidden = false;
@@ -5465,6 +5527,7 @@ async function probeIsOwner() {
     }
   } catch {}
   isOwnerView = false;
+  isAdminView = false;
   return false;
 }
 

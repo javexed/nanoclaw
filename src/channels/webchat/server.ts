@@ -1582,11 +1582,43 @@ async function handleHttp(
       return json(res, 403, { error: 'Admin privilege required' });
     }
     try {
-      resetSession(session.agent_group_id, session.id);
+      injectSessionCommand(session.agent_group_id, session.id, '/clear');
       return json(res, 200, { ok: true });
     } catch (err) {
       return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
     }
+  }
+  // Bulk: inject a command (/clear or /compact) into every active session of
+  // every agent wired to a room — the "/clear all" / "/compact all" fan-out.
+  // Resolves the room's agents server-side, and only touches agents the caller
+  // has admin over (incl. their background a2a sessions).
+  const roomBroadcastMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/sessions\/broadcast$/);
+  if (roomBroadcastMatch && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const roomId = decodeURIComponent(roomBroadcastMatch[1]);
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let command = '';
+    try {
+      command = String((JSON.parse(raw) as { command?: unknown }).command || '');
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    if (!SESSION_COMMANDS.has(command)) return json(res, 400, { error: 'command must be /clear or /compact' });
+    const agents = getAgentsForWebchatRoom(roomId).filter((a) => hasAdminPrivilege(userId, a.id));
+    if (agents.length === 0) return json(res, 403, { error: 'Admin privilege required' });
+    let count = 0;
+    for (const a of agents) {
+      for (const s of getSessionsByAgentGroup(a.id).filter((x) => x.status === 'active')) {
+        try {
+          injectSessionCommand(a.id, s.id, command);
+          count++;
+        } catch {
+          /* skip sessions whose inbound.db is missing */
+        }
+      }
+    }
+    return json(res, 200, { ok: true, count });
   }
 
   // ── Models ────────────────────────────────────────────────────────────
@@ -2808,11 +2840,14 @@ function toAgentForUI(g: AgentGroup): AgentForUI {
   };
 }
 
-// Reset a session by injecting a /clear command into its inbound.db — exactly
-// what a room-typed /clear does, but reachable for background a2a sessions.
-// The poll-loop processes /clear before any query, so the poisoned continuation
-// is dropped before the next turn runs. The host owns inbound.db (single writer).
-function resetSession(agentGroupId: string, sessionId: string): void {
+// Inject an admin command (/clear or /compact) into a session's inbound.db —
+// exactly what a room-typed command does, but reachable for background a2a
+// sessions. The poll-loop processes these before any query, so /clear drops the
+// poisoned continuation before the next turn. The host owns inbound.db (single
+// writer). Bulk broadcast ("… all") loops this over every active session.
+const SESSION_COMMANDS = new Set(['/clear', '/compact']);
+function injectSessionCommand(agentGroupId: string, sessionId: string, command: string): void {
+  if (!SESSION_COMMANDS.has(command)) throw new Error(`unsupported session command: ${command}`);
   const dbPath = path.join(DATA_DIR, 'v2-sessions', agentGroupId, sessionId, 'inbound.db');
   if (!fs.existsSync(dbPath)) throw new Error('session inbound.db not found');
   const db = openInboundDb(dbPath);
@@ -2824,7 +2859,7 @@ function resetSession(agentGroupId: string, sessionId: string): void {
       platformId: 'webchat',
       channelType: 'webchat',
       threadId: null,
-      content: JSON.stringify({ text: '/clear', sender: 'operator', senderId: 'webchat:operator', senderName: 'operator' }),
+      content: JSON.stringify({ text: command, sender: 'operator', senderId: 'webchat:operator', senderName: 'operator' }),
       processAfter: null,
       recurrence: null,
       trigger: 1,
