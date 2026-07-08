@@ -106,7 +106,7 @@ register model endpoints and assign them per agent:
 
 ---
 
-## User credentials (BYOK)
+## User credentials
 
 In a shared room, each member can connect **their own** Anthropic API key. Their
 turns then run in a container bearing **their own** OneCLI credential identity — so

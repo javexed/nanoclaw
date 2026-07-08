@@ -6458,3 +6458,88 @@ a.lightbox-btn {
 .router-picker .router-delete:not(:disabled) {
   color: var(--danger);
 }
+
+/* ── Slash-command menu (composer) — mirrors .mention-popover so the two
+   composer popups look identical (same trigger UX, same styling). ────────── */
+.slash-menu {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 16px;
+  min-width: 260px;
+  max-width: min(360px, calc(100% - 32px));
+  z-index: 1000;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px 0;
+  font-size: 0.867rem;
+}
+.slash-menu[hidden] {
+  display: none;
+}
+.slash-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 6px 10px;
+  cursor: pointer;
+  color: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.slash-item.active,
+.slash-item:hover {
+  background: var(--surface2);
+}
+.slash-cmd {
+  font-weight: 600;
+  color: var(--accent);
+}
+.slash-desc {
+  color: var(--text-dim, var(--text));
+  opacity: 0.75;
+  font-size: 0.95em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Agent sessions (reset control) ────────────────────────────────────── */
+.agent-sessions-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.agent-session-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 0;
+}
+.agent-session-row.muted {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+.agent-session-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.agent-session-label {
+  font-size: var(--fs-sm);
+}
+.agent-session-sub {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+.agent-session-reset {
+  flex: none;
+}

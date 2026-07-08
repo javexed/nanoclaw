@@ -54,15 +54,16 @@ model. Not pursued.
 - `pending_questions.thread_id` — approvals/`ask_user_question` already
   thread-aware.
 
-**The gap (what we build) — the webchat skill severs the thread at both ends:**
-- The adapter declares `supportsThreads: false` and calls
-  `onInbound(roomId, null, message)` — **nulls out threadId** (`index.ts:87,102`),
-  so every room message collapses into one `shared` session.
-- `deliver(platformId, _threadId, …)` **ignores** the threadId on the way back
-  (`index.ts:152`).
-- `webchat_messages` is a flat `(room_id, created_at)` log — **no thread column**.
-- The client has no thread concept; it sends `{type:'message', content}` with no
-  thread (`app.js:2500`).
+**The gap we closed — before this feature the webchat skill severed the thread
+at both ends** (now fixed; kept here as design motivation):
+- The adapter declared `supportsThreads: false` and nulled out the threadId on
+  `onInbound`, so every room message collapsed into one `shared` session. Now
+  `supportsThreads: true` and inbound carries the real threadId (`index.ts`).
+- `deliver` ignored the threadId on the way back. Now it honors it (`index.ts`).
+- `webchat_messages` was a flat `(room_id, created_at)` log — **no thread
+  column**. Now it has `thread_id` (§3).
+- The client had no thread concept; it sent `{type:'message', content}` with no
+  thread. Now every frame carries `thread_id` (`app.js`).
 
 So the work is: **stop nulling the thread, store it, route replies back to it,
 and give the client a sidebar thread tree.** The routing layer already knows what
@@ -219,10 +220,9 @@ Follows `public/webchat/DESIGN.md` — tokens, `showToast`, sentence-case microc
 2. **Server endpoints** — `GET/POST/PATCH/DELETE /api/rooms/:id/threads`;
    `?thread_id=` on the messages endpoint; per-thread read endpoint; thread
    teardown on delete (owner/member-gated, CSRF, mirroring room routes). Tests.
-3. **Auto-spawn** — `auto_thread` setting (default per §5); router/adapter logic
-   to redirect a single-mention `main` message to `agent:<folder>`. Tests:
-   exactly-one-mention from main → agent lane; zero/two mentions → main;
-   single-agent/DM never spawns; in-thread messages don't re-route.
+3. ~~**Auto-spawn**~~ — **cut from v1 (see §5)**; only the dormant `auto_thread`
+   column remains. Left here for history: it would have redirected a
+   single-mention `main` message to an `agent:<folder>` lane.
 4. **Sidebar UI** — nested thread tree, create/rename/delete, per-thread history
    load, send-with-thread, route inbound to the right thread, per-thread unread,
    active-thread persistence.

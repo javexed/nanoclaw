@@ -96,7 +96,8 @@ import {
 } from '../../db/agent-groups.js';
 import { createMessagingGroupAgent, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import { syncSessionContext, type ContextMessage } from '../../session-manager.js';
-import { getPendingApproval, getSessionsByAgentGroup } from '../../db/sessions.js';
+import { getPendingApproval, getSession, getSessionsByAgentGroup } from '../../db/sessions.js';
+import { insertMessage, openInboundDb } from '../../db/session-db.js';
 import { killContainer } from '../../container-runner.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { initGroupFilesystem } from '../../group-init.js';
@@ -1508,17 +1509,19 @@ async function handleHttp(
   // same field `ncl groups config add-mcp-server` writes and the container
   // reads — and restarts the group's containers. List responses never include
   // env/headers (they may hold credentials).
+  // MCP registry is admin-only (scoped admin or higher) — end to end.
   if (url.pathname === '/api/mcp-servers' && method === 'GET') {
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
     return json(res, 200, listMcpServersForUI());
   }
   if (url.pathname === '/api/mcp-servers' && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
     return createMcpServerHandler(req, res);
   }
   if (url.pathname === '/api/mcp-servers/probe' && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
     return probeMcpServerHandler(req, res);
   }
   const mcpServerIdMatch = url.pathname.match(/^\/api\/mcp-servers\/([^/]+)$/);
@@ -1550,6 +1553,72 @@ async function handleHttp(
     if (!group) return json(res, 404, { error: 'Agent not found' });
     if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
     return setAgentStatusHandler(req, res, group.id);
+  }
+
+  // ── Sessions (list + reset) ────────────────────────────────────────────
+  // Lets an admin reach an agent's sessions — including background a2a
+  // sessions no room-typed /clear can target — and reset one (inject /clear).
+  const agentSessionsMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/sessions$/);
+  if (agentSessionsMatch && method === 'GET') {
+    const group = resolveAgent(decodeURIComponent(agentSessionsMatch[1]));
+    if (!group) return json(res, 404, { error: 'Agent not found' });
+    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+    const sessions = getSessionsByAgentGroup(group.id)
+      .filter((s) => s.status === 'active')
+      .map((s) => ({
+        id: s.id,
+        thread_id: s.thread_id,
+        container_status: s.container_status,
+        last_active: s.last_active,
+      }));
+    return json(res, 200, { sessions });
+  }
+  const sessionResetMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/reset$/);
+  if (sessionResetMatch && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const session = getSession(decodeURIComponent(sessionResetMatch[1]));
+    if (!session) return json(res, 404, { error: 'Session not found' });
+    if (!hasAdminPrivilege(userId, session.agent_group_id)) {
+      return json(res, 403, { error: 'Admin privilege required' });
+    }
+    try {
+      injectSessionCommand(session.agent_group_id, session.id, '/clear');
+      return json(res, 200, { ok: true });
+    } catch (err) {
+      return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  // Bulk: inject a command (/clear or /compact) into every active session of
+  // every agent wired to a room — the "/clear all" / "/compact all" fan-out.
+  // Resolves the room's agents server-side, and only touches agents the caller
+  // has admin over (incl. their background a2a sessions).
+  const roomBroadcastMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/sessions\/broadcast$/);
+  if (roomBroadcastMatch && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const roomId = decodeURIComponent(roomBroadcastMatch[1]);
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let command = '';
+    try {
+      command = String((JSON.parse(raw) as { command?: unknown }).command || '');
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    if (!SESSION_COMMANDS.has(command)) return json(res, 400, { error: 'command must be /clear or /compact' });
+    const agents = getAgentsForWebchatRoom(roomId).filter((a) => hasAdminPrivilege(userId, a.id));
+    if (agents.length === 0) return json(res, 403, { error: 'Admin privilege required' });
+    let count = 0;
+    for (const a of agents) {
+      for (const s of getSessionsByAgentGroup(a.id).filter((x) => x.status === 'active')) {
+        try {
+          injectSessionCommand(a.id, s.id, command);
+          count++;
+        } catch {
+          /* skip sessions whose inbound.db is missing */
+        }
+      }
+    }
+    return json(res, 200, { ok: true, count });
   }
 
   // ── Models ────────────────────────────────────────────────────────────
@@ -2769,6 +2838,35 @@ function toAgentForUI(g: AgentGroup): AgentForUI {
     assigned_model_id: assigned ? assigned.id : null,
     effective_model_label: assigned ? null : deriveEffectiveModelLabel(g.id),
   };
+}
+
+// Inject an admin command (/clear or /compact) into a session's inbound.db —
+// exactly what a room-typed command does, but reachable for background a2a
+// sessions. The poll-loop processes these before any query, so /clear drops the
+// poisoned continuation before the next turn. The host owns inbound.db (single
+// writer). Bulk broadcast ("… all") loops this over every active session.
+const SESSION_COMMANDS = new Set(['/clear', '/compact']);
+function injectSessionCommand(agentGroupId: string, sessionId: string, command: string): void {
+  if (!SESSION_COMMANDS.has(command)) throw new Error(`unsupported session command: ${command}`);
+  const dbPath = path.join(DATA_DIR, 'v2-sessions', agentGroupId, sessionId, 'inbound.db');
+  if (!fs.existsSync(dbPath)) throw new Error('session inbound.db not found');
+  const db = openInboundDb(dbPath);
+  try {
+    insertMessage(db, {
+      id: `${randomUUID()}:${agentGroupId}`,
+      kind: 'chat',
+      timestamp: new Date().toISOString(),
+      platformId: 'webchat',
+      channelType: 'webchat',
+      threadId: null,
+      content: JSON.stringify({ text: command, sender: 'operator', senderId: 'webchat:operator', senderName: 'operator' }),
+      processAfter: null,
+      recurrence: null,
+      trigger: 1,
+    });
+  } finally {
+    db.close();
+  }
 }
 
 function resolveAgent(idOrJid: string): AgentGroup | null {

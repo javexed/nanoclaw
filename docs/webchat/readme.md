@@ -29,7 +29,7 @@ NanoClaw runs multiple AI agents with real tools and persistent workspaces. To a
 - **stays local** — binds to `127.0.0.1`, credentials injected per-request by the host; reach it over your LAN or [Tailscale](#authentication-at-a-glance), never a public endpoint you didn't choose;
 - **routes to the right agent** — `@mention` in a shared lobby, or a dedicated DM;
 - **keeps topics separate** — per-room **threads**, each its own isolated agent session;
-- **lets a team bring their own keys** — each member can connect **their own** Anthropic API key so their turns run under their own credential identity (**BYOK**);
+- **lets a team bring their own keys** — each member can connect **their own** Anthropic API key so their turns run under their own credential identity;
 - **doubles as an operator console** — create/wire agents, register models, manage roles and approvals, all from the browser.
 
 It flows through NanoClaw's normal router and session model — it's a **channel adapter**, not a side process.
@@ -67,7 +67,7 @@ _The hero lobby GIF and the DM / approvals / permissions / wiring shots come fro
 | **Authentication** | Localhost · Tailscale identity · bearer token · SSO / reverse-proxy headers (Entra ID, Cloudflare Access…). Each method auto-enables from its env var; no mode switch. |
 | **Roles** | Owner / admin, global or scoped to an agent group; per-room access gating. |
 | **Hardening** | `X-Webchat-CSRF` header required on mutations, same-origin CORS, strict CSP; **SSRF guards** on every operator-supplied URL; secret **redaction** on every broadcast and push payload; optional TLS. |
-| **BYOK (per-member credentials)** | In a shared room, each member connects **their own** Anthropic API key; their turns run in a container bearing their own OneCLI credential identity — nothing shared or replayable. Keys go straight to the OneCLI vault, never the host. _(Claude-subscription / Codex OAuth minting is an early prototype; the API-key path is the shipping one.)_ |
+| **User credentials (per-member)** | In a shared room, each member connects **their own** Anthropic API key; their turns run in a container bearing their own OneCLI credential identity — nothing shared or replayable. Keys go straight to the OneCLI vault, never the host. _(Claude-subscription / Codex OAuth minting is an early prototype; the API-key path is the shipping one.)_ |
 
 ### Operator console
 | | |
@@ -80,7 +80,7 @@ _The hero lobby GIF and the DM / approvals / permissions / wiring shots come fro
 | **Permissions** | Manage users, roles, and members. |
 | **Topology / Wiring** | See and edit which agents and models are reachable from which rooms. |
 
-> BYOK ships in the box (Anthropic API-key path). The **local-routing engine** (LiteLLM + Arch-Router classifier) installs right from the console's **"Set up auto routing"** button — or via the `/add-litellm` + `/add-routing` skills; the console degrades to "not installed" until it's there.
+> User credentials ship in the box (Anthropic API-key path). The **local-routing engine** (LiteLLM + Arch-Router classifier) installs right from the console's **"Set up auto routing"** button — or via the `/add-litellm` + `/add-routing` skills; the console degrades to "not installed" until it's there.
 
 ## Install
 
