@@ -856,7 +856,7 @@ async function handleHttp(
   // takes the pasted code, captures the token, and stores it as the member's
   // user-level credential — the same storage the paste path uses, minus the
   // terminal. Same gates as the OAuth paste path: room access + OAuth opt-in.
-  const userCredsMintMatch = url.pathname.match(/^\/api\/userCreds\/oauth\/(start|code|cancel)$/);
+  const userCredsMintMatch = url.pathname.match(/^\/api\/user-credentials\/oauth\/(start|code|cancel)$/);
   if (userCredsMintMatch && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     const raw = await readJsonBody(req, res);
@@ -905,7 +905,7 @@ async function handleHttp(
   // the URL + code; 'finish' waits for the written auth.json and stores it as the
   // member's user-level Codex credential (→ an `openai` auth.json secret). Same
   // gates as the Claude mint: room access + the room's OAuth opt-in.
-  const codexMintMatch = url.pathname.match(/^\/api\/userCreds\/codex\/(start|finish|cancel)$/);
+  const codexMintMatch = url.pathname.match(/^\/api\/user-credentials\/codex\/(start|finish|cancel)$/);
   if (codexMintMatch && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     const raw = await readJsonBody(req, res);
@@ -1744,7 +1744,9 @@ async function handleHttp(
     if (model) {
       const assigned = getAgentsAssignedToModel(model.id);
       if (assigned.length > 0) {
-        return json(res, 409, { error: `router "${name}" is assigned to ${assigned.length} agent(s) — unassign first` });
+        return json(res, 409, {
+          error: `router "${name}" is assigned to ${assigned.length} agent(s) — unassign first`,
+        });
       }
     }
     try {
@@ -1835,10 +1837,16 @@ async function handleHttp(
     if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
     const r = startRoutingInstall();
     if (r.error === 'litellm-not-installed') {
-      return json(res, 409, { error: 'LiteLLM is not installed. Run /add-litellm first.', code: 'litellm-not-installed' });
+      return json(res, 409, {
+        error: 'LiteLLM is not installed. Run /add-litellm first.',
+        code: 'litellm-not-installed',
+      });
     }
     if (r.error === 'installer-missing') {
-      return json(res, 409, { error: 'The add-routing skill is not present in this checkout.', code: 'installer-missing' });
+      return json(res, 409, {
+        error: 'The add-routing skill is not present in this checkout.',
+        code: 'installer-missing',
+      });
     }
     return json(res, r.started ? 202 : 409, { ...getRoutingInstallState(), started: r.started });
   }
@@ -2859,7 +2867,12 @@ function injectSessionCommand(agentGroupId: string, sessionId: string, command: 
       platformId: 'webchat',
       channelType: 'webchat',
       threadId: null,
-      content: JSON.stringify({ text: command, sender: 'operator', senderId: 'webchat:operator', senderName: 'operator' }),
+      content: JSON.stringify({
+        text: command,
+        sender: 'operator',
+        senderId: 'webchat:operator',
+        senderName: 'operator',
+      }),
       processAfter: null,
       recurrence: null,
       trigger: 1,
