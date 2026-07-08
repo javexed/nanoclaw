@@ -343,10 +343,13 @@ async function renderCredentialsSettings() {
     btn.classList.toggle('active', btn.dataset.value === cfg.defaultMode);
   });
   // Allowed providers — pill toggles (multi-select). "on" = accept BOTH a key
-  // and a subscription for that provider.
+  // and a subscription for that provider. Displayed with AND (not OR) so the
+  // pill can't read "on" while one half (e.g. OAuth) is actually off — that
+  // mismatch hid the "Connect to <provider>" (OAuth) action even though the
+  // pill looked enabled (allowClaudeOauth defaults off, allowAnthropicKey on).
   const providerOn = {
-    claude: !!(cfg.allowAnthropicKey || cfg.allowClaudeOauth),
-    codex: !!(cfg.allowOpenaiKey || cfg.allowCodexOauth),
+    claude: !!(cfg.allowAnthropicKey && cfg.allowClaudeOauth),
+    codex: !!(cfg.allowOpenaiKey && cfg.allowCodexOauth),
   };
   // Greyed-but-clickable when unavailable, so a click can explain why (rather
   // than a native `disabled` button that swallows the click). Claude is always
@@ -380,6 +383,9 @@ async function renderCredentialsSettings() {
         document
           .querySelectorAll('#cred-default-mode .setting-option')
           .forEach((b) => b.classList.toggle('active', b === btn));
+        // The effective mode for the open room may have changed — refresh its
+        // credential banner so the connect controls appear/disappear at once.
+        if (currentRoom) updateUserCredsBanner(currentRoom);
       }
     });
   });
@@ -403,7 +409,13 @@ async function renderCredentialsSettings() {
       const [keyFlag, oauthFlag] = PROVIDER_FLAGS[p] || [];
       if (!keyFlag) return;
       const on = !btn.classList.contains('active'); // flipping to this state
-      if (await putConfig({ [keyFlag]: on, [oauthFlag]: on })) btn.classList.toggle('active', on);
+      if (await putConfig({ [keyFlag]: on, [oauthFlag]: on })) {
+        btn.classList.toggle('active', on);
+        // Reflect the policy change in the open chat's credential banner right
+        // away (show/hide "Connect to <provider>") instead of waiting for the
+        // next room open — the gap that made enabling OAuth look like a no-op.
+        if (currentRoom) updateUserCredsBanner(currentRoom);
+      }
     });
   });
 }
@@ -4153,6 +4165,16 @@ function sendCurrentMessage() {
   }
 
   if (!text) return;
+  // Bulk "/clear all" / "/compact all" fan out host-side to every session of
+  // the room's agent(s) — intercepted here, not delivered as a chat message.
+  const bulk = BULK_COMMANDS[text.toLowerCase()];
+  if (bulk) {
+    input.value = '';
+    input.style.height = 'auto';
+    $('#slash-menu').hidden = true;
+    setTimeout(() => broadcastSessionCommand(bulk), 0);
+    return;
+  }
   // Don't send into a non-open socket — like the read/typing/interrupt sends.
   // ws.send on a CONNECTING/CLOSING socket throws or silently drops; bail and
   // keep the input so the user can resend once reconnected.
@@ -4175,12 +4197,41 @@ function sendCurrentMessage() {
   input.style.height = 'auto';
 }
 
+// Fan a bulk command (/clear or /compact) out to every active session of the
+// room's agent(s) — the "… all" slash commands. The server resolves the room's
+// wired agents and enforces admin (incl. their background a2a sessions).
+async function broadcastSessionCommand(command) {
+  if (!currentRoom) return;
+  const verb = command === '/clear' ? 'Reset' : 'Compact';
+  const ok = await showConfirmModal({
+    title: `${verb} all sessions`,
+    body: `${verb} every active session of this room's agent(s) — including background agent-to-agent sessions${command === '/clear' ? '. Each drops its context and starts fresh on the next turn.' : '.'}`,
+    confirmLabel: verb,
+    destructive: command === '/clear',
+  });
+  if (!ok) return;
+  try {
+    const res = await authFetch(`/api/rooms/${encodeURIComponent(currentRoom)}/sessions/broadcast`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.status);
+    showToast(`${verb} queued for ${body.count} session(s)`, { kind: 'success' });
+  } catch (err) {
+    showToast(`${verb} all failed: ${err.message}`, { kind: 'error' });
+  }
+}
+
 $('#message-form').addEventListener('submit', (e) => {
   e.preventDefault();
   sendCurrentMessage();
 });
 
 $('#message-input').addEventListener('keydown', (e) => {
+  // Slash-command menu (when open) consumes nav/select/dismiss keys first.
+  if (slashKeydown(e)) return;
   // If mention popover is showing, let it consume Enter/Tab before send fires.
   if (mentionMatches.length > 0 && (e.key === 'Enter' || e.key === 'Tab')) return;
   if (e.key !== 'Enter') return;
@@ -4197,6 +4248,111 @@ $('#message-input').addEventListener('keydown', (e) => {
     sendCurrentMessage();
   }
 });
+
+// ── Slash-command autocomplete (/clear, /compact, …) ──────────────────────────
+//
+// The agent-runner handles these admin commands directly (formatter.ts). Webchat
+// already passes the raw text through, so this is pure discoverability: type "/"
+// to see the set, pick one, send it. Per-session — resets/compacts the session
+// you're in, not background a2a sessions (use the agent's Sessions panel for those).
+const SLASH_COMMANDS = [
+  { cmd: '/clear', desc: 'Reset this session — drop context, start fresh' },
+  { cmd: '/clear all', desc: "Reset ALL of this agent's sessions (incl. background a2a)" },
+  { cmd: '/compact', desc: 'Compact the context now' },
+  { cmd: '/compact all', desc: "Compact ALL of this agent's sessions" },
+  { cmd: '/context', desc: 'Show context-window usage' },
+  { cmd: '/cost', desc: 'Show token cost so far' },
+  { cmd: '/files', desc: 'List files in the workspace' },
+];
+// The bulk "… all" commands fan out host-side to every session of the room's
+// agent(s); they're intercepted on send rather than delivered as chat.
+const BULK_COMMANDS = { '/clear all': '/clear', '/compact all': '/compact' };
+let slashMatches = [];
+let slashActive = 0;
+
+function updateSlashMenu() {
+  const menu = $('#slash-menu');
+  // These commands are all admin-only (see command-gate.ts) — don't surface
+  // them to non-admins, who'd only get "Permission denied".
+  if (!isAdminView) {
+    slashMatches = [];
+    menu.hidden = true;
+    return;
+  }
+  const input = $('#message-input');
+  const v = input.value;
+  // Match while typing a command, incl. the "/clear all" form (one trailing word).
+  const m = /^\/[a-z-]*( [a-z-]*)?$/i.exec(v);
+  slashMatches = m ? SLASH_COMMANDS.filter((c) => c.cmd.startsWith(v.toLowerCase())) : [];
+  if (slashMatches.length === 0) {
+    menu.hidden = true;
+    return;
+  }
+  if (slashActive >= slashMatches.length) slashActive = 0;
+  menu.innerHTML = '';
+  slashMatches.forEach((c, i) => {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'slash-item' + (i === slashActive ? ' active' : '');
+    item.setAttribute('role', 'option');
+    item.innerHTML = `<span class="slash-cmd">${esc(c.cmd)}</span><span class="slash-desc">${esc(c.desc)}</span>`;
+    item.addEventListener('mousedown', (e) => {
+      e.preventDefault(); // keep focus in the input
+      pickSlash(i);
+    });
+    menu.appendChild(item);
+  });
+  menu.hidden = false;
+}
+
+function pickSlash(i) {
+  const c = slashMatches[i];
+  if (!c) return;
+  const input = $('#message-input');
+  slashMatches = [];
+  $('#slash-menu').hidden = true;
+  // Bulk "… all" commands are actions, not text — fire them straight away
+  // instead of dropping them in the composer to be sent. Defer past this
+  // keypress so the confirm modal doesn't catch the same Enter and auto-confirm.
+  const bulk = BULK_COMMANDS[c.cmd];
+  if (bulk) {
+    input.value = '';
+    input.style.height = 'auto';
+    setTimeout(() => broadcastSessionCommand(bulk), 0);
+    return;
+  }
+  input.value = c.cmd + ' ';
+  input.focus();
+}
+
+// Returns true if it consumed the key (caller should stop).
+function slashKeydown(e) {
+  if (slashMatches.length === 0) return false;
+  if (e.key === 'ArrowDown') {
+    slashActive = (slashActive + 1) % slashMatches.length;
+    updateSlashMenu();
+    e.preventDefault();
+    return true;
+  }
+  if (e.key === 'ArrowUp') {
+    slashActive = (slashActive - 1 + slashMatches.length) % slashMatches.length;
+    updateSlashMenu();
+    e.preventDefault();
+    return true;
+  }
+  if (e.key === 'Enter' || e.key === 'Tab') {
+    pickSlash(slashActive);
+    e.preventDefault();
+    return true;
+  }
+  if (e.key === 'Escape') {
+    slashMatches = [];
+    $('#slash-menu').hidden = true;
+    e.preventDefault();
+    return true;
+  }
+  return false;
+}
 
 // ── Mention autocomplete (@<folder>) + chip rendering ─────────────────────────
 //
@@ -5313,6 +5469,7 @@ let permsUsers = []; // cached most-recent /api/users result
 let permsSelectedUserId = null;
 let myUserId = null; // populated by probeIsOwner via /api/auth/check
 let isOwnerView = false; // set by probeIsOwner — gates owner-only write controls (e.g. room assignment)
+let isAdminView = false; // set by probeIsOwner — true for any admin+ (gates the slash menu, MCP)
 
 function openPermissions() {
   closeAgentDetail();
@@ -5356,6 +5513,13 @@ async function probeIsOwner() {
       // response — isOwnerView must stay owner-only since it gates owner-only
       // write controls (e.g. room assignment).
       $('#overflow-permissions').hidden = false;
+      // /api/users success = admin+ → gates the admin-only slash menu.
+      isAdminView = true;
+      // MCP registry is admin-only too — reveal its menu item + manage-tab.
+      const mcpItem = $('#overflow-mcp');
+      if (mcpItem) mcpItem.hidden = false;
+      const mcpTab = $('#mtab-mcp-btn');
+      if (mcpTab) mcpTab.hidden = false;
       const list = await users.json().catch(() => []);
       const me = Array.isArray(list) ? list.find((u) => u.id === myUserId) : null;
       isOwnerView = !!(me && userIsOwner(me));
@@ -5363,6 +5527,7 @@ async function probeIsOwner() {
     }
   } catch {}
   isOwnerView = false;
+  isAdminView = false;
   return false;
 }
 
@@ -6400,6 +6565,9 @@ async function openAgentDetail(id) {
   // MCP servers wired to this agent (external tool servers).
   renderAgentMcp(id);
 
+  // Active sessions — reset a stuck one (incl. background a2a sessions).
+  renderAgentSessions(id);
+
   $('#agent-detail').hidden = false;
   $('#members-panel').hidden = true;
 }
@@ -6593,6 +6761,72 @@ $('#agent-add-room-toggle').addEventListener('click', async () => {
 // server never returns env/headers).
 
 let agentMcpServers = []; // servers attached to the currently-open agent
+
+// Active sessions for an agent, each with a Reset control that injects /clear
+// host-side — the only way to clear a background a2a session (a room-typed
+// /clear only reaches the session you're in). Admin-gated server-side.
+async function renderAgentSessions(agentId) {
+  const list = $('#agent-sessions-list');
+  const countEl = $('#agent-sessions-count');
+  if (!list) return;
+  list.innerHTML = '<li class="agent-session-row muted">Loading…</li>';
+  let sessions = [];
+  try {
+    const res = await authFetch(`/api/agents/${encodeURIComponent(agentId)}/sessions`);
+    if (!res.ok) throw new Error((await res.json()).error || res.status);
+    sessions = (await res.json()).sessions || [];
+  } catch (err) {
+    list.innerHTML = `<li class="agent-session-row muted">Sessions unavailable: ${esc(err.message)}</li>`;
+    if (countEl) countEl.textContent = '';
+    return;
+  }
+  if (countEl) countEl.textContent = sessions.length ? String(sessions.length) : '';
+  list.innerHTML = '';
+  if (sessions.length === 0) {
+    list.innerHTML = '<li class="agent-session-row muted">No active sessions.</li>';
+    return;
+  }
+  for (const s of sessions) {
+    const li = document.createElement('li');
+    li.className = 'agent-session-row';
+    const label = s.thread_id ? `thread: ${s.thread_id}` : 'main / a2a';
+    const when = s.last_active ? new Date(s.last_active).toLocaleString() : '—';
+    const meta = document.createElement('div');
+    meta.className = 'agent-session-meta';
+    meta.innerHTML = `<span class="agent-session-label">${esc(label)}</span><span class="agent-session-sub">${esc(s.container_status || 'stopped')} · ${esc(when)}</span>`;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-ghost agent-session-reset';
+    btn.textContent = 'Reset';
+    btn.title = 'Reset this session (inject /clear — drops context, next turn starts fresh)';
+    btn.addEventListener('click', () => resetAgentSession(agentId, s.id, btn));
+    li.appendChild(meta);
+    li.appendChild(btn);
+    list.appendChild(li);
+  }
+}
+
+async function resetAgentSession(agentId, sessionId, btn) {
+  const ok = await showConfirmModal({
+    title: 'Reset session',
+    body: 'Inject /clear into this session — it drops the accumulated context and the next turn starts fresh. Useful when a session is stuck or "autocompact is thrashing".',
+    confirmLabel: 'Reset',
+  });
+  if (!ok) return;
+  btn.disabled = true;
+  btn.textContent = 'Resetting…';
+  try {
+    const res = await authFetch(`/api/sessions/${encodeURIComponent(sessionId)}/reset`, { method: 'POST' });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.status);
+    showToast('Session reset — /clear queued', { kind: 'success' });
+    renderAgentSessions(agentId);
+  } catch (err) {
+    showToast('Could not reset: ' + err.message, { kind: 'error' });
+    btn.disabled = false;
+    btn.textContent = 'Reset';
+  }
+}
 
 async function renderAgentMcp(agentId) {
   const list = $('#agent-mcp-list');
@@ -8078,6 +8312,7 @@ let typingTimeout = null;
 let isTyping = false;
 
 $('#message-input').addEventListener('input', function () {
+  updateSlashMenu(); // slash-command autocomplete
   // Auto-grow textarea — only resize when content overflows or shrinks
   const prevH = this._prevScrollHeight || this.clientHeight;
   if (this.scrollHeight > this.clientHeight || this.scrollHeight < prevH) {

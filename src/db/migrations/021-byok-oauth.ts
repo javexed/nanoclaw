@@ -14,7 +14,7 @@ import type { Migration } from './index.js';
  * the credential. cred_type only drives presentation (which connect flow the
  * member used) and whether the per-member container is put in OAuth mode (a
  * sentinel CLAUDE_CODE_OAUTH_TOKEN at spawn; OneCLI swaps the real token on the
- * wire). See src/modules/byok/index.ts and docs/design/byok-oauth.md.
+ * wire). See src/modules/byok/index.ts and docs/webchat/user-credentials-oauth.md.
  */
 export const migration021: Migration = {
   version: 21,

@@ -11,7 +11,7 @@ This is the overview. Focused design docs cover the harder subsystems in depth:
 - Threads: [threads.md](threads.md), [threads-qa.md](threads-qa.md)
 - Thread context sync: [thread-context-sync.md](thread-context-sync.md)
 - Thread-engaged agents (dormant): [thread-engaged-agents.md](thread-engaged-agents.md)
-- Per-member credentials (BYOK): [user-credentials.md](../design/user-credentials.md), [user-credentials-oauth.md](../design/user-credentials-oauth.md)
+- User credentials (per-member): [user-credentials.md](user-credentials.md), [user-credentials-oauth.md](user-credentials-oauth.md)
 - Local-model routing: [llm-router.md](../design/llm-router.md), [add-litellm.md](../design/add-litellm.md)
 
 Ships **disabled by default** — the adapter factory returns `null` unless
@@ -60,8 +60,8 @@ attachments, push subscriptions, user handles, an approvals index, and settings.
 
 Credentials are never placed in env vars or chat. Per-turn credentials are
 injected on the wire by the **OneCLI gateway**, keyed to the container's OneCLI
-agent identity, resolved at spawn from trusted session state. See the BYOK
-section and [user-credentials.md](../design/user-credentials.md).
+agent identity, resolved at spawn from trusted session state. See the user-credentials
+section and [user-credentials.md](user-credentials.md).
 
 ### Approvals bridge
 
@@ -128,7 +128,7 @@ response.
   before any broadcast or push payload.
 - **TLS** — optional `WEBCHAT_TLS_CERT` / `_KEY` upgrade to HTTPS.
 
-### BYOK — per-member credentials
+### User credentials — per-member
 
 In a shared room, each member's turns run in a container bearing that member's own
 OneCLI agent identity, so the gateway bills that member's own credential. Per-member
@@ -239,7 +239,7 @@ Loaded from `.env` into `process.env` (if unset) by the adapter's `env-load.ts`
 - **Threads** — `GET|POST /api/rooms/:id/threads`,
   `GET|PUT|DELETE …/threads/:tid`, `PUT …/threads/:tid/read`,
   `POST …/threads/:tid/pull|push` (dormant: `…/engaged` routes).
-- **Credentials / BYOK** — `GET|PUT /api/webchat/credentials-config`,
+- **User credentials** — `GET|PUT /api/webchat/credentials-config`,
   `GET|POST|DELETE /api/user-credentials/credential`,
   `POST /api/userCreds/oauth/(start|code|cancel)`,
   `POST /api/userCreds/codex/(start|finish|cancel)`,
@@ -314,7 +314,7 @@ merged into trunk (too large a surface for core). It is installed by the
   Push / PWA, the approvals bridge, the models registry + discover/probe, Ollama
   pull, the MCP registry, permissions / topology / wiring, draft-from-prompt, all
   four auth methods, SSRF / CSRF / redaction.
-- **BYOK**: the **Anthropic API-key path ships**; the **OAuth / subscription +
+- **User credentials**: the **Anthropic API-key path ships**; the **OAuth / subscription +
   Codex minting flow is a prototype** (fragile PTY screen-scrape, no tests).
 - **Thread-engaged agents (chips)**: built but **dormant/removed** — the backend
   tables and routes remain, but the UI was pulled and threads route mention-only.
