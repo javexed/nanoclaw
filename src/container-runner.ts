@@ -418,6 +418,19 @@ export function buildMounts(
   if (fs.existsSync(skillsSrc)) {
     mounts.push({ hostPath: skillsSrc, containerPath: '/app/skills', readonly: true });
   }
+  // User-added skills (imported/uploaded at runtime) — a separate read-only
+  // mount so they never mix into the version-controlled container/skills. The
+  // dir is created on demand; a skill's symlink resolves to whichever mount
+  // holds it (see skillContainerPath).
+  const userSkillsSrc = path.join(projectRoot, 'data', 'user-skills');
+  try {
+    fs.mkdirSync(userSkillsSrc, { recursive: true });
+  } catch {
+    /* best-effort */
+  }
+  if (fs.existsSync(userSkillsSrc)) {
+    mounts.push({ hostPath: userSkillsSrc, containerPath: '/app/user-skills', readonly: true });
+  }
 
   // Additional mounts from container config
   if (containerConfig.additionalMounts && containerConfig.additionalMounts.length > 0) {
@@ -456,43 +469,70 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
     } catch {
       continue;
     }
-    if (isSymlink && !desiredSet.has(entry)) {
+    // Unlink when deselected OR when the skill no longer exists in any mount —
+    // a deleted-but-still-selected skill would otherwise leave a dangling
+    // symlink in .claude/skills (the create loop below can't repair a target
+    // that resolves to nothing).
+    if (isSymlink && (!desiredSet.has(entry) || !skillContainerTarget(entry))) {
       fs.unlinkSync(entryPath);
     }
   }
 
-  // Create symlinks for desired skills (container path targets)
+  // Create/repair symlinks for desired skills, each pointing at whichever mount
+  // actually holds it (/app/skills for shipped, /app/user-skills for imported).
   for (const skill of desired) {
+    const target = skillContainerTarget(skill);
+    if (!target) continue; // skill no longer exists in either source — skip
     const linkPath = path.join(skillsDir, skill);
-    let exists = false;
+    let current: string | null = null;
     try {
-      fs.lstatSync(linkPath);
-      exists = true;
+      current = fs.lstatSync(linkPath).isSymbolicLink() ? fs.readlinkSync(linkPath) : '';
     } catch {
-      /* missing */
+      current = null; // no entry
     }
-    if (!exists) {
-      fs.symlinkSync(`/app/skills/${skill}`, linkPath);
+    if (current === target) continue; // already correct
+    try {
+      if (current !== null) fs.unlinkSync(linkPath);
+    } catch {
+      /* ignore */
+    }
+    fs.symlinkSync(target, linkPath);
+  }
+}
+
+// The container path for a skill, chosen by which host mount holds it. Shipped
+// skills win over user skills of the same name (a user can't shadow a builtin).
+function skillContainerTarget(name: string): string | null {
+  if (fs.existsSync(path.join(process.cwd(), 'container', 'skills', name))) return `/app/skills/${name}`;
+  if (fs.existsSync(path.join(process.cwd(), 'data', 'user-skills', name))) return `/app/user-skills/${name}`;
+  return null;
+}
+
+// Every skill directory across both mounts (shipped + user), deduped.
+function availableSkillNames(): string[] {
+  const dirs = [path.join(process.cwd(), 'container', 'skills'), path.join(process.cwd(), 'data', 'user-skills')];
+  const names = new Set<string>();
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir)) continue;
+    for (const e of fs.readdirSync(dir)) {
+      try {
+        if (fs.statSync(path.join(dir, e)).isDirectory()) names.add(e);
+      } catch {
+        /* skip unreadable */
+      }
     }
   }
+  return [...names];
 }
 
 /**
  * Resolve the group's skill selection to concrete names — `'all'` recomputes
- * from `container/skills/` so newly-added upstream skills appear automatically.
+ * from both skill mounts so newly-added (shipped or imported) skills appear
+ * automatically.
  */
 function selectedSkillNames(containerConfig: import('./container-config.js').ContainerConfig): string[] {
   if (containerConfig.skills !== 'all') return containerConfig.skills;
-  const sharedSkillsDir = path.join(process.cwd(), 'container', 'skills');
-  return fs.existsSync(sharedSkillsDir)
-    ? fs.readdirSync(sharedSkillsDir).filter((e) => {
-        try {
-          return fs.statSync(path.join(sharedSkillsDir, e)).isDirectory();
-        } catch {
-          return false;
-        }
-      })
-    : [];
+  return availableSkillNames();
 }
 
 async function buildContainerArgs(

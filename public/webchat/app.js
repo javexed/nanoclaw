@@ -535,6 +535,7 @@ function openSettings() {
   renderSettingsModal();
   renderCredentialsSettings();
   renderRoutingSetupSettings();
+  renderSkillSourcesSettings();
   $('#settings-overlay').hidden = false;
   // Focus trap
   const modal = $('#settings-overlay .modal');
@@ -613,6 +614,7 @@ async function runRoutingInstall() {
   const log = $('#routing-install-log');
   $('#routing-install-progress').hidden = false;
   btn.disabled = true;
+  btn.textContent = 'Installing…';
   log.textContent = 'Starting…';
   try {
     const res = await authFetch('/api/router/install', { method: 'POST' });
@@ -626,6 +628,7 @@ async function runRoutingInstall() {
         showToast('Auto routing setup failed', { kind: 'error' });
       }
       btn.disabled = false;
+      btn.textContent = 'Install';
       return;
     }
     pollRoutingInstall();
@@ -633,6 +636,7 @@ async function runRoutingInstall() {
     log.textContent = 'Install failed: ' + err.message;
     showToast('Auto routing setup failed', { kind: 'error' });
     btn.disabled = false;
+    btn.textContent = 'Install';
   }
 }
 
@@ -651,10 +655,8 @@ async function renderRoutingSetupSettings() {
 
   const btn = $('#routing-install-btn');
   const desc = $('#routing-setup-desc');
-  const installedNote = $('#routing-installed-note');
+  const badge = $('#routing-installed-badge');
   const progress = $('#routing-install-progress');
-  const btnRow = btn.parentElement;
-  if (!desc.dataset.default) desc.dataset.default = desc.textContent;
 
   if (!routingInstallWired) {
     routingInstallWired = true;
@@ -666,12 +668,13 @@ async function renderRoutingSetupSettings() {
   const pulling = Boolean(st.pull && st.pull.status === 'pulling');
   const busy = st.running || pulling;
 
-  // Already scaffolded → point at the Routing tab (routes.json exists). Keep the
-  // pull bar visible if the classifier model is still coming down.
+  // Already scaffolded → green ✓ Installed (badge title points at the Auto
+  // routing tab). Keep the pull bar visible if the classifier model is still
+  // coming down.
   if (st.installed) {
-    btnRow.hidden = true;
+    btn.hidden = true;
     desc.hidden = true;
-    installedNote.hidden = false;
+    badge.hidden = false;
     if (busy) {
       progress.hidden = false;
       renderRoutingInstallProgress(st);
@@ -681,15 +684,18 @@ async function renderRoutingSetupSettings() {
     }
     return;
   }
-  installedNote.hidden = true;
-  desc.hidden = false;
-  btnRow.hidden = false;
+  badge.hidden = true;
+  btn.hidden = false;
+  btn.textContent = busy ? 'Installing…' : 'Install';
   if (!st.litellmReady) {
+    // The one case that still needs a hint line: the prerequisite is missing,
+    // so a bare disabled button would be inexplicable.
     btn.disabled = true;
-    desc.textContent = 'Install the LiteLLM router first (run /add-litellm), then layer routing on here.';
+    desc.hidden = false;
+    desc.textContent = 'Install the LiteLLM router first (run /add-litellm), then install auto routing here.';
   } else {
     btn.disabled = busy;
-    desc.textContent = desc.dataset.default;
+    desc.hidden = true;
   }
   if (busy) {
     progress.hidden = false;
@@ -724,6 +730,7 @@ $('#overflow-menu')?.addEventListener('click', (e) => {
   if (action === 'agents') openManage('agents');
   else if (action === 'models') openManage('models');
   else if (action === 'mcp') openManage('mcp');
+  else if (action === 'skills') openManage('skills');
   else if (action === 'routing') openManage('routing');
   else if (action === 'topology') toggleTopology();
   else if (action === 'wiring') toggleMatrix();
@@ -1262,16 +1269,19 @@ function connect() {
           else if (!r.mention) mentionedRooms.delete(r.id);
           else unreadRooms.delete(r.id);
         });
+        // Render rooms immediately from the WS payload — renderRooms doesn't use
+        // allAgents, so don't block first paint on the /api/agents round-trip
+        // (it reset per page load, delaying every load by a round-trip). Load
+        // agents in parallel for the later consumers that do need them (which
+        // already lazy-load via fetchAgents() when the list is empty).
+        renderRooms(msg.rooms);
         if (allAgents.length === 0) {
           authFetch('/api/agents')
             .then((r) => r.json())
             .then((b) => {
               allAgents = b;
-              renderRooms(msg.rooms);
             })
-            .catch(() => renderRooms(msg.rooms));
-        } else {
-          renderRooms(msg.rooms);
+            .catch(() => {});
         }
         // Catch up on approvals queued while offline / mid-reconnect. Idempotent.
         fetchApprovals();
@@ -4807,11 +4817,13 @@ function switchManageTab(tab) {
   $('#mtab-agents').hidden = tab !== 'agents';
   $('#mtab-models').hidden = tab !== 'models';
   $('#mtab-mcp').hidden = tab !== 'mcp';
+  $('#mtab-skills').hidden = tab !== 'skills';
   $('#mtab-routing').hidden = tab !== 'routing';
   if (typeof syncManageSortIcon === 'function') syncManageSortIcon(); // reflect the active tab's sort
   if (tab === 'agents') fetchAgents();
   else if (tab === 'models') fetchModels();
   else if (tab === 'mcp') fetchMcpServers();
+  else if (tab === 'skills') renderSkillsRegistry();
   else if (tab === 'routing') {
     if (!routingAvailable) return switchManageTab('agents');
     loadRoutingTab();
@@ -4820,6 +4832,552 @@ function switchManageTab(tab) {
 $('#manage-back')?.addEventListener('click', () => closeView('manage'));
 document.querySelectorAll('.manage-tab').forEach((t) => {
   t.addEventListener('click', () => switchManageTab(t.dataset.mtab));
+});
+
+// ── Skills registry tab ─────────────────────────────────────────────────────
+// Browse every skill (shipped + imported), import one from a GitHub folder, and
+// delete imported ones. Assignment to agents stays in the agent detail's Skills
+// panel; this is the catalog.
+async function renderSkillsRegistry() {
+  const list = $('#skills-list');
+  if (!list) return;
+  showSkillEditor(false); // always land on the browse view
+  list.innerHTML = '<li class="skills-empty">Loading…</li>';
+  let skills = [];
+  try {
+    const res = await authFetch('/api/skills');
+    if (res.ok) skills = (await res.json()).skills || [];
+  } catch (err) {
+    console.error('Failed to load skills:', err);
+  }
+  list.innerHTML = '';
+  if (!skills.length) {
+    list.innerHTML = '<li class="skills-empty">No skills yet — import one above.</li>';
+    return;
+  }
+  for (const s of skills) {
+    const li = document.createElement('li');
+    li.className = 'skill-row';
+    const info = document.createElement('div');
+    info.className = 'skill-info';
+    const head = document.createElement('div');
+    head.className = 'skill-head';
+    const name = document.createElement('span');
+    name.className = 'skill-name';
+    name.textContent = s.name;
+    // Provenance badge: where the skill came from. Shipped skills are "built-in";
+    // imported ones show their origin ("Anthropic", "obra/superpowers",
+    // "awesomeskill.ai", "custom"); legacy imports with no recorded origin fall
+    // back to "imported".
+    let badge;
+    if (s.source === 'shipped') {
+      badge = document.createElement('span');
+      badge.className = 'skill-badge';
+      badge.textContent = 'built-in';
+    } else if (s.origin && s.origin.label) {
+      badge = originBadgeEl(s.origin);
+    } else {
+      badge = document.createElement('span');
+      badge.className = 'skill-badge skill-badge-user';
+      badge.textContent = 'imported';
+    }
+    head.append(name, badge);
+    const desc = document.createElement('span');
+    desc.className = 'skill-desc';
+    desc.textContent = s.description || '';
+    info.append(head, desc);
+    // Click the row to open the SKILL.md viewer/editor (user skills editable).
+    info.style.cursor = 'pointer';
+    info.setAttribute('role', 'button');
+    info.setAttribute('tabindex', '0');
+    info.addEventListener('click', () => openSkillEditor(s.name));
+    info.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        openSkillEditor(s.name);
+      }
+    });
+    li.appendChild(info);
+    if (s.source === 'user') {
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'skill-delete';
+      del.textContent = 'Remove';
+      del.addEventListener('click', () => deleteSkill(s.name));
+      li.appendChild(del);
+    }
+    list.appendChild(li);
+  }
+}
+
+// ── SKILL.md editor — view any skill; create/edit user skills (the upload +
+// manual-edit path). Built-ins are read-only (repo files).
+const SKILL_TEMPLATE = `---
+name: my-skill
+description: One line saying what this skill is for and when to use it.
+---
+
+# My Skill
+
+Instructions the agent follows when this skill applies.
+`;
+
+// Three sub-views: browse (the list), add (catalog + URL import), editor.
+function showSkillsView(view) {
+  $('#skills-browse').hidden = view !== 'browse';
+  $('#skills-add').hidden = view !== 'add';
+  $('#skills-editor').hidden = view !== 'editor';
+}
+function showSkillEditor(show) {
+  showSkillsView(show ? 'editor' : 'browse');
+}
+
+// ── Add view: browse well-known collections + import by URL ────────────────
+// Trust is a deliberate top-level mode (Official vs Community), not something
+// that mutates as you flip a mixed source dropdown. The source picker only ever
+// lists one tier's collections, so switching sources never changes trust chrome.
+
+// A network-loading list row: inline spinner + label, matching the busy-button
+// spinner (.btn-spinner) so "loading" reads the same everywhere.
+function skillsLoadingRow(label) {
+  return `<li class="skills-empty"><span class="btn-spinner" aria-hidden="true"></span>${label}</li>`;
+}
+
+// Stable hue from a label, so every collection keeps its own distinct colour
+// across renders — and any newly added collection gets one for free. The green
+// band (~90–175°) is skipped so a community colour never reads as the reserved
+// official green (Anthropic ≈148°); the hash maps into the remaining wheel.
+function labelHue(str) {
+  const BAND_LO = 60;
+  const BAND_HI = 190;
+  const usable = 360 - (BAND_HI - BAND_LO);
+  let h = 0;
+  for (let i = 0; i < String(str).length; i++) h = (h * 31 + str.charCodeAt(i)) % usable;
+  return h < BAND_LO ? h : h + (BAND_HI - BAND_LO);
+}
+
+// Provenance badge — where a skill comes from. One clickable element shared by
+// the installed list and the catalog/marketplace pool so origin reads the same
+// everywhere. Official (Anthropic) is green; every other collection gets its own
+// colour keyed off its label. Links out to the source.
+function originBadgeEl(origin) {
+  const el = document.createElement(origin.url ? 'a' : 'span');
+  el.className = 'skill-badge skill-badge-origin' + (origin.official ? ' skill-badge-official' : '');
+  el.textContent = origin.label;
+  if (!origin.official) el.style.setProperty('--badge-hue', String(labelHue(origin.label)));
+  if (origin.url) {
+    el.href = origin.url;
+    el.target = '_blank';
+    el.rel = 'noopener noreferrer';
+    el.title = `${origin.label} — open source ↗`;
+    // The installed-list row is itself clickable (opens the editor); don't let a
+    // click on the badge trigger it.
+    el.addEventListener('click', (e) => e.stopPropagation());
+  }
+  return el;
+}
+
+let skillTrust = 'official';
+let poolSearchTimer = null;
+let poolSeq = 0;
+
+async function openSkillsAdd() {
+  showSkillsView('add');
+  $('#skill-discover-search').value = '';
+  await setSkillTrust('official');
+}
+
+// Switch trust tier: toggle the segment, gate the search box to Community (the
+// persistent community warning too), then load that tier's merged pool.
+async function setSkillTrust(mode) {
+  skillTrust = mode;
+  const official = mode === 'official';
+  $('#skills-trust-official').classList.toggle('active', official);
+  $('#skills-trust-official').setAttribute('aria-selected', String(official));
+  $('#skills-trust-community').classList.toggle('active', !official);
+  $('#skills-trust-community').setAttribute('aria-selected', String(!official));
+  const search = $('#skill-discover-search');
+  search.hidden = official;
+  if (official) search.value = '';
+  $('#skills-catalog-warn').hidden = official; // community warning is persistent
+  await renderSkillPool();
+}
+
+// Render ONE merged, badged pool for the current tier. Community pools every
+// collection + the awesomeskill.ai marketplace equally; the search box filters
+// it. No per-source picker — each row's origin badge carries (and links to) its
+// provenance.
+async function renderSkillPool() {
+  const tier = skillTrust;
+  const community = tier === 'community';
+  const q = community ? $('#skill-discover-search').value.trim() : '';
+  const list = $('#skills-catalog-list');
+  const seq = ++poolSeq;
+  list.innerHTML = skillsLoadingRow(q ? 'Searching…' : 'Loading skills…');
+  let data = null;
+  try {
+    const res = await authFetch(`/api/skills/catalog?tier=${tier}&q=${encodeURIComponent(q)}`);
+    if (res.ok) data = await res.json();
+  } catch {}
+  if (seq !== poolSeq) return; // superseded by a newer tier switch / keystroke
+  if (!data) {
+    list.innerHTML = '<li class="skills-empty">Couldn’t load skills — import by URL below.</li>';
+    return;
+  }
+  const skills = data.skills || [];
+  list.innerHTML = '';
+  if (!skills.length) {
+    list.innerHTML = `<li class="skills-empty">${q ? 'No matches.' : 'Nothing here yet.'}</li>`;
+    return;
+  }
+  for (const s of skills) {
+    const li = document.createElement('li');
+    li.className = 'skill-row';
+    const info = document.createElement('div');
+    info.className = 'skill-info';
+    const head = document.createElement('div');
+    head.className = 'skill-head';
+    const name = document.createElement('span');
+    name.className = 'skill-name';
+    name.textContent = s.name;
+    head.append(name, originBadgeEl(s.origin));
+    const desc = document.createElement('span');
+    desc.className = 'skill-desc';
+    desc.textContent = s.description || '';
+    info.append(head, desc);
+    li.appendChild(info);
+    if (community && s.review) {
+      const review = document.createElement('a');
+      review.className = 'skill-review';
+      review.href = s.review;
+      review.target = '_blank';
+      review.rel = 'noopener noreferrer';
+      review.textContent = 'Review ↗';
+      li.appendChild(review);
+    }
+    if (s.installed) {
+      const got = document.createElement('span');
+      got.className = 'skill-badge skill-badge-user';
+      got.textContent = 'added';
+      li.appendChild(got);
+    } else {
+      const add = document.createElement('button');
+      add.type = 'button';
+      add.className = 'btn btn-secondary skill-catalog-add';
+      add.textContent = 'Add';
+      add.addEventListener('click', async () => {
+        if (community && !(await confirmCommunityImport(s.name, s.origin.label, null))) return;
+        await importSkillInto({ ...s.ref, origin: s.origin }, add);
+      });
+      li.appendChild(add);
+    }
+    list.appendChild(li);
+  }
+}
+
+// Import + swap the button to an "added" badge. Shared by every pool row.
+async function importSkillInto(importBody, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Importing…';
+  try {
+    const res = await authFetch('/api/skills/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(importBody),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || res.statusText);
+    showToast(`Added ${body.name}`, { kind: 'success' });
+    const got = document.createElement('span');
+    got.className = 'skill-badge skill-badge-user';
+    got.textContent = 'added';
+    btn.replaceWith(got);
+  } catch (err) {
+    showToast('Import failed: ' + (err?.message || err), { kind: 'error' });
+    btn.disabled = false;
+    btn.textContent = 'Add';
+  }
+}
+
+// The community trust gate — a review confirm naming the source before import.
+function confirmCommunityImport(name, from, stars) {
+  return showConfirmModal({
+    title: `Import ${name}?`,
+    body: `From ${from}${stars != null ? ` (★ ${stars})` : ''}. This is a community skill — its instructions and scripts will run in your agents. Review it first.`,
+    confirmLabel: 'Import',
+    destructive: true,
+  });
+}
+
+async function openSkillEditor(name) {
+  const nameInput = $('#skill-editor-name');
+  const content = $('#skill-editor-content');
+  const badge = $('#skill-editor-badge');
+  const save = $('#skill-editor-save');
+  if (name) {
+    let data = null;
+    try {
+      const res = await authFetch(`/api/skills/${encodeURIComponent(name)}`);
+      if (res.ok) data = await res.json();
+    } catch {}
+    if (!data) return showToast('Couldn’t load skill', { kind: 'error' });
+    nameInput.value = data.name;
+    nameInput.readOnly = true;
+    content.value = data.content;
+    const editable = data.source === 'user';
+    content.readOnly = !editable;
+    save.hidden = !editable;
+    badge.hidden = false;
+    badge.className = 'skill-badge skill-badge-' + data.source;
+    badge.textContent = editable ? 'imported — editable' : 'built-in — read-only';
+  } else {
+    nameInput.value = '';
+    nameInput.readOnly = false;
+    content.value = SKILL_TEMPLATE;
+    content.readOnly = false;
+    save.hidden = false;
+    badge.hidden = true;
+  }
+  showSkillEditor(true);
+  (name ? content : nameInput).focus();
+}
+
+async function saveSkillEditor() {
+  const name = $('#skill-editor-name').value.trim();
+  const content = $('#skill-editor-content').value;
+  if (!name) return showToast('Give the skill a name', { kind: 'error' });
+  const save = $('#skill-editor-save');
+  save.disabled = true;
+  try {
+    const res = await authFetch(`/api/skills/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || res.statusText);
+    showToast(`Saved ${body.name} — applies on each agent's next spawn`, { kind: 'success' });
+    showSkillEditor(false);
+    await renderSkillsRegistry();
+  } catch (err) {
+    showToast('Save failed: ' + (err?.message || err), { kind: 'error' });
+  } finally {
+    save.disabled = false;
+  }
+}
+
+$('#skill-add-btn')?.addEventListener('click', openSkillsAdd);
+$('#skill-discover-search')?.addEventListener('input', () => {
+  clearTimeout(poolSearchTimer);
+  poolSearchTimer = setTimeout(() => renderSkillPool(), 400);
+});
+$('#skills-add-back')?.addEventListener('click', () => renderSkillsRegistry()); // re-render → lands on browse with fresh list
+$('#skills-trust-official')?.addEventListener('click', () => setSkillTrust('official'));
+$('#skills-trust-community')?.addEventListener('click', () => setSkillTrust('community'));
+
+// ── Settings: skill-collections registry (global admin) ────────────────────
+// Owners/global admins manage the Skills tab's catalog sources: label + a
+// GitHub folder URL per collection. Server verifies the folder actually lists
+// skills before saving.
+async function renderSkillSourcesSettings() {
+  const section = $('#settings-skill-sources');
+  if (!section) return;
+  section.hidden = !isOwnerView;
+  if (!isOwnerView) return;
+  const list = $('#skill-sources-list');
+  list.innerHTML = '';
+  let sources = [];
+  let builtins = [];
+  try {
+    const res = await authFetch('/api/skills/sources');
+    if (res.ok) {
+      const b = await res.json();
+      sources = b.sources || [];
+      builtins = b.builtins || [];
+    }
+  } catch {}
+  // Each row leads with the same coloured origin badge as the pool, so a
+  // collection's colour is consistent between Settings and the catalog.
+  const sourceRow = (origin, meta) => {
+    const li = document.createElement('li');
+    li.className = 'skill-source-row';
+    const info = document.createElement('div');
+    info.className = 'skill-info';
+    const head = document.createElement('div');
+    head.className = 'skill-head';
+    head.appendChild(originBadgeEl(origin));
+    const m = document.createElement('span');
+    m.className = 'skill-desc';
+    m.textContent = meta;
+    info.append(head, m);
+    li.appendChild(info);
+    return li;
+  };
+  // Editable GitHub collections.
+  for (const s of sources) {
+    const origin = s.official
+      ? { label: s.label.replace(/\s*\((?:official|community)\)\s*$/i, ''), url: `https://github.com/${s.owner}/${s.repo}`, official: true }
+      : { label: `${s.owner}/${s.repo}`, url: `https://github.com/${s.owner}/${s.repo}`, official: false };
+    const li = sourceRow(origin, s.dir ? `${s.dir} · ${s.branch}` : `whole repo · ${s.branch}`);
+    const edit = document.createElement('button');
+    edit.type = 'button';
+    edit.className = 'btn btn-ghost';
+    edit.textContent = 'Edit';
+    edit.addEventListener('click', () => {
+      $('#skill-source-url').value = `https://github.com/${s.owner}/${s.repo}/tree/${s.branch}/${s.dir}`;
+      const save = $('#skill-source-save');
+      save.textContent = 'Save';
+      save.dataset.editId = s.id;
+    });
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'skill-delete';
+    del.textContent = 'Remove';
+    del.addEventListener('click', async () => {
+      const ok = await showConfirmModal({
+        title: `Remove ${origin.label}?`,
+        body: 'The collection disappears from the Skills catalog. Already-imported skills are unaffected.',
+        confirmLabel: 'Remove',
+        destructive: true,
+      });
+      if (!ok) return;
+      try {
+        const res = await authFetch(`/api/skills/sources/${encodeURIComponent(s.id)}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+        renderSkillSourcesSettings();
+      } catch (err) {
+        showToast('Remove failed: ' + (err?.message || err), { kind: 'error' });
+      }
+    });
+    li.append(edit, del);
+    list.appendChild(li);
+  }
+  // Built-in sources (the marketplace) — nothing to edit, but removable from the
+  // pool (a reversible toggle, since there's no URL to re-paste).
+  for (const bi of builtins) {
+    const li = sourceRow(
+      { label: bi.label, url: bi.url, official: false },
+      bi.disabled ? 'Built-in marketplace — removed from the pool' : 'Built-in marketplace — pooled into Community',
+    );
+    if (bi.disabled) li.classList.add('source-disabled');
+    const tag = document.createElement('span');
+    tag.className = 'skill-badge';
+    tag.textContent = 'built-in';
+    li.appendChild(tag);
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = bi.disabled ? 'btn btn-ghost' : 'skill-delete';
+    toggle.textContent = bi.disabled ? 'Add' : 'Remove';
+    toggle.addEventListener('click', () => toggleBuiltinSource(bi.id, bi.disabled));
+    li.appendChild(toggle);
+    list.appendChild(li);
+  }
+}
+
+// Enable/disable a built-in source (the marketplace). DELETE switches it off,
+// PUT switches it back on — reversible, so no destructive confirm.
+async function toggleBuiltinSource(id, wasDisabled) {
+  try {
+    const res = await authFetch(`/api/skills/sources/${encodeURIComponent(id)}`, {
+      method: wasDisabled ? 'PUT' : 'DELETE',
+      ...(wasDisabled ? { headers: { 'Content-Type': 'application/json' }, body: '{}' } : {}),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    showToast(wasDisabled ? 'Marketplace added back to the pool' : 'Marketplace removed from the pool', { kind: 'success' });
+    renderSkillSourcesSettings();
+  } catch (err) {
+    showToast('Failed: ' + (err?.message || err), { kind: 'error' });
+  }
+}
+
+$('#skill-source-save')?.addEventListener('click', async () => {
+  const save = $('#skill-source-save');
+  const url = $('#skill-source-url').value.trim();
+  if (!url) return showToast('Paste a GitHub repo or folder URL', { kind: 'error' });
+  // No label to type — a new collection's id is derived from what it pulls in
+  // (owner-repo[-dir]); the server names it owner/repo. Editing keeps the id.
+  const folder = url.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/tree\/([^/]+)\/(.+?)\/?$/);
+  const root = url.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
+  const slug = folder ? `${folder[1]}-${folder[2]}-${folder[4]}` : root ? `${root[1]}-${root[2]}` : '';
+  const derivedId = slug.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '');
+  const id = save.dataset.editId || derivedId;
+  if (!id) return showToast('Expected a GitHub repo or folder URL', { kind: 'error' });
+  save.disabled = true;
+  try {
+    const res = await authFetch(`/api/skills/sources/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || res.statusText);
+    showToast(`Added ${body.source?.label || 'collection'}`, { kind: 'success' });
+    $('#skill-source-url').value = '';
+    save.textContent = 'Add';
+    delete save.dataset.editId;
+    renderSkillSourcesSettings(); // the pool refetches on next open, picking up the new collection
+  } catch (err) {
+    showToast('Save failed: ' + (err?.message || err), { kind: 'error' });
+  } finally {
+    save.disabled = false;
+  }
+});
+$('#skill-new-btn')?.addEventListener('click', () => openSkillEditor(null));
+$('#skill-editor-cancel')?.addEventListener('click', () => showSkillEditor(false));
+$('#skill-editor-save')?.addEventListener('click', saveSkillEditor);
+
+async function importSkill() {
+  const input = $('#skill-import-url');
+  const btn = $('#skill-import-btn');
+  const url = (input.value || '').trim();
+  if (!url) return;
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = 'Importing…';
+  try {
+    const res = await authFetch('/api/skills/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || res.statusText);
+    showToast(`Imported "${body.name}" (${body.files} files)`, { kind: 'success' });
+    input.value = '';
+    await renderSkillsRegistry();
+  } catch (err) {
+    showToast('Import failed: ' + (err?.message || err), { kind: 'error' });
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+}
+
+async function deleteSkill(name) {
+  const ok = await showConfirmModal({
+    title: `Delete ${name}?`,
+    body: 'Removes this imported skill. Agents that use it lose it on their next spawn.',
+    confirmLabel: 'Delete',
+    destructive: true,
+  });
+  if (!ok) return;
+  try {
+    const res = await authFetch(`/api/skills/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || res.statusText);
+    showToast(`Deleted ${name}`, { kind: 'success' });
+    await renderSkillsRegistry();
+  } catch (err) {
+    showToast('Delete failed: ' + (err?.message || err), { kind: 'error' });
+  }
+}
+
+$('#skill-import-btn')?.addEventListener('click', importSkill);
+$('#skill-import-url')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    importSkill();
+  }
 });
 
 // ── Approvals ─────────────────────────────────────────────────────────────
@@ -5153,6 +5711,9 @@ function svgEl(tag, attrs) {
 function renderTopology(data) {
   const canvas = $('#topology-canvas');
   if (!canvas) return;
+  topoData = data;
+  topoFocus = null; // every (re)render starts on the full graph
+  updateTopoFocusPill();
   canvas.textContent = '';
   const rooms = data.rooms || [];
   const agents = data.agents || [];
@@ -5231,10 +5792,17 @@ function renderTopology(data) {
     if (stroke) ln.style.stroke = stroke;
     return svg.appendChild(ln);
   };
-  for (const e of edges)
-    edgeLine(cols.room + LABEL_W, yPx(roomY, e.room), cols.agent - NODE_X, yPx(agentY, e.agent), roomColor(e.room));
+  for (const e of edges) {
+    const ln = edgeLine(cols.room + LABEL_W, yPx(roomY, e.room), cols.agent - NODE_X, yPx(agentY, e.agent), roomColor(e.room));
+    ln.setAttribute('data-room', e.room);
+    ln.setAttribute('data-agent', e.agent);
+  }
   for (const a of agents)
-    if (a.modelId) edgeLine(cols.agent + LABEL_W, yPx(agentY, a.id), cols.model - NODE_X, yPx(modelY, a.modelId));
+    if (a.modelId) {
+      const ln = edgeLine(cols.agent + LABEL_W, yPx(agentY, a.id), cols.model - NODE_X, yPx(modelY, a.modelId));
+      ln.setAttribute('data-agent', a.id);
+      ln.setAttribute('data-model', a.modelId);
+    }
 
   // Nodes.
   const drawNode = (x, yMap, item, kind, degree, stroke) => {
@@ -5246,11 +5814,20 @@ function renderTopology(data) {
     g.setAttribute('role', 'button');
     g.setAttribute('tabindex', '0');
     g.setAttribute('aria-label', `Open ${kind} settings: ${item.name}`);
-    g.addEventListener('click', () => openTopologyItem(kind, item.id));
+    g.setAttribute('data-kind', kind);
+    g.setAttribute('data-node-id', item.id);
+    // Clicking a node focuses the graph on its connections (dims the rest) AND
+    // opens its settings drawer — the drawer is a right-side panel on desktop,
+    // so the dimmed graph stays visible beside it.
+    const activate = () => {
+      setTopoFocus(kind, item.id, item.name);
+      openTopologyItem(kind, item.id);
+    };
+    g.addEventListener('click', activate);
     g.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
-        openTopologyItem(kind, item.id);
+        activate();
       }
     });
     const c = svgEl('circle', { cx: x, cy: y, r: NODE_X });
@@ -5267,8 +5844,107 @@ function renderTopology(data) {
   for (const a of agents) drawNode(cols.agent, agentY, a, 'agent', (agentRooms.get(a.id) || []).length);
   for (const m of models) drawNode(cols.model, modelY, m, 'model', (modelAgents.get(m.id) || []).length);
 
+  // Click empty canvas to clear a focus (nodes handle their own clicks).
+  svg.addEventListener('click', (ev) => {
+    if (ev.target === svg) clearTopoFocus();
+  });
   canvas.appendChild(svg);
 }
+
+// ── Topology focus ─────────────────────────────────────────────────────────
+// Clicking a node dims everything not connected to it. For a model that's the
+// model + the agents assigned to it + the rooms those agents serve; for an agent
+// its rooms + model; for a room its agents + their models. A directed reach (not
+// the whole component) — focusing a model doesn't fan back out to a room's other
+// agents. Reversible via the "Focused: …" pill, an empty-canvas click, or refresh.
+let topoData = null;
+let topoFocus = null; // { kind, id, name } or null
+
+function computeTopoFocus(data, kind, id) {
+  const agents = data?.agents || [];
+  const edges = data?.edges || [];
+  const rooms = new Set();
+  const ags = new Set();
+  const models = new Set();
+  const agentModel = new Map(agents.map((a) => [a.id, a.modelId]));
+  const roomsOfAgent = new Map();
+  const agentsOfRoom = new Map();
+  const agentsOfModel = new Map();
+  const push = (m, k, v) => {
+    if (k == null) return;
+    if (!m.has(k)) m.set(k, []);
+    m.get(k).push(v);
+  };
+  for (const e of edges) {
+    push(roomsOfAgent, e.agent, e.room);
+    push(agentsOfRoom, e.room, e.agent);
+  }
+  for (const a of agents) if (a.modelId) push(agentsOfModel, a.modelId, a.id);
+  if (kind === 'model') {
+    models.add(id);
+    for (const a of agentsOfModel.get(id) || []) {
+      ags.add(a);
+      for (const r of roomsOfAgent.get(a) || []) rooms.add(r);
+    }
+  } else if (kind === 'agent') {
+    ags.add(id);
+    if (agentModel.get(id)) models.add(agentModel.get(id));
+    for (const r of roomsOfAgent.get(id) || []) rooms.add(r);
+  } else if (kind === 'room') {
+    rooms.add(id);
+    for (const a of agentsOfRoom.get(id) || []) {
+      ags.add(a);
+      if (agentModel.get(a)) models.add(agentModel.get(a));
+    }
+  }
+  return { rooms, agents: ags, models };
+}
+
+function applyTopoFocus() {
+  const svg = $('#topology-canvas')?.querySelector('svg');
+  if (!svg) return;
+  if (!topoFocus) {
+    svg.querySelectorAll('.topo-dimmed').forEach((el) => el.classList.remove('topo-dimmed'));
+    return;
+  }
+  const hl = computeTopoFocus(topoData, topoFocus.kind, topoFocus.id);
+  const setFor = (k) => (k === 'room' ? hl.rooms : k === 'agent' ? hl.agents : hl.models);
+  svg.querySelectorAll('.topo-node').forEach((g) => {
+    const on = setFor(g.getAttribute('data-kind')).has(g.getAttribute('data-node-id'));
+    g.classList.toggle('topo-dimmed', !on);
+  });
+  svg.querySelectorAll('.topo-edge').forEach((ln) => {
+    const on = ln.hasAttribute('data-model')
+      ? hl.agents.has(ln.getAttribute('data-agent')) && hl.models.has(ln.getAttribute('data-model'))
+      : hl.rooms.has(ln.getAttribute('data-room')) && hl.agents.has(ln.getAttribute('data-agent'));
+    ln.classList.toggle('topo-dimmed', !on);
+  });
+}
+
+function setTopoFocus(kind, id, name) {
+  topoFocus = { kind, id, name };
+  applyTopoFocus();
+  updateTopoFocusPill();
+}
+
+function clearTopoFocus() {
+  topoFocus = null;
+  applyTopoFocus();
+  updateTopoFocusPill();
+}
+
+function updateTopoFocusPill() {
+  const pill = $('#topo-focus-pill');
+  if (!pill) return;
+  if (topoFocus) {
+    pill.textContent = `Focused: ${topoFocus.name} ✕`;
+    pill.hidden = false;
+  } else {
+    pill.hidden = true;
+  }
+}
+
+$('#topo-focus-pill')?.addEventListener('click', clearTopoFocus);
 
 // Open the settings drawer for a clicked topology node. The detail drawers are
 // fixed overlays (z-index 110), so they layer over the graph and closing one
@@ -5520,6 +6196,11 @@ async function probeIsOwner() {
       if (mcpItem) mcpItem.hidden = false;
       const mcpTab = $('#mtab-mcp-btn');
       if (mcpTab) mcpTab.hidden = false;
+      // Skills registry (import/manage) is admin-only too.
+      const skillsTab = $('#mtab-skills-btn');
+      if (skillsTab) skillsTab.hidden = false;
+      const skillsItem = $('#overflow-skills');
+      if (skillsItem) skillsItem.hidden = false;
       const list = await users.json().catch(() => []);
       const me = Array.isArray(list) ? list.find((u) => u.id === myUserId) : null;
       isOwnerView = !!(me && userIsOwner(me));
@@ -6565,6 +7246,9 @@ async function openAgentDetail(id) {
   // MCP servers wired to this agent (external tool servers).
   renderAgentMcp(id);
 
+  // Skills (Anthropic Agent Skills) this agent loads.
+  renderAgentSkills(id);
+
   // Active sessions — reset a stuck one (incl. background a2a sessions).
   renderAgentSessions(id);
 
@@ -6825,6 +7509,83 @@ async function resetAgentSession(agentId, sessionId, btn) {
     showToast('Could not reset: ' + err.message, { kind: 'error' });
     btn.disabled = false;
     btn.textContent = 'Reset';
+  }
+}
+
+// Per-agent skills: list every available skill with a toggle reflecting whether
+// this agent loads it. Changes batch behind Save (one PUT → one respawn) rather
+// than restarting the agent on every toggle.
+async function renderAgentSkills(agentId) {
+  const list = $('#agent-skills-list');
+  const saveBtn = $('#agent-skills-save');
+  if (!list) return;
+  list.innerHTML = '';
+  let data = { available: [], enabled: [] };
+  try {
+    const res = await authFetch(`/api/agents/${encodeURIComponent(agentId)}/skills`);
+    if (res.ok) data = await res.json();
+  } catch (err) {
+    console.error('Failed to load skills:', err);
+  }
+  const enabled = new Set(data.enabled || []);
+  const count = $('#agent-skills-count');
+  if (count) count.textContent = enabled.size ? String(enabled.size) : '';
+  if (saveBtn) saveBtn.disabled = true;
+  if (!(data.available || []).length) {
+    const empty = document.createElement('li');
+    empty.className = 'agent-mcp-empty';
+    empty.textContent = 'No skills available in this install';
+    list.appendChild(empty);
+    return;
+  }
+  for (const s of data.available) {
+    const li = document.createElement('li');
+    li.className = 'agent-skill-row';
+    const info = document.createElement('div');
+    info.className = 'agent-mcp-info';
+    const name = document.createElement('span');
+    name.className = 'agent-mcp-name';
+    name.textContent = s.name;
+    const meta = document.createElement('span');
+    meta.className = 'agent-mcp-meta';
+    meta.textContent = s.description || '';
+    info.append(name, meta);
+    const toggle = document.createElement('input');
+    toggle.type = 'checkbox';
+    toggle.className = 'agent-skill-toggle';
+    toggle.checked = enabled.has(s.name);
+    toggle.dataset.skill = s.name;
+    toggle.setAttribute('aria-label', `Enable skill ${s.name}`);
+    toggle.addEventListener('change', () => {
+      if (saveBtn) saveBtn.disabled = false;
+    });
+    li.append(info, toggle);
+    list.appendChild(li);
+  }
+  if (saveBtn) saveBtn.onclick = () => saveAgentSkills(agentId);
+}
+
+async function saveAgentSkills(agentId) {
+  const saveBtn = $('#agent-skills-save');
+  const skills = [...document.querySelectorAll('#agent-skills-list .agent-skill-toggle')]
+    .filter((t) => t.checked)
+    .map((t) => t.dataset.skill);
+  if (saveBtn) saveBtn.disabled = true;
+  try {
+    const res = await authFetch(`/api/agents/${encodeURIComponent(agentId)}/skills`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ skills }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || res.statusText);
+    showToast(body.restarted ? 'Skills saved — agent restarting' : 'Skills saved (applies on next message)', {
+      kind: 'success',
+    });
+    await renderAgentSkills(agentId);
+  } catch (err) {
+    showToast('Couldn’t save skills: ' + (err?.message || err), { kind: 'error' });
+    if (saveBtn) saveBtn.disabled = false;
   }
 }
 
@@ -7130,6 +7891,77 @@ $('#create-agent-btn').addEventListener('click', () => {
   $('#agent-create-name').focus();
 });
 
+// ── Skill suggestions in the create form ────────────────────────────────────
+// As the operator describes the agent, match installed skills + the catalog
+// collections and surface fits. Installed matches are informational (new agents
+// load all installed skills by default); catalog matches get a checkbox and are
+// imported when the agent is created.
+let suggestTimer = null;
+let suggestSeq = 0;
+function scheduleSkillSuggest() {
+  clearTimeout(suggestTimer);
+  suggestTimer = setTimeout(refreshSkillSuggestions, 700);
+}
+async function refreshSkillSuggestions() {
+  const text = [$('#agent-create-draft-prompt').value, $('#agent-create-name').value, $('#agent-create-instructions').value]
+    .join(' ')
+    .trim();
+  const block = $('#agent-create-skills');
+  if (text.length < 12) {
+    block.hidden = true;
+    return;
+  }
+  const seq = ++suggestSeq;
+  let suggestions = [];
+  try {
+    const res = await authFetch(`/api/skills/suggest?text=${encodeURIComponent(text.slice(0, 2000))}`);
+    if (res.ok) suggestions = (await res.json()).suggestions || [];
+  } catch {}
+  if (seq !== suggestSeq) return; // a newer request superseded this one
+  const list = $('#agent-create-skills-list');
+  list.innerHTML = '';
+  if (!suggestions.length) {
+    block.hidden = true;
+    return;
+  }
+  for (const s of suggestions) {
+    const li = document.createElement('li');
+    li.className = 'agent-create-skill-row';
+    const info = document.createElement('div');
+    info.className = 'skill-info';
+    const head = document.createElement('div');
+    head.className = 'skill-head';
+    const name = document.createElement('span');
+    name.className = 'skill-name';
+    name.textContent = s.name;
+    head.appendChild(name);
+    const desc = document.createElement('span');
+    desc.className = 'skill-desc';
+    desc.textContent = s.description || '';
+    info.append(head, desc);
+    li.appendChild(info);
+    if (s.source === 'installed') {
+      const got = document.createElement('span');
+      got.className = 'skill-badge';
+      got.textContent = 'available';
+      li.appendChild(got);
+    } else {
+      const check = document.createElement('input');
+      check.type = 'checkbox';
+      check.className = 'agent-create-skill-check';
+      check.dataset.url = s.url;
+      check.dataset.name = s.name;
+      check.setAttribute('aria-label', `Add skill ${s.name} (${s.source})`);
+      li.appendChild(check);
+    }
+    list.appendChild(li);
+  }
+  block.hidden = false;
+}
+for (const sel of ['#agent-create-draft-prompt', '#agent-create-name', '#agent-create-instructions']) {
+  $(sel)?.addEventListener('input', scheduleSkillSuggest);
+}
+
 $('#agent-create-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const name = $('#agent-create-name').value.trim();
@@ -7146,6 +7978,25 @@ $('#agent-create-form').addEventListener('submit', async (e) => {
       showToast('Failed to create agent: ' + (err.error || res.statusText), { kind: 'error' });
       return;
     }
+    // Import any checked suggested skills — new agents default to "all skills",
+    // so imports attach automatically on the agent's first spawn.
+    const checked = [...document.querySelectorAll('#agent-create-skills-list .agent-create-skill-check:checked')];
+    if (checked.length) showToast(`Adding ${checked.length} suggested skill(s)…`, { kind: 'info' });
+    for (const c of checked) {
+      try {
+        const ir = await authFetch('/api/skills/import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: c.dataset.url }),
+        });
+        if (!ir.ok) throw new Error((await ir.json().catch(() => ({}))).error || ir.statusText);
+        showToast(`Added skill ${c.dataset.name}`, { kind: 'success' });
+      } catch (err) {
+        showToast(`Skill ${c.dataset.name} failed: ` + (err?.message || err), { kind: 'error' });
+      }
+    }
+    $('#agent-create-skills').hidden = true;
+    $('#agent-create-skills-list').innerHTML = '';
     await fetchAgents();
     closeAgentDetail();
   } catch (err) {
@@ -8365,6 +9216,35 @@ document.addEventListener('paste', (e) => {
   }
 });
 
+// Multi-line pastes → fenced code block. Pasted code/errors otherwise render as
+// Markdown (backticks/asterisks/# reformat; stray @handles chip). Wrapping in a
+// fence renders them verbatim — monospace + copy button — and suppresses BOTH
+// Markdown and mention decoration inside (decorateMentions skips <pre>/<code>),
+// while typed @mentions OUTSIDE the block keep working. Single-line pastes stay
+// inline; Ctrl/Cmd+Z reverts the wrap in one step. Files are handled above.
+$('#message-input').addEventListener('paste', (e) => {
+  if (e.clipboardData?.files?.length) return; // images/files handled by the document listener
+  const text = e.clipboardData?.getData('text/plain') ?? '';
+  if (!text.includes('\n')) return; // single-line pastes stay inline
+  e.preventDefault();
+  const input = e.currentTarget;
+  // Fence must be longer than any backtick run inside so nested ``` survive.
+  const longestTicks = (text.match(/`+/g) || []).reduce((m, r) => Math.max(m, r.length), 0);
+  const fence = '`'.repeat(Math.max(3, longestTicks + 1));
+  const before = input.value.slice(0, input.selectionStart);
+  const lead = before.length > 0 && !before.endsWith('\n') ? '\n' : '';
+  const body = text.replace(/\n+$/, ''); // trim trailing blank lines inside the block
+  const insert = `${lead}${fence}\n${body}\n${fence}\n`;
+  // execCommand keeps the native undo stack so Ctrl/Cmd+Z reverts the wrap; fall
+  // back to setRangeText only if it genuinely didn't insert (value unchanged).
+  const valBefore = input.value;
+  document.execCommand('insertText', false, insert);
+  if (input.value === valBefore) {
+    input.setRangeText(insert, input.selectionStart, input.selectionEnd, 'end');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+});
+
 $('#file-picker').addEventListener('click', () => {
   const input = document.createElement('input');
   input.type = 'file';
@@ -8442,8 +9322,26 @@ if ('serviceWorker' in navigator) {
       refreshing = true;
       location.reload();
     } else {
+      // Silent deferral was invisible on mobile: the tab is always visible in
+      // use, and iOS freezes JS on background so the hidden-tab reload often
+      // never fires — clients sat versions behind with no signal. Surface an
+      // actionable banner instead; the hidden-tab auto-reload path still runs.
       reloadPending = true;
+      showUpdateBanner();
     }
+  }
+  function showUpdateBanner() {
+    if (document.getElementById('update-banner')) return;
+    const b = document.createElement('button');
+    b.id = 'update-banner';
+    b.type = 'button';
+    b.className = 'update-banner';
+    b.textContent = 'A new version is ready — tap to refresh';
+    b.addEventListener('click', () => {
+      refreshing = true;
+      location.reload();
+    });
+    document.body.appendChild(b);
   }
   document.addEventListener('visibilitychange', () => {
     if (reloadPending && document.hidden) tryReload();

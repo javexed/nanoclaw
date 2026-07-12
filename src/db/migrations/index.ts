@@ -46,6 +46,9 @@ import {
   moduleWebchatThreadEngaged,
   moduleWebchatThreadContextSync,
   moduleWebchatMcpServers,
+  moduleWebchatSkillSources,
+  moduleWebchatSkillSourcesOfficial,
+  moduleWebchatDisabledBuiltins,
 } from '../../channels/webchat/migration.js';
 
 export interface Migration {
@@ -107,6 +110,9 @@ export const migrations: Migration[] = [
   moduleWebchatThreadEngaged,
   moduleWebchatThreadContextSync,
   moduleWebchatMcpServers,
+  moduleWebchatSkillSources,
+  moduleWebchatSkillSourcesOfficial,
+  moduleWebchatDisabledBuiltins,
 ];
 
 /** Row shape of PRAGMA foreign_key_check. Child rowids are stable across a

@@ -833,3 +833,62 @@ export const moduleWebchatMcpServers: Migration = {
     `);
   },
 };
+
+/**
+ * Editable registry of well-known skill collections (the Skills tab's catalog
+ * sources). Seeded with the two curated defaults; global admins manage the
+ * list from Settings. Each row is a GitHub repo location with one skill
+ * folder per entry under `dir`.
+ */
+export const moduleWebchatSkillSources: Migration = {
+  version: 120,
+  name: 'webchat-skill-sources',
+  up(db: Database.Database) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS webchat_skill_sources (
+        id         TEXT PRIMARY KEY,
+        label      TEXT NOT NULL,
+        owner      TEXT NOT NULL,
+        repo       TEXT NOT NULL,
+        branch     TEXT NOT NULL,
+        dir        TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+    `);
+    const now = Date.now();
+    const seed = db.prepare(
+      `INSERT OR IGNORE INTO webchat_skill_sources (id, label, owner, repo, branch, dir, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    seed.run('anthropic', 'Anthropic (official)', 'anthropics', 'skills', 'main', 'skills', now);
+    seed.run('superpowers', 'Superpowers (community)', 'obra', 'superpowers', 'main', 'skills', now);
+  },
+};
+
+/**
+ * Two-tier trust for skill collections: `official` marks curated, first-party
+ * sources (Anthropic) that get a direct-add UX; everything else — Superpowers
+ * and any admin-added collection — is community (review link + confirm gate).
+ */
+export const moduleWebchatSkillSourcesOfficial: Migration = {
+  version: 121,
+  name: 'webchat-skill-sources-official',
+  up(db: Database.Database) {
+    const hasCol = (db.prepare("PRAGMA table_info('webchat_skill_sources')").all() as Array<{ name: string }>).some(
+      (c) => c.name === 'official',
+    );
+    if (!hasCol) db.exec('ALTER TABLE webchat_skill_sources ADD COLUMN official INTEGER NOT NULL DEFAULT 0');
+    db.prepare("UPDATE webchat_skill_sources SET official = 1 WHERE id = 'anthropic'").run();
+  },
+};
+
+// Records which CODE-WIRED built-in sources (the awesomeskill.ai marketplace)
+// an owner has switched off, so they can be removed from the pool like any GitHub
+// collection. Absence = enabled; a row = disabled.
+export const moduleWebchatDisabledBuiltins: Migration = {
+  version: 122,
+  name: 'webchat-disabled-builtins',
+  up(db: Database.Database) {
+    db.exec('CREATE TABLE IF NOT EXISTS webchat_disabled_sources (id TEXT PRIMARY KEY)');
+  },
+};

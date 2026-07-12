@@ -868,6 +868,7 @@ body {
 /* Messages */
 #messages {
   flex: 1;
+  min-height: 0; /* scroller recipe — see DESIGN.md "Scroll containment" */
   overflow-y: auto;
   padding: 16px 20px;
   display: flex;
@@ -1412,7 +1413,12 @@ button:focus-visible {
   }
   #sidebar {
     width: 100%;
-    flex-shrink: 0;
+    /* Fill the 100dvh app column and let #room-list scroll internally.
+       flex-shrink:0 let the nav grow to its content (every room), overflowing
+       the shell and making the DOCUMENT the scroller — so overlays sat on a
+       scrollable page and every gesture chained to "the interface behind". */
+    flex: 1;
+    min-height: 0;
     border-right: none;
     border-bottom: 1px solid var(--border);
   }
@@ -1425,9 +1431,15 @@ button:focus-visible {
   #app.in-room #sidebar {
     display: none;
   }
+  /* min-height:0 on every #app-column child is LOAD-BEARING: without it the
+     flex item grows to its content (a long room made #chat ~17,000px tall),
+     its inner scroller never overflows, and — with the document shell locked
+     (html/body overflow:hidden) — NOTHING scrolls: the app reads as frozen.
+     Pre-lock this failure was masked by the page itself scrolling. */
   #app.in-room #chat {
     display: flex;
     flex: 1;
+    min-height: 0;
   }
   #app.in-room #dashboard {
     display: none;
@@ -1440,6 +1452,7 @@ button:focus-visible {
   #app.detail-open #chat {
     display: flex;
     flex: 1;
+    min-height: 0;
   }
 
   /* Dashboard mode on mobile */
@@ -1449,6 +1462,7 @@ button:focus-visible {
   #app.in-dashboard #dashboard {
     display: flex;
     flex: 1;
+    min-height: 0;
   }
   #app.in-dashboard #chat {
     display: none;
@@ -1811,6 +1825,21 @@ a.lightbox-btn {
   to {
     transform: rotate(360deg);
   }
+}
+/* Shared inline busy spinner — a small ring in the current text color, for
+   "doing something" states that live inline: a busy button ("Probing…",
+   "Saving…") or an in-list loader ("Loading catalog…", "Searching…"). The
+   signal sits ON the control or row that's working, never in a toast. */
+.btn-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 7px;
+  vertical-align: -1px;
+  border: 2px solid color-mix(in srgb, currentColor 35%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: lightbox-spin 0.8s linear infinite;
 }
 .file-info {
   display: flex;
@@ -2938,6 +2967,37 @@ a.lightbox-btn {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
 }
+/* Skills picker — reuses .agent-mcp-info/name/meta for the label + description. */
+.agent-skills-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.agent-skills-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.agent-skill-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.agent-skill-row .agent-mcp-info {
+  flex: 1;
+}
+.agent-skill-toggle {
+  flex-shrink: 0;
+  cursor: pointer;
+}
 .agent-mcp-info {
   display: flex;
   flex-direction: column;
@@ -3334,6 +3394,19 @@ a.lightbox-btn {
 .manage-tabs {
   display: flex;
   gap: 4px;
+  /* Five tabs no longer fit a phone width — let the bar swipe horizontally
+     (scrollbar hidden) instead of clipping "Auto routing" off the edge. */
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  min-width: 0;
+}
+.manage-tabs::-webkit-scrollbar {
+  display: none;
+}
+.manage-tab {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .manage-tab {
   background: none;
@@ -3592,6 +3665,20 @@ a.lightbox-btn {
   flex-direction: column;
   min-width: 0;
 }
+/* Master–detail: when a settings drawer is open over the topology (desktop, a
+   420px right-side panel), shift the whole view left by the drawer width so the
+   Agents/Models columns aren't hidden under it. The SVG is width:100% and
+   scales to its canvas, so the graph reflows into the narrower area — visible
+   beside the drawer, with the focus-dimming still tracing the clicked node.
+   Mobile drawers are full-screen (a clean back-navigation), so no shift there. */
+@media (min-width: 601px) {
+  #app.detail-open #topology {
+    margin-right: min(420px, 100vw);
+  }
+  #topology {
+    transition: margin-right var(--transition);
+  }
+}
 #topology[hidden] {
   display: none;
 }
@@ -3638,6 +3725,31 @@ a.lightbox-btn {
 .topo-edge {
   stroke: color-mix(in srgb, var(--accent) 35%, var(--border));
   stroke-width: 1.5;
+  transition: opacity var(--transition);
+}
+/* Focus filter: dim everything not connected to the focused node (see
+   applyTopoFocus). Nodes fade to a faint ghost; edges fade further so the
+   focused subgraph reads clearly. .topo-node already transitions. */
+.topo-node.topo-dimmed {
+  opacity: 0.14;
+}
+.topo-edge.topo-dimmed {
+  opacity: 0.07;
+}
+.topo-focus-pill {
+  padding: 2px 10px;
+  font-size: var(--fs-xs);
+  color: var(--text);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: var(--transition);
+}
+.topo-focus-pill:hover {
+  background: var(--surface3, var(--surface2));
+  border-color: var(--accent);
 }
 .topo-node circle {
   fill: var(--surface2);
@@ -4296,6 +4408,203 @@ a.lightbox-btn {
   padding: 8px 0;
   flex: 1;
   overflow-y: auto;
+}
+/* ── Skills registry tab ─────────────────────────────────────────────────── */
+.skills-import {
+  display: flex;
+  gap: 8px;
+}
+#skill-import-url {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+}
+.skills-import-hint {
+  margin: 8px 0 12px;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+#skills-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* The pane's scroller: without flex:1 + min-height:0 the list outgrows the
+     flex-column pane and touch scrolling chains to the surface behind it. */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.skills-empty {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  padding: 8px 2px;
+}
+.skill-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.skill-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.skill-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.skill-name {
+  font-weight: 600;
+}
+.skill-badge {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.skill-badge-user {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+/* Provenance badges carry paths/domains ("obra/superpowers", "awesomeskill.ai"),
+   which read better in normal case than the uppercased status badges. Each
+   collection gets its own colour from a hue set inline (--badge-hue); the
+   lightness is theme-aware so it stays legible on either background. */
+.skill-badge-origin {
+  --badge-hue: 210;
+  --badge-l: 66%;
+  text-transform: none;
+  letter-spacing: normal;
+  color: hsl(var(--badge-hue) 85% var(--badge-l));
+  border-color: hsl(var(--badge-hue) 70% var(--badge-l) / 0.55);
+  background: hsl(var(--badge-hue) 70% var(--badge-l) / 0.14);
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0; /* keep the badge whole; let a long skill name wrap instead */
+  text-decoration: none;
+  cursor: pointer;
+}
+a.skill-badge-origin:hover {
+  text-decoration: underline;
+}
+@media (prefers-color-scheme: light) {
+  .skill-badge-origin {
+    --badge-l: 40%;
+  }
+}
+:root[data-theme='dark'] .skill-badge-origin {
+  --badge-l: 66%;
+}
+:root[data-theme='light'] .skill-badge-origin {
+  --badge-l: 40%;
+}
+/* Official (Anthropic) ignores the per-collection hue — fixed green. */
+.skill-badge-official {
+  color: var(--accent2-strong);
+  border-color: var(--accent2);
+  background: color-mix(in srgb, var(--accent2) 14%, transparent);
+}
+.skill-desc {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.skill-delete {
+  flex-shrink: 0;
+  font-size: var(--fs-xs);
+  color: var(--delete-color, #e5484d);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: var(--transition);
+}
+.skill-delete:hover {
+  border-color: var(--delete-color, #e5484d);
+}
+#skills-browse {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+#skills-browse[hidden] {
+  display: none; /* display:flex beats the UA [hidden] rule — re-assert it */
+}
+#skills-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  flex: 1;
+}
+#skills-editor[hidden] {
+  display: none;
+}
+.skills-editor-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+#skill-editor-name {
+  flex: 0 1 280px;
+  padding: 7px 10px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+#skill-editor-name[readonly] {
+  color: var(--text-dim);
+  border-color: transparent;
+  background: transparent;
+  font-weight: 600;
+}
+#skill-editor-content {
+  flex: 1;
+  min-height: 260px;
+  resize: none;
+  padding: 10px 12px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+#skill-editor-content[readonly] {
+  color: var(--text-dim);
+}
+.skills-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 #model-list li,
 #route-list li,
@@ -6542,4 +6851,243 @@ a.lightbox-btn {
 }
 .agent-session-reset {
   flex: none;
+}
+
+/* ── PWA scroll containment ─────────────────────────────────────────────────
+   Every internal scroller must trap its own overscroll: without this, reaching
+   the end of a list chains the gesture to the surface behind it (overlays
+   scroll the chat, the chat rubber-bands the app shell) — most visible in the
+   installed PWA. One grouped rule for every overflow-y container; new scrollers
+   should be added here. `contain` keeps in-container physics but stops
+   propagation; html/body get `none` to kill app-shell rubber-banding entirely. */
+html,
+body {
+  overscroll-behavior: none;
+  /* Shell lock: the app is a fixed 100dvh flex layout — the document must
+     never be a scroller. iOS ignores root overscroll-behavior in standalone
+     PWAs, so a scrollable document = gestures drag the whole shell ("the
+     interface behind moves"). All scrolling happens in internal containers. */
+  overflow: hidden;
+}
+.search-results,
+#room-list,
+#agent-list,
+#messages,
+.msg .thoughts-body,
+#message-input,
+.file-preview,
+.thinking-bubble.expanded .thinking-fulltrace,
+.thread-switcher,
+.members-panel,
+.room-create-agent-checklist,
+.manage-pane > ul,
+.modal,
+.dash-body,
+#dash-detail-body,
+.mention-popover,
+#mcp-list,
+#skills-list,
+#skill-editor-content,
+.model-probe-list,
+.model-picker-body,
+.approvals-banner-list,
+.perms-user-list,
+.perms-detail-body,
+.routing-body,
+.routing-decisions-list,
+.routing-subpane,
+.slash-menu,
+.topology-canvas {
+  overscroll-behavior: contain;
+}
+
+/* Update-ready banner: a new service worker has taken over but an auto-reload
+   wasn't safe (visible tab / draft in the composer). One tap applies it. */
+.update-banner {
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 0px) + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1200;
+  padding: 7px 14px;
+  background: var(--surface2);
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  transition: var(--transition);
+}
+.update-banner:hover {
+  background: var(--surface3, var(--surface2));
+}
+
+/* ── Skills add view (catalog + URL import) ─────────────────────────────── */
+#skills-add {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  flex: 1;
+}
+#skills-add[hidden] {
+  display: none;
+}
+#skills-catalog-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.skill-catalog-add {
+  flex-shrink: 0;
+  padding: 3px 14px;
+}
+
+/* ── Skill-collection settings + create-form suggestions ─────────────────── */
+.skill-sources-list {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.skill-source-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.skill-source-row .skill-info {
+  flex: 1;
+  min-width: 0;
+}
+/* A built-in source switched off: dim it but keep it listed (its badge stays
+   full-colour so you can still tell which collection it is). */
+.skill-source-row.source-disabled .skill-desc {
+  opacity: 0.6;
+}
+.skill-source-form {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.skill-source-form input {
+  flex: 1;
+  min-width: 120px;
+  padding: 7px 10px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+}
+#skill-source-url {
+  flex: 2 1 220px;
+}
+.agent-create-skills-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.agent-create-skill-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.agent-create-skill-row .skill-info {
+  flex: 1;
+  min-width: 0;
+}
+.agent-create-skill-check {
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+/* ── Install-row pattern (Settings) — name left, Install button or green ✓
+   Installed badge right. Reusable for future installable features. ────────── */
+.install-row {
+  display: flex;
+  /* .setting-group is a flex COLUMN — force the row axis back. */
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+/* .btn's display:inline-flex (author origin) beats the UA [hidden] rule, so a
+   hidden Install button still rendered. Re-assert hidden inside the row. */
+.install-row [hidden] {
+  display: none !important;
+}
+.install-badge {
+  display: inline-flex;
+  align-items: center;
+  color: var(--success);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+.install-badge .icon {
+  stroke: var(--success);
+}
+
+/* ── Skills discovery (community search) ────────────────────────────────── */
+#skill-discover-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 12px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+}
+#skill-discover-search[hidden] {
+  display: none;
+}
+#skills-catalog[hidden] {
+  display: none;
+}
+#skills-catalog {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  flex: 1;
+}
+.skills-warn {
+  margin: 0;
+  padding: 6px 10px;
+  font-size: var(--fs-xs);
+  color: var(--warning, #d29922);
+  border: 1px solid var(--warning, #d29922);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--warning, #d29922) 8%, transparent);
+}
+.skill-review {
+  flex-shrink: 0;
+  font-size: var(--fs-xs);
+  color: var(--accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.skill-review:hover {
+  text-decoration: underline;
 }

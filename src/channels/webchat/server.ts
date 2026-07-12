@@ -67,6 +67,7 @@ import {
 } from 'http';
 import { createServer as createHttpsServer } from 'https';
 import { createHash, randomUUID } from 'crypto';
+import zlib from 'node:zlib';
 import { execFile } from 'child_process';
 import fs from 'fs';
 import os from 'os';
@@ -226,10 +227,16 @@ import {
   unassignModelFromAgent,
   unwireAgentFromWebchatRoom,
   updateWebchatModel,
+  listSkillSources,
+  upsertSkillSource,
+  deleteSkillSource,
+  isSourceDisabled,
+  setSourceDisabled,
   type FileMeta,
   type WebchatModel,
   type WebchatModelKind,
   type WebchatRoomAgent,
+  type WebchatSkillSource,
 } from './db.js';
 import { DraftError, draftAgent } from './drafter.js';
 import {
@@ -1543,6 +1550,111 @@ async function handleHttp(
     return setAgentMcpHandler(req, res, group.id);
   }
 
+  // ── Skills (per-agent capability toggles) ──────────────────────────────
+  // Available skills = the folders in container/skills (bind-mounted read-only
+  // into every container); each agent's container config picks which it gets.
+  if (url.pathname === '/api/skills' && method === 'GET') {
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
+    return json(res, 200, { skills: listAvailableSkills() });
+  }
+  // Import a skill from a GitHub folder URL into data/user-skills (no rebuild).
+  // Owner/global-admin only: an imported skill lands in a shared mount that fans
+  // out to every 'all' agent install-wide, so importing code is an install-wide
+  // trust action (same bar as the source registry), NOT a per-group one — a
+  // scoped admin of one group must not be able to inject code into others'.
+  if (url.pathname === '/api/skills/import' && method === 'POST') {
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    return importSkillHandler(req, res);
+  }
+  // One merged pool of skills for a trust tier (official = Anthropic; community =
+  // every community GitHub collection + the awesomeskill.ai marketplace). `q`
+  // filters/searches the pool. Community results are unvetted — the UI warns +
+  // gates import behind a review confirm.
+  if (url.pathname === '/api/skills/catalog' && method === 'GET') {
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
+    return catalogPoolHandler(res, url.searchParams.get('tier') || 'official', url.searchParams.get('q') || '');
+  }
+  // Suggest skills (installed + catalogs) matching a new agent's description.
+  if (url.pathname === '/api/skills/suggest' && method === 'GET') {
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
+    return suggestSkillsHandler(res, url.searchParams.get('text') || '');
+  }
+  // Catalog-source registry: list is admin-visible; changes are global-admin
+  // only ("well-known sites" are an install-wide trust decision).
+  // NOTE: these literal routes must stay ABOVE the /api/skills/:name matcher.
+  if (url.pathname === '/api/skills/sources' && method === 'GET') {
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
+    // `sources` = editable GitHub collections; `builtins` = code-wired sources
+    // that also feed the pool but have nothing to edit (the marketplace).
+    return json(res, 200, {
+      sources: listSkillSources(),
+      builtins: [
+        {
+          id: MARKETPLACE_ID,
+          label: SKILL_DISCOVERY_SOURCE.name,
+          url: SKILL_DISCOVERY_SOURCE.url,
+          disabled: isSourceDisabled(MARKETPLACE_ID),
+        },
+      ],
+    });
+  }
+  const skillSourceMatch = url.pathname.match(/^\/api\/skills\/sources\/([^/]+)$/);
+  if (skillSourceMatch && (method === 'PUT' || method === 'DELETE')) {
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const sourceId = decodeURIComponent(skillSourceMatch[1]);
+    // Built-in marketplace: there's nothing in the DB to edit/delete — DELETE
+    // switches it off (removed from the pool), PUT switches it back on.
+    if (sourceId === MARKETPLACE_ID) {
+      setSourceDisabled(MARKETPLACE_ID, method === 'DELETE');
+      return json(res, 200, { ok: true });
+    }
+    if (method === 'PUT') return putSkillSourceHandler(req, res, sourceId);
+    catalogCache.delete(sourceId);
+    return deleteSkillSource(sourceId)
+      ? json(res, 200, { ok: true })
+      : json(res, 404, { error: 'Source not found' });
+  }
+  // Delete a user skill (imported/uploaded). Shipped skills can't be removed.
+  // Read / write / delete a single skill. GET returns its SKILL.md (any
+  // source); PUT creates or edits a USER skill's SKILL.md (shipped skills are
+  // read-only — they're repo files); DELETE removes a user skill.
+  const skillItemMatch = url.pathname.match(/^\/api\/skills\/([^/]+)$/);
+  if (skillItemMatch && (method === 'GET' || method === 'PUT' || method === 'DELETE')) {
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
+    const skillName = decodeURIComponent(skillItemMatch[1]);
+    if (method === 'GET') return getSkillContentHandler(res, skillName); // viewing is fine for any admin
+    // Writing a skill (create/edit/delete) introduces code that fans out to every
+    // 'all' agent install-wide → owner/global-admin only, like import.
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (method === 'PUT') return putUserSkillHandler(req, res, skillName);
+    return deleteUserSkillHandler(res, skillName);
+  }
+  const agentSkillsMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/skills$/);
+  if (agentSkillsMatch && (method === 'GET' || method === 'PUT')) {
+    const group = resolveAgent(decodeURIComponent(agentSkillsMatch[1]));
+    if (!group) return json(res, 404, { error: 'Agent not found' });
+    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+    if (method === 'GET') {
+      const available = listAvailableSkills();
+      // getContainerConfig returns the raw row — skills is a JSON string ("all"
+      // or a name array), so parse it (configFromDb does the same).
+      let sel: string[] | 'all' = 'all';
+      try {
+        const rawSkills = getContainerConfig(group.id)?.skills;
+        if (rawSkills != null) sel = JSON.parse(rawSkills) as string[] | 'all';
+      } catch {
+        sel = 'all';
+      }
+      const enabled = sel === 'all' ? available.map((s) => s.name) : sel;
+      return json(res, 200, { available, enabled });
+    }
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    return setAgentSkillsHandler(req, res, group.id);
+  }
+
   // ── Lifecycle status (active | paused | archived) ──────────────────────
   const agentStatusMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/status$/);
   if (agentStatusMatch && method === 'PUT') {
@@ -2097,6 +2209,44 @@ export function computeSwCacheVersion(publicDir: string): string {
   return 'nanoclaw-chat-' + hash.digest('hex').slice(0, 12);
 }
 
+// Text assets we compress before sending. Images (png/jpg/webp/ico) are already
+// compressed — running them through gzip/brotli wastes CPU for ~0% gain.
+const COMPRESSIBLE_EXT = new Set(['.html', '.js', '.css', '.json', '.svg', '.txt', '.md', '.webmanifest', '.map']);
+
+// In-memory asset cache keyed by path → { raw, per-encoding compressed, etag }.
+// Invalidated by (mtimeMs, size): a redeploy that rewrites the file re-reads +
+// re-compresses on the next request; unchanged files serve from memory, so we
+// stop hitting the disk and stop re-compressing the same 400KB bundle per load.
+type CachedAsset = { mtimeMs: number; size: number; etag: string; raw: Buffer; gzip?: Buffer; br?: Buffer };
+const assetCache = new Map<string, CachedAsset>();
+
+function loadAsset(filePath: string): CachedAsset {
+  const st = fs.statSync(filePath);
+  const hit = assetCache.get(filePath);
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit;
+  const raw = fs.readFileSync(filePath);
+  const etag = '"' + createHash('sha256').update(raw).digest('hex').slice(0, 16) + '"';
+  const entry: CachedAsset = { mtimeMs: st.mtimeMs, size: st.size, etag, raw };
+  assetCache.set(filePath, entry);
+  return entry;
+}
+
+// Pick the best encoding the client accepts (brotli > gzip > identity), but only
+// for compressible types. Compressed bytes are memoized on the cache entry so a
+// given asset version is compressed at most once per encoding.
+function encodedBody(entry: CachedAsset, accept: string, compressible: boolean): { body: Buffer; encoding?: string } {
+  if (!compressible) return { body: entry.raw };
+  if (/\bbr\b/.test(accept)) {
+    entry.br ??= zlib.brotliCompressSync(entry.raw, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 6 } });
+    return { body: entry.br, encoding: 'br' };
+  }
+  if (/\bgzip\b/.test(accept)) {
+    entry.gzip ??= zlib.gzipSync(entry.raw, { level: 6 });
+    return { body: entry.gzip, encoding: 'gzip' };
+  }
+  return { body: entry.raw };
+}
+
 function servePwa(req: IncomingMessage, res: ServerResponse, publicDir: string): boolean {
   let urlPath = req.url?.split('?')[0] ?? '/';
   if (urlPath === '/') urlPath = '/index.html';
@@ -2111,25 +2261,52 @@ function servePwa(req: IncomingMessage, res: ServerResponse, publicDir: string):
   const basename = path.basename(filePath);
   const contentType =
     basename === 'manifest.json' ? 'application/manifest+json' : STATIC_MIME[ext] || 'application/octet-stream';
+  const accept = (req.headers['accept-encoding'] as string) || '';
+  const compressible = COMPRESSIBLE_EXT.has(ext);
   // sw.js carries a `__CACHE_VERSION__` placeholder; substitute the derived
-  // asset hash so the service worker's cache name tracks asset content.
+  // asset hash so the service worker's cache name tracks asset content. Its body
+  // is computed per request (infrequent), so compress inline without caching.
   if (basename === 'sw.js') {
-    const body = fs.readFileSync(filePath, 'utf8').replace('__CACHE_VERSION__', computeSwCacheVersion(publicDir));
-    res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'no-cache' });
+    const raw = Buffer.from(
+      fs.readFileSync(filePath, 'utf8').replace('__CACHE_VERSION__', computeSwCacheVersion(publicDir)),
+    );
+    const headers: Record<string, string> = { 'Content-Type': contentType, 'Cache-Control': 'no-cache' };
+    let body = raw;
+    if (/\bbr\b/.test(accept)) {
+      body = zlib.brotliCompressSync(raw, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 6 } });
+      headers['Content-Encoding'] = 'br';
+    } else if (/\bgzip\b/.test(accept)) {
+      body = zlib.gzipSync(raw, { level: 6 });
+      headers['Content-Encoding'] = 'gzip';
+    }
+    if (headers['Content-Encoding']) headers['Vary'] = 'Accept-Encoding';
+    res.writeHead(200, headers);
     res.end(body);
     return true;
   }
-  // `no-cache` = browser MAY cache but must revalidate before reuse. Without
-  // this we sent no caching headers; both the browser and any reverse proxy
-  // in front (Azure App Service, Cloudflare, nginx) happily held stale
-  // CSS/JS/HTML across deploys, breaking PWA updates. The SW's network-first
-  // path benefits from this immediately; cache-first served assets still
-  // need an SW reinstall (bump the CACHE constant in sw.js) to evict.
-  res.writeHead(200, {
+  // `no-cache` = browser MAY cache but must revalidate before reuse — deliberate:
+  // it stops browsers and reverse proxies (Azure App Service, Cloudflare, nginx)
+  // holding stale CSS/JS/HTML across deploys. The content-hash ETag makes that
+  // revalidation cheap: an unchanged asset gets a 304 (empty body) instead of
+  // re-downloading. Freshness across deploys is owned by the SW cache version.
+  const entry = loadAsset(filePath);
+  if (req.headers['if-none-match'] === entry.etag) {
+    res.writeHead(304, { ETag: entry.etag, 'Cache-Control': 'no-cache' });
+    res.end();
+    return true;
+  }
+  const { body, encoding } = encodedBody(entry, accept, compressible);
+  const headers: Record<string, string> = {
     'Content-Type': contentType,
     'Cache-Control': 'no-cache',
-  });
-  res.end(fs.readFileSync(filePath));
+    ETag: entry.etag,
+  };
+  if (encoding) {
+    headers['Content-Encoding'] = encoding;
+    headers['Vary'] = 'Accept-Encoding';
+  }
+  res.writeHead(200, headers);
+  res.end(body);
   return true;
 }
 
@@ -4192,7 +4369,676 @@ async function probeMcpServerHandler(req: IncomingMessage, res: ServerResponse):
   }
 }
 
-/** The agent panel's list: which registry servers are attached to this agent. */
+// Available skills = folders containing a SKILL.md across BOTH mounts: the
+// shipped container/skills and the runtime data/user-skills (imported/uploaded).
+// The dir name is the id used in the config + symlinks; the front-matter
+// `description` is shown in the picker. Shipped wins on a name collision.
+const USER_SKILLS_DIR = path.join(process.cwd(), 'data', 'user-skills');
+
+// Provenance recorded at import time in a `.origin.json` sidecar inside the
+// skill folder, so the installed list can show where each skill came from
+// ("Anthropic", "obra/superpowers", "awesomeskill.ai", …) long after import.
+// A sidecar (not front-matter) keeps it out of the agent-facing SKILL.md and
+// self-cleans when the skill folder is deleted.
+type SkillOrigin = { label: string; url?: string; official?: boolean };
+function sanitizeOrigin(input: unknown): SkillOrigin | null {
+  if (!input || typeof input !== 'object') return null;
+  const o = input as Record<string, unknown>;
+  const label = String(o.label ?? '').trim().slice(0, 60);
+  if (!label) return null;
+  const u = String(o.url ?? '').trim();
+  const url = /^https:\/\/\S+$/i.test(u) && u.length <= 300 ? u : undefined;
+  return { label, url, official: !!o.official };
+}
+function readSkillOrigin(skillDir: string): SkillOrigin | null {
+  try {
+    return sanitizeOrigin(JSON.parse(fs.readFileSync(path.join(skillDir, '.origin.json'), 'utf8')));
+  } catch {
+    return null;
+  }
+}
+
+type AvailableSkill = { name: string; description: string; source: 'shipped' | 'user'; origin?: SkillOrigin | null };
+function listAvailableSkills(): AvailableSkill[] {
+  const roots: Array<{ dir: string; source: 'shipped' | 'user' }> = [
+    { dir: path.join(process.cwd(), 'container', 'skills'), source: 'shipped' },
+    { dir: USER_SKILLS_DIR, source: 'user' },
+  ];
+  const out: AvailableSkill[] = [];
+  const seen = new Set<string>();
+  for (const { dir, source } of roots) {
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (seen.has(entry)) continue; // shipped already claimed this name
+      try {
+        const skillDir = path.join(dir, entry);
+        if (!fs.statSync(skillDir).isDirectory()) continue;
+        const text = fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8');
+        const fm = text.match(/^---\s*\n([\s\S]*?)\n---/);
+        out.push({
+          name: entry,
+          description: fm ? frontMatterDescription(fm[1]) : '',
+          source,
+          origin: source === 'user' ? readSkillOrigin(skillDir) : null,
+        });
+        seen.add(entry);
+      } catch {
+        continue; // no SKILL.md → not a skill
+      }
+    }
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function sanitizeSkillName(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64);
+}
+
+// fetch() that retries once on a 5xx or network error — GitHub's gateway
+// returns transient 502s under load, which shouldn't fail a whole import.
+async function githubFetch(url: string, headers: Record<string, string>): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const r = await fetch(url, { headers, signal: AbortSignal.timeout(12000) });
+      if (r.status >= 500 && r.status < 600 && attempt < 1) {
+        await new Promise((res) => setTimeout(res, 600));
+        continue;
+      }
+      return r;
+    } catch (err) {
+      if (attempt < 1) {
+        await new Promise((res) => setTimeout(res, 600));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+// Recursively fetch a GitHub folder via the contents API. Input is host-locked
+// to github.com (parsed by the caller); the API + download_urls only reach
+// github's own hosts, so there's no SSRF surface. Capped in files + bytes.
+async function fetchGithubDir(
+  owner: string,
+  repo: string,
+  branch: string,
+  dirPath: string,
+): Promise<Array<{ rel: string; content: Buffer }>> {
+  const MAX_FILES = 60;
+  const MAX_BYTES = 8 * 1024 * 1024;
+  const base = dirPath.replace(/\/+$/, '');
+  // Walk the tree first (serial — each level needs its parent listing), then
+  // download contents in parallel: script-heavy skills (xlsx: 54 files) took
+  // ~10s serial, ~2s parallel.
+  const files: Array<{ rel: string; download_url: string }> = [];
+  let totalBytes = 0;
+  async function walk(p: string): Promise<void> {
+    const api = `https://api.github.com/repos/${owner}/${repo}/contents/${encodeURI(p)}?ref=${encodeURIComponent(branch)}`;
+    const r = await githubFetch(api, { 'User-Agent': 'nanoclaw', Accept: 'application/vnd.github+json' });
+    if (!r.ok) throw new Error(`GitHub API ${r.status}`);
+    const items = (await r.json()) as Array<{ type: string; path: string; download_url: string | null; size: number }>;
+    if (!Array.isArray(items)) throw new Error('That URL is a file, not a folder');
+    for (const it of items) {
+      if (files.length >= MAX_FILES) throw new Error(`Too many files (>${MAX_FILES})`);
+      if (it.type === 'dir') {
+        await walk(it.path);
+      } else if (it.type === 'file' && it.download_url) {
+        totalBytes += it.size || 0;
+        if (totalBytes > MAX_BYTES) throw new Error('Skill exceeds 8MB');
+        files.push({ rel: it.path.slice(base.length).replace(/^\/+/, ''), download_url: it.download_url });
+      }
+    }
+  }
+  await walk(base);
+  return Promise.all(
+    files.map(async (f) => {
+      const fr = await githubFetch(f.download_url, { 'User-Agent': 'nanoclaw' });
+      if (!fr.ok) throw new Error(`Download ${fr.status}`);
+      return { rel: f.rel, content: Buffer.from(await fr.arrayBuffer()) };
+    }),
+  );
+}
+
+// Skill collections (each a GitHub repo with one skill folder per entry under
+// `dir`). The registry lives in webchat_skill_sources (seeded by migration 120,
+// managed by global admins from Settings). Listing goes through the GitHub API
+// (1 call); descriptions come from raw.githubusercontent (not API-rate-limited).
+// Cached for an hour — catalogs change rarely and the API allows 60/hr.
+const catalogCache = new Map<string, { at: number; skills: Array<{ name: string; description: string; url: string }> }>();
+
+// Fetch (or serve cached) the skill list for one source row. Throws only when
+// there's no cache to fall back on.
+async function loadCatalog(src: WebchatSkillSource): Promise<Array<{ name: string; description: string; url: string }>> {
+  let entry = catalogCache.get(src.id);
+  if (!entry || Date.now() - entry.at > 3600_000) {
+    try {
+      // Walk the repo tree once and take EVERY folder that contains a SKILL.md
+      // at any depth under `dir` (empty dir = whole repo). This lets a collection
+      // be a repo root, a single folder, or skills nested under category folders
+      // (e.g. letta-ai/skills → letta/*, meta/*, tools/*) — not just one flat dir.
+      const treeApi = `https://api.github.com/repos/${src.owner}/${src.repo}/git/trees/${src.branch}?recursive=1`;
+      const r = await fetch(treeApi, {
+        headers: { 'User-Agent': 'nanoclaw', Accept: 'application/vnd.github+json' },
+        signal: AbortSignal.timeout(12000),
+      });
+      if (!r.ok) throw new Error(`GitHub API ${r.status}`);
+      const tree = ((await r.json()) as { tree?: Array<{ path: string; type: string }> }).tree || [];
+      const prefix = src.dir && src.dir !== '.' ? src.dir.replace(/^\/+|\/+$/g, '') + '/' : '';
+      const seen = new Set<string>();
+      const folders: Array<{ folder: string; name: string }> = [];
+      for (const t of tree) {
+        if (t.type !== 'blob' || !t.path.endsWith('/SKILL.md')) continue;
+        if (prefix && !t.path.startsWith(prefix)) continue;
+        const folder = t.path.slice(0, -'/SKILL.md'.length);
+        const name = sanitizeSkillName(folder.split('/').pop() || '');
+        if (!name || seen.has(name)) continue; // first wins on a leaf-name collision
+        seen.add(name);
+        folders.push({ folder, name });
+      }
+      const skills = await Promise.all(
+        folders.slice(0, 100).map(async ({ folder, name }) => {
+          // description is best-effort
+          let description = '';
+          try {
+            const raw = await fetch(
+              `https://raw.githubusercontent.com/${src.owner}/${src.repo}/${src.branch}/${folder}/SKILL.md`,
+              { headers: { 'User-Agent': 'nanoclaw' }, signal: AbortSignal.timeout(8000) },
+            );
+            if (raw.ok) {
+              const fm = (await raw.text()).match(/^---\s*\n([\s\S]*?)\n---/);
+              if (fm) description = frontMatterDescription(fm[1]);
+            }
+          } catch {
+            /* best-effort */
+          }
+          return { name, description, url: `https://github.com/${src.owner}/${src.repo}/tree/${src.branch}/${folder}` };
+        }),
+      );
+      entry = { at: Date.now(), skills };
+      catalogCache.set(src.id, entry);
+    } catch (err) {
+      // Serve a stale cache over an error if we have one.
+      if (!entry) throw err;
+    }
+  }
+  return entry.skills;
+}
+
+// The awesomeskill.ai marketplace — the ONE allowlisted discovery host, a
+// community source pooled alongside the GitHub collections. Public, read-only.
+const SKILL_DISCOVERY_URL = 'https://awesomeskill.ai/api/agent/skills/search';
+const SKILL_DISCOVERY_SOURCE = { name: 'awesomeskill.ai', url: 'https://awesomeskill.ai' };
+// Stable id for the code-wired marketplace, so an owner can switch it off like a
+// GitHub collection (persisted in webchat_disabled_sources).
+const MARKETPLACE_ID = 'awesomeskill';
+
+// Fetch community skills from awesomeskill.ai. Empty query = browse top-by-stars
+// (the default pool); otherwise search. Best-effort — returns [] on error so a
+// marketplace outage can't blank the whole pool.
+async function fetchMarketplace(
+  q: string,
+  limit = 25,
+): Promise<Array<{ name: string; title: string; description: string; repo: string; stars: number; reviewUrl: string }>> {
+  const query = q.trim().slice(0, 100);
+  try {
+    const r = await fetch(`${SKILL_DISCOVERY_URL}?q=${encodeURIComponent(query)}&limit=${limit}&sort=stars`, {
+      headers: { 'User-Agent': 'nanoclaw', Accept: 'application/json' },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!r.ok) throw new Error(`Discovery API ${r.status}`);
+    const raw = (await r.json()) as unknown;
+    const rec = raw as { results?: unknown; skills?: unknown; data?: unknown };
+    const items = (Array.isArray(raw) ? raw : rec.results || rec.skills || rec.data || []) as Array<Record<string, unknown>>;
+    return items
+      .map((s) => {
+        const repo = String(s.githubRepo || '').trim();
+        return {
+          name: sanitizeSkillName(String(s.name || '')),
+          title: String(s.name || ''),
+          description: String(s.description || ''),
+          repo,
+          stars: Number(s.githubStars) || 0,
+          // Point Review at the actual code repo (repo is validated owner/repo
+          // below), NOT the marketplace-supplied sourceUrl — that's third-party
+          // controlled and would otherwise reach an <a href> unvalidated.
+          reviewUrl: repo ? `https://github.com/${repo}` : '',
+        };
+      })
+      .filter((s) => s.name && /^[^/]+\/[^/]+$/.test(s.repo));
+  } catch {
+    return [];
+  }
+}
+
+type PoolSkill = {
+  name: string;
+  description: string;
+  origin: SkillOrigin;
+  installed: boolean;
+  review: string; // GitHub URL to review before importing
+  ref: { url: string } | { repo: string; name: string }; // import descriptor
+};
+
+// One merged, deduped pool of skills for a trust tier. Official = the Anthropic
+// collection(s). Community = every community GitHub collection PLUS the
+// awesomeskill.ai marketplace, all badged by origin and treated equally — no
+// collection is privileged. A query filters GitHub collections by substring and
+// searches the marketplace. Curated collections list first, so they win dedup
+// over marketplace copies of the same skill.
+async function catalogPoolHandler(res: ServerResponse, tier: string, q: string): Promise<void> {
+  const wantOfficial = tier === 'official';
+  const query = q.trim();
+  const ql = query.toLowerCase();
+  const installed = new Set(listAvailableSkills().map((s) => s.name));
+  const tierSources = listSkillSources().filter((s) => !!s.official === wantOfficial);
+  const out: PoolSkill[] = [];
+  const seen = new Set<string>();
+  for (const src of tierSources) {
+    let skills: Array<{ name: string; description: string; url: string }>;
+    try {
+      skills = await loadCatalog(src);
+    } catch {
+      continue; // one bad source can't blank the pool
+    }
+    const origin: SkillOrigin = {
+      label: src.official ? src.label.replace(/\s*\((?:official|community)\)\s*$/i, '') : `${src.owner}/${src.repo}`,
+      url: `https://github.com/${src.owner}/${src.repo}`,
+      official: !!src.official,
+    };
+    for (const s of skills) {
+      const name = sanitizeSkillName(s.name);
+      if (!name || seen.has(name)) continue;
+      if (query && !`${name} ${s.description}`.toLowerCase().includes(ql)) continue;
+      seen.add(name);
+      out.push({ name, description: s.description, origin, installed: installed.has(name), review: s.url, ref: { url: s.url } });
+    }
+  }
+  if (!wantOfficial && !isSourceDisabled(MARKETPLACE_ID)) {
+    const origin: SkillOrigin = { label: SKILL_DISCOVERY_SOURCE.name, url: SKILL_DISCOVERY_SOURCE.url, official: false };
+    for (const m of await fetchMarketplace(query)) {
+      if (!m.name || seen.has(m.name)) continue;
+      seen.add(m.name);
+      out.push({ name: m.name, description: m.description, origin, installed: installed.has(m.name), review: m.reviewUrl, ref: { repo: m.repo, name: m.title } });
+    }
+  }
+  // Sort by name so collections interleave — no source is grouped first. (Dedup
+  // above already let curated collections win over marketplace copies.)
+  out.sort((a, b) => a.name.localeCompare(b.name));
+  return json(res, 200, { tier, official: wantOfficial, skills: out });
+}
+
+// Parse a GitHub folder URL into skill-source components (shared by the source
+// editor and validated the same way as skill imports).
+function parseGithubDirUrl(url: string): { owner: string; repo: string; branch: string; dir: string } | null {
+  const m = url
+    .trim()
+    .match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/tree\/([^/]+)\/(.+?)\/?$/);
+  return m ? { owner: m[1], repo: m[2], branch: m[3], dir: m[4] } : null;
+}
+
+// Resolve a source URL into {owner, repo, branch, dir}. Accepts a folder URL
+// (…/tree/branch/dir), a branch URL (…/tree/branch → whole branch), OR a bare
+// repo root (…/owner/repo → default branch, whole repo). loadCatalog walks the
+// tree from `dir`, so an empty dir means "find skills anywhere in the repo".
+async function resolveSourceUrl(url: string): Promise<{ owner: string; repo: string; branch: string; dir: string } | null> {
+  const u = url.trim();
+  const folder = parseGithubDirUrl(u);
+  if (folder) return folder;
+  const branchOnly = u.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/tree\/([^/]+)\/?$/);
+  if (branchOnly) return { owner: branchOnly[1], repo: branchOnly[2], branch: branchOnly[3], dir: '' };
+  const root = u.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
+  if (root) {
+    try {
+      const r = await fetch(`https://api.github.com/repos/${root[1]}/${root[2]}`, {
+        headers: { 'User-Agent': 'nanoclaw', Accept: 'application/vnd.github+json' },
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!r.ok) return null;
+      const branch = ((await r.json()) as { default_branch?: string }).default_branch || 'main';
+      return { owner: root[1], repo: root[2], branch, dir: '' };
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+async function putSkillSourceHandler(req: IncomingMessage, res: ServerResponse, id: string): Promise<void> {
+  const clean = sanitizeSkillName(id);
+  if (!clean) return json(res, 400, { error: 'Invalid source id (a-z, 0-9, hyphens)' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { label?: unknown; url?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  const parsed = await resolveSourceUrl(String(body.url || ''));
+  if (!parsed) {
+    return json(res, 400, {
+      error: 'Expected a GitHub repo or folder URL, e.g. https://github.com/letta-ai/skills',
+    });
+  }
+  // No label needed — name the collection after what it pulls in (owner/repo),
+  // matching its badge everywhere. An explicit label still wins if one's sent.
+  const label = String(body.label || '').trim() || `${parsed.owner}/${parsed.repo}`;
+  // Verify the location actually lists skill folders before saving it. Admin-
+  // added sources are always community (official=false); upsert ignores this
+  // field, but the type requires it.
+  const probe: WebchatSkillSource = { id: clean, label, ...parsed, official: false };
+  catalogCache.delete(clean); // force a fresh fetch on edit
+  try {
+    const skills = await loadCatalog(probe);
+    if (skills.length === 0) return json(res, 422, { error: 'That folder contains no skill directories' });
+  } catch (err) {
+    return json(res, 422, { error: 'Could not list that folder: ' + (err instanceof Error ? err.message : String(err)) });
+  }
+  upsertSkillSource(probe);
+  return json(res, 200, { ok: true, source: { id: clean, label } });
+}
+
+// ── Skill suggestions for a new agent ───────────────────────────────────────
+// Deterministic keyword scoring of the agent's name/description/instructions
+// against installed skills + every catalog source. No LLM dependency: the
+// create form calls this as the operator types, so it must be instant and work
+// on installs with no local model. Synonyms bridge common phrasing gaps
+// ("spreadsheet" → xlsx, "website" → frontend).
+const SKILL_SYNONYMS: Record<string, string[]> = {
+  pdf: ['pdf', 'pdfs', 'document', 'documents', 'form', 'forms'],
+  docx: ['word', 'docx', 'document', 'documents', 'letter', 'report', 'reports'],
+  xlsx: ['excel', 'xlsx', 'spreadsheet', 'spreadsheets', 'csv', 'budget', 'finance', 'financial', 'invoice', 'invoices'],
+  pptx: ['powerpoint', 'pptx', 'presentation', 'presentations', 'slides', 'deck', 'decks'],
+  'frontend-design': ['website', 'websites', 'frontend', 'ui', 'web', 'landing', 'design'],
+  'web-artifacts-builder': ['website', 'webapp', 'web', 'app', 'artifact'],
+  'webapp-testing': ['test', 'testing', 'qa', 'browser', 'e2e'],
+  'mcp-builder': ['mcp', 'integration', 'integrations', 'tool', 'tools', 'server'],
+  'skill-creator': ['skill', 'skills'],
+  'canvas-design': ['poster', 'posters', 'graphic', 'graphics', 'visual', 'design', 'image'],
+  'algorithmic-art': ['art', 'generative', 'creative', 'p5js'],
+  'slack-gif-creator': ['gif', 'gifs', 'slack'],
+  'brand-guidelines': ['brand', 'branding', 'style'],
+  'internal-comms': ['announcement', 'announcements', 'comms', 'communication', 'newsletter'],
+  'doc-coauthoring': ['write', 'writing', 'draft', 'drafting', 'edit', 'editing', 'coauthor'],
+  'agent-browser': ['browse', 'browser', 'web', 'research', 'scrape', 'scraping', 'read', 'news'],
+  'frontend-engineer': ['website', 'websites', 'frontend', 'web', 'react', 'ui'],
+  'vercel-cli': ['deploy', 'deployment', 'vercel', 'ship', 'publish'],
+  brainstorming: ['brainstorm', 'brainstorming', 'ideas', 'ideation', 'creative'],
+  'writing-plans': ['plan', 'plans', 'planning'],
+  'executing-plans': ['plan', 'plans', 'execute', 'workflow'],
+};
+const SUGGEST_STOPWORDS = new Set(
+  'a an and are as at be by for from has have in is it its of on or that the this to use uses using when with you your agent assistant help helps'.split(
+    ' ',
+  ),
+);
+
+function suggestTokens(text: string): Set<string> {
+  return new Set(
+    text
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((t) => t.length > 2 && !SUGGEST_STOPWORDS.has(t)),
+  );
+}
+
+async function suggestSkillsHandler(res: ServerResponse, text: string): Promise<void> {
+  const tokens = suggestTokens(text);
+  if (tokens.size === 0) return json(res, 200, { suggestions: [] });
+  const installed = listAvailableSkills();
+  const installedNames = new Set(installed.map((s) => s.name));
+  // Candidates: installed skills + every catalog entry (cached; a cold cache
+  // fetch can take a couple of seconds on the very first call — fine for a form).
+  const candidates: Array<{ name: string; description: string; source: string; url?: string }> = installed.map(
+    (s) => ({ name: s.name, description: s.description, source: 'installed' }),
+  );
+  for (const src of listSkillSources()) {
+    try {
+      for (const s of await loadCatalog(src)) {
+        if (!installedNames.has(sanitizeSkillName(s.name))) candidates.push({ ...s, source: src.label });
+      }
+    } catch {
+      /* an unreachable catalog must not break suggestions */
+    }
+  }
+  const suggestions = candidates
+    .map((c) => {
+      let score = 0;
+      for (const t of suggestTokens(c.name.replace(/-/g, ' '))) if (tokens.has(t)) score += 3;
+      for (const t of suggestTokens(c.description)) if (tokens.has(t)) score += 1;
+      for (const syn of SKILL_SYNONYMS[c.name] || []) if (tokens.has(syn)) score += 3;
+      return { ...c, score };
+    })
+    .filter((c) => c.score >= 3)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5);
+  return json(res, 200, { suggestions });
+}
+
+// Discovery gives a repo (owner/repo) + skill name, not the folder path. Walk
+// the repo tree once and return the github folder URL of the SKILL.md whose
+// parent dir matches the name — so a discovered skill imports through the same
+// GitHub-only pipeline as a pasted folder URL.
+async function resolveDiscoveredSkillUrl(repoRaw: string, name: string): Promise<string> {
+  const m = repoRaw.trim().match(/(?:github\.com\/)?([^/\s]+)\/([^/\s]+?)(?:\.git)?$/);
+  if (!m) throw new Error('unrecognized repo');
+  const [, owner, repo] = m;
+  const gh = async (p: string) => {
+    const r = await githubFetch(`https://api.github.com/repos/${owner}/${repo}${p}`, {
+      'User-Agent': 'nanoclaw',
+      Accept: 'application/vnd.github+json',
+    });
+    if (!r.ok) throw new Error(`GitHub API ${r.status}`);
+    return r.json();
+  };
+  const branch = ((await gh('')) as { default_branch?: string }).default_branch || 'main';
+  const tree = ((await gh(`/git/trees/${branch}?recursive=1`)) as { tree?: Array<{ path: string; type: string }> }).tree || [];
+  const skillMds = tree.filter((t) => t.type === 'blob' && /(^|\/)SKILL\.md$/i.test(t.path));
+  const want = sanitizeSkillName(name);
+  const parentDir = (p: string) => p.split('/').slice(-2)[0] || '';
+  const match =
+    skillMds.find((t) => sanitizeSkillName(parentDir(t.path)) === want) ||
+    skillMds.find((t) => sanitizeSkillName(parentDir(t.path)).includes(want) && want.length >= 3) ||
+    (skillMds.length === 1 ? skillMds[0] : null);
+  if (!match) throw new Error("couldn't pinpoint the skill folder — open the repo and import the folder URL by hand");
+  const dir = match.path.replace(/\/?SKILL\.md$/i, '');
+  if (!dir) throw new Error('skill lives at the repo root — import the repo URL by hand');
+  return `https://github.com/${owner}/${repo}/tree/${branch}/${dir}`;
+}
+
+async function importSkillHandler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { url?: unknown; repo?: unknown; name?: unknown; origin?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  let url = String(body.url || '').trim();
+  // Discovery import: resolve {repo, name} into a github folder URL first.
+  if (!url && body.repo) {
+    try {
+      url = await resolveDiscoveredSkillUrl(String(body.repo), String(body.name || ''));
+    } catch (err) {
+      return json(res, 422, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  const m = url.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/tree\/([^/]+)\/(.+?)\/?$/);
+  if (!m) {
+    return json(res, 400, {
+      error: 'Expected a GitHub folder URL, e.g. https://github.com/anthropics/skills/tree/main/document-skills/pdf',
+    });
+  }
+  const [, owner, repo, branch, ghPath] = m;
+  // Provenance: trust the client's display label (catalog collection or the
+  // marketplace it was discovered from), but fall back to the git owner/repo —
+  // which is the real code origin and can't be spoofed, since it's parsed from
+  // the fetch URL above.
+  const origin: SkillOrigin = sanitizeOrigin(body.origin) ?? {
+    label: `${owner}/${repo}`,
+    url: `https://github.com/${owner}/${repo}`,
+    official: false,
+  };
+  const skillName = sanitizeSkillName(ghPath.split('/').pop() || '');
+  if (!skillName) return json(res, 400, { error: 'Could not derive a skill name from the URL' });
+  if (fs.existsSync(path.join(process.cwd(), 'container', 'skills', skillName))) {
+    return json(res, 409, { error: `A built-in skill named "${skillName}" already exists` });
+  }
+  let files: Array<{ rel: string; content: Buffer }>;
+  try {
+    files = await fetchGithubDir(owner, repo, branch, ghPath);
+  } catch (err) {
+    return json(res, 502, { error: 'Fetch failed: ' + (err instanceof Error ? err.message : String(err)) });
+  }
+  if (!files.some((f) => f.rel === 'SKILL.md')) {
+    return json(res, 422, { error: 'That folder has no SKILL.md — not an Agent Skill' });
+  }
+  // Stage in a temp dir, then swap into place so a failed import can't leave a
+  // half-written skill.
+  const dest = path.join(USER_SKILLS_DIR, skillName);
+  const staging = `${dest}.importing`;
+  try {
+    fs.rmSync(staging, { recursive: true, force: true });
+    for (const f of files) {
+      const target = path.join(staging, f.rel);
+      if (target !== staging && !target.startsWith(staging + path.sep)) continue; // no traversal
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, f.content);
+    }
+    fs.writeFileSync(path.join(staging, '.origin.json'), JSON.stringify(origin));
+    fs.rmSync(dest, { recursive: true, force: true });
+    fs.renameSync(staging, dest);
+  } catch (err) {
+    fs.rmSync(staging, { recursive: true, force: true });
+    return json(res, 500, { error: 'Write failed: ' + (err instanceof Error ? err.message : String(err)) });
+  }
+  return json(res, 200, { ok: true, name: skillName, files: files.length });
+}
+
+function deleteUserSkillHandler(res: ServerResponse, name: string): void {
+  const clean = sanitizeSkillName(name);
+  if (clean && fs.existsSync(path.join(process.cwd(), 'container', 'skills', clean))) {
+    return json(res, 403, { error: 'Built-in skills cannot be deleted' });
+  }
+  const dir = path.join(USER_SKILLS_DIR, clean);
+  if (!clean || !fs.existsSync(dir)) return json(res, 404, { error: 'Skill not found' });
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+    return json(res, 200, { ok: true });
+  } catch (err) {
+    return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+// Read a skill's SKILL.md (either source) for the viewer/editor.
+function getSkillContentHandler(res: ServerResponse, name: string): void {
+  const clean = sanitizeSkillName(name);
+  if (!clean) return json(res, 404, { error: 'Skill not found' });
+  const shipped = path.join(process.cwd(), 'container', 'skills', clean, 'SKILL.md');
+  const user = path.join(USER_SKILLS_DIR, clean, 'SKILL.md');
+  const file = fs.existsSync(shipped) ? shipped : fs.existsSync(user) ? user : null;
+  if (!file) return json(res, 404, { error: 'Skill not found' });
+  try {
+    return json(res, 200, {
+      name: clean,
+      source: file === shipped ? 'shipped' : 'user',
+      content: fs.readFileSync(file, 'utf8'),
+    });
+  } catch (err) {
+    return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+// Create or edit a USER skill's SKILL.md — the upload/manual-edit path. Only
+// the SKILL.md is writable here; extra files come via GitHub import (or the
+// host filesystem at data/user-skills/<name>/). Requires front-matter with a
+// description so the picker isn't full of blanks.
+async function putUserSkillHandler(req: IncomingMessage, res: ServerResponse, name: string): Promise<void> {
+  const clean = sanitizeSkillName(name);
+  if (!clean) return json(res, 400, { error: 'Invalid skill name (a-z, 0-9, hyphens)' });
+  if (fs.existsSync(path.join(process.cwd(), 'container', 'skills', clean))) {
+    return json(res, 403, { error: 'Built-in skills are read-only — create one under a different name' });
+  }
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let content = '';
+  try {
+    content = String((JSON.parse(raw) as { content?: unknown }).content || '');
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  if (content.length > 512 * 1024) return json(res, 413, { error: 'SKILL.md exceeds 512KB' });
+  const fm = content.match(/^---\s*\n([\s\S]*?)\n---/);
+  if (!fm || !/^description:\s*\S/m.test(fm[1])) {
+    return json(res, 422, {
+      error: 'SKILL.md needs YAML front-matter with a description (--- name/description ---)',
+    });
+  }
+  try {
+    const skillDir = path.join(USER_SKILLS_DIR, clean);
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), content);
+    // Hand-authored here → "custom". Only stamp when there's no origin yet, so
+    // editing an imported skill's SKILL.md never overwrites its provenance.
+    const originFile = path.join(skillDir, '.origin.json');
+    if (!fs.existsSync(originFile)) {
+      fs.writeFileSync(originFile, JSON.stringify({ label: 'custom' } satisfies SkillOrigin));
+    }
+    return json(res, 200, { ok: true, name: clean });
+  } catch (err) {
+    return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+// Pull `description` from YAML front-matter, handling the common shapes: an
+// inline value, quoted, or a folded/literal block scalar (>- | etc.) whose text
+// continues on the following indented lines.
+function frontMatterDescription(fmBody: string): string {
+  const lines = fmBody.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^description:\s*(.*)$/);
+    if (!m) continue;
+    const val = m[1].trim();
+    if (['>', '>-', '|', '|-'].includes(val)) {
+      const parts: string[] = [];
+      for (let j = i + 1; j < lines.length && /^\s+\S/.test(lines[j]); j++) parts.push(lines[j].trim());
+      return parts.join(' ');
+    }
+    return val.replace(/^["']|["']$/g, '');
+  }
+  return '';
+}
+
+async function setAgentSkillsHandler(req: IncomingMessage, res: ServerResponse, agentGroupId: string): Promise<void> {
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { skills?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  if (!Array.isArray(body.skills)) return json(res, 400, { error: 'skills array required' });
+  const available = new Set(listAvailableSkills().map((s) => s.name));
+  const skills = [...new Set(body.skills.map(String).filter((s) => available.has(s)))];
+  // Persist the explicit selection (switches the agent off the 'all' default) and
+  // respawn so syncSkillSymlinks re-points .claude/skills before the next turn.
+  updateContainerConfigJson(agentGroupId, 'skills', skills);
+  const restarted = restartAgentGroupContainers(agentGroupId, 'Webchat skills changed');
+  return json(res, 200, { ok: true, skills, restarted });
+}
+
 function listAgentMcpHandler(res: ServerResponse, agentGroupId: string): void {
   const attached = getMcpServersForAgent(agentGroupId).map(mcpServerForUI);
   return json(res, 200, { servers: attached });
