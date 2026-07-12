@@ -120,22 +120,30 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
-  // App files: network-first, fall back to cache (always fresh after server
-  // restart). Only KNOWN shell paths are cached, keyed by pathname — so
-  // query-string deep-links (e.g. /?room=X from a notification) reuse the
-  // single '/' entry instead of each accumulating a redundant shell copy.
-  // Anything else (dynamic/unknown non-/api/ responses) is served but never
-  // written to the cache, so the app cache can't grow unboundedly.
+  // App files: cache-first. The CACHE name is a content hash of every asset
+  // (computeSwCacheVersion in server.ts), so a cached asset is immutable within
+  // a version — any change ships a new sw.js with a new CACHE name, and the
+  // install/activate cycle re-caches + evicts. That means serving from cache is
+  // always fresh AND skips a network round-trip on every load (the old
+  // network-first path re-downloaded the whole growing bundle each time, even
+  // when nothing changed). On a cache miss we fetch and populate.
+  //
+  // Only KNOWN shell paths are cached, keyed by pathname — so query-string
+  // deep-links (e.g. /?room=X from a notification) reuse the single '/' entry
+  // instead of each accumulating a redundant shell copy. Anything else
+  // (dynamic/unknown non-/api/ responses) is fetched but never cached, so the
+  // app cache can't grow unboundedly.
   const cacheKey = ASSETS.includes(url.pathname) ? url.pathname : null;
   e.respondWith(
-    fetch(e.request)
-      .then((res) => {
+    caches.match(cacheKey || e.request).then((cached) => {
+      if (cached) return cached;
+      return fetch(e.request).then((res) => {
         if (cacheKey && res.ok && res.type !== 'opaque') {
           const clone = res.clone();
           caches.open(CACHE).then((c) => c.put(cacheKey, clone));
         }
         return res;
-      })
-      .catch(() => caches.match(cacheKey || e.request)),
+      });
+    }),
   );
 });

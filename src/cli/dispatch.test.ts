@@ -174,6 +174,17 @@ register({
   handler: async () => ({ agent_group_id: 'g1', model: 'opus' }),
 });
 
+// A dash-joined command whose custom-operation key contains spaces
+// ('config update') — used by the --help space/dash bridging test.
+register({
+  name: 'groups-config-update',
+  description: 'bare registry description (should not be the help answer)',
+  resource: 'groups',
+  access: 'open',
+  parseArgs: (raw) => raw,
+  handler: async (args) => ({ echo: args }),
+});
+
 // The real `sessions-get` name — triggers the pre-handler ownership check.
 register({
   name: 'sessions-get',
@@ -595,18 +606,260 @@ describe('CLI scope enforcement', () => {
   });
 });
 
-// --- Dash-joined positional id resolution (generated ids contain dashes) ---
+// Multi-segment command, to prove the longest-prefix match (verb itself has dashes).
+register({
+  name: 'groups-cfg-get',
+  description: 'test multi-segment command',
+  resource: 'groups',
+  access: 'open',
+  parseArgs: (raw) => raw,
+  handler: async (args) => ({ echo: args }),
+});
 
-describe('dash-joined positional id resolution', () => {
-  it('resolves `groups-get-<uuid-with-dashes>` to (groups get, id=<uuid>)', async () => {
-    const uuid = '550e8400-e29b-41d4-a716-446655440000';
+describe('positional dashed-id resolution', () => {
+  const host = { caller: 'host' as const };
 
-    const resp = await dispatch({ id: '1', command: `groups-get-${uuid}`, args: {} }, { caller: 'host' });
+  it('resolves a long dashed id to command + intact id (no shredding)', async () => {
+    const id = 'task-374f0630-d3e0-4965-81da-fe4bf7a6a442';
+    const resp = await dispatch({ id: '1', command: `groups-test-${id}`, args: {} }, host);
+    expect(resp.ok).toBe(true);
+    if (resp.ok) expect(resp.data).toEqual({ echo: { id } });
+  });
+
+  it('matches the LONGEST command prefix when the verb itself has dashes', async () => {
+    const resp = await dispatch({ id: '2', command: 'groups-cfg-get-abc-123', args: {} }, host);
+    expect(resp.ok).toBe(true);
+    if (resp.ok) expect(resp.data).toEqual({ echo: { id: 'abc-123' } });
+  });
+
+  it('leaves a registered no-id command alone', async () => {
+    const resp = await dispatch({ id: '3', command: 'groups-test', args: {} }, host);
+    expect(resp.ok).toBe(true);
+    if (resp.ok) expect(resp.data).toEqual({ echo: {} });
+  });
+
+  it('does not override an explicit --id', async () => {
+    const resp = await dispatch({ id: '4', command: 'groups-test-tail', args: { id: 'explicit' } }, host);
+    expect(resp.ok).toBe(true);
+    if (resp.ok) expect(resp.data).toEqual({ echo: { id: 'explicit' } });
+  });
+});
+
+// --- `--help` interception: answer with generated help, execute nothing ---
+
+describe('--help interception', () => {
+  it('returns command help instead of executing (open command)', async () => {
+    const resp = await dispatch({ id: '1', command: 'test-cmd', args: { help: true } }, { caller: 'host' });
 
     expect(resp.ok).toBe(true);
     if (resp.ok) {
-      const data = resp.data as { echo: Record<string, unknown> };
-      expect(data.echo.id).toBe(uuid);
+      // No deep resource def for 'test' → falls back to the description.
+      expect(resp.data).toBe('test command (non-group resource)');
     }
+  });
+
+  it('carries the help text in `human` so clients print it verbatim', async () => {
+    const resp = await dispatch({ id: '1', command: 'test-cmd', args: { help: true } }, { caller: 'host' });
+
+    expect(resp.ok).toBe(true);
+    if (resp.ok) {
+      expect(typeof resp.data).toBe('string');
+      expect(resp.human).toBe(resp.data);
+    }
+  });
+
+  it('never mints an approval card for --help on an approval-gated command', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    mockGetSession.mockReturnValue({ id: 's1', agent_group_id: 'g1', messaging_group_id: 'mg1' });
+
+    const resp = await dispatch({ id: '1', command: 'approval-context-command', args: { help: true } }, agentCtx());
+
+    expect(resp.ok).toBe(true);
+    expect(approvalState.requestApproval).not.toHaveBeenCalled();
+    expect(approvalState.observedContexts).toHaveLength(0); // handler never ran
+  });
+
+  it('renders deep verb help when the resource def is available', async () => {
+    mockGetResource.mockImplementation((plural: string) =>
+      plural === 'groups'
+        ? {
+            name: 'group',
+            plural: 'groups',
+            table: 'agent_groups',
+            description: 'Agent groups.',
+            idColumn: 'id',
+            scopeField: 'id',
+            columns: [],
+            operations: {},
+            customOperations: {
+              test: {
+                access: 'open',
+                description: 'Deep test op.',
+                args: [{ name: 'foo', type: 'string', description: 'A foo.', required: true }],
+                handler: async () => ({}),
+              },
+            },
+          }
+        : undefined,
+    );
+
+    const resp = await dispatch({ id: '1', command: 'groups-test', args: { help: true } }, { caller: 'host' });
+
+    expect(resp.ok).toBe(true);
+    if (resp.ok) {
+      expect(resp.data).toContain('ncl groups test');
+      expect(resp.data).toContain('--foo');
+      expect(resp.data).toContain('(required)');
+    }
+  });
+
+  it('renders deep verb help for a multi-word custom-operation key (spaces vs dashes)', async () => {
+    // registerResource stores the op under 'config update' but registers the
+    // command as 'groups-config-update'; help must bridge the two.
+    mockGetResource.mockImplementation((plural: string) =>
+      plural === 'groups'
+        ? {
+            name: 'group',
+            plural: 'groups',
+            table: 'agent_groups',
+            description: 'Agent groups.',
+            idColumn: 'id',
+            scopeField: 'id',
+            columns: [],
+            operations: {},
+            customOperations: {
+              'config update': {
+                access: 'open',
+                description: 'Update container config.',
+                args: [{ name: 'model', type: 'string', description: 'Model override.' }],
+                handler: async () => ({}),
+              },
+            },
+          }
+        : undefined,
+    );
+
+    const resp = await dispatch({ id: '1', command: 'groups-config-update', args: { help: true } }, { caller: 'host' });
+
+    expect(resp.ok).toBe(true);
+    if (resp.ok) {
+      expect(resp.data).toContain('ncl groups config update');
+      expect(resp.data).toContain('--model');
+      // Not the bare registry description fallback:
+      expect(resp.data).not.toBe('bare registry description (should not be the help answer)');
+    }
+  });
+
+  it('still enforces group scope before answering --help', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+
+    const resp = await dispatch({ id: '1', command: 'wirings-list', args: { help: true } }, agentCtx());
+
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) expect(resp.error.code).toBe('forbidden');
+  });
+});
+
+// --- Unknown-command errors carry their fix ---
+
+describe('unknown-command errors', () => {
+  it('lists the resource verbs when the command names a known resource', async () => {
+    mockGetResource.mockImplementation((plural: string) =>
+      plural === 'groups'
+        ? {
+            name: 'group',
+            plural: 'groups',
+            table: 'agent_groups',
+            description: 'Agent groups.',
+            idColumn: 'id',
+            columns: [],
+            operations: { list: 'open', get: 'open' },
+            customOperations: {
+              restart: { access: 'approval', description: 'Restart.', handler: async () => ({}) },
+            },
+          }
+        : undefined,
+    );
+
+    const resp = await dispatch({ id: '1', command: 'groups-restrat', args: {} }, { caller: 'host' });
+
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) {
+      expect(resp.error.code).toBe('unknown-command');
+      expect(resp.error.message).toContain('verbs for groups: list, get, restart');
+      expect(resp.error.message).toContain('ncl groups help');
+    }
+  });
+
+  it('suggests the closest command name for near-miss typos', async () => {
+    const resp = await dispatch({ id: '1', command: 'test-cm', args: {} }, { caller: 'host' });
+
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) {
+      expect(resp.error.code).toBe('unknown-command');
+      expect(resp.error.message).toContain('did you mean "test-cmd"?');
+    }
+  });
+
+  it('falls back to a plain pointer when nothing is close', async () => {
+    const resp = await dispatch({ id: '1', command: 'zzz-qqq-vvv', args: {} }, { caller: 'host' });
+
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) {
+      expect(resp.error.message).toContain('no command "zzz-qqq-vvv"');
+      expect(resp.error.message).toContain('ncl help');
+      expect(resp.error.message).not.toContain('did you mean');
+    }
+  });
+});
+
+// --- formatHuman hook: server-rendered human view on the frame ---
+
+describe('formatHuman hook', () => {
+  register({
+    name: 'render-cmd',
+    description: 'command with a human renderer',
+    access: 'open',
+    parseArgs: (raw) => raw,
+    handler: async () => [{ id: 'x1', status: 'live' }],
+    formatHuman: (rows) => `TABLE(${(rows as { id: string }[]).map((r) => r.id).join(',')})`,
+  });
+
+  register({
+    name: 'render-throws',
+    description: 'command whose renderer throws',
+    access: 'open',
+    parseArgs: (raw) => raw,
+    handler: async () => ({ fine: true }),
+    formatHuman: () => {
+      throw new Error('renderer bug');
+    },
+  });
+
+  it('attaches human alongside data', async () => {
+    const resp = await dispatch({ id: '1', command: 'render-cmd', args: {} }, { caller: 'host' });
+
+    expect(resp.ok).toBe(true);
+    if (resp.ok) {
+      expect(resp.human).toBe('TABLE(x1)');
+      expect(resp.data).toEqual([{ id: 'x1', status: 'live' }]); // machine contract intact
+    }
+  });
+
+  it('a throwing renderer degrades to a plain frame, never an error', async () => {
+    const resp = await dispatch({ id: '1', command: 'render-throws', args: {} }, { caller: 'host' });
+
+    expect(resp.ok).toBe(true);
+    if (resp.ok) {
+      expect(resp.human).toBeUndefined();
+      expect(resp.data).toEqual({ fine: true });
+    }
+  });
+
+  it('commands without a renderer stay human-less', async () => {
+    const resp = await dispatch({ id: '1', command: 'test-cmd', args: {} }, { caller: 'host' });
+
+    expect(resp.ok).toBe(true);
+    if (resp.ok) expect(resp.human).toBeUndefined();
   });
 });

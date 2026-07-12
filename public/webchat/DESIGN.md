@@ -209,13 +209,30 @@ no backdrop-tap or history entry yet — × and Escape only.
 
 ---
 
-## 5. Feedback channels — three, with a rule
+## 5. Feedback channels — four, with a rule
 
 | Channel | API | Fires for |
 |---------|-----|-----------|
 | Transcript bubble | `appendSystem()` (×18) | **conversation-domain events only** — agent joined, file shared, an in-room approval |
 | Toast | `showToast()` (×72) | **operation outcomes** — saved, copied, failed, status changed |
 | Inline text | (login, perms) | **field validation** — bad token, missing name |
+| Persistent banner | `#connection-banner`, `#update-banner` | **standing states needing user action** — connection lost, a new version ready |
+| Inline spinner | `.btn-spinner` (+ `wizardBusy()`) | **in-progress** — the "doing something" signal, on the control/row that's working |
+
+A standing state gets a persistent, one-tap-actionable banner — never a toast
+(it expires) and never a silent deferral. The update banner exists because the
+service-worker takeover used to defer its reload until the tab went hidden:
+invisible on mobile (the tab is always visible in use; iOS freezes JS on
+background), so installed PWAs sat versions behind with no signal.
+
+**In-progress lives on the thing that's working, never in a toast.** A press
+that starts async work shows its wait *on the pressed control* — `wizardBusy(btn,
+'Probing…')` clears the label, drops in a `.btn-spinner`, disables, and returns a
+restore fn for the `finally`. A list that's fetching shows the same ring inline
+as its first row ("Loading catalog…", "Searching…"), not a blank pane or a
+toast. One spinner primitive (`.btn-spinner`, a `currentColor` ring on the
+`lightbox-spin` keyframe) so every wait reads identically. Toasts are for
+*outcomes*; a spinner is the *wait* — don't announce "Loading…" in a toast.
 
 Rule of thumb: if it isn't part of the *conversation*, it does not belong in the
 transcript. Notably, Web Push setup currently narrates `Push: fetching VAPID
@@ -245,6 +262,14 @@ at all 8 destructive sites).
   credentials"** in the UI. Never "member credentials" (the old label) or "BYOK"
   (internal jargon — `byok` no longer appears anywhere). The per-room states are
   *off* / *optional* / *required*.
+- **Prose budget — surfaces are controls, not documents.** No explainer
+  paragraphs in panels or forms; a control must be self-evident from its label
+  and affordance. A standing hint line (one line, no trailing period) is
+  allowed only when: a control would be **inexplicable** without it (disabled
+  by a missing prerequisite); there's an **irreversibility/safety** consequence
+  ("Stored once, never shown again"); or it's the **empty state**. Everything
+  else moves to tooltips (`title`), placeholders, outcome toasts, or Help —
+  e.g. "toggle, then save" is what a Save button already says; delete it.
 
 ---
 
@@ -339,3 +364,78 @@ Ollama hosts and the LiteLLM router, each listing what it serves). Server
 rows never open a detail; they carry a single +/− toggle that adds/removes
 the model from the selectable list (kind decided by the server type), plus
 per-card actions (pull on Ollama hosts, roster refresh on the router).
+
+---
+
+## Composer popups
+
+Anything that pops above the composer (`.mention-popover`, `#slash-menu`)
+shares **one look**: anchored inside `#message-form` (iOS keyboard viewport),
+`bottom: calc(100% + 4px)`, same chrome (6px radius, `0 4px 16px` shadow,
+`0.867rem`), horizontal rows — the key term in `--accent` (mention slug /
+slash command), the rest dimmed inline. New composer popups mirror
+`.mention-popover`; don't invent a third style.
+
+Selection semantics: picking a **text completion** inserts it; picking an
+**action** (e.g. the bulk `/clear all`) fires it directly — and any confirm
+modal it opens must be deferred past the triggering keypress
+(`setTimeout(…, 0)`), or the same Enter auto-confirms it.
+
+---
+
+## Install-row — installable features in Settings
+
+An installable feature (auto routing today) is one `.setting-group.install-row`
+line: **name left, action right**, three states —
+
+1. `Install` (secondary button)
+2. `Installing…` (disabled; progress bar/log appears below)
+3. green `✓ Installed` badge (`.install-badge`, `--success`, no button)
+
+No explainer paragraph — the feature's own surface is the explanation; a
+tooltip on the badge may point at it. The **only** standing hint is the
+missing-prerequisite case, where a bare disabled button would be inexplicable
+("Install the LiteLLM router first…").
+
+Trap: `.btn`'s `display: inline-flex` (author origin) beats the UA `[hidden]`
+rule, so a hidden Install button still renders — `.install-row [hidden]`
+re-asserts `display: none`. Keep that rule when reusing the pattern.
+
+---
+
+## Scroll containment
+
+The app is a fixed `100dvh` flex shell — **the document must never be a
+scroller**. `html, body { overflow: hidden }` locks it (iOS ignores root
+`overscroll-behavior` in installed PWAs, so an overflowing document means
+gestures drag the whole shell). All scrolling happens in internal containers.
+
+Every internal scroller needs the full recipe:
+
+- `flex: 1; min-height: 0; overflow-y: auto` — without the first two, a
+  flex-column child grows past the shell instead of scrolling (the mobile
+  sidebar bug), and the gesture goes to whatever is behind it.
+- membership in the **grouped `overscroll-behavior: contain` rule** at the tail
+  of `style.css` ("PWA scroll containment") — one list, add new scrollers
+  there, so hitting a list edge never chains to the surface behind.
+
+Tab bars and other horizontal strips that can overflow a phone width get
+`overflow-x: auto` + hidden scrollbar + `flex-shrink: 0` children — never
+`overflow: visible` (that clips the trailing tab unreachably).
+
+---
+
+## Privilege-gated surfaces
+
+Admin-and-above UI ships **hidden in the markup** (`hidden` attribute) and is
+revealed by `probeIsOwner()` after auth resolves. Two client flags, one rule:
+
+| Flag | True for | Gates |
+|------|----------|-------|
+| `isAdminView` | any admin+ (`/api/users` succeeded) | MCP tab/menu, Skills tab/menu, the slash-command menu |
+| `isOwnerView` | owner (own roles in the response) | owner-only writes — room assignment, permissions panel, skill-collection registry |
+
+The client hiding is **UX, not security** — every gated endpoint re-checks
+server-side (`isAnyAdmin` / `hasAdminPrivilege` / `isGlobalAdmin`). Don't
+surface a control whose only outcome for the viewer is "Permission denied"
+(the pre-gate slash menu did exactly that).

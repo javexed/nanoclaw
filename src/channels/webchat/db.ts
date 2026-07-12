@@ -1845,3 +1845,61 @@ export function getMentionedRoomIdsForUser(userId: string, handle: string): Set<
     .all(userId, h) as { room_id: string }[];
   return new Set(rows.map((r) => r.room_id));
 }
+
+// ── Skill catalog sources (webchat_skill_sources) ───────────────────────────
+// The Skills tab's browsable collections. Seeded by migration 120; global
+// admins manage the list from Settings.
+export interface WebchatSkillSource {
+  id: string;
+  label: string;
+  owner: string;
+  repo: string;
+  branch: string;
+  dir: string;
+  official: boolean;
+}
+
+type SkillSourceRow = Omit<WebchatSkillSource, 'official'> & { official: number };
+const toSource = (r: SkillSourceRow): WebchatSkillSource => ({ ...r, official: !!r.official });
+
+export function listSkillSources(): WebchatSkillSource[] {
+  return (
+    getDb()
+      .prepare('SELECT id, label, owner, repo, branch, dir, official FROM webchat_skill_sources ORDER BY created_at')
+      .all() as SkillSourceRow[]
+  ).map(toSource);
+}
+
+export function getSkillSource(id: string): WebchatSkillSource | undefined {
+  const r = getDb()
+    .prepare('SELECT id, label, owner, repo, branch, dir, official FROM webchat_skill_sources WHERE id = ?')
+    .get(id) as SkillSourceRow | undefined;
+  return r ? toSource(r) : undefined;
+}
+
+// Admin-added sources are always community (official=0). The `official` flag is
+// set only by the seed/migration for first-party collections and is deliberately
+// NOT touched on edit, so re-saving a source can't silently promote/demote it.
+export function upsertSkillSource(s: Omit<WebchatSkillSource, 'official'>): void {
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_skill_sources (id, label, owner, repo, branch, dir, official, created_at)
+       VALUES (@id, @label, @owner, @repo, @branch, @dir, 0, @created_at)
+       ON CONFLICT(id) DO UPDATE SET label=@label, owner=@owner, repo=@repo, branch=@branch, dir=@dir`,
+    )
+    .run({ ...s, created_at: Date.now() });
+}
+
+export function deleteSkillSource(id: string): boolean {
+  return getDb().prepare('DELETE FROM webchat_skill_sources WHERE id = ?').run(id).changes > 0;
+}
+
+// Enable/disable a code-wired built-in source (the marketplace). A row in
+// webchat_disabled_sources means "switched off" — removed from the pool.
+export function isSourceDisabled(id: string): boolean {
+  return !!getDb().prepare('SELECT 1 FROM webchat_disabled_sources WHERE id = ?').get(id);
+}
+export function setSourceDisabled(id: string, disabled: boolean): void {
+  if (disabled) getDb().prepare('INSERT OR IGNORE INTO webchat_disabled_sources (id) VALUES (?)').run(id);
+  else getDb().prepare('DELETE FROM webchat_disabled_sources WHERE id = ?').run(id);
+}

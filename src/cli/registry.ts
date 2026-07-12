@@ -10,7 +10,14 @@
  */
 import type { CallerContext } from './frame.js';
 
-export type Access = 'open' | 'approval';
+/**
+ * Resources an agent under `cli_scope=group` may touch. Single source —
+ * consumed by both dispatch enforcement and `ncl help` filtering, so the
+ * agent is never shown a resource the gate would reject (or vice versa).
+ */
+export const GROUP_SCOPE_RESOURCES = new Set(['groups', 'sessions', 'destinations', 'members']);
+
+export type Access = 'open' | 'approval' | 'hidden';
 
 export type CommandDef<TArgs = unknown, TData = unknown> = {
   name: string;
@@ -34,6 +41,14 @@ export type CommandDef<TArgs = unknown, TData = unknown> = {
   /** Validates `frame.args` and produces the typed handler input. Throws on invalid. */
   parseArgs: (raw: Record<string, unknown>) => TArgs;
   handler: (args: TArgs, ctx: CallerContext) => Promise<TData>;
+  /**
+   * Optional presentational renderer. When set, dispatch attaches its output
+   * as the response frame's `human` field (server-rendered once, printed
+   * verbatim by every client in human mode). Runs after post-handler scope
+   * filtering, so it only ever sees data the caller is allowed to see. A
+   * throwing formatter is ignored — clients fall back to rendering `data`.
+   */
+  formatHuman?: (data: TData) => string;
 };
 
 const registry = new Map<string, CommandDef>();
