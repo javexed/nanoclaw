@@ -4727,6 +4727,31 @@ $('#members-search')?.addEventListener('input', (e) => {
 $('#members-overlay').addEventListener('click', toggleMembersPanel);
 
 // ── Detail-panel backdrop (mobile-only via CSS) ─────────────────────────────
+// Shared view-stack state for the detail drawers (mirrored from panel `.hidden`
+// by the observer below). Hoisted to module scope so full-view openers can close
+// an open drawer and wait for its router teardown before pushing themselves.
+let detailRouterOpen = false; // a detail drawer owns the top view-stack entry
+let afterDetailClose = null; // deferred full-view open, run once the drawer's router teardown completes
+function closeAllDetailDrawers() {
+  $('#agent-detail').hidden = true;
+  $('#room-detail').hidden = true;
+  $('#model-detail').hidden = true;
+  $('#mcp-detail').hidden = true;
+}
+// Open a full-screen view. If a detail drawer is open it owns the top of the view
+// stack, so close it FIRST and defer opening the full view until the drawer's
+// ASYNC router teardown finishes. Otherwise the two happen in one tick: the view
+// is pushed, then the drawer's history.go unwinds it too — so the first click
+// just closed the drawer and you had to click again. No drawer open → immediate.
+function openFullView(fn) {
+  if (detailRouterOpen) {
+    afterDetailClose = fn;
+    closeAllDetailDrawers();
+    return;
+  }
+  fn();
+}
+
 // Shared tap-to-close for #agent-detail / #room-detail / #model-detail. There
 // are 14-ish call sites that toggle `.hidden` on those panels; rather than
 // patch each one, a MutationObserver mirrors panel state onto the backdrop.
@@ -4735,12 +4760,6 @@ $('#members-overlay').addEventListener('click', toggleMembersPanel);
   if (!overlay) return; // index.html older than this build — graceful no-op
   const panels = ['#agent-detail', '#room-detail', '#model-detail', '#mcp-detail'].map((s) => $(s)).filter(Boolean);
   const app = $('#app');
-  let detailViewSynced = false;
-  const closeAllDetailPanels = () => {
-    $('#agent-detail').hidden = true;
-    $('#room-detail').hidden = true;
-    $('#model-detail').hidden = true;
-  };
   const sync = () => {
     const allHidden = panels.every((p) => p.hidden);
     overlay.hidden = allHidden;
@@ -4753,15 +4772,20 @@ $('#members-overlay').addEventListener('click', toggleMembersPanel);
     if (app) app.classList.toggle('detail-open', !allHidden);
     // Router: a detail pane is an overlay surface, so the OS/browser back
     // gesture closes it (and, when opened over Manage, returns there). Guarded
-    // by detailViewSynced so the teardown's own .hidden writes don't recurse.
-    if (!allHidden && !detailViewSynced) {
-      detailViewSynced = true;
+    // by detailRouterOpen so the teardown's own .hidden writes don't recurse.
+    if (!allHidden && !detailRouterOpen) {
+      detailRouterOpen = true;
       openView('detail', () => {
-        detailViewSynced = false;
-        closeAllDetailPanels();
+        detailRouterOpen = false;
+        closeAllDetailDrawers();
+        // A full-view open that closed this drawer waits here for the teardown.
+        // Defer a tick so its openView/pushState runs after popstate settles.
+        const next = afterDetailClose;
+        afterDetailClose = null;
+        if (next) queueMicrotask(next);
       });
-    } else if (allHidden && detailViewSynced) {
-      detailViewSynced = false;
+    } else if (allHidden && detailRouterOpen) {
+      detailRouterOpen = false;
       closeView('detail');
     }
   };
@@ -4786,21 +4810,21 @@ $('#members-overlay').addEventListener('click', toggleMembersPanel);
 // back gesture returns to chat; detail panes (z-index above) overlay it.
 let manageActive = false;
 function openManage(tab = 'agents') {
-  closeAgentDetail();
-  closeRoomDetail();
-  closeModelDetail();
-  closeMcpDetail();
-  // Close any other full view first; manage overlays the chat pane, so restore
-  // chat as its backdrop (a prior full view had hidden it + set in-dashboard).
-  hideOtherFullViews('manage');
-  $('#chat').hidden = false;
-  $('#app').classList.remove('in-dashboard');
-  manageActive = true;
-  $('#manage').hidden = false;
-  $('#overflow-btn')?.classList.add('active');
-  switchManageTab(tab);
-  if (!viewStack.some((v) => v.name === 'manage')) openView('manage', teardownManage);
-  probeRoutingAvailability();
+  // openFullView closes any open detail drawer first, then runs this (see there
+  // for why the deferral matters). Close any other full view too; manage overlays
+  // the chat pane, so restore chat as its backdrop (a prior full view had hidden
+  // it + set in-dashboard).
+  openFullView(() => {
+    hideOtherFullViews('manage');
+    $('#chat').hidden = false;
+    $('#app').classList.remove('in-dashboard');
+    manageActive = true;
+    $('#manage').hidden = false;
+    $('#overflow-btn')?.classList.add('active');
+    switchManageTab(tab);
+    if (!viewStack.some((v) => v.name === 'manage')) openView('manage', teardownManage);
+    probeRoutingAvailability();
+  });
 }
 function teardownManage() {
   manageActive = false;
@@ -5067,7 +5091,7 @@ async function renderSkillPool() {
       add.textContent = 'Add';
       add.addEventListener('click', async () => {
         if (community && !(await confirmCommunityImport(s.name, s.origin.label, null))) return;
-        await importSkillInto({ ...s.ref, origin: s.origin }, add);
+        openWireToAgentsPicker({ ...s.ref, origin: s.origin }, s.name);
       });
       li.appendChild(add);
     }
@@ -5097,6 +5121,63 @@ async function importSkillInto(importBody, btn) {
     btn.disabled = false;
     btn.textContent = 'Add';
   }
+}
+
+// Adding a skill asks WHICH agents up front — the same multi-select attach picker
+// MCP uses. Each toggle wires the skill to just that agent (per-agent scoped
+// import, no pool fan-out); "Wire to all agents" does the shared-pool import.
+let wireSkillState = null;
+async function openWireToAgentsPicker(importBody, displayName) {
+  if (!allAgents.length) await fetchAgents();
+  wireSkillState = { importBody, name: null, wired: new Set() };
+  openAttachPicker({
+    title: `Wire ${displayName} to agents`,
+    searchPlaceholder: 'Search agents…',
+    emptyText: 'No agents yet.',
+    addNewLabel: 'Wire to all agents',
+    items: () => allAgents,
+    searchText: (a) => a.name,
+    name: (a) => a.name,
+    isAttached: (a) => wireSkillState.wired.has(a.id),
+    onToggle: async (a, add) => {
+      if (add) {
+        const res = await authFetch(`/api/agents/${encodeURIComponent(a.id)}/skills/import`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(importBody),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.error || res.statusText);
+        wireSkillState.name = body.name;
+        wireSkillState.wired.add(a.id);
+        showToast(`Wired ${body.name} to ${a.name}`, { kind: 'success' });
+      } else {
+        const res = await authFetch(
+          `/api/agents/${encodeURIComponent(a.id)}/skills/scoped/${encodeURIComponent(wireSkillState.name)}`,
+          { method: 'DELETE' },
+        );
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+        wireSkillState.wired.delete(a.id);
+        showToast(`Unwired from ${a.name}`, { kind: 'success' });
+      }
+    },
+    onAddNew: async () => {
+      // "Wire to all agents" = the shared pool (every 'all' agent picks it up).
+      closeAttachPicker();
+      try {
+        const res = await authFetch('/api/skills/import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(importBody),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.error || res.statusText);
+        showToast(`Added ${body.name} to all agents`, { kind: 'success' });
+      } catch (err) {
+        showToast('Import failed: ' + (err?.message || err), { kind: 'error' });
+      }
+    },
+  });
 }
 
 // The community trust gate — a review confirm naming the source before import.
@@ -5326,31 +5407,14 @@ $('#skill-new-btn')?.addEventListener('click', () => openSkillEditor(null));
 $('#skill-editor-cancel')?.addEventListener('click', () => showSkillEditor(false));
 $('#skill-editor-save')?.addEventListener('click', saveSkillEditor);
 
-async function importSkill() {
+// Import-by-URL now asks which agents up front (same picker as the catalog rows).
+function importSkill() {
   const input = $('#skill-import-url');
-  const btn = $('#skill-import-btn');
   const url = (input.value || '').trim();
   if (!url) return;
-  btn.disabled = true;
-  const orig = btn.textContent;
-  btn.textContent = 'Importing…';
-  try {
-    const res = await authFetch('/api/skills/import', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
-    });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || res.statusText);
-    showToast(`Imported "${body.name}" (${body.files} files)`, { kind: 'success' });
-    input.value = '';
-    await renderSkillsRegistry();
-  } catch (err) {
-    showToast('Import failed: ' + (err?.message || err), { kind: 'error' });
-  } finally {
-    btn.disabled = false;
-    btn.textContent = orig;
-  }
+  const label = url.replace(/^https?:\/\/github\.com\//, '').replace(/\/tree\/.*$/, '');
+  input.value = '';
+  openWireToAgentsPicker({ url }, label || 'skill');
 }
 
 async function deleteSkill(name) {
@@ -5623,19 +5687,17 @@ function hideOtherFullViews(keep) {
 }
 
 function openDashboard() {
-  closeAgentDetail();
-  closeRoomDetail();
-  closeModelDetail();
-  closeMcpDetail();
-  hideOtherFullViews('dashboard');
-  dashboardActive = true;
-  $('#chat').hidden = true;
-  $('#dashboard').hidden = false;
-  $('#dash-btn')?.classList.add('active');
-  $('#app').classList.add('in-dashboard');
-  $('#app').classList.remove('in-room');
-  refreshDashboard();
-  openView('dashboard', teardownDashboard);
+  openFullView(() => {
+    hideOtherFullViews('dashboard');
+    dashboardActive = true;
+    $('#chat').hidden = true;
+    $('#dashboard').hidden = false;
+    $('#dash-btn')?.classList.add('active');
+    $('#app').classList.add('in-dashboard');
+    $('#app').classList.remove('in-room');
+    refreshDashboard();
+    openView('dashboard', teardownDashboard);
+  });
 }
 function teardownDashboard() {
   dashboardActive = false;
@@ -5659,18 +5721,16 @@ $('#dash-refresh').addEventListener('click', refreshDashboard);
 // unused. Data: GET /api/topology (access-scoped server-side).
 let topologyActive = false;
 function openTopology() {
-  closeAgentDetail();
-  closeRoomDetail();
-  closeModelDetail();
-  closeMcpDetail();
-  hideOtherFullViews('topology');
-  topologyActive = true;
-  $('#chat').hidden = true;
-  $('#topology').hidden = false;
-  $('#app').classList.add('in-dashboard'); // reuse the full-view mobile layout
-  $('#app').classList.remove('in-room');
-  refreshTopology();
-  openView('topology', teardownTopology);
+  openFullView(() => {
+    hideOtherFullViews('topology');
+    topologyActive = true;
+    $('#chat').hidden = true;
+    $('#topology').hidden = false;
+    $('#app').classList.add('in-dashboard'); // reuse the full-view mobile layout
+    $('#app').classList.remove('in-room');
+    refreshTopology();
+    openView('topology', teardownTopology);
+  });
 }
 function teardownTopology() {
   topologyActive = false;
@@ -5975,18 +6035,16 @@ async function openTopologyItem(kind, id) {
 let matrixActive = false;
 let matrixWired = new Set(); // "roomId|agentId" for currently-wired pairs
 function openMatrix() {
-  closeAgentDetail();
-  closeRoomDetail();
-  closeModelDetail();
-  closeMcpDetail();
-  hideOtherFullViews('matrix');
-  matrixActive = true;
-  $('#chat').hidden = true;
-  $('#matrix').hidden = false;
-  $('#app').classList.add('in-dashboard');
-  $('#app').classList.remove('in-room');
-  refreshMatrix();
-  openView('matrix', teardownMatrix);
+  openFullView(() => {
+    hideOtherFullViews('matrix');
+    matrixActive = true;
+    $('#chat').hidden = true;
+    $('#matrix').hidden = false;
+    $('#app').classList.add('in-dashboard');
+    $('#app').classList.remove('in-room');
+    refreshMatrix();
+    openView('matrix', teardownMatrix);
+  });
 }
 function teardownMatrix() {
   matrixActive = false;
@@ -6148,20 +6206,18 @@ let isOwnerView = false; // set by probeIsOwner — gates owner-only write contr
 let isAdminView = false; // set by probeIsOwner — true for any admin+ (gates the slash menu, MCP)
 
 function openPermissions() {
-  closeAgentDetail();
-  closeRoomDetail();
-  closeModelDetail();
-  closeMcpDetail();
-  hideOtherFullViews('permissions');
-  permsActive = true;
-  $('#chat').hidden = true;
-  $('#permissions').hidden = false;
-  $('#overflow-btn')?.classList.add('active');
-  $('#app').classList.add('in-dashboard');
-  $('#app').classList.remove('in-room');
-  permsShowList();
-  refreshPermissions();
-  openView('permissions', teardownPermissions);
+  openFullView(() => {
+    hideOtherFullViews('permissions');
+    permsActive = true;
+    $('#chat').hidden = true;
+    $('#permissions').hidden = false;
+    $('#overflow-btn')?.classList.add('active');
+    $('#app').classList.add('in-dashboard');
+    $('#app').classList.remove('in-room');
+    permsShowList();
+    refreshPermissions();
+    openView('permissions', teardownPermissions);
+  });
 }
 function teardownPermissions() {
   permsActive = false;
@@ -7529,8 +7585,10 @@ async function renderAgentSkills(agentId) {
   }
   const enabled = new Set(data.enabled || []);
   const count = $('#agent-skills-count');
-  if (count) count.textContent = enabled.size ? String(enabled.size) : '';
+  const scoped = data.scoped || [];
+  if (count) count.textContent = enabled.size + scoped.length ? String(enabled.size + scoped.length) : '';
   if (saveBtn) saveBtn.disabled = true;
+  renderAgentScopedSkills(agentId, scoped);
   if (!(data.available || []).length) {
     const empty = document.createElement('li');
     empty.className = 'agent-mcp-empty';
@@ -7563,6 +7621,86 @@ async function renderAgentSkills(agentId) {
     list.appendChild(li);
   }
   if (saveBtn) saveBtn.onclick = () => saveAgentSkills(agentId);
+}
+
+// Skills wired to this one agent (imported into its own dir) + the import row.
+function renderAgentScopedSkills(agentId, scoped) {
+  const list = $('#agent-scoped-list');
+  const addBtn = $('#agent-scoped-add');
+  const urlInput = $('#agent-scoped-url');
+  if (!list) return;
+  list.innerHTML = '';
+  if (!scoped.length) {
+    const empty = document.createElement('li');
+    empty.className = 'agent-mcp-empty';
+    empty.textContent = 'None yet — import one below (this agent only).';
+    list.appendChild(empty);
+  }
+  for (const s of scoped) {
+    const li = document.createElement('li');
+    li.className = 'agent-skill-row';
+    const info = document.createElement('div');
+    info.className = 'agent-mcp-info';
+    const head = document.createElement('div');
+    head.className = 'skill-head';
+    const name = document.createElement('span');
+    name.className = 'agent-mcp-name';
+    name.textContent = s.name;
+    head.appendChild(name);
+    if (s.origin && s.origin.label) head.appendChild(originBadgeEl(s.origin));
+    const meta = document.createElement('span');
+    meta.className = 'agent-mcp-meta';
+    meta.textContent = s.description || '';
+    info.append(head, meta);
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'skill-delete';
+    del.textContent = 'Remove';
+    del.addEventListener('click', () => removeAgentScopedSkill(agentId, s.name, del));
+    li.append(info, del);
+    list.appendChild(li);
+  }
+  if (addBtn) addBtn.onclick = () => importAgentScopedSkill(agentId, addBtn, urlInput);
+}
+
+async function importAgentScopedSkill(agentId, btn, urlInput) {
+  const url = (urlInput?.value || '').trim();
+  if (!url) return showToast('Paste a GitHub repo or folder URL', { kind: 'error' });
+  btn.disabled = true;
+  btn.textContent = 'Importing…';
+  try {
+    const res = await authFetch(`/api/agents/${encodeURIComponent(agentId)}/skills/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || res.statusText);
+    showToast(`Wired ${body.name} to this agent — applies on its next turn`, { kind: 'success' });
+    if (urlInput) urlInput.value = '';
+    renderAgentSkills(agentId);
+  } catch (err) {
+    showToast('Import failed: ' + (err?.message || err), { kind: 'error' });
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Import';
+  }
+}
+
+async function removeAgentScopedSkill(agentId, name, btn) {
+  if (!(await showConfirmModal({ title: `Remove ${name}?`, body: 'Unwires it from this agent.', confirmLabel: 'Remove', destructive: true }))) return;
+  btn.disabled = true;
+  try {
+    const res = await authFetch(`/api/agents/${encodeURIComponent(agentId)}/skills/scoped/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    showToast(`Removed ${name}`, { kind: 'success' });
+    renderAgentSkills(agentId);
+  } catch (err) {
+    showToast('Remove failed: ' + (err?.message || err), { kind: 'error' });
+    btn.disabled = false;
+  }
 }
 
 async function saveAgentSkills(agentId) {
