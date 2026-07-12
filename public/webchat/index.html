@@ -510,6 +510,17 @@
                 <details class="agent-accordion">
                   <summary class="agent-accordion-summary"><span class="form-label">Skills</span><span class="agent-accordion-count" id="agent-skills-count"></span></summary>
                   <div class="agent-skills-section">
+                    <!-- Wired to THIS agent only — imported into its own skills
+                         dir, so it never reaches other agents. -->
+                    <div class="agent-scoped">
+                      <span class="form-label">Wired to this agent</span>
+                      <ul id="agent-scoped-list" class="agent-skills-list"></ul>
+                      <div class="agent-scoped-import">
+                        <input id="agent-scoped-url" type="text" autocomplete="off" spellcheck="false" placeholder="https://github.com/owner/repo" />
+                        <button type="button" id="agent-scoped-add" class="btn btn-secondary">Import</button>
+                      </div>
+                    </div>
+                    <span class="form-label">Shared skills</span>
                     <ul id="agent-skills-list" class="agent-skills-list"></ul>
                     <button type="button" id="agent-skills-save" class="btn btn-primary" disabled>Save skills</button>
                   </div>

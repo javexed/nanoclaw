@@ -1649,10 +1649,31 @@ async function handleHttp(
         sel = 'all';
       }
       const enabled = sel === 'all' ? available.map((s) => s.name) : sel;
-      return json(res, 200, { available, enabled });
+      // Also surface skills wired to THIS agent only (real dirs in its own
+      // .claude-shared/skills), which the shared pool doesn't include.
+      return json(res, 200, { available, enabled, scoped: listScopedSkills(group.id) });
     }
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     return setAgentSkillsHandler(req, res, group.id);
+  }
+  // Import a skill wired to ONE agent (its own .claude-shared/skills), so it
+  // reaches only that group — never the shared pool / other 'all' agents.
+  // Per-group admin is sufficient: it can't affect any other group.
+  const agentSkillImportMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/skills\/import$/);
+  if (agentSkillImportMatch && method === 'POST') {
+    const group = resolveAgent(decodeURIComponent(agentSkillImportMatch[1]));
+    if (!group) return json(res, 404, { error: 'Agent not found' });
+    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    return importScopedSkillHandler(req, res, group.id);
+  }
+  const agentScopedSkillMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/skills\/scoped\/([^/]+)$/);
+  if (agentScopedSkillMatch && method === 'DELETE') {
+    const group = resolveAgent(decodeURIComponent(agentScopedSkillMatch[1]));
+    if (!group) return json(res, 404, { error: 'Agent not found' });
+    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    return deleteScopedSkillHandler(res, group.id, decodeURIComponent(agentScopedSkillMatch[2]));
   }
 
   // ── Lifecycle status (active | paused | archived) ──────────────────────
@@ -4435,6 +4456,38 @@ function listAvailableSkills(): AvailableSkill[] {
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+// ── Per-agent (scoped) skills ───────────────────────────────────────────────
+// A skill wired to ONE agent group, not the shared pool: it lives as a real
+// directory in that group's own `.claude-shared/skills/` (mounted at
+// ~/.claude/skills), so only that group loads it and `'all'` never fans it out.
+// (Pooled skills show up in the same dir as symlinks into /app/user-skills —
+// those aren't scoped; we only count real directories.)
+function scopedSkillsDir(agentGroupId: string): string {
+  return path.join(DATA_DIR, 'v2-sessions', agentGroupId, '.claude-shared', 'skills');
+}
+function listScopedSkills(agentGroupId: string): Array<{ name: string; description: string; origin: SkillOrigin | null }> {
+  const dir = scopedSkillsDir(agentGroupId);
+  const out: Array<{ name: string; description: string; origin: SkillOrigin | null }> = [];
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return out;
+  }
+  for (const entry of entries) {
+    try {
+      const p = path.join(dir, entry);
+      if (!fs.lstatSync(p).isDirectory()) continue; // lstat: skip pooled symlinks, keep real dirs
+      const text = fs.readFileSync(path.join(p, 'SKILL.md'), 'utf8');
+      const fm = text.match(/^---\s*\n([\s\S]*?)\n---/);
+      out.push({ name: entry, description: fm ? frontMatterDescription(fm[1]) : '', origin: readSkillOrigin(p) });
+    } catch {
+      continue; // symlink (isDirectory false via lstat) or no SKILL.md
+    }
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 function sanitizeSkillName(raw: string): string {
   return raw
     .trim()
@@ -4483,7 +4536,7 @@ async function fetchGithubDir(
   const files: Array<{ rel: string; download_url: string }> = [];
   let totalBytes = 0;
   async function walk(p: string): Promise<void> {
-    const api = `https://api.github.com/repos/${owner}/${repo}/contents/${encodeURI(p)}?ref=${encodeURIComponent(branch)}`;
+    const api = `https://api.github.com/repos/${owner}/${repo}/contents${p ? '/' + encodeURI(p) : ''}?ref=${encodeURIComponent(branch)}`;
     const r = await githubFetch(api, { 'User-Agent': 'nanoclaw', Accept: 'application/vnd.github+json' });
     if (!r.ok) throw new Error(`GitHub API ${r.status}`);
     const items = (await r.json()) as Array<{ type: string; path: string; download_url: string | null; size: number }>;
@@ -4545,13 +4598,24 @@ async function loadCatalog(src: WebchatSkillSource): Promise<Array<{ name: strin
         seen.add(name);
         folders.push({ folder, name });
       }
+      // A one-skill repo/folder: SKILL.md sits at `dir` itself (no subfolder),
+      // e.g. jdilla1277/agentcad-skill (SKILL.md at the repo root). Surface it as
+      // a single skill named after the repo (or the dir).
+      if (folders.length === 0) {
+        const rootBase = prefix.replace(/\/$/, '');
+        if (tree.some((t) => t.type === 'blob' && t.path === `${prefix}SKILL.md`)) {
+          const name = sanitizeSkillName((rootBase ? rootBase.split('/').pop() : src.repo) || src.repo);
+          if (name) folders.push({ folder: rootBase, name });
+        }
+      }
       const skills = await Promise.all(
         folders.slice(0, 100).map(async ({ folder, name }) => {
+          const sub = folder ? `${folder}/` : ''; // '' when the skill IS the repo/dir root
           // description is best-effort
           let description = '';
           try {
             const raw = await fetch(
-              `https://raw.githubusercontent.com/${src.owner}/${src.repo}/${src.branch}/${folder}/SKILL.md`,
+              `https://raw.githubusercontent.com/${src.owner}/${src.repo}/${src.branch}/${sub}SKILL.md`,
               { headers: { 'User-Agent': 'nanoclaw' }, signal: AbortSignal.timeout(8000) },
             );
             if (raw.ok) {
@@ -4561,7 +4625,11 @@ async function loadCatalog(src: WebchatSkillSource): Promise<Array<{ name: strin
           } catch {
             /* best-effort */
           }
-          return { name, description, url: `https://github.com/${src.owner}/${src.repo}/tree/${src.branch}/${folder}` };
+          return {
+            name,
+            description,
+            url: `https://github.com/${src.owner}/${src.repo}/tree/${src.branch}${folder ? '/' + folder : ''}`,
+          };
         }),
       );
       entry = { at: Date.now(), skills };
@@ -4874,13 +4942,16 @@ async function importSkillHandler(req: IncomingMessage, res: ServerResponse): Pr
       return json(res, 422, { error: err instanceof Error ? err.message : String(err) });
     }
   }
-  const m = url.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/tree\/([^/]+)\/(.+?)\/?$/);
-  if (!m) {
+  // Accept a folder URL (…/tree/branch/dir), a branch URL, OR a bare repo root —
+  // the last covers a one-skill repo whose SKILL.md is at the root (e.g.
+  // jdilla1277/agentcad-skill). Empty dir → import the repo/branch root.
+  const resolved = await resolveSourceUrl(url);
+  if (!resolved) {
     return json(res, 400, {
-      error: 'Expected a GitHub folder URL, e.g. https://github.com/anthropics/skills/tree/main/document-skills/pdf',
+      error: 'Expected a GitHub repo or folder URL, e.g. https://github.com/owner/repo or .../tree/main/skill-folder',
     });
   }
-  const [, owner, repo, branch, ghPath] = m;
+  const { owner, repo, branch, dir } = resolved;
   // Provenance: trust the client's display label (catalog collection or the
   // marketplace it was discovered from), but fall back to the git owner/repo —
   // which is the real code origin and can't be spoofed, since it's parsed from
@@ -4890,14 +4961,15 @@ async function importSkillHandler(req: IncomingMessage, res: ServerResponse): Pr
     url: `https://github.com/${owner}/${repo}`,
     official: false,
   };
-  const skillName = sanitizeSkillName(ghPath.split('/').pop() || '');
+  // Name after the skill folder, or the repo itself when the skill is the root.
+  const skillName = sanitizeSkillName((dir ? dir.split('/').pop() : repo) || repo);
   if (!skillName) return json(res, 400, { error: 'Could not derive a skill name from the URL' });
   if (fs.existsSync(path.join(process.cwd(), 'container', 'skills', skillName))) {
     return json(res, 409, { error: `A built-in skill named "${skillName}" already exists` });
   }
   let files: Array<{ rel: string; content: Buffer }>;
   try {
-    files = await fetchGithubDir(owner, repo, branch, ghPath);
+    files = await fetchGithubDir(owner, repo, branch, dir);
   } catch (err) {
     return json(res, 502, { error: 'Fetch failed: ' + (err instanceof Error ? err.message : String(err)) });
   }
@@ -5037,6 +5109,101 @@ async function setAgentSkillsHandler(req: IncomingMessage, res: ServerResponse, 
   updateContainerConfigJson(agentGroupId, 'skills', skills);
   const restarted = restartAgentGroupContainers(agentGroupId, 'Webchat skills changed');
   return json(res, 200, { ok: true, skills, restarted });
+}
+
+// Import a GitHub skill wired to ONE agent group: staged into that group's own
+// .claude-shared/skills/<name> (a real dir), so only that group loads it. Accepts
+// a repo/folder URL (incl. a bare repo root for a one-skill repo).
+async function importScopedSkillHandler(req: IncomingMessage, res: ServerResponse, agentGroupId: string): Promise<void> {
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { url?: unknown; repo?: unknown; name?: unknown; origin?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  let url = String(body.url || '').trim();
+  // Marketplace items arrive as {repo, name} — resolve to a folder URL first.
+  if (!url && body.repo) {
+    try {
+      url = await resolveDiscoveredSkillUrl(String(body.repo), String(body.name || ''));
+    } catch (err) {
+      return json(res, 422, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  const resolved = await resolveSourceUrl(url);
+  if (!resolved) {
+    return json(res, 400, { error: 'Expected a GitHub repo or folder URL, e.g. https://github.com/owner/repo' });
+  }
+  const { owner, repo, branch, dir } = resolved;
+  const origin: SkillOrigin = sanitizeOrigin(body.origin) ?? {
+    label: `${owner}/${repo}`,
+    url: `https://github.com/${owner}/${repo}`,
+    official: false,
+  };
+  const skillName = sanitizeSkillName((dir ? dir.split('/').pop() : repo) || repo);
+  if (!skillName) return json(res, 400, { error: 'Could not derive a skill name from the URL' });
+  // A pooled skill of this name would collide with the 'all' symlink in the same
+  // dir — steer the user to plain assignment instead of a scoped copy.
+  if (
+    fs.existsSync(path.join(process.cwd(), 'container', 'skills', skillName)) ||
+    fs.existsSync(path.join(USER_SKILLS_DIR, skillName))
+  ) {
+    return json(res, 409, { error: `A shared skill named "${skillName}" already exists — assign it below instead` });
+  }
+  let files: Array<{ rel: string; content: Buffer }>;
+  try {
+    files = await fetchGithubDir(owner, repo, branch, dir);
+  } catch (err) {
+    return json(res, 502, { error: 'Fetch failed: ' + (err instanceof Error ? err.message : String(err)) });
+  }
+  if (!files.some((f) => f.rel === 'SKILL.md')) {
+    return json(res, 422, { error: 'That folder has no SKILL.md — not an Agent Skill' });
+  }
+  const dir0 = scopedSkillsDir(agentGroupId);
+  const dest = path.join(dir0, skillName);
+  const staging = `${dest}.importing`;
+  try {
+    fs.mkdirSync(dir0, { recursive: true });
+    fs.rmSync(staging, { recursive: true, force: true });
+    for (const f of files) {
+      const target = path.join(staging, f.rel);
+      if (target !== staging && !target.startsWith(staging + path.sep)) continue; // no traversal
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, f.content);
+    }
+    fs.writeFileSync(path.join(staging, '.origin.json'), JSON.stringify(origin));
+    fs.rmSync(dest, { recursive: true, force: true });
+    fs.renameSync(staging, dest);
+  } catch (err) {
+    fs.rmSync(staging, { recursive: true, force: true });
+    return json(res, 500, { error: 'Write failed: ' + (err instanceof Error ? err.message : String(err)) });
+  }
+  const restarted = restartAgentGroupContainers(agentGroupId, 'Webchat scoped skill added');
+  return json(res, 200, { ok: true, name: skillName, files: files.length, restarted });
+}
+
+// Remove a scoped skill (a real dir) from a group's .claude-shared/skills. Only
+// touches real directories — never a pooled-skill symlink.
+function deleteScopedSkillHandler(res: ServerResponse, agentGroupId: string, name: string): void {
+  const clean = sanitizeSkillName(name);
+  if (!clean) return json(res, 400, { error: 'Invalid skill name' });
+  const dir = path.join(scopedSkillsDir(agentGroupId), clean);
+  let isRealDir = false;
+  try {
+    isRealDir = fs.lstatSync(dir).isDirectory();
+  } catch {
+    return json(res, 404, { error: 'Skill not wired to this agent' });
+  }
+  if (!isRealDir) return json(res, 404, { error: 'Skill not wired to this agent' }); // a symlink = pooled, not scoped
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch (err) {
+    return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+  }
+  const restarted = restartAgentGroupContainers(agentGroupId, 'Webchat scoped skill removed');
+  return json(res, 200, { ok: true, restarted });
 }
 
 function listAgentMcpHandler(res: ServerResponse, agentGroupId: string): void {

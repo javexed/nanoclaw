@@ -157,12 +157,34 @@ files; copy into a new name to fork one. PUT requires front-matter with a
 description (so the picker never fills with blanks), caps at 512KB, and only
 writes `SKILL.md` — extra files come via import or the host filesystem.
 
+## Per-agent (scoped) skills
+
+**Decision: a skill can be wired to ONE agent group without entering the shared
+pool.** The shared `data/user-skills` pool fans out to every `'all'` agent
+(the default), so a pooled import lands on all of them — the fan-out the security
+review flagged. A *scoped* skill instead lives as a **real directory** in the
+target group's own `.claude-shared/skills/<name>/`, which mounts at
+`~/.claude/skills` — so only that group loads it, and `'all'` never includes it
+(`availableSkillNames()` only scans the pool, not per-group dirs).
+
+`syncSkillSymlinks` manages *symlinks* (the pooled fan-out) and leaves real dirs
+untouched, so a scoped skill coexists with the `'all'` symlinks in the same dir;
+`listScopedSkills()` distinguishes them with `lstat` (real dir = scoped, symlink
+= pooled). Endpoints hang off the agent, not the global skills surface:
+`POST /api/agents/:id/skills/import` (repo/folder/repo-root URL → staged into the
+group dir → `restartAgentGroupContainers`) and `DELETE …/skills/scoped/:name`.
+Both are gated `hasAdminPrivilege(agent)` — a scoped skill can't affect any other
+group, so per-group admin is sufficient (and it sidesteps the pooled-import
+escalation entirely). Surfaced in the agent's Skills panel under "Wired to this
+agent", above the shared-pool checkboxes.
+
 ## Gating
 
 | Surface | Client | Server |
 |---------|--------|--------|
-| List / import / edit / delete skills | admin (`isAdminView`) | `isAnyAdmin` |
-| Assign to an agent | agent detail | `hasAdminPrivilege(agent)` |
+| List / import / edit / delete POOLED skills | admin (`isAdminView`) | owner/`isGlobalAdmin` for writes (install-wide fan-out) |
+| Assign a pooled skill to an agent | agent detail | `hasAdminPrivilege(agent)` |
+| Import / remove a SCOPED skill (one agent) | agent detail | `hasAdminPrivilege(agent)` — affects only that group |
 | Catalog source add/edit/remove | owner view (Settings) | `isGlobalAdmin` — install-wide trust decision |
 
 ## Dependency stance
