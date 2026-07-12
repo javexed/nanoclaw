@@ -420,12 +420,37 @@ function selectedSkillNames(containerConfig: import('./container-config.js').Con
     : [];
 }
 
+/**
+ * Output-token ceiling for the Claude agent SDK.
+ *
+ * Left unset, the SDK caps a turn at 32000 output tokens and kills it with
+ * "Claude's response exceeded the 32000 output token maximum" — which killed real
+ * turns (a long CAD/OpenSCAD answer in rolling-bench). Every current model's real
+ * ceiling is far higher, so there's no reason to leave that headroom unused.
+ *
+ * Model-aware because the ceilings differ and overshooting is a 400:
+ *   Haiku 4.5                                    →  64K
+ *   Opus 4.6/4.7/4.8, Sonnet 4.6/5, Fable 5      → 128K
+ *
+ * Unknown/custom model strings fall back to 64K — the value every current model
+ * accepts. Override with NANOCLAW_MAX_OUTPUT_TOKENS. This is a ceiling, not a
+ * target: raising it costs nothing unless a turn actually needs the room.
+ */
+function maxOutputTokensFor(model: string | null | undefined): number {
+  const override = Number(process.env.NANOCLAW_MAX_OUTPUT_TOKENS);
+  if (Number.isFinite(override) && override > 0) return Math.floor(override);
+  const m = (model ?? '').toLowerCase();
+  if (m.includes('haiku')) return 64_000;
+  if (!m || m.includes('opus') || m.includes('sonnet') || m.includes('fable')) return 128_000;
+  return 64_000;
+}
+
 async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
   agentGroup: AgentGroup,
   containerConfig: import('./container-config.js').ContainerConfig,
-  _provider: string,
+  provider: string,
   providerContribution: ProviderContainerContribution,
   agentIdentifier?: string,
 ): Promise<string[]> {
@@ -441,6 +466,13 @@ async function buildContainerArgs(
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Raise the SDK's 32000 output-token cap to the model's real ceiling. Claude
+  // provider only — the var is read by the Claude Agent SDK and means nothing to
+  // opencode/ollama, whose own limits are configured elsewhere.
+  if (provider === 'claude') {
+    args.push('-e', `CLAUDE_CODE_MAX_OUTPUT_TOKENS=${maxOutputTokensFor(containerConfig.model)}`);
+  }
 
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
   if (providerContribution.env) {
