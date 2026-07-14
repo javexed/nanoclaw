@@ -1,5 +1,5 @@
 diff --git a/src/container-runner.ts b/src/container-runner.ts
-index b5156b99..8d8931ad 100644
+index 8064d6c5..9e52987a 100644
 --- a/src/container-runner.ts
 +++ b/src/container-runner.ts
 @@ -326,16 +326,30 @@ function resolveProviderContribution(

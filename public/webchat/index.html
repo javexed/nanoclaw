@@ -50,6 +50,11 @@
         <rect width="7" height="9" x="14" y="12" rx="1" />
         <rect width="7" height="5" x="3" y="16" rx="1" />
       </symbol>
+      <symbol id="i-graduation-cap" viewBox="0 0 24 24">
+        <path d="M21.42 10.922a1 1 0 0 0-.019-1.838L12.83 5.18a2 2 0 0 0-1.66 0L2.6 9.08a1 1 0 0 0 0 1.832l8.57 3.908a2 2 0 0 0 1.66 0z" />
+        <path d="M22 10v6" />
+        <path d="M6 12.5V16a6 3 0 0 0 12 0v-3.5" />
+      </symbol>
       <symbol id="i-sparkles" viewBox="0 0 24 24">
         <path
           d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .962 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.962 0z"
@@ -212,6 +217,7 @@
                 title="Menu"
               >
                 <svg class="icon" aria-hidden="true"><use href="#i-ellipsis"></use></svg>
+                <span id="learn-drafts-dot" class="menu-count menu-count-dot" hidden></span>
               </button>
               <div id="overflow-menu" class="overflow-menu" hidden role="menu">
                 <button class="overflow-item" data-action="agents" role="menuitem">
@@ -225,6 +231,7 @@
                 </button>
                 <button id="overflow-skills" class="overflow-item" data-action="skills" role="menuitem" hidden>
                   <svg class="icon" aria-hidden="true"><use href="#i-book-open"></use></svg>&nbsp;&nbsp;Skills
+                  <span id="learn-drafts-count" class="menu-count" hidden></span>
                 </button>
                 <button class="overflow-item" data-action="routing" role="menuitem" hidden>
                   <svg class="icon" aria-hidden="true"><use href="#i-route"></use></svg>&nbsp;&nbsp;Auto routing
@@ -411,8 +418,21 @@
             </div>
             <div id="typing-indicator" class="typing-indicator" aria-hidden="true"></div>
             <div id="file-preview" class="file-preview" hidden></div>
+            <!-- Learn nudge: appears only after a turn that looked skill-worthy
+                 (tool-heavy). Human-gated — it suggests, you tap, nothing runs on its
+                 own. Dismiss hides it until the next qualifying turn. -->
+            <div id="learn-nudge" class="learn-nudge" hidden>
+              <button type="button" id="learn-nudge-go" class="learn-nudge-go">
+                <svg class="icon" aria-hidden="true"><use href="#i-sparkles"></use></svg>
+                Worth keeping? Distill a skill
+              </button>
+              <button type="button" id="learn-nudge-dismiss" class="learn-nudge-dismiss" aria-label="Dismiss">
+                <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+              </button>
+            </div>
             <form id="message-form">
               <div id="slash-menu" class="slash-menu" role="listbox" aria-label="Commands" hidden></div>
+                <div id="learn-menu" class="learn-menu" role="menu" aria-label="Learning" hidden></div>
               <button type="button" id="file-picker" class="file-picker-btn" title="Upload file">
                 <svg class="icon" aria-hidden="true"><use href="#i-paperclip"></use></svg>
               </button>
@@ -420,6 +440,15 @@
                 <svg class="icon" aria-hidden="true"><use href="#i-camera"></use></svg>
               </button>
               <textarea id="message-input" rows="1" placeholder="Message…" autocomplete="off" disabled></textarea>
+              <button
+                type="button"
+                id="learn-btn"
+                class="file-picker-btn"
+                title="Distill a skill from this session"
+                disabled
+              >
+                <svg class="icon" aria-hidden="true"><use href="#i-graduation-cap"></use></svg>
+              </button>
               <button type="submit" id="send-btn" disabled aria-label="Send message">
                 <svg
                   viewBox="0 0 24 24"
@@ -697,6 +726,17 @@
                     </div>
                   </div>
                 </div>
+                <!-- Learning loop: everything skill-related for this room, in the room.
+                     Proposals from its agents (Keep wires scoped to the proposer, no
+                     fan-out) and the skills they've already learned. Saves a trip to
+                     the global Skills page. Hidden entirely when there's nothing. -->
+                <div id="room-skills-section" hidden>
+                  <div class="form-label-row">
+                    <span class="form-label">Skills</span>
+                    <span id="room-skills-count" class="room-skills-count"></span>
+                  </div>
+                  <ul id="room-skills-list" class="room-skills-list"></ul>
+                </div>
                 <div class="agent-detail-actions">
                   <button type="button" id="room-archive-toggle" class="btn btn-secondary" hidden>Archive room</button>
                   <button type="button" id="room-delete" class="btn btn-danger">Delete room</button>
@@ -955,6 +995,8 @@
                   />
                 </label>
                 <p id="mcp-detail-usage" class="room-prime-note"></p>
+                <!-- Health / drift / tool-allowlist / OAuth — filled by openMcpDetail. -->
+                <div id="mcp-hardening"></div>
                 <div class="agent-detail-actions">
                   <button type="submit" class="btn btn-primary">Save</button>
                 </div>
@@ -972,6 +1014,32 @@
                 </button>
               </div>
               <div class="agent-detail-form">
+                <!-- Catalog: the public MCP registry. Read-only discovery — picking a
+                     row only PREFILLS the form below, so every server still goes
+                     through probe → add. Remote servers are dialled out to; package
+                     (npm/pypi) servers execute code inside the container, so they're
+                     marked and gated. See mcp-catalog.test.ts. -->
+                <details id="mcp-catalog-block" class="mcp-catalog-block">
+                  <summary>Browse the MCP registry</summary>
+                  <input
+                    id="mcp-catalog-search"
+                    type="search"
+                    placeholder="Search servers…"
+                    autocomplete="off"
+                  />
+                  <p class="mcp-catalog-source">
+                    Source:
+                    <a href="https://registry.modelcontextprotocol.io" target="_blank" rel="noopener noreferrer"
+                      >registry.modelcontextprotocol.io</a
+                    >
+                  </p>
+                  <p class="setting-help mcp-catalog-warning">
+                    Third-party servers, published by anyone — nobody vets them. Read the source, probe it,
+                    and remember a server sees whatever the agent sends it
+                  </p>
+                  <p id="mcp-catalog-status" class="setting-help"></p>
+                  <ul id="mcp-catalog-list" class="mcp-catalog-list"></ul>
+                </details>
                 <!-- Probe section: paste a URL, connect as an MCP client, list the
                      server's tools before saving (mirrors the model probe). -->
                 <div class="model-probe-block">
@@ -1126,6 +1194,17 @@
             <!-- Browse view: plain list + footer button, same shape as the other
                  manage tabs. Adding lives behind "+ Add skill". -->
             <div id="skills-browse">
+              <!-- Learning loop: skills the agents proposed, awaiting review. -->
+              <div id="skill-drafts" hidden>
+                <span class="form-label">Proposed skills</span>
+                <ul id="skill-drafts-list" class="skills-list"></ul>
+              </div>
+              <!-- Learning loop: the same skill learned independently by several
+                   agents — the signal it belongs in the shared pool. -->
+              <div id="skill-duplicates" hidden>
+                <span class="form-label">Learned by several agents</span>
+                <ul id="skill-duplicates-list" class="skills-list"></ul>
+              </div>
               <ul id="skills-list"></ul>
               <button id="skill-add-btn" class="btn btn-secondary btn-list-footer" type="button">+ Add skill</button>
             </div>
@@ -1166,6 +1245,7 @@
               </div>
               <textarea id="skill-editor-content" spellcheck="false"></textarea>
               <div class="skills-editor-actions">
+                <button id="skill-editor-mode" class="btn btn-ghost" type="button" hidden>Edit</button>
                 <button id="skill-editor-cancel" class="btn btn-secondary" type="button">Back</button>
                 <button id="skill-editor-save" class="btn btn-primary" type="button">Save</button>
               </div>
@@ -1587,6 +1667,15 @@
                 <input id="notif-toggle" type="checkbox" />
               </label>
             </div>
+            <!-- Re-open the first-run setup wizard — owner/global-admin only. -->
+            <div id="settings-wizard" class="settings-credentials" hidden>
+              <h3 class="settings-section-title">Setup</h3>
+              <div class="setting-group">
+                <button id="wizard-open-btn" class="btn btn-secondary" type="button">Run setup wizard…</button>
+              </div>
+            </div>
+            <!-- Default login (Anthropic/Codex) now lives in the setup wizard's
+                 engine picker — reached via "Run setup wizard…" above. -->
             <!-- Workspace credentials policy — owner only (shown when canEdit). -->
             <div id="settings-credentials" class="settings-credentials" hidden>
               <h3 class="settings-section-title">User credentials</h3>
@@ -1606,6 +1695,38 @@
                 </div>
               </div>
             </div>
+            <!-- Access & security — owner/global-admin. The bearer-token opt-out
+                 appears only once Tailscale or SSO (trusted proxy / EntraID) is
+                 live; the server refuses to disable it otherwise. -->
+            <div id="settings-access" class="settings-credentials" hidden>
+              <h3 class="settings-section-title">Access</h3>
+              <div class="setting-group install-row">
+                <span class="setting-label">Bearer token</span>
+                <button id="access-bearer-btn" class="btn btn-secondary" type="button" hidden></button>
+                <span id="access-bearer-badge" class="install-badge" hidden></span>
+              </div>
+              <p class="cred-hint" id="access-bearer-hint"></p>
+              <!-- HTTPS over Tailscale — runs `tailscale serve` so webchat is
+                   reachable at https://<node>.ts.net with a real cert (secure
+                   context → PWA install / push / voice). Shown only when
+                   tailscaled is detected up on the host. -->
+              <div id="access-https-row" class="setting-group install-row" hidden>
+                <span class="setting-label">HTTPS over Tailscale</span>
+                <button id="access-https-btn" class="btn btn-secondary" type="button"></button>
+              </div>
+              <p class="cred-hint" id="access-https-hint" hidden></p>
+            </div>
+            <!-- Feature toggles — owner/global-admin. MCP + skills marketplace are
+                 code-execution surfaces: on by default, disable for a locked-down
+                 deployment (hides the tabs + 403s the endpoints). -->
+            <div id="settings-features" class="settings-credentials" hidden>
+              <h3 class="settings-section-title">Features</h3>
+              <div class="setting-group install-row">
+                <span class="setting-label">MCP &amp; skills marketplace</span>
+                <button id="features-marketplace-btn" class="btn btn-secondary" type="button"></button>
+              </div>
+              <p class="cred-hint" id="features-marketplace-hint"></p>
+            </div>
             <!-- Skill collections registry — the Skills tab's catalog sources.
                  Shown to owners/global admins (server enforces global admin). -->
             <div id="settings-skill-sources" class="settings-credentials" hidden>
@@ -1615,6 +1736,12 @@
                 <input id="skill-source-url" type="text" placeholder="https://github.com/owner/repo" autocomplete="off" spellcheck="false" />
                 <button id="skill-source-save" class="btn btn-secondary" type="button">Add</button>
               </div>
+            </div>
+            <!-- MCP registry — the Add-MCP-server catalog's source. Switched off the same
+                 way a skill collection is (webchat_disabled_sources). -->
+            <div id="settings-mcp-sources" class="settings-credentials" hidden>
+              <h3 class="settings-section-title">MCP registry</h3>
+              <ul id="mcp-sources-list" class="skill-sources-list"></ul>
             </div>
             <div id="settings-routing" class="settings-credentials" hidden>
               <!-- Install-row pattern: name left, action right — Install button →
@@ -1636,6 +1763,171 @@
               </div>
             </div>
           </div>
+        </div>
+      </div>
+    </div>
+    <!--
+      First-run setup wizard — owner/global-admin only. Auto-opens on first login
+      while onboarding is incomplete; re-openable from Settings. Steps are skippable.
+    -->
+    <div id="wizard-overlay" class="modal-overlay" hidden>
+      <div class="modal wizard-modal" role="dialog" aria-modal="true" aria-labelledby="wizard-title">
+        <div class="members-header">
+          <span id="wizard-title">Set up NanoClaw</span>
+          <button id="wizard-close" class="members-close" type="button" aria-label="Close">
+            <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+          </button>
+        </div>
+        <div class="wizard-dots" id="wizard-dots" aria-hidden="true"></div>
+        <div class="wizard-body">
+          <!-- Step 0: pick the default (fallback) engine; each option expands
+               its connect controls inline (accordion) when selected. -->
+          <section class="wizard-step" data-step="0">
+            <h3 class="settings-section-title">Default engine</h3>
+            <div class="wizard-engines" role="radiogroup" aria-label="Default engine">
+              <div class="wizard-engine">
+                <label class="wizard-engine-head">
+                  <input type="radio" name="wizard-engine" value="claude" checked />
+                  <span>Claude</span>
+                  <span class="wizard-engine-rec">Recommended</span>
+                  <span class="wizard-engine-chip" id="wizard-chip-claude" hidden></span>
+                </label>
+                <div class="wizard-engine-body" data-engine="claude">
+                  <div id="wizard-claude-connect">
+                    <div class="setting-group">
+                      <button id="wizard-claude-oauth" class="btn btn-primary" type="button">
+                        Connect with Claude subscription…
+                      </button>
+                    </div>
+                    <div class="setting-group">
+                      <input
+                        id="wizard-claude-key"
+                        type="password"
+                        placeholder="or paste sk-ant-… key / sk-ant-oat… token"
+                        autocomplete="off"
+                        spellcheck="false"
+                      />
+                      <button id="wizard-claude-save" class="btn btn-secondary" type="button">Save</button>
+                    </div>
+                    <p class="cred-hint" id="wizard-claude-status" hidden></p>
+                  </div>
+                  <div class="wizard-connected" id="wizard-claude-connected" hidden>
+                    <span class="wizard-connected-check" aria-hidden="true">✓</span>
+                    <span id="wizard-claude-connected-text">Connected</span>
+                    <button id="wizard-claude-disconnect" class="btn btn-secondary" type="button">Disconnect</button>
+                  </div>
+                </div>
+              </div>
+              <div class="wizard-engine" id="wizard-engine-codex">
+                <label class="wizard-engine-head">
+                  <input type="radio" name="wizard-engine" value="codex" />
+                  <span>Codex (ChatGPT)</span>
+                  <span class="wizard-engine-chip" id="wizard-chip-codex" hidden></span>
+                </label>
+                <div class="wizard-engine-body" data-engine="codex" hidden>
+                  <div id="wizard-codex-connect">
+                    <div class="setting-group">
+                      <button id="wizard-codex-oauth" class="btn btn-primary" type="button">
+                        Connect with ChatGPT subscription…
+                      </button>
+                    </div>
+                    <div class="setting-group">
+                      <input
+                        id="wizard-codex-key"
+                        type="password"
+                        placeholder="or paste an sk-… OpenAI key"
+                        autocomplete="off"
+                        spellcheck="false"
+                      />
+                      <button id="wizard-codex-save" class="btn btn-secondary" type="button">Save</button>
+                    </div>
+                    <p class="cred-hint" id="wizard-codex-status" hidden></p>
+                  </div>
+                  <div class="wizard-connected" id="wizard-codex-connected" hidden>
+                    <span class="wizard-connected-check" aria-hidden="true">✓</span>
+                    <span id="wizard-codex-connected-text">Connected</span>
+                    <button id="wizard-codex-disconnect" class="btn btn-secondary" type="button">Disconnect</button>
+                  </div>
+                </div>
+              </div>
+              <div class="wizard-engine">
+                <label class="wizard-engine-head">
+                  <input type="radio" name="wizard-engine" value="ollama" />
+                  <span>Ollama</span>
+                  <span class="wizard-engine-chip" id="wizard-chip-ollama" hidden></span>
+                </label>
+                <div class="wizard-engine-body" data-engine="ollama" hidden>
+                  <div class="setting-group">
+                    <input id="wizard-ollama-url" type="url" placeholder="http://localhost:11434" autocomplete="off" spellcheck="false" />
+                    <button id="wizard-ollama-probe" class="btn btn-secondary" type="button">Probe</button>
+                  </div>
+                  <!-- Shown when nothing answers on this machine's :11434 (Linux only). -->
+                  <div class="setting-group" id="wizard-ollama-install-row" hidden>
+                    <button id="wizard-ollama-install" class="btn btn-secondary" type="button">
+                      Install Ollama on this machine…
+                    </button>
+                  </div>
+                  <pre id="wizard-ollama-install-log" class="wizard-code" hidden></pre>
+                  <p class="cred-hint" id="wizard-ollama-status" hidden></p>
+                  <div id="wizard-ollama-results" hidden>
+                    <ul id="wizard-ollama-list" class="wizard-list"></ul>
+                    <button id="wizard-ollama-add" class="btn btn-primary" type="button">Set as default</button>
+                  </div>
+                  <!-- Pull a model onto the probed host (progress polled from /api/ollama/pulls). -->
+                  <div class="setting-group" id="wizard-ollama-dl-row" hidden>
+                    <input id="wizard-ollama-dl-model" type="text" placeholder="model to download" autocomplete="off" spellcheck="false" />
+                    <button id="wizard-ollama-dl" class="btn btn-secondary" type="button">Download</button>
+                  </div>
+                  <p class="cred-hint" id="wizard-ollama-rec" hidden></p>
+                  <div class="ollama-pull-bar" id="wizard-ollama-pull-bar" hidden><span style="width:0%"></span></div>
+                  <p class="cred-hint" id="wizard-ollama-dl-status" hidden></p>
+                </div>
+              </div>
+            </div>
+          </section>
+          <!-- Step 1: Create first agent + room -->
+          <section class="wizard-step" data-step="1" hidden>
+            <h3 class="settings-section-title">Your first agent</h3>
+            <div class="setting-group">
+              <input id="wizard-room-name" type="text" value="General" placeholder="Room name" autocomplete="off" />
+            </div>
+            <div class="setting-group">
+              <input id="wizard-agent-name" type="text" value="Assistant" placeholder="Agent name" autocomplete="off" />
+            </div>
+            <div class="setting-group">
+              <label class="setting-toggle">
+                <span>Enable MCP &amp; skills marketplace <span class="cred-hint">(recommended)</span></span>
+                <input id="wizard-marketplace" type="checkbox" checked />
+              </label>
+            </div>
+            <div class="setting-group">
+              <label class="setting-toggle">
+                <span>I'll access this over Tailscale <span class="cred-hint">(recommended)</span></span>
+                <input id="wizard-tailscale" type="checkbox" />
+              </label>
+            </div>
+            <p class="cred-hint" id="wizard-tailscale-note" hidden>
+              You're secured by a bearer token today. For a stronger, tokenless
+              setup, add <a href="https://tailscale.com/kb/1130/lxc-unprivileged" target="_blank" rel="noopener">Tailscale</a>
+              (Proxmox LXC: the community Tailscale addon), then reach this over your
+              tailnet — the first Tailscale login here becomes an owner. For real
+              HTTPS (PWA install, push, voice), front it with <code>tailscale serve</code>.
+              You can then retire the token in Settings → Access.
+            </p>
+            <!-- Revealed by app.js only when tailscaled is detected up and serve
+                 isn't already on — lets the operator flip on HTTPS right here. -->
+            <div id="wizard-https-row" class="setting-group install-row" hidden>
+              <button id="wizard-https-btn" class="btn btn-secondary" type="button">Enable HTTPS now</button>
+              <span id="wizard-https-status" class="cred-hint"></span>
+            </div>
+            <p class="cred-hint" id="wizard-room-status" hidden></p>
+          </section>
+        </div>
+        <div class="wizard-footer">
+          <button id="wizard-back" class="btn btn-secondary" type="button" hidden>Back</button>
+          <span class="wizard-footer-spacer"></span>
+          <button id="wizard-skip" class="btn btn-secondary" type="button">Skip</button>
+          <button id="wizard-next" class="btn btn-primary" type="button">Next</button>
         </div>
       </div>
     </div>

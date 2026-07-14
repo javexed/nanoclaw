@@ -114,8 +114,11 @@ async function main(): Promise<void> {
   // Welcome menu — default path or open advanced overrides before any setup
   // work begins. Default lands on standard so Enter is the happy path.
   // On sg re-exec, the user already chose — skip straight to standard.
+  // With no TTY (cloud-init, provisioners, CI) there's nothing to prompt —
+  // take the standard path instead of aborting on stdin EOF. Advanced overrides
+  // are still reachable headlessly via the NANOCLAW_* config env vars.
   let startChoice: 'default' | 'advanced' = 'default';
-  if (process.env.NANOCLAW_REEXEC_SG !== '1') {
+  if (process.env.NANOCLAW_REEXEC_SG !== '1' && Boolean(process.stdin.isTTY)) {
     startChoice = ensureAnswer(
       await brightSelect<'default' | 'advanced'>({
         message: 'How would you like to begin?',

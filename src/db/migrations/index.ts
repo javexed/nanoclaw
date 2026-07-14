@@ -20,6 +20,9 @@ import { migration022 } from './022-byok-provider.js';
 import { migration023 } from './023-byok-user-credentials.js';
 import { migration024 } from './024-rename-user-credentials.js';
 import { moduleApprovalsPendingApprovals } from './module-approvals-pending-approvals.js';
+import { moduleLearningSkillDrafts } from './module-learning-skill-drafts.js';
+import { moduleLearningConfig } from './module-learning-config.js';
+import { moduleMcpHardening } from './module-mcp-hardening.js';
 import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js';
 import { migration018 } from './018-approvals-approver-user-id.js';
 
@@ -46,6 +49,12 @@ import {
   moduleWebchatThreadEngaged,
   moduleWebchatThreadContextSync,
   moduleWebchatMcpServers,
+  moduleWebchatOnboarding,
+  moduleWebchatStt,
+  moduleWebchatBearerAuth,
+  moduleWebchatMarketplaceToggle,
+  moduleWebchatTailscaleOwner,
+  moduleWebchatDefaultModel,
   moduleWebchatSkillSources,
   moduleWebchatSkillSourcesOfficial,
   moduleWebchatDisabledBuiltins,
@@ -70,6 +79,7 @@ export const migrations: Migration[] = [
   migration001,
   migration002,
   moduleApprovalsPendingApprovals,
+  moduleLearningSkillDrafts,
   moduleAgentToAgentDestinations,
   migration017,
   moduleApprovalsTitleOptions,
@@ -110,9 +120,19 @@ export const migrations: Migration[] = [
   moduleWebchatThreadEngaged,
   moduleWebchatThreadContextSync,
   moduleWebchatMcpServers,
+  moduleWebchatOnboarding,
+  moduleWebchatStt,
+  moduleWebchatBearerAuth,
+  moduleWebchatMarketplaceToggle,
+  moduleWebchatTailscaleOwner,
+  moduleWebchatDefaultModel,
   moduleWebchatSkillSources,
   moduleWebchatSkillSourcesOfficial,
   moduleWebchatDisabledBuiltins,
+  // ALTERs container_configs — must run after migration014 creates it. Keep at the end.
+  moduleLearningConfig,
+  // ALTERs webchat_mcp_servers — must run after moduleWebchatMcpServers creates it. Keep at the end.
+  moduleMcpHardening,
 ];
 
 /** Row shape of PRAGMA foreign_key_check. Child rowids are stable across a

@@ -19,10 +19,9 @@ import path from 'path';
 import dns from 'node:dns/promises';
 
 import { DATA_DIR } from '../../config.js';
-import { ensureContainerConfig, updateContainerConfigScalars } from '../../db/container-configs.js';
-import { getProviderContainerConfig } from '../../providers/provider-container-registry.js';
+import { ensureContainerConfig, getContainerConfig, updateContainerConfigScalars } from '../../db/container-configs.js';
 import { log } from '../../log.js';
-import { getAssignedModelForAgent, type WebchatModel } from './db.js';
+import { getAssignedModelForAgent, getEffectiveModelForAgent, type WebchatModel } from './db.js';
 
 // ─── SSRF defense for owner-supplied probe/discover/validate URLs ─────────
 //
@@ -238,24 +237,46 @@ export function envForModel(model: WebchatModel | null): Record<string, string> 
     // "issue with the selected model … may not exist". Verified against Ollama
     // 0.17 (qwen3-coder, llama3.2): bare → 200, `/v1` → 404.
     const base = containerReachableUrl(model.endpoint.replace(/\/+$/, ''));
+    // The container routes model calls through the OneCLI credential proxy
+    // (HTTP_PROXY/HTTPS_PROXY from the gateway env). A redirected Ollama
+    // endpoint must BYPASS it — the proxy only fronts known providers and
+    // resets anything else (surfaces as "API Error: ECONNRESET" from the
+    // agent). Same requirement as /add-ollama-provider; see docs/ollama.md.
+    let host = 'host.docker.internal';
+    try {
+      host = new URL(base).hostname;
+    } catch {
+      /* keep the default alias */
+    }
     return {
       ANTHROPIC_BASE_URL: base,
       ANTHROPIC_MODEL: model.model_id,
+      NO_PROXY: host,
+      no_proxy: host,
     };
   }
   if (model.kind === 'openai-compatible') {
-    // Stored env stub for the OpenCode provider to pick up when the
-    // operator installs `/add-opencode` and switches the agent's
-    // `agent_provider` to 'opencode'. With the default Claude SDK these
-    // env vars are no-ops — the assignment is registered for later use.
+    // Direct path — no OpenCode hop. LiteLLM serves the Anthropic-spec
+    // /v1/messages endpoint for every model it fronts, so the default Claude
+    // SDK talks to it natively: same contract as the `ollama` kind above.
+    // Registry endpoints conventionally carry their OpenAI-format `/v1`
+    // suffix; strip it — the SDK appends the full `/v1/messages` path itself
+    // (LiteLLM serves it at the root, like Ollama).
     if (!model.endpoint) return {};
-    // The env block is container-facing — a loopback endpoint (the operator's
-    // host-side view, e.g. a local LiteLLM router) must become the in-container
-    // alias or the container would call itself.
-    const base = containerReachableUrl(model.endpoint.replace(/\/+$/, ''));
+    const base = containerReachableUrl(model.endpoint.replace(/\/+$/, '').replace(/\/v1$/, ''));
+    let host = 'host.docker.internal';
+    try {
+      host = new URL(base).hostname;
+    } catch {
+      /* keep the default alias */
+    }
     return {
-      OPENAI_BASE_URL: base,
-      OPENAI_MODEL: model.model_id,
+      ANTHROPIC_BASE_URL: base,
+      ANTHROPIC_MODEL: model.model_id,
+      // Bypass the OneCLI credential proxy for the local router — same
+      // requirement (and same failure mode) as the ollama kind.
+      NO_PROXY: host,
+      no_proxy: host,
     };
   }
   return {};
@@ -277,7 +298,15 @@ export function envForModel(model: WebchatModel | null): Record<string, string> 
  * Idempotent. Preserves any pre-existing env keys we don't manage.
  */
 export function writeAgentSettingsForAssignedModel(agentGroupId: string): void {
-  const model = getAssignedModelForAgent(agentGroupId);
+  // Per-agent assignment wins; a claude-family group WITHOUT one falls back to
+  // the workspace default model (wizard "default engine = Ollama"). Groups on
+  // a non-default provider (codex/opencode) never inherit the fallback — their
+  // harness doesn't read the ANTHROPIC_* env this writes.
+  let model = getAssignedModelForAgent(agentGroupId);
+  if (!model) {
+    const provider = getContainerConfig(agentGroupId)?.provider;
+    if (!provider || provider === 'claude') model = getEffectiveModelForAgent(agentGroupId);
+  }
   const overrides = envForModel(model);
 
   const settingsPath = path.join(DATA_DIR, 'v2-sessions', agentGroupId, '.claude-shared', 'settings.json');
@@ -309,35 +338,31 @@ export function writeAgentSettingsForAssignedModel(agentGroupId: string): void {
   delete cleaned.ANTHROPIC_MODEL;
   delete cleaned.OPENAI_BASE_URL;
   delete cleaned.OPENAI_MODEL;
+  delete cleaned.NO_PROXY;
+  delete cleaned.no_proxy;
 
   const merged = { ...existing, env: { ...cleaned, ...overrides } };
   fs.writeFileSync(settingsPath, JSON.stringify(merged, null, 2) + '\n');
 }
 
 /**
- * The agent provider a model kind requires. `openai-compatible` models are
- * consumed by the OpenCode harness (installed via /add-opencode); every other
- * kind (and no assignment) runs the default Claude provider.
+ * Every model kind runs on the default Claude provider. `openai-compatible`
+ * endpoints are consumed through their Anthropic-spec /v1/messages surface
+ * (LiteLLM; Ollama has its own kind) — the OpenCode hop is gone, so no model
+ * kind requires a provider switch anymore.
+ *
+ * Kept (returning null) because the provider-lockstep sync below must still
+ * RUN: groups that a pre-direct install flipped to 'opencode' revert to the
+ * default provider on their next (re)assignment.
  */
-export function providerForModelKind(kind: string | null | undefined): 'opencode' | null {
-  return kind === 'openai-compatible' ? 'opencode' : null;
-}
-
-/** True when the OpenCode provider is installed (self-registered on import). */
-export function opencodeProviderInstalled(): boolean {
-  return getProviderContainerConfig('opencode') !== undefined;
+export function providerForModelKind(_kind: string | null | undefined): null {
+  return null;
 }
 
 /**
  * Keep the agent group's provider in lockstep with its assigned model's kind.
- *
- * Assigning an `openai-compatible` model switches the group to the OpenCode
- * provider; unassigning (or switching to an anthropic/ollama kind) reverts to
- * the default Claude provider. Only `container_configs.provider` is written —
- * it drives both spawn-time resolution and the host-side provider
- * contribution (sessions are created with agent_provider=null, and
- * agent_groups.agent_provider is deprecated). Takes effect on the next
- * container spawn; the caller's restart handles that.
+ * Post-OpenCode this always writes null (default Claude provider) — which is
+ * exactly what un-wedges a group an older install left on 'opencode'.
  */
 export function syncAgentProviderForAssignedModel(agentGroupId: string): void {
   const model = getAssignedModelForAgent(agentGroupId);
@@ -379,7 +404,27 @@ export async function healthCheckOllamaModel(endpoint: string, modelId: string):
     }
     return null;
   } catch (err) {
-    return `Ollama unreachable: ${err instanceof Error ? err.message : String(err)}`;
+    // Not literally Ollama — but the `ollama` kind really means "endpoint that
+    // speaks the Anthropic /v1/messages API" (that's all envForModel wires up).
+    // A LiteLLM router serving anthropic-spec is exactly as usable, and it has
+    // no /api/tags. Probe /v1/messages with a real one-token request — a 200
+    // both proves the route AND that the model id resolves. (An intentionally
+    // malformed body is no good: LiteLLM 500s on it rather than 400.) 401/403
+    // pass too: the endpoint is alive, just auth-gated.
+    try {
+      const url = `${endpoint.replace(/\/+$/, '')}/v1/messages`;
+      const res = await safeFetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: modelId, max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (res.ok || res.status === 401 || res.status === 403) return null;
+      const detail = await res.text().catch(() => '');
+      return `Anthropic-compatible endpoint returned ${res.status}${detail ? `: ${detail.slice(0, 120)}` : ''}`;
+    } catch {
+      return `Ollama unreachable: ${err instanceof Error ? err.message : String(err)}`;
+    }
   }
 }
 
@@ -592,7 +637,7 @@ async function probeOneScheme(rawUrl: string): Promise<ProbeResult> {
       result.kind = 'openai-compatible';
       result.requires_credential = true;
       result.notes =
-        'OpenAI-compatible endpoint detected (auth required). Save the API key as a OneCLI secret with hostPattern matching this URL, then assign here. ⚠ Using this kind requires the `/add-opencode` skill — the default Claude SDK does not speak OpenAI protocol.';
+        'OpenAI-compatible endpoint detected (auth required). Agents consume these through the Anthropic-spec /v1/messages surface (LiteLLM serves it for every model it fronts). For an auth-required endpoint, save the API key as a OneCLI secret with hostPattern matching this URL.';
       return result;
     }
     if (r.ok) {

@@ -132,8 +132,12 @@ if [ -z "$INST" ]; then fail "no install-webchat.sh on $CHANNEL"; else
       install-webchat.sh|uninstall-webchat.sh|configure-webchat.sh|verify-webchat-publish.sh) covered=yes ;;
       e2e/*|playwright.config.ts) covered=yes ;;                                   # dev-only e2e infra — intentionally not installed
       webchat-hooks/*) covered=yes ;;                                              # provider overlays (step 2d) — applied/copied by name
-      README.md|CHANGELOG.md) covered=yes ;;                                       # root project docs — branch documents the GUI; overlay never patches them
-      .claude/skills/*|docs/design/*|docs/showcase/*|docs/webchat/*) covered=yes ;; # repo-resident skills + design/webchat docs — repo documentation, not delivered by the webchat overlay
+      README.md|CHANGELOG.md|CONTRIBUTING.md) covered=yes ;;                        # root project docs — repo documentation; the overlay never patches them
+      .claude/skills/*|docs/*) covered=yes ;;                                       # repo-resident skills + ALL docs — repo documentation, not delivered by the webchat overlay
+      .github/*|repo-tokens/*) covered=yes ;;                                       # CI workflows + README badge assets — repo infra, never installed onto a user tree
+      templates/*) covered=yes ;;                                                   # repo-resident agent templates + their docs — carried by the base install, not the webchat overlay
+      setup/*) covered=yes ;;                                                       # base install/setup scripts (e.g. the headless setup:auto fix) — delivered by the base install / release tarball; webchat's own setup/get-oauth-token.sh is separately in NEW_PATHS
+      src/cli/*|container/agent-runner/src/cli/*) covered=yes ;;                    # base ncl admin CLI (host + container) — a base feature with zero webchat references; reaches installs via the base tree / release tarball, not the overlay
     esac
     [ "$covered" = no ] && uncovered="${uncovered}${f}"$'\n'
   done < <(git diff --name-only "$BASE" "$CHANNEL")
@@ -206,6 +210,9 @@ WEBCHAT_HOOK_ALLOWLIST=(
   src/modules/self-mod/apply.ts
   src/modules/self-mod/apply.test.ts
   src/modules/approvals/response-handler.test.ts
+  src/db/container-configs.ts
+  container/agent-runner/src/mcp-tools/index.ts
+  container/agent-runner/src/formatter.ts
 )
 DECLARED=$(git show "$CHANNEL:install-webchat.sh" 2>/dev/null \
   | awk '/^HOOK_FILES=\(/{f=1;next} f&&/^\)/{f=0} f{gsub(/^[ \t]+/,"");print}')

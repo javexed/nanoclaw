@@ -1,5 +1,5 @@
 diff --git a/container/agent-runner/src/config.ts b/container/agent-runner/src/config.ts
-index b53bfa6f..ef0b983c 100644
+index 8613020b..0860c094 100644
 --- a/container/agent-runner/src/config.ts
 +++ b/container/agent-runner/src/config.ts
 @@ -29,6 +29,11 @@ export interface RunnerConfig {
@@ -11,10 +11,10 @@ index b53bfa6f..ef0b983c 100644
 +   * re-run once on this provider (fresh session). Unset = no escalation.
 +   */
 +  fallbackProvider?: string;
- }
- 
- const DEFAULT_MAX_MESSAGES = 10;
-@@ -59,6 +64,7 @@ export function loadConfig(): RunnerConfig {
+   /**
+    * Learning-loop behavior (host's container.json). autoTrigger absent = ON;
+    * cooldownMinutes absent = 30. autoKeep is host-side only — the container
+@@ -66,6 +71,7 @@ export function loadConfig(): RunnerConfig {
      model: (raw.model as string) || undefined,
      effort: (raw.effort as string) || undefined,
      lenientOutput: raw.lenientOutput === true,

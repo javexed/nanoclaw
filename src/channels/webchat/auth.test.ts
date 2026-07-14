@@ -164,6 +164,57 @@ describe('authenticateRequest — loopback bypass', () => {
   });
 });
 
+describe('tailscaleServeIdentity — serve HTTPS header, loopback-gated', () => {
+  it('returns the login when the header arrives on loopback', async () => {
+    const auth = await loadAuthWithEnv({ WEBCHAT_TAILSCALE: 'true' });
+    const req = fakeReq({ remoteAddress: '127.0.0.1', headers: { 'tailscale-user-login': 'alice@github' } });
+    expect(auth.tailscaleServeIdentity(req, '127.0.0.1')).toBe('alice@github');
+  });
+
+  it('rejects the header from a non-loopback source (spoof guard)', async () => {
+    const auth = await loadAuthWithEnv({ WEBCHAT_TAILSCALE: 'true' });
+    // A LAN attacker hitting :PORT directly and forging the header must NOT be trusted.
+    const req = fakeReq({ remoteAddress: '192.168.1.50', headers: { 'tailscale-user-login': 'attacker@evil' } });
+    expect(auth.tailscaleServeIdentity(req, '192.168.1.50')).toBeNull();
+  });
+
+  it('returns null on loopback when the header is absent', async () => {
+    const auth = await loadAuthWithEnv({ WEBCHAT_TAILSCALE: 'true' });
+    expect(auth.tailscaleServeIdentity(fakeReq({ remoteAddress: '127.0.0.1' }), '127.0.0.1')).toBeNull();
+  });
+});
+
+describe('authenticateRequest — tailscale serve header path', () => {
+  it('authenticates a loopback serve request as the same webchat:tailscale id whois mints', async () => {
+    const auth = await loadAuthWithEnv({ WEBCHAT_TAILSCALE: 'true' });
+    const req = fakeReq({ remoteAddress: '127.0.0.1', headers: { 'tailscale-user-login': 'Alice@Github' } });
+    const result = await auth.authenticateRequest(req);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.source).toBe('tailscale');
+      // Same normalization as the whois path → identity continuity across http→https.
+      expect(result.userId).toBe('webchat:tailscale:alice@github');
+    }
+  });
+
+  it('does NOT trust the serve header from a non-loopback IP (falls through to reject)', async () => {
+    const auth = await loadAuthWithEnv({ WEBCHAT_TAILSCALE: 'true' });
+    const req = fakeReq({ remoteAddress: '192.168.1.50', headers: { 'tailscale-user-login': 'attacker@evil' } });
+    const result = await auth.authenticateRequest(req);
+    // whois on a LAN IP returns nothing (no tailscale binary in tests) → Unauthorized.
+    expect(result.ok).toBe(false);
+  });
+
+  it('ignores the serve header entirely when WEBCHAT_TAILSCALE is off', async () => {
+    const auth = await loadAuthWithEnv({});
+    const req = fakeReq({ remoteAddress: '127.0.0.1', headers: { 'tailscale-user-login': 'alice@github' } });
+    const result = await auth.authenticateRequest(req);
+    // No tailscale mode + no other explicit auth → plain loopback auto-pass, not a tailscale id.
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.source).toBe('localhost');
+  });
+});
+
 describe('authenticateRequest — trusted proxy header', () => {
   it('accepts a header from a configured proxy IP', async () => {
     const auth = await loadAuthWithEnv({

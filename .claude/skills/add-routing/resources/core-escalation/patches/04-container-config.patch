@@ -1,8 +1,8 @@
 diff --git a/src/container-config.ts b/src/container-config.ts
-index 0bb64080..771a56aa 100644
+index 285c7071..cad68046 100644
 --- a/src/container-config.ts
 +++ b/src/container-config.ts
-@@ -63,6 +63,12 @@ export interface ContainerConfig {
+@@ -67,6 +67,12 @@ export interface ContainerConfig {
    maxMessagesPerPrompt?: number;
    model?: string;
    effort?: string;
@@ -15,11 +15,11 @@ index 0bb64080..771a56aa 100644
    /**
     * Deliver unwrapped agent prose to the originating room instead of dropping
     * it as scratchpad. Contributed by an installed module (webchat sets it for
-@@ -90,6 +96,7 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
+@@ -101,6 +107,7 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
      maxMessagesPerPrompt: row.max_messages_per_prompt ?? undefined,
      model: row.model ?? undefined,
      effort: row.effort ?? undefined,
 +    fallbackProvider: row.fallback_provider ?? undefined,
+     learning: parseLearning(row.learning),
    };
  }
- 

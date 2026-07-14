@@ -247,7 +247,8 @@ export function parseConfiguredHosts(configText: string): string | null {
 }
 
 export function getRosterRefreshState(root = process.cwd()): RosterRefreshState {
-  refreshState.available = fs.existsSync(litellmInstallerPath(root)) && fs.existsSync(path.join(root, 'data/litellm/config.yaml'));
+  refreshState.available =
+    fs.existsSync(litellmInstallerPath(root)) && fs.existsSync(path.join(root, 'data/litellm/config.yaml'));
   return refreshState;
 }
 
@@ -423,7 +424,8 @@ export function startRoutingInstall(root = process.cwd()): StartRoutingResult {
 
   // Kick the classifier-model pull in parallel on the host-side Ollama. The
   // install steps don't wait on it — the model is only needed at classify time.
-  const ollamaHost = parseConfiguredHosts(fs.readFileSync(configPath, 'utf8'))?.split(',')[0] ?? 'http://localhost:11434';
+  const ollamaHost =
+    parseConfiguredHosts(fs.readFileSync(configPath, 'utf8'))?.split(',')[0] ?? 'http://localhost:11434';
   void startPull(ollamaHost, ARCH_ROUTER_MODEL).catch(() => {
     /* failure surfaces on the pull job's own status/error */
   });
@@ -440,6 +442,109 @@ export function startRoutingInstall(root = process.cwd()): StartRoutingResult {
     { run: ['node', [bindRoutesPath(root), '--apply']] },
   ];
   runInstallChain(routingInstallState, steps, root);
+  return { started: true };
+}
+
+// ── Local Ollama install (wizard) ──────────────────────────────────────────
+// Rootless install: the host service runs unprivileged, so the official
+// `install.sh` (which sudo-installs to /usr/local + system systemd) is out.
+// Instead: official release tarball → ~/.local, a systemd --user unit, and
+// `enable --now`. Matches how a rootless operator installs by hand and needs
+// no credentials. Linux-only; other platforms get a manual hint.
+const ollamaInstallState: InstallState = {
+  running: false,
+  lines: [],
+  exitCode: null,
+  startedAt: null,
+  finishedAt: null,
+};
+
+const OLLAMA_INSTALL_SCRIPT = `
+set -e
+arch=$(uname -m)
+case "$arch" in
+  x86_64) pkg=ollama-linux-amd64.tar.zst ;;
+  aarch64) pkg=ollama-linux-arm64.tar.zst ;;
+  *) echo "unsupported arch: $arch" >&2; exit 1 ;;
+esac
+command -v zstd >/dev/null || { echo "zstd is required to unpack Ollama — install it (apt/pacman install zstd) and retry" >&2; exit 1; }
+url="https://github.com/ollama/ollama/releases/latest/download/$pkg"
+mkdir -p "$HOME/.local"
+tmp=$(mktemp /tmp/ollama-dl-XXXXXX.tar.zst)
+trap 'rm -f "$tmp"' EXIT
+total=$(curl -sIL --max-time 15 "$url" | tr -d "\r" | awk 'tolower($1)=="content-length:"{s=$2} END{print int(s/1048576)}')
+echo "downloading $url (~\${total:-?} MB) …"
+curl -fSL --no-progress-meter -o "$tmp" "$url" &
+dl=$!
+while kill -0 "$dl" 2>/dev/null; do
+  sleep 5
+  echo "downloaded $(du -m "$tmp" 2>/dev/null | cut -f1) of \${total:-?} MB …"
+done
+wait "$dl"
+echo "extracting …"
+tar --zstd -xf "$tmp" -C "$HOME/.local"
+echo "installed to $HOME/.local/bin/ollama"
+mkdir -p "$HOME/.config/systemd/user"
+cat > "$HOME/.config/systemd/user/ollama.service" <<'UNIT'
+[Unit]
+Description=Ollama Service (rootless)
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/ollama serve
+Restart=always
+Environment=OLLAMA_HOST=0.0.0.0
+
+[Install]
+WantedBy=default.target
+UNIT
+systemctl --user daemon-reload
+systemctl --user enable --now ollama.service
+echo "waiting for Ollama to come up …"
+for i in $(seq 1 20); do
+  curl -sf http://127.0.0.1:11434/api/tags >/dev/null && { echo "Ollama is running."; exit 0; }
+  sleep 1
+done
+echo "Ollama did not answer on :11434 after 20s" >&2
+exit 1
+`;
+
+export interface OllamaLocalState {
+  reachable: boolean;
+  canInstall: boolean;
+  running: boolean;
+  lines: string[];
+  exitCode: number | null;
+}
+
+/** Local-Ollama status for the wizard: is :11434 answering, can we install here? */
+export async function getOllamaLocalState(): Promise<OllamaLocalState> {
+  let reachable = false;
+  try {
+    const r = await safeFetch('http://127.0.0.1:11434/api/tags', { signal: AbortSignal.timeout(1500) });
+    reachable = r.ok;
+  } catch {
+    /* not running */
+  }
+  return {
+    reachable,
+    canInstall: process.platform === 'linux',
+    running: ollamaInstallState.running,
+    lines: ollamaInstallState.lines.slice(-20),
+    exitCode: ollamaInstallState.exitCode,
+  };
+}
+
+export function startOllamaInstall(): { started: boolean; error?: string } {
+  if (ollamaInstallState.running) return { started: false, error: 'already-running' };
+  if (process.platform !== 'linux')
+    return { started: false, error: 'Automatic install is Linux-only — install Ollama from ollama.com manually.' };
+  ollamaInstallState.running = true;
+  ollamaInstallState.lines = [];
+  ollamaInstallState.exitCode = null;
+  ollamaInstallState.startedAt = Date.now();
+  ollamaInstallState.finishedAt = null;
+  runInstallChain(ollamaInstallState, [{ run: ['sh', ['-c', OLLAMA_INSTALL_SCRIPT]] }], process.cwd());
   return { started: true };
 }
 
@@ -498,7 +603,11 @@ export interface RouterMetrics {
  * per-model request ledger: shadow entries count against the model that was
  * asked for, live ('auto') entries against the model the router chose.
  */
-export function computeRouterMetrics(text: string, days: number, nowMs = Date.now()): Omit<RouterMetrics, 'available' | 'days'> {
+export function computeRouterMetrics(
+  text: string,
+  days: number,
+  nowMs = Date.now(),
+): Omit<RouterMetrics, 'available' | 'days'> {
   const since = nowMs - days * 86_400_000;
   const byModel = new Map<string, number>();
   const byRoute = new Map<string, number>();
@@ -508,7 +617,14 @@ export function computeRouterMetrics(text: string, days: number, nowMs = Date.no
   let escalations = 0;
   for (const line of text.split('\n')) {
     if (!line.trim()) continue;
-    let e: { ts?: number; mode?: string; route?: string; requested_model?: string; final_model?: string; bound_model?: string };
+    let e: {
+      ts?: number;
+      mode?: string;
+      route?: string;
+      requested_model?: string;
+      final_model?: string;
+      bound_model?: string;
+    };
     try {
       e = JSON.parse(line);
     } catch {
@@ -583,7 +699,7 @@ export function primaryRouterName(cfg: Record<string, unknown>): string {
   if (routers && typeof routers === 'object') {
     return 'auto' in routers ? 'auto' : (Object.keys(routers)[0] ?? 'auto');
   }
-  return ((cfg.live as { model_name?: string } | undefined)?.model_name) ?? 'auto';
+  return (cfg.live as { model_name?: string } | undefined)?.model_name ?? 'auto';
 }
 
 export function primaryRouter(cfg: Record<string, unknown>): { routes: RouteDef[]; default_route?: string } {
@@ -677,12 +793,15 @@ export function listRouters(cfg: Record<string, unknown>): string[] {
   const names =
     routers && typeof routers === 'object'
       ? Object.keys(routers)
-      : [((cfg.live as { model_name?: string } | undefined)?.model_name) ?? 'auto'];
+      : [(cfg.live as { model_name?: string } | undefined)?.model_name ?? 'auto'];
   return names.sort((a, b) => (a === 'auto' ? -1 : b === 'auto' ? 1 : a.localeCompare(b)));
 }
 
 /** The named router's routes + default_route (falls back to the primary). */
-export function routerView(cfg: Record<string, unknown>, name?: string): { name: string; routes: RouteDef[]; default_route?: string } {
+export function routerView(
+  cfg: Record<string, unknown>,
+  name?: string,
+): { name: string; routes: RouteDef[]; default_route?: string } {
   const routers = cfg.routers as Record<string, { routes?: RouteDef[]; default_route?: string }> | undefined;
   if (routers && typeof routers === 'object') {
     const n = name && name in routers ? name : primaryRouterName(cfg);
@@ -696,13 +815,17 @@ export function routerView(cfg: Record<string, unknown>, name?: string): { name:
 /** Convert a config to the multi-router shape in memory (no-op if already). */
 function toMultiRouter(cfg: Record<string, unknown>): Record<string, unknown> {
   if (cfg.routers && typeof cfg.routers === 'object') return { ...cfg };
-  const name = ((cfg.live as { model_name?: string } | undefined)?.model_name) ?? 'auto';
+  const name = (cfg.live as { model_name?: string } | undefined)?.model_name ?? 'auto';
   const { routes, default_route, live, classifier } = cfg as Record<string, unknown>;
   return {
     classifier,
     live: { enabled: Boolean((live as { enabled?: boolean } | undefined)?.enabled) },
     routers: {
-      [name]: { default_route, timeout_ms: (live as { timeout_ms?: number } | undefined)?.timeout_ms ?? 5000, routes: routes ?? [] },
+      [name]: {
+        default_route,
+        timeout_ms: (live as { timeout_ms?: number } | undefined)?.timeout_ms ?? 5000,
+        routes: routes ?? [],
+      },
     },
   };
 }
@@ -710,7 +833,8 @@ function toMultiRouter(cfg: Record<string, unknown>): Record<string, unknown> {
 /** Add a router, cloning the primary router's routes as the starting point.
  *  Converts a single-router config to multi-router first. Returns the new cfg. */
 export function addRouter(cfg: Record<string, unknown>, name: string): Record<string, unknown> {
-  if (!/^[a-z0-9_-]{1,32}$/i.test(name)) throw new Error('router name must be 1-32 letters, digits, dash or underscore');
+  if (!/^[a-z0-9_-]{1,32}$/i.test(name))
+    throw new Error('router name must be 1-32 letters, digits, dash or underscore');
   const next = toMultiRouter(cfg);
   const routers = next.routers as Record<string, unknown>;
   if (name in routers) throw new Error(`router "${name}" already exists`);
@@ -763,7 +887,10 @@ export function parseClassifierRoute(raw: string): string {
 }
 
 /** Dry classify: run the real classifier on a prompt, change nothing. */
-export async function dryClassify(prompt: string, root = process.cwd()): Promise<{ route: string; model: string | null; ms: number }> {
+export async function dryClassify(
+  prompt: string,
+  root = process.cwd(),
+): Promise<{ route: string; model: string | null; ms: number }> {
   const cfg = readRoutesConfig(root);
   if (!cfg) throw new Error('routing is not installed');
   const classifier = cfg.classifier as { url: string; model: string; keep_alive?: string };
@@ -873,7 +1000,8 @@ function scoreFor(modelId: string, capability: string, cat: CapabilityCatalog): 
   if (quality == null) return null;
   const m = modelId.toLowerCase().match(/(\d+(?:\.\d+)?)b\b/);
   const paramB = m ? parseFloat(m[1]) : null;
-  const penalty = paramB != null && paramB > cat.max_comfortable_b ? (paramB - cat.max_comfortable_b) * cat.size_penalty_per_b : 0;
+  const penalty =
+    paramB != null && paramB > cat.max_comfortable_b ? (paramB - cat.max_comfortable_b) * cat.size_penalty_per_b : 0;
   return quality - penalty;
 }
 

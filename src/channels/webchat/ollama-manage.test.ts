@@ -39,7 +39,14 @@ beforeEach(() => {
 describe('listHostModels', () => {
   it('merges /api/tags with /api/ps loaded state', async () => {
     mockFetch
-      .mockResolvedValueOnce(jsonRes({ models: [{ name: 'gemma4:latest', size: 9_600_000_000 }, { name: 'qwen3.5:4b', size: 3_400_000_000 }] }))
+      .mockResolvedValueOnce(
+        jsonRes({
+          models: [
+            { name: 'gemma4:latest', size: 9_600_000_000 },
+            { name: 'qwen3.5:4b', size: 3_400_000_000 },
+          ],
+        }),
+      )
       .mockResolvedValueOnce(jsonRes({ models: [{ name: 'gemma4:latest', size_vram: 2_500_000_000 }] }));
     const models = await listHostModels('http://192.168.1.90:11434/');
     expect(models).toHaveLength(2);
@@ -78,14 +85,18 @@ describe('startPull', () => {
   });
 
   it('marks the job failed on an Ollama error line', async () => {
-    mockFetch.mockResolvedValueOnce(ndjsonStream([JSON.stringify({ error: 'pull model manifest: file does not exist' })]));
+    mockFetch.mockResolvedValueOnce(
+      ndjsonStream([JSON.stringify({ error: 'pull model manifest: file does not exist' })]),
+    );
     const job = await startPull('http://h:11434', 'no-such-model');
     await vi.waitFor(() => expect(job.status).toBe('error'));
     expect(job.error).toMatch(/does not exist/);
   });
 
   it('fails when the stream ends without a success status (dropped connection)', async () => {
-    mockFetch.mockResolvedValueOnce(ndjsonStream([JSON.stringify({ status: 'pulling 4f0…', completed: 1, total: 100 })]));
+    mockFetch.mockResolvedValueOnce(
+      ndjsonStream([JSON.stringify({ status: 'pulling 4f0…', completed: 1, total: 100 })]),
+    );
     const job = await startPull('http://h:11434', 'ornith');
     await vi.waitFor(() => expect(job.status).toBe('error'));
     expect(job.error).toMatch(/ended early/);
@@ -162,7 +173,12 @@ describe('mergeRoutesUpdate / parseClassifierRoute', () => {
     };
     const merged = mergeRoutesUpdate(existing, {
       routes: [
-        { name: 'general', description: 'everyday conversation and quick questions', model: 'gemma4:latest', pinned: true },
+        {
+          name: 'general',
+          description: 'everyday conversation and quick questions',
+          model: 'gemma4:latest',
+          pinned: true,
+        },
         { name: 'escalate', description: 'too hard for local models here', escalate: true },
       ],
       default_route: 'general',
@@ -185,7 +201,9 @@ describe('mergeRoutesUpdate / parseClassifierRoute', () => {
       /description/,
     );
     expect(() =>
-      mergeRoutesUpdate(existing, { routes: [{ name: 'a', description: 'long enough desc', escalate: true, model: 'm' }] }),
+      mergeRoutesUpdate(existing, {
+        routes: [{ name: 'a', description: 'long enough desc', escalate: true, model: 'm' }],
+      }),
     ).toThrow(/must not have a model/);
     expect(() =>
       mergeRoutesUpdate(existing, {
@@ -260,7 +278,12 @@ describe('computeRouteSuggestions', () => {
 describe('primaryRouter / multi-router compat', () => {
   it('primaryRouter reads the primary (auto) router from a multi-router config', async () => {
     const { primaryRouter, primaryRouterName } = await import('./ollama-manage.js');
-    const cfg = { routers: { 'auto-vision': { routes: [{ name: 'v' }], default_route: 'v' }, auto: { routes: [{ name: 'code', model: 'x' }], default_route: 'code' } } };
+    const cfg = {
+      routers: {
+        'auto-vision': { routes: [{ name: 'v' }], default_route: 'v' },
+        auto: { routes: [{ name: 'code', model: 'x' }], default_route: 'code' },
+      },
+    };
     expect(primaryRouterName(cfg)).toBe('auto'); // auto preferred over first key
     expect(primaryRouter(cfg).routes).toEqual([{ name: 'code', model: 'x' }]);
     expect(primaryRouter(cfg).default_route).toBe('code');
@@ -275,8 +298,13 @@ describe('primaryRouter / multi-router compat', () => {
 
   it('mergeRoutesUpdate writes edits into the primary router when multi-router', async () => {
     const { mergeRoutesUpdate } = await import('./ollama-manage.js');
-    const existing = { routers: { auto: { routes: [], default_route: 'code' }, 'auto-vision': { routes: [{ name: 'v' }] } } };
-    const merged = mergeRoutesUpdate(existing, { routes: [{ name: 'code', description: 'writing code stuff', model: 'ornith' }], default_route: 'code' }) as any;
+    const existing = {
+      routers: { auto: { routes: [], default_route: 'code' }, 'auto-vision': { routes: [{ name: 'v' }] } },
+    };
+    const merged = mergeRoutesUpdate(existing, {
+      routes: [{ name: 'code', description: 'writing code stuff', model: 'ornith' }],
+      default_route: 'code',
+    }) as any;
     expect(merged.routers.auto.routes[0]).toMatchObject({ name: 'code', model: 'ornith' });
     expect(merged.routers['auto-vision'].routes).toEqual([{ name: 'v' }]); // sibling untouched
     expect(merged.routes).toBeUndefined(); // no top-level routes leaked
@@ -286,7 +314,12 @@ describe('primaryRouter / multi-router compat', () => {
 describe('router management (picker)', () => {
   it('listRouters orders auto first; routerView returns the named router', async () => {
     const { listRouters, routerView } = await import('./ollama-manage.js');
-    const cfg = { routers: { 'auto-vision': { routes: [{ name: 'v' }], default_route: 'v' }, auto: { routes: [{ name: 'code', model: 'x' }], default_route: 'code' } } };
+    const cfg = {
+      routers: {
+        'auto-vision': { routes: [{ name: 'v' }], default_route: 'v' },
+        auto: { routes: [{ name: 'code', model: 'x' }], default_route: 'code' },
+      },
+    };
     expect(listRouters(cfg)).toEqual(['auto', 'auto-vision']);
     expect(routerView(cfg, 'auto-vision').routes).toEqual([{ name: 'v' }]);
     expect(routerView(cfg, 'nope').name).toBe('auto'); // unknown → primary
@@ -294,7 +327,12 @@ describe('router management (picker)', () => {
 
   it('addRouter clones the primary and converts single-router configs', async () => {
     const { addRouter } = await import('./ollama-manage.js');
-    const single = { classifier: {}, default_route: 'general', live: { enabled: true }, routes: [{ name: 'general', model: 'g' }] };
+    const single = {
+      classifier: {},
+      default_route: 'general',
+      live: { enabled: true },
+      routes: [{ name: 'general', model: 'g' }],
+    };
     const next = addRouter(single, 'auto-cheap') as any;
     expect(Object.keys(next.routers).sort()).toEqual(['auto', 'auto-cheap']);
     expect(next.routers['auto-cheap'].routes).toEqual([{ name: 'general', model: 'g' }]); // cloned
@@ -314,9 +352,15 @@ describe('router management (picker)', () => {
   it('mergeRoutesUpdate targets a named router, leaving siblings untouched', async () => {
     const { mergeRoutesUpdate } = await import('./ollama-manage.js');
     const existing = { routers: { auto: { routes: [{ name: 'a' }] }, 'auto-cheap': { routes: [{ name: 'old' }] } } };
-    const merged = mergeRoutesUpdate(existing, { routes: [{ name: 'code', description: 'writing code stuff', model: 'qwen' }] }, 'auto-cheap') as any;
+    const merged = mergeRoutesUpdate(
+      existing,
+      { routes: [{ name: 'code', description: 'writing code stuff', model: 'qwen' }] },
+      'auto-cheap',
+    ) as any;
     expect(merged.routers['auto-cheap'].routes[0]).toMatchObject({ name: 'code', model: 'qwen' });
     expect(merged.routers.auto.routes).toEqual([{ name: 'a' }]); // untouched
-    expect(() => mergeRoutesUpdate(existing, { routes: [{ name: 'x', description: 'valid enough', model: 'm' }] }, 'ghost')).toThrow(/no router named/);
+    expect(() =>
+      mergeRoutesUpdate(existing, { routes: [{ name: 'x', description: 'valid enough', model: 'm' }] }, 'ghost'),
+    ).toThrow(/no router named/);
   });
 });

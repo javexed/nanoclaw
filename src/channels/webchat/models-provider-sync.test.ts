@@ -1,13 +1,13 @@
 /**
- * Provider follows the assigned model's kind.
+ * Provider follows the assigned model's kind — which, post-OpenCode, is
+ * always the default Claude provider (openai-compatible endpoints are
+ * consumed through LiteLLM's Anthropic-spec /v1/messages surface).
  *
- * Assigning an `openai-compatible` webchat model must switch the agent
- * group's container_configs.provider to 'opencode' (the harness that can
- * actually consume the endpoint); unassigning — or switching to an
- * anthropic/ollama-kind model — must revert it to the default (null →
- * claude). Guards the sync wiring end-to-end against the real central DB:
- * delete the syncAgentProviderForAssignedModel call (or its column write)
- * and this goes red.
+ * The sync's remaining job is REVERSION: a group some earlier install
+ * flipped to 'opencode' must come back to null (default) on its next
+ * (re)assignment. Guards that wiring end-to-end against the real central
+ * DB: delete the syncAgentProviderForAssignedModel call (or its column
+ * write) and this goes red.
  */
 import fs from 'fs';
 import os from 'os';
@@ -54,7 +54,9 @@ function makeModel(kind: WebchatModelKind, id: string): void {
 
 describe('providerForModelKind', () => {
   it('maps openai-compatible to opencode and everything else to default', () => {
-    expect(providerForModelKind('openai-compatible')).toBe('opencode');
+    // Post-OpenCode: every kind runs the default Claude provider (LiteLLM's
+    // Anthropic-spec /v1/messages surface carries openai-compatible models).
+    expect(providerForModelKind('openai-compatible')).toBeNull();
     expect(providerForModelKind('anthropic')).toBeNull();
     expect(providerForModelKind('ollama')).toBeNull();
     expect(providerForModelKind(null)).toBeNull();
@@ -63,25 +65,25 @@ describe('providerForModelKind', () => {
 });
 
 describe('syncAgentProviderForAssignedModel', () => {
-  it('flips to opencode on openai-compatible assignment and reverts on unassign', () => {
+  it('keeps the default provider on an openai-compatible assignment (direct path)', () => {
     makeModel('openai-compatible', 'm-oc');
     assignModelToAgent('ag-1', 'm-oc');
-    syncAgentProviderForAssignedModel('ag-1');
-    expect(getContainerConfig('ag-1')?.provider).toBe('opencode');
-
-    unassignModelFromAgent('ag-1');
     syncAgentProviderForAssignedModel('ag-1');
     expect(getContainerConfig('ag-1')?.provider).toBeNull();
   });
 
-  it('reverts to default when switching to a non-opencode kind', () => {
+  it('reverts a group a pre-direct install left on opencode', () => {
     makeModel('openai-compatible', 'm-oc');
     assignModelToAgent('ag-1', 'm-oc');
-    syncAgentProviderForAssignedModel('ag-1');
+    syncAgentProviderForAssignedModel('ag-1'); // ensures the config row exists
+    // Simulate the legacy state: an older install wrote provider='opencode'.
+    getDb().prepare(`UPDATE container_configs SET provider = 'opencode' WHERE agent_group_id = 'ag-1'`).run();
     expect(getContainerConfig('ag-1')?.provider).toBe('opencode');
 
-    makeModel('ollama', 'm-ol');
-    assignModelToAgent('ag-1', 'm-ol'); // PK on agent_group_id — replaces
+    syncAgentProviderForAssignedModel('ag-1'); // any (re)assignment un-wedges it
+    expect(getContainerConfig('ag-1')?.provider).toBeNull();
+
+    unassignModelFromAgent('ag-1');
     syncAgentProviderForAssignedModel('ag-1');
     expect(getContainerConfig('ag-1')?.provider).toBeNull();
   });

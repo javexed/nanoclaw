@@ -190,6 +190,21 @@ NEW_PATHS=(
   docs/webchat/threads-qa.md
   docs/webchat/thread-engaged-agents.md
   docs/webchat/thread-context-sync.md
+  # Learning loop (drafts, curator, trials) + skills inspection + MCP hardening
+  src/modules/learning
+  src/modules/skills
+  src/db/skill-drafts.ts
+  src/db/migrations/module-learning-skill-drafts.ts
+  src/db/migrations/module-learning-config.ts
+  src/db/migrations/module-mcp-hardening.ts
+  container/agent-runner/src/mcp-tools/draft-skill.ts
+  container/agent-runner/src/mcp-tools/draft-skill.test.ts
+  container/agent-runner/src/auto-review.test.ts
+  container/agent-runner/src/learn-command.test.ts
+  container/agent-runner/src/learning-review.test.ts
+  container/agent-runner/src/providers/rate-limit.test.ts
+  docs/learning-loop.md
+  docs/design/learning-loop.md
 )
 echo "→ Copying webchat-owned files …"
 git checkout "$BR" -- "${NEW_PATHS[@]}"
@@ -257,6 +272,9 @@ HOOK_FILES=(
   src/modules/self-mod/apply.ts
   src/modules/self-mod/apply.test.ts
   src/modules/approvals/response-handler.test.ts
+  src/db/container-configs.ts
+  container/agent-runner/src/mcp-tools/index.ts
+  container/agent-runner/src/formatter.ts
 )
 CONFLICTS=()
 echo "→ Applying webchat core-file hooks …"
@@ -449,7 +467,7 @@ for (const file of files) {
   // The exported symbol + its import path come from the migration file itself,
   // so this never drifts from what the file actually exports.
   const body = readFileSync(file, 'utf8');
-  const m = body.match(/export (?:const|function) (migration[0-9A-Za-z]+)\b/);
+  const m = body.match(/export (?:const|function) ((?:migration|module)[0-9A-Za-z]+)\b/);
   if (!m) {
     console.error(`  ! ${file}: no exported migration symbol — skipping`);
     continue;

@@ -67,6 +67,20 @@ export function isClearCommand(msg: MessageInRow): boolean {
 }
 
 /**
+ * `/learn` — the learning loop's EXPLICIT trigger (docs/design/learning-loop.md §1).
+ *
+ * Explicit-first, by design: zero false positives, and it never surprise-costs the
+ * operator. Heuristic and classifier triggers come later; this is the one that has
+ * to work first, because it's also what the webchat "Distill a skill from this
+ * session" button sends.
+ */
+export function isLearnCommand(msg: MessageInRow): boolean {
+  const content = parseContent(msg.content);
+  const text = (content.text || '').trim();
+  return /^\/learn\b/i.test(text);
+}
+
+/**
  * True for any chat that needs the outer loop's command path: /clear plus
  * admin/passthrough slash commands the SDK can only dispatch when they are
  * a query's first input. Used by the follow-up poller to bail out and let

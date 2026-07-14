@@ -110,6 +110,7 @@ async function main(): Promise<void> {
     cwd: CWD,
     systemContext: { instructions },
     lenientOutput: config.lenientOutput,
+    learning: config.learning,
   });
 }
 

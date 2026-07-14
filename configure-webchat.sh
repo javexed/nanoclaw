@@ -51,8 +51,25 @@ if [ "$mode" = "2" ]; then
     t|T)
       env_set WEBCHAT_TAILSCALE true
       echo "→ WEBCHAT_TAILSCALE=true"
-      echo "  ⚠  Same-machine loopback won't work in tailscale mode."
-      echo "     Open via tailnet hostname/IP, not 127.0.0.1."
+      # Keep a bearer token alongside it as first-access / fallback: you reach
+      # the box over the tailnet at http://<node>.ts.net:PORT (identified by
+      # `tailscale whois` → the first Tailscale login becomes owner), but the
+      # token still lets you in from the LAN before Tailscale is up, or if the
+      # daemon is down. Retire it later from the setup wizard / Settings → Access.
+      if ! env_has WEBCHAT_TOKEN; then
+        token=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))" 2>/dev/null \
+          || node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))")
+        env_set WEBCHAT_TOKEN "$token"
+        echo "→ WEBCHAT_TOKEN=<generated, see .env> (fallback until Tailscale is up)"
+      else
+        echo "= WEBCHAT_TOKEN already set (kept as fallback)"
+      fi
+      echo "  Reach it over your tailnet at http://<node>.ts.net:PORT — the first"
+      echo "  Tailscale login there becomes owner. Then turn on real HTTPS from the"
+      echo "  setup wizard (or Settings → Access), which runs 'tailscale serve', and"
+      echo "  retire the token."
+      echo "  ⚠  Same-machine loopback won't authenticate via tailscale; open the"
+      echo "     tailnet hostname/IP, not 127.0.0.1."
       ;;
     p|P)
       ask "Trusted proxy IP/CIDR (or 'auto' for Azure/Cloudflare detect)" "auto" proxy_ips

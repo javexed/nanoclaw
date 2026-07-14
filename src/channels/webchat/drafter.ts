@@ -23,6 +23,8 @@ import { ProxyAgent } from 'undici';
 
 import { ONECLI_API_KEY, ONECLI_URL } from '../../config.js';
 import { log } from '../../log.js';
+import { getDefaultModelId, getWebchatModel, type WebchatModel } from './db.js';
+import { safeFetch } from './models.js';
 
 // Reserved agent identifier registered with OneCLI on first draft request.
 // `[a-z][a-z0-9-]{0,49}` per OneCLI's identifier regex — same gotcha that
@@ -230,6 +232,18 @@ export async function draftAgent(prompt: string): Promise<DraftedAgent> {
 }
 
 async function runDraft(prompt: string): Promise<DraftedAgent> {
+  // Engine-agnostic: when the workspace default is a local model (the wizard's
+  // Ollama engine — kind ollama/openai-compatible), draft through THAT model's
+  // OpenAI-compatible endpoint. The Anthropic-via-OneCLI path below needs an
+  // Anthropic credential, which a local-model-only install doesn't have (that's
+  // the "generate draft didn't work" under a qwen3 default). Claude/Codex
+  // defaults have no default MODEL set, so they fall through to the OneCLI path.
+  const defaultId = getDefaultModelId();
+  const defaultModel = defaultId ? getWebchatModel(defaultId) : undefined;
+  if (defaultModel?.endpoint && (defaultModel.kind === 'ollama' || defaultModel.kind === 'openai-compatible')) {
+    return runDraftViaModel(prompt, defaultModel);
+  }
+
   await ensureDrafterIdentity();
   const { dispatcher, authHeaders } = await buildDrafterTransport();
 
@@ -300,6 +314,63 @@ async function runDraft(prompt: string): Promise<DraftedAgent> {
     .map((b) => b.text as string)
     .join('')
     .trim();
+  if (!text) throw new DraftError('Drafter returned empty content', 502);
+  return parseDraftResponse(text);
+}
+
+/**
+ * Draft via the workspace default local model's OpenAI-compatible endpoint
+ * (Ollama or an openai-compatible server). No credential needed — these run
+ * locally. safeFetch handles the host-reachable rewrite + SSRF gate. A longer
+ * timeout than the OneCLI/Anthropic path: a thinking model on CPU can take
+ * minutes to produce the JSON. Thinking traces (<think>…</think>) are stripped
+ * before parsing so a reasoning model's output still yields clean JSON.
+ */
+const MODEL_REQUEST_TIMEOUT_MS = 180_000;
+
+async function runDraftViaModel(prompt: string, model: WebchatModel): Promise<DraftedAgent> {
+  let res: Response;
+  try {
+    res = await safeFetch(`${model.endpoint!.replace(/\/+$/, '')}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: model.model_id,
+        max_tokens: DRAFTER_MAX_TOKENS,
+        temperature: 0.7,
+        messages: [
+          { role: 'system', content: DRAFTER_SYSTEM_PROMPT },
+          { role: 'user', content: prompt },
+        ],
+        // Disable reasoning for the draft: it needs a short JSON blob, and a
+        // thinking model (Qwen3 etc.) otherwise spends its whole token budget
+        // in the `reasoning` field and returns EMPTY content (finish_reason:
+        // length). Verified against Ollama's /v1/chat/completions: only
+        // `reasoning_effort:none` is honored there — `think:false` is silently
+        // ignored by the OpenAI-compat adapter. Ignored by non-reasoning models.
+        reasoning_effort: 'none',
+      }),
+      signal: AbortSignal.timeout(MODEL_REQUEST_TIMEOUT_MS),
+    });
+  } catch (err) {
+    log.warn('Webchat drafter: model endpoint fetch threw', { err, model: model.model_id });
+    throw new DraftError('Drafter call to the local model failed (see server logs)', 503);
+  }
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    log.warn('Webchat drafter: model endpoint non-OK', { status: res.status, detail: detail.slice(0, 300) });
+    throw new DraftError(`Drafter model returned ${res.status}`, 502);
+  }
+  const raw = await res.text();
+  if (raw.length > MAX_RESPONSE_BYTES) throw new DraftError('Drafter upstream returned an oversized response', 502);
+  let body: { choices?: Array<{ message?: { content?: string } }> };
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    throw new DraftError('Drafter upstream returned non-JSON response', 502);
+  }
+  // Belt-and-suspenders: some backends still inline <think>…</think> in content.
+  const text = (body.choices?.[0]?.message?.content ?? '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
   if (!text) throw new DraftError('Drafter returned empty content', 502);
   return parseDraftResponse(text);
 }

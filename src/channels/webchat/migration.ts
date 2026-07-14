@@ -835,6 +835,130 @@ export const moduleWebchatMcpServers: Migration = {
 };
 
 /**
+ * First-run setup-wizard state. A single boolean on the `webchat_settings`
+ * singleton (id=1): 0 = onboarding not finished (the owner sees the auto-opening
+ * wizard on first login), 1 = finished/dismissed. Owner-only to flip; re-openable
+ * from Settings regardless. Kept on the existing settings singleton rather than a
+ * new table — it's one workspace-wide flag.
+ */
+export const moduleWebchatOnboarding: Migration = {
+  version: 123,
+  name: 'webchat-onboarding',
+  up(db: Database.Database) {
+    // ADD COLUMN isn't idempotent — guard against a re-run / partial prior apply.
+    const hasCol = (db.prepare("PRAGMA table_info('webchat_settings')").all() as Array<{ name: string }>).some(
+      (c) => c.name === 'onboarding_complete',
+    );
+    if (!hasCol) {
+      db.exec(`ALTER TABLE webchat_settings ADD COLUMN onboarding_complete INTEGER NOT NULL DEFAULT 0`);
+    }
+  },
+};
+
+/**
+ * Voice-dictation transcript cleanup — which roster model (webchat_models.id)
+ * tidies raw dictation text. NULL = no cleanup (raw transcript). Lives on the
+ * webchat_settings singleton: one workspace-wide choice, owner-set.
+ */
+export const moduleWebchatStt: Migration = {
+  version: 124,
+  name: 'webchat-stt',
+  up(db: Database.Database) {
+    const hasCol = (db.prepare("PRAGMA table_info('webchat_settings')").all() as Array<{ name: string }>).some(
+      (c) => c.name === 'stt_cleanup_model_id',
+    );
+    if (!hasCol) {
+      db.exec(`ALTER TABLE webchat_settings ADD COLUMN stt_cleanup_model_id TEXT`);
+    }
+  },
+};
+
+/**
+ * Bearer-token opt-out. The provisioner seeds WEBCHAT_TOKEN so a LAN-exposed
+ * install isn't open before the owner claims it, but a shared secret is weaker
+ * than identity auth. Once Tailscale or a trusted-proxy / SSO (EntraID) method
+ * is live, the owner can retire the bearer token from Settings: this flag makes
+ * auth.ts ignore WEBCHAT_TOKEN (the value stays in .env but no longer
+ * authenticates). Only offered when an alternative method is active, so
+ * disabling it can never leave the server with no way to authenticate anyone.
+ * 0 = bearer honored (default), 1 = bearer inert.
+ */
+export const moduleWebchatBearerAuth: Migration = {
+  version: 130,
+  name: 'webchat-bearer-auth',
+  up(db: Database.Database) {
+    const hasCol = (db.prepare("PRAGMA table_info('webchat_settings')").all() as Array<{ name: string }>).some(
+      (c) => c.name === 'bearer_token_disabled',
+    );
+    if (!hasCol) {
+      db.exec(`ALTER TABLE webchat_settings ADD COLUMN bearer_token_disabled INTEGER NOT NULL DEFAULT 0`);
+    }
+  },
+};
+
+/**
+ * MCP + skills-marketplace opt-out. Both are code-execution surfaces (MCP wires
+ * arbitrary servers; the skills marketplace imports code from git). On by
+ * default (recommended), but an owner can disable them from the setup wizard /
+ * Settings for a locked-down deployment — which hides the MCP + Skills tabs AND
+ * makes the server 403 their endpoints (DOM + server, per the admin-surface
+ * rule). 0 = enabled (default), 1 = disabled.
+ */
+export const moduleWebchatMarketplaceToggle: Migration = {
+  version: 131,
+  name: 'webchat-marketplace-toggle',
+  up(db: Database.Database) {
+    const hasCol = (db.prepare("PRAGMA table_info('webchat_settings')").all() as Array<{ name: string }>).some(
+      (c) => c.name === 'marketplace_disabled',
+    );
+    if (!hasCol) {
+      db.exec(`ALTER TABLE webchat_settings ADD COLUMN marketplace_disabled INTEGER NOT NULL DEFAULT 0`);
+    }
+  },
+};
+
+/**
+ * One-shot "first Tailscale login becomes owner". The bearer bootstrap identity
+ * grabs the owner slot during the wizard, so a later Tailscale login would land
+ * as a non-owner. When the operator opts in (wizard: "I'll use Tailscale"), this
+ * flag makes auth.ts promote the FIRST tailscale identity to owner, then clears
+ * itself. 0 = off (default), 1 = armed.
+ */
+export const moduleWebchatTailscaleOwner: Migration = {
+  version: 132,
+  name: 'webchat-tailscale-owner',
+  up(db: Database.Database) {
+    const hasCol = (db.prepare("PRAGMA table_info('webchat_settings')").all() as Array<{ name: string }>).some(
+      (c) => c.name === 'promote_first_tailscale_owner',
+    );
+    if (!hasCol) {
+      db.exec(`ALTER TABLE webchat_settings ADD COLUMN promote_first_tailscale_owner INTEGER NOT NULL DEFAULT 0`);
+    }
+  },
+};
+
+/**
+ * Workspace DEFAULT model — the roster model (webchat_models.id, ollama kind)
+ * that any claude-family agent WITHOUT its own assigned model falls back to.
+ * The model analogue of the workspace default credential: the wizard's
+ * "default engine = Ollama" writes this, and every unassigned agent inherits
+ * it at spawn. NULL = no fallback (unassigned agents use the workspace
+ * Anthropic credential as before).
+ */
+export const moduleWebchatDefaultModel: Migration = {
+  version: 125,
+  name: 'webchat-default-model',
+  up(db: Database.Database) {
+    const hasCol = (db.prepare("PRAGMA table_info('webchat_settings')").all() as Array<{ name: string }>).some(
+      (c) => c.name === 'default_model_id',
+    );
+    if (!hasCol) {
+      db.exec(`ALTER TABLE webchat_settings ADD COLUMN default_model_id TEXT`);
+    }
+  },
+};
+
+/**
  * Editable registry of well-known skill collections (the Skills tab's catalog
  * sources). Seeded with the two curated defaults; global admins manage the
  * list from Settings. Each row is a GitHub repo location with one skill

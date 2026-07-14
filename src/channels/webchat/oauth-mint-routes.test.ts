@@ -93,7 +93,11 @@ const appJsPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '../..
 const appJs = fs.readFileSync(appJsPath, 'utf8');
 
 function extractUrl(varName: string): string {
-  const m = appJs.match(new RegExp(`const ${varName} = [^;]*'(/api/user-credentials/[a-z/-]+)'`));
+  // `=\\s*[^;]*` tolerates a multiline assignment: these URLs are now multi-target
+  // ternaries (member / workspace / workspace-codex), so the value can begin on
+  // the next line. Still pins the LAST /api/user-credentials/* literal the branch
+  // resolves to — the route-drift guard is unchanged.
+  const m = appJs.match(new RegExp(`const ${varName} =\\s*[^;]*'(/api/user-credentials/[a-z/-]+)'`));
   if (!m) throw new Error(`app.js: could not find a literal URL assigned to ${varName}`);
   return m[1];
 }

@@ -184,7 +184,17 @@ const STATUS_EVENTS_CAP = 200;
  * the tool name and `detail` is the target (file/command/query); for the
  * others `text` carries the message and `detail` is null.
  */
+// Per-turn tool counter for the learning loop's auto-trigger. Counted here —
+// the one chokepoint every provider's tool activity already flows through —
+// so the poll-loop needs no per-provider wiring. 'start' resets it.
+let turnToolCount = 0;
+export function getTurnToolCount(): number {
+  return turnToolCount;
+}
+
 export function appendStatusEvent(kind: string, text: string | null, detail: string | null = null): void {
+  if (kind === 'start') turnToolCount = 0;
+  else if (kind === 'tool') turnToolCount++;
   try {
     const db = getOutboundDb();
     db.prepare(`INSERT INTO status_events (kind, text, detail, created_at) VALUES ($kind, $text, $detail, $now)`).run({

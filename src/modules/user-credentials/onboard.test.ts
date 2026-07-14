@@ -2,7 +2,14 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 import { initTestDb, closeDb, getDb } from '../../db/connection.js';
 import { runMigrations } from '../../db/migrations/index.js';
-import { storeUserCredential, ensureGroupEnrollment, revokeUserCredential } from './onboard.js';
+import {
+  storeUserCredential,
+  ensureGroupEnrollment,
+  revokeUserCredential,
+  setWorkspaceDefaultAnthropic,
+  setWorkspaceDefaultCredential,
+} from './onboard.js';
+import { WORKSPACE_DEFAULT_USER_ID } from './identity.js';
 import {
   getUserCredsCredential,
   userHasActiveKey,
@@ -243,6 +250,104 @@ describe('Codex provider (per-member ChatGPT/Codex credential)', () => {
     expect(row.cred_type).toBe('api_key');
     expect(secrets.get(row.secret_id!)!.type).toBe('openai');
     expect(secrets.get(row.secret_id!)!.value).toBe('sk-openai-dave');
+  });
+});
+
+describe('setWorkspaceDefaultAnthropic (owner default → single unassigned all-mode secret)', () => {
+  it('stores the default as its own tracked anthropic secret + row', async () => {
+    const { admin, secrets } = fakeAdmin();
+    await setWorkspaceDefaultAnthropic(admin, 'sk-ant-default', 'api_key');
+    expect(userHasConnectedCredential(WORKSPACE_DEFAULT_USER_ID, 'claude')).toBe(true);
+    const row = getUserCredential(WORKSPACE_DEFAULT_USER_ID, 'claude')!;
+    expect(row.cred_type).toBe('api_key');
+    expect(secrets.get(row.secret_id!)!.value).toBe('sk-ant-default');
+    expect(secrets.get(row.secret_id!)!.type).toBe('anthropic');
+  });
+
+  it('reconciles a legacy untracked anthropic secret away, but never a member secret or non-anthropic secret', async () => {
+    const { admin, secrets } = fakeAdmin();
+    // A legacy setup/auth.ts secret: anthropic, untracked (no user_credentials row).
+    secrets.set('legacy-1', { value: 'sk-ant-legacy', type: 'anthropic' });
+    // A non-anthropic tool secret — must always survive.
+    secrets.set('grp-gmail', { value: 'x', type: 'generic' });
+    // A member who connected but hasn't been enrolled yet → their anthropic secret
+    // is UNASSIGNED, so "unassigned" alone must not make it deletable.
+    await storeUserCredential(admin, 'webchat:alice', 'claude', 'sk-ant-alice', 'api_key');
+    const memberSecret = getUserSecretId('webchat:alice')!;
+
+    await setWorkspaceDefaultAnthropic(admin, 'sk-ant-default', 'api_key');
+
+    const wsSecret = getUserCredential(WORKSPACE_DEFAULT_USER_ID, 'claude')!.secret_id!;
+    expect(secrets.has('legacy-1')).toBe(false); // legacy removed
+    expect(secrets.has(memberSecret)).toBe(true); // member's tracked secret protected
+    expect(secrets.has('grp-gmail')).toBe(true); // non-anthropic untouched
+    expect(secrets.has(wsSecret)).toBe(true); // the new default remains
+    // Exactly one anthropic secret is unassigned/eligible: the workspace default
+    // plus the member's (which will be pinned to a selective agent on enrollment).
+    const anthropicIds = (await admin.listAllSecrets()).filter((s) => s.type === 'anthropic').map((s) => s.id);
+    expect(anthropicIds.sort()).toEqual([memberSecret, wsSecret].sort());
+  });
+
+  it('rotates in place on re-set (old default secret deleted, new one created)', async () => {
+    const { admin, secrets } = fakeAdmin();
+    await setWorkspaceDefaultAnthropic(admin, 'sk-ant-one', 'api_key');
+    const first = getUserCredential(WORKSPACE_DEFAULT_USER_ID, 'claude')!.secret_id!;
+    await setWorkspaceDefaultAnthropic(admin, 'sk-ant-two', 'api_key');
+    const second = getUserCredential(WORKSPACE_DEFAULT_USER_ID, 'claude')!.secret_id!;
+    expect(second).not.toBe(first);
+    expect(secrets.has(first)).toBe(false);
+    expect(secrets.get(second)!.value).toBe('sk-ant-two');
+  });
+
+  it('stores a subscription (OAuth) default with cred_type oauth_token (drives the base sentinel)', async () => {
+    const { admin, secrets } = fakeAdmin();
+    await setWorkspaceDefaultAnthropic(admin, 'sk-ant-oat-WORKSPACE', 'oauth_token');
+    const row = getUserCredential(WORKSPACE_DEFAULT_USER_ID, 'claude')!;
+    expect(row.cred_type).toBe('oauth_token');
+    expect(secrets.get(row.secret_id!)!.type).toBe('anthropic'); // OneCLI auto-detects oauth from the value
+    expect(secrets.get(row.secret_id!)!.value).toBe('sk-ant-oat-WORKSPACE');
+  });
+
+  it('is never enrolled onto a per-member agent (the id is guarded out of enrollment)', async () => {
+    const { admin, agents } = fakeAdmin();
+    await setWorkspaceDefaultAnthropic(admin, 'sk-ant-default', 'api_key');
+    await ensureGroupEnrollment(admin, WORKSPACE_DEFAULT_USER_ID, 'ag-1');
+    expect(getUserCredsCredential(WORKSPACE_DEFAULT_USER_ID, 'ag-1')).toBeNull();
+    expect(agents.size).toBe(0); // no per-member agent created for the workspace default
+  });
+
+  it('codex: stores an openai secret and reconciles only untracked OPENAI secrets — anthropic ones untouched', async () => {
+    const { admin, secrets } = fakeAdmin();
+    // Legacy operator Codex credential from /add-codex (untracked openai) + a
+    // legacy anthropic secret + a member's tracked codex credential.
+    secrets.set('legacy-codex', { value: 'old-auth-json', type: 'openai' });
+    secrets.set('legacy-anthropic', { value: 'sk-ant-legacy', type: 'anthropic' });
+    await storeUserCredential(admin, 'webchat:carol', 'codex', '{"tokens":{}}', 'oauth_token');
+    const memberCodexSecret = getUserSecretId('webchat:carol', 'codex')!;
+
+    await setWorkspaceDefaultCredential(admin, 'codex', '{"tokens":{"access_token":"ws"}}', 'oauth_token');
+
+    const row = getUserCredential(WORKSPACE_DEFAULT_USER_ID, 'codex')!;
+    expect(row.cred_type).toBe('oauth_token');
+    expect(secrets.get(row.secret_id!)!.type).toBe('openai');
+    expect(secrets.has('legacy-codex')).toBe(false); // untracked openai reconciled away
+    expect(secrets.has('legacy-anthropic')).toBe(true); // other provider's type untouched
+    expect(secrets.has(memberCodexSecret)).toBe(true); // tracked member secret protected
+  });
+
+  it('claude and codex workspace defaults coexist as two independent rows/secrets', async () => {
+    const { admin, secrets } = fakeAdmin();
+    await setWorkspaceDefaultCredential(admin, 'claude', 'sk-ant-default', 'api_key');
+    await setWorkspaceDefaultCredential(admin, 'codex', 'sk-openai-default', 'api_key');
+    const claudeRow = getUserCredential(WORKSPACE_DEFAULT_USER_ID, 'claude')!;
+    const codexRow = getUserCredential(WORKSPACE_DEFAULT_USER_ID, 'codex')!;
+    expect(claudeRow.secret_id).not.toBe(codexRow.secret_id);
+    expect(secrets.get(claudeRow.secret_id!)!.type).toBe('anthropic');
+    expect(secrets.get(codexRow.secret_id!)!.type).toBe('openai');
+    // Revoking one leaves the other connected.
+    await revokeUserCredential(admin, WORKSPACE_DEFAULT_USER_ID, 'codex');
+    expect(userHasConnectedCredential(WORKSPACE_DEFAULT_USER_ID, 'codex')).toBe(false);
+    expect(userHasConnectedCredential(WORKSPACE_DEFAULT_USER_ID, 'claude')).toBe(true);
   });
 });
 
