@@ -164,6 +164,18 @@ async function sweep(): Promise<void> {
   }
   // MODULE-HOOK:approvals-reason-sweep:end
 
+  // Curator: archive scoped skills nothing has invoked in months (learning
+  // loop §6). Self-gated to one real run per day; a failure never blocks the
+  // rest of the sweep.
+  // MODULE-HOOK:learning-curator-sweep:start
+  try {
+    const { sweepStaleScopedSkills } = await import('./modules/learning/curator.js');
+    await sweepStaleScopedSkills();
+  } catch (err) {
+    log.error('Learning curator sweep failed', { err });
+  }
+  // MODULE-HOOK:learning-curator-sweep:end
+
   setTimeout(sweep, SWEEP_INTERVAL_MS);
 }
 

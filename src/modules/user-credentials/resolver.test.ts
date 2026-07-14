@@ -9,10 +9,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { initTestDb, closeDb, getDb } from '../../db/connection.js';
 import { runMigrations } from '../../db/migrations/index.js';
 import { resolveSessionKeyOverride } from '../../session-manager.js';
-import { resolveAgentIdentity } from '../../container-runtime.js';
+import { resolveAgentIdentity, resolveContainerEnv } from '../../container-runtime.js';
 import { setRoomModeOverride, setCredentialsConfig } from '../../channels/webchat/db.js';
 import { upsertUserCredential, setUserCredentialStatus } from './db.js';
-import { userCredsAgentIdentifier } from './identity.js';
+import { userCredsAgentIdentifier, WORKSPACE_DEFAULT_USER_ID } from './identity.js';
 import './index.js'; // registers the resolvers
 
 const webchatMg = (platformId: string) => ({
@@ -100,6 +100,52 @@ describe('userCreds session-key resolver', () => {
   it('null userId → no override', () => {
     setRoomModeOverride('room-1', 'required');
     expect(resolveSessionKeyOverride(webchatMg('room-1'), 'ag-1', null)).toBeNull();
+  });
+});
+
+describe('container-env resolver (OAuth sentinel at spawn)', () => {
+  const OAUTH_ENV = { CLAUDE_CODE_OAUTH_TOKEN: 'placeholder', ANTHROPIC_API_KEY: '' };
+
+  it('per-member OAuth session → sentinel env', () => {
+    upsertUserCredential('webchat:alice', 'claude', 'sec-oat', 'oauth_token');
+    expect(resolveContainerEnv('ag-1', 'webchat:alice')).toEqual(OAUTH_ENV);
+  });
+
+  it('per-member API-key session → no env (rides x-api-key)', () => {
+    upsertUserCredential('webchat:alice', 'claude', 'sec-1', 'api_key');
+    expect(resolveContainerEnv('ag-1', 'webchat:alice')).toEqual({});
+  });
+
+  it('base session + OAuth workspace default → sentinel env', () => {
+    upsertUserCredential(WORKSPACE_DEFAULT_USER_ID, 'claude', 'sec-ws-oat', 'oauth_token');
+    expect(resolveContainerEnv('ag-1', null)).toEqual(OAUTH_ENV);
+  });
+
+  it('base session + API-key workspace default → no env', () => {
+    upsertUserCredential(WORKSPACE_DEFAULT_USER_ID, 'claude', 'sec-ws-key', 'api_key');
+    expect(resolveContainerEnv('ag-1', null)).toEqual({});
+  });
+
+  it('base session + no workspace default → no env', () => {
+    expect(resolveContainerEnv('ag-1', null)).toEqual({});
+  });
+
+  it('member API key wins over an OAuth workspace default for that member session', () => {
+    upsertUserCredential(WORKSPACE_DEFAULT_USER_ID, 'claude', 'sec-ws-oat', 'oauth_token');
+    upsertUserCredential('webchat:alice', 'claude', 'sec-1', 'api_key');
+    expect(resolveContainerEnv('ag-1', 'webchat:alice')).toEqual({}); // member key mode
+    expect(resolveContainerEnv('ag-1', null)).toEqual(OAUTH_ENV); // base still OAuth
+  });
+
+  it('topic-thread ids (not a credentialed member) fall through to the workspace default', () => {
+    upsertUserCredential(WORKSPACE_DEFAULT_USER_ID, 'claude', 'sec-ws-oat', 'oauth_token');
+    expect(resolveContainerEnv('ag-1', 'main')).toEqual(OAUTH_ENV); // webchat topic thread
+  });
+
+  it('revoked workspace default → no sentinel (fail back to key mode)', () => {
+    upsertUserCredential(WORKSPACE_DEFAULT_USER_ID, 'claude', 'sec-ws-oat', 'oauth_token');
+    setUserCredentialStatus(WORKSPACE_DEFAULT_USER_ID, 'claude', 'revoked');
+    expect(resolveContainerEnv('ag-1', null)).toEqual({});
   });
 });
 

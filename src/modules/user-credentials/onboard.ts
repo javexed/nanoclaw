@@ -24,7 +24,7 @@
  */
 import { log } from '../../log.js';
 import { getContainerConfig } from '../../db/container-configs.js';
-import { userCredsAgentIdentifier, userSlug } from './identity.js';
+import { userCredsAgentIdentifier, userSlug, WORKSPACE_DEFAULT_USER_ID, isWorkspaceDefaultUser } from './identity.js';
 import {
   getUserCredsCredential,
   getUserCredential,
@@ -33,6 +33,7 @@ import {
   upsertUserCredsCredential,
   upsertUserCredential,
   listEnrolledGroups,
+  listAllTrackedSecretIds,
   type UserCredsCredType,
   type UserCredsProvider,
 } from './db.js';
@@ -137,6 +138,9 @@ export async function storeUserCredential(
  * connected a credential for this group's provider.
  */
 export async function ensureGroupEnrollment(admin: OnecliAdmin, userId: string, agentGroupId: string): Promise<void> {
+  // The workspace-default credential is an unassigned `all`-mode workspace secret
+  // by design — it must never become a per-member `selective` enrollment.
+  if (isWorkspaceDefaultUser(userId)) return;
   const provider = groupProvider(agentGroupId);
   // Already enrolled — but only skip when the enrollment is for THIS group's
   // CURRENT provider. If the group's provider was switched after enrollment, the
@@ -174,4 +178,45 @@ export async function revokeUserCredential(
   if (secretId) await admin.deleteSecret(secretId).catch(() => {}); // best-effort; row revoke below is the gate
   setUserCredentialStatus(userId, provider, 'revoked');
   log.info('UserCreds credential revoked', { userId, provider });
+}
+
+/**
+ * Set (or rotate) a WORKSPACE DEFAULT credential — the owner-managed fallback
+ * that `all`-mode base agents auto-inject when a member has no user credential.
+ * `claude` → an `anthropic` vault secret; `codex` → an `openai` secret (a
+ * ChatGPT/Codex auth.json for OAuth, an OpenAI key otherwise).
+ *
+ * Stores it as the workspace-default's own tracked secret (reusing
+ * `storeUserCredential`), then reconciles to the single-secret invariant: any
+ * OTHER secret of the provider's type NOT tracked by a `user_credentials` row —
+ * i.e. a legacy secret from `setup/auth.ts`/`init-onecli`/`/add-codex` — is
+ * deleted so two eligible `all`-mode provider secrets can't resolve
+ * nondeterministically. (Typed provider secrets ARE the model credential; tool
+ * secrets are `generic`-typed and never touched.) The new secret is created
+ * first, so there's never a zero-credential window and it's already tracked
+ * (never deleted) by the time reconciliation runs. Member secrets are tracked
+ * too, so they are never touched — even before their lazy enrollment.
+ */
+export async function setWorkspaceDefaultCredential(
+  admin: OnecliAdmin,
+  provider: UserCredsProvider,
+  value: string,
+  credType: UserCredsCredType,
+): Promise<void> {
+  await storeUserCredential(admin, WORKSPACE_DEFAULT_USER_ID, provider, value, credType);
+  const secretType = secretTypeFor(provider);
+  const tracked = new Set(listAllTrackedSecretIds());
+  const stale = (await admin.listAllSecrets()).filter((s) => s.type === secretType && !tracked.has(s.id));
+  for (const s of stale) await admin.deleteSecret(s.id).catch(() => {}); // best-effort; leftover is only a duplicate
+  if (stale.length)
+    log.info('Workspace default: reconciled legacy secrets', { provider, type: secretType, removed: stale.length });
+}
+
+/** Back-compat alias for the Claude path. */
+export async function setWorkspaceDefaultAnthropic(
+  admin: OnecliAdmin,
+  value: string,
+  credType: UserCredsCredType,
+): Promise<void> {
+  return setWorkspaceDefaultCredential(admin, 'claude', value, credType);
 }

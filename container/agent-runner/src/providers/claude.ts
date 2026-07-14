@@ -75,6 +75,16 @@ function mcpAllowPattern(serverName: string): string {
   return `mcp__${serverName.replace(/[^a-zA-Z0-9_-]/g, '_')}__*`;
 }
 
+// Tool-level allowlisting: a server with `enabledTools` gets ONLY those tools
+// listed; everything else the server exposes is filtered out by the SDK and
+// never even enters the agent's context. No allowlist → the whole namespace.
+function mcpAllowEntries(serverName: string, cfg: import('./types.js').McpServerConfig): string[] {
+  const enabled = cfg.enabledTools;
+  if (!Array.isArray(enabled) || enabled.length === 0) return [mcpAllowPattern(serverName)];
+  const ns = serverName.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return enabled.map((t) => `mcp__${ns}__${String(t).replace(/[^a-zA-Z0-9_-]/g, '_')}`);
+}
+
 interface SDKUserMessage {
   type: 'user';
   message: { role: 'user'; content: string };
@@ -226,6 +236,41 @@ export function summarizeThinking(thinking: string): string[] {
  * script. Defense-in-depth: if SDK_DISALLOWED_TOOLS slips through somehow,
  * block the call here instead of letting the agent hang.
  */
+/**
+ * Last-invoked telemetry for the learning loop's curator (design §6). When the
+ * SDK loads a skill, stamp `.last-invoked` in that skill's dir so the host-side
+ * curator can age scoped skills by USE rather than by creation date.
+ *
+ * Field-name-agnostic on purpose: the Skill tool's input isn't in the SDK's
+ * typed schemas, so instead of guessing a field we stamp whichever input string
+ * exactly names a real skill dir — it cannot stamp the wrong thing. Pooled
+ * skills are symlinks into a read-only mount; the write fails and is skipped,
+ * which is correct: the curator only manages scoped skills anyway.
+ */
+const SKILLS_DIR = process.env.CLAUDE_SKILLS_DIR || '/home/node/.claude/skills';
+function stampSkillInvocation(toolInput: Record<string, unknown> | undefined): void {
+  if (!toolInput) return;
+  for (const v of Object.values(toolInput)) {
+    if (typeof v !== 'string' || !v || v.includes('/') || v.includes('..')) continue;
+    const dir = path.join(SKILLS_DIR, v);
+    try {
+      if (!fs.existsSync(path.join(dir, 'SKILL.md'))) continue;
+      fs.writeFileSync(path.join(dir, '.last-invoked'), new Date().toISOString());
+      // Effectiveness telemetry: a monotone use counter next to the recency
+      // stamp. Same best-effort contract — pooled read-only skills skip both.
+      let n = 0;
+      try {
+        n = parseInt(fs.readFileSync(path.join(dir, '.invocations'), 'utf8'), 10) || 0;
+      } catch {
+        /* first invocation */
+      }
+      fs.writeFileSync(path.join(dir, '.invocations'), String(n + 1));
+    } catch {
+      /* read-only pooled skill, or a race — either way not ours to stamp */
+    }
+  }
+}
+
 const preToolUseHook: HookCallback = async (input) => {
   const i = input as { tool_name?: string; tool_input?: Record<string, unknown> };
   const toolName = i.tool_name ?? '';
@@ -246,6 +291,7 @@ const preToolUseHook: HookCallback = async (input) => {
   }
   // Cosmetic activity feed for the webchat thinking bubble (best-effort).
   if (toolName) appendStatusEvent('tool', toolName, summarizeToolTarget(toolName, i.tool_input));
+  if (toolName === 'Skill') stampSkillInvocation(i.tool_input);
   return { continue: true };
 };
 
@@ -422,6 +468,48 @@ const STALE_SESSION_RE = /no conversation found|ENOENT.*\.jsonl|session.*not fou
  * Patterns are intentionally broad/lowercased — SDK and Ollama error text
  * varies, and a false `config` only costs one extra (cheap) default-model try.
  */
+export interface SdkRateLimitInfo {
+  status?: string;
+  resetsAt?: number;
+  rateLimitType?: string;
+  utilization?: number;
+  errorCode?: string;
+  overageDisabledReason?: string;
+}
+
+/**
+ * Map an SDK `rate_limit_event` to a provider event — or to NOTHING.
+ *
+ * The SDK emits this "when rate limit info changes": it is TELEMETRY, and
+ * `status` is usually 'allowed' (here's your remaining headroom). We used to
+ * treat every one as a terminal error, which aborted perfectly healthy turns
+ * across every room — the agent stopped mid-work and posted a rate-limit notice
+ * for what was only a status update. **Only 'rejected' is an actual block.**
+ *
+ * When it IS rejected the SDK tells us WHY, so we distinguish properly instead
+ * of guessing: `errorCode: 'credits_required'` / `overageDisabledReason:
+ * 'out_of_credits'` means genuinely out of credits (billing); anything else is a
+ * transient window limit that resets (`resetsAt`, `rateLimitType`).
+ *
+ * Returns null when the event is informational (do not disturb the turn).
+ */
+export function classifyRateLimitEvent(
+  info: SdkRateLimitInfo | undefined,
+): { message: string; classification: 'rate_limit' | 'quota' } | null {
+  if (info?.status !== 'rejected') return null;
+  const outOfCredits = info.errorCode === 'credits_required' || info.overageDisabledReason === 'out_of_credits';
+  let detail = '';
+  if (typeof info.resetsAt === 'number' && Number.isFinite(info.resetsAt)) {
+    const ms = info.resetsAt < 1e12 ? info.resetsAt * 1000 : info.resetsAt;
+    detail = ` (resets ${new Date(ms).toISOString()})`;
+  }
+  const window = info.rateLimitType ? ` [${info.rateLimitType}]` : '';
+  return {
+    message: `${outOfCredits ? 'Out of credits' : 'Rate limit'}${window}${detail}`,
+    classification: outOfCredits ? 'quota' : 'rate_limit',
+  };
+}
+
 export function classifyTerminalError(text: string): 'config' | 'network' | undefined {
   const t = text.toLowerCase();
 
@@ -456,10 +544,14 @@ export function classifyTerminalError(text: string): 'config' | 'network' | unde
 
 export class ClaudeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = true;
+  // Both halves are real here: allowedTools drops to draft_skill alone, and the
+  // SDK's forkSession keeps the review off the main session's transcript.
+  readonly supportsRestrictedReview = true;
 
   private assistantName?: string;
   private mcpServers: Record<string, McpServerConfig>;
   private env: Record<string, string | undefined>;
+  private settingSources: Array<'project' | 'user' | 'local'>;
   private additionalDirectories?: string[];
   private model?: string;
   private effort?: string;
@@ -474,6 +566,7 @@ export class ClaudeProvider implements AgentProvider {
       ...(options.env ?? {}),
       CLAUDE_CODE_AUTO_COMPACT_WINDOW,
     };
+    this.settingSources = options.settingSources ?? ['project', 'user', 'local'];
   }
 
   isSessionInvalid(err: unknown): boolean {
@@ -522,25 +615,33 @@ export class ClaudeProvider implements AgentProvider {
 
     const instructions = input.systemContext?.instructions;
 
+    // A learning review runs on a FORK of the session (transcript in context,
+    // main conversation untouched) with draft_skill as its only tool. A cheaper
+    // model may serve it via NANOCLAW_LEARNING_MODEL — authoring a SKILL.md from
+    // a transcript needs less model than producing the transcript did.
+    const review = input.learningReview === true;
     const sdkResult = sdkQuery({
       prompt: stream,
       options: {
         cwd: input.cwd,
         additionalDirectories: this.additionalDirectories,
         resume: input.continuation,
+        forkSession: review ? true : undefined,
         pathToClaudeCodeExecutable: '/pnpm/claude',
         systemPrompt: instructions
           ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions }
           : undefined,
-        allowedTools: [...TOOL_ALLOWLIST, ...Object.keys(this.mcpServers).map(mcpAllowPattern)],
+        allowedTools: review
+          ? ['mcp__nanoclaw__draft_skill']
+          : [...TOOL_ALLOWLIST, ...Object.entries(this.mcpServers).flatMap(([name, cfg]) => mcpAllowEntries(name, cfg))],
         disallowedTools: SDK_DISALLOWED_TOOLS,
         env: this.env,
-        model: this.model,
+        model: review ? process.env.NANOCLAW_LEARNING_MODEL || this.model : this.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         effort: this.effort as any,
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
-        settingSources: ['project', 'user', 'local'],
+        settingSources: this.settingSources,
         mcpServers: this.mcpServers,
         hooks: {
           PreToolUse: [{ hooks: [preToolUseHook] }],
@@ -576,9 +677,33 @@ export class ClaudeProvider implements AgentProvider {
           } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
             yield { type: 'error', message: 'API retry', retryable: true };
           } else if (message.type === 'rate_limit_event') {
-            // upstream fix/rate-limit-event-shape: the SDK now emits this as a
-            // top-level event type, not a system message with a subtype.
-            yield { type: 'error', message: 'Rate limit', retryable: false, classification: 'quota' };
+            // The SDK emits this "when rate limit info CHANGES" — it is telemetry,
+            // not necessarily an error. `rate_limit_info.status` is usually
+            // 'allowed' (here's your remaining headroom). Treating every one of
+            // these as a terminal error aborted perfectly healthy turns across
+            // every room — the agent would stop mid-work and post a rate-limit
+            // notice for what was just a status update. ONLY 'rejected' is an
+            // actual block.
+            //
+            // When it IS rejected the SDK tells us WHY, so we can finally
+            // distinguish the two cases properly instead of guessing:
+            //   errorCode 'credits_required' / overageDisabledReason
+            //   'out_of_credits'  → genuinely out of credits (billing)
+            //   otherwise         → a transient window limit that resets.
+            const info = (message as { rate_limit_info?: SdkRateLimitInfo }).rate_limit_info;
+            const blocked = classifyRateLimitEvent(info);
+            if (!blocked) {
+              // Informational ('allowed' / 'allowed_warning') — never kill the turn.
+              if (info?.status === 'allowed_warning') {
+                log(
+                  `rate-limit warning: ${info.rateLimitType ?? 'window'} at ${
+                    info.utilization != null ? `${Math.round(info.utilization * 100)}%` : 'high'
+                  } utilization`,
+                );
+              }
+            } else {
+              yield { type: 'error', message: blocked.message, retryable: false, classification: blocked.classification };
+            }
           } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
             const meta = (message as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;
             const detail = meta?.pre_tokens ? ` (${meta.pre_tokens.toLocaleString()} tokens compacted)` : '';

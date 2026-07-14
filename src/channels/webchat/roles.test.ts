@@ -10,7 +10,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 import { initTestDb, closeDb, getDb } from '../../db/connection.js';
 import { runMigrations } from '../../db/migrations/index.js';
-import { ensureOwnerRoleOnFirstLogin, hasAdminPrivilege, isOwner } from './roles.js';
+import { ensureOwnerRoleOnFirstLogin, grantOwnerRole, hasAdminPrivilege, isOwner } from './roles.js';
 
 beforeEach(() => {
   initTestDb();
@@ -174,5 +174,22 @@ describe('ensureOwnerRoleOnFirstLogin', () => {
       | { kind: string }
       | undefined;
     expect(row?.kind).toBe('webchat');
+  });
+});
+
+describe('grantOwnerRole', () => {
+  it('grants global owner to a specific identity (co-owner-safe, idempotent)', () => {
+    runMigrations(getDb());
+    insertRole('webchat:owner', 'owner', null); // bearer bootstrap already owns
+    // Promote a second (Tailscale) identity alongside it.
+    expect(grantOwnerRole('webchat:tailscale:me@example.com')).toBe(true);
+    expect(isOwner('webchat:tailscale:me@example.com')).toBe(true);
+    expect(isOwner('webchat:owner')).toBe(true); // original owner preserved
+    // Idempotent — a second grant for the same id inserts nothing.
+    expect(grantOwnerRole('webchat:tailscale:me@example.com')).toBe(false);
+  });
+
+  it('is a no-op (false) when the permissions module is absent', () => {
+    expect(grantOwnerRole('webchat:x')).toBe(false); // no migrations → no user_roles
   });
 });

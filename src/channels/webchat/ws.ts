@@ -29,6 +29,7 @@ import {
   getMemberList,
   annotateRoomsForUser,
   markRoomReadForUser,
+  getActiveTurns,
 } from './state.js';
 import {
   deleteWebchatMessage,
@@ -273,6 +274,13 @@ export function setupWebSocket(
           room_id: room.id,
           members: getMemberList(room.id),
         });
+        // Replay any in-progress agent turn so a re-join mid-turn re-shows the
+        // thinking bubble (status frames are live-only + room-scoped, so leaving
+        // and returning otherwise loses it). A synthetic `start` — subsequent
+        // live frames refine it; the turn's real `done` clears it.
+        for (const agentName of getActiveTurns(room.id)) {
+          send({ type: 'status', room_id: room.id, agent_name: agentName || null, event: 'start' });
+        }
         return;
       }
 

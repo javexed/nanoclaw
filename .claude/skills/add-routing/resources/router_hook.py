@@ -269,7 +269,11 @@ async def _route_live(cfg, router, router_name, data, prompt_text):
 class ShadowRouter(CustomLogger):
     async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
         try:
-            if call_type not in ("completion", "acompletion", "text_completion"):
+            # anthropic_messages = LiteLLM's Anthropic-spec /v1/messages route —
+            # the call type the Claude Agent SDK produces when pointed at this
+            # proxy (nanoclaw -> LiteLLM direct, no OpenCode hop). Same message
+            # shapes (_last_user_text handles text-block lists), same rewrite.
+            if call_type not in ("completion", "acompletion", "text_completion", "anthropic_messages"):
                 return data
             text = _last_user_text(data.get("messages"))
             if not text:

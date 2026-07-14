@@ -28,7 +28,7 @@ import {
 } from './db.js';
 import { ensureGroupEnrollment } from './onboard.js';
 import { realOnecliAdmin } from './onecli-admin.js';
-import { userCredsAgentIdentifier } from './identity.js';
+import { userCredsAgentIdentifier, WORKSPACE_DEFAULT_USER_ID } from './identity.js';
 
 /** The agent group's provider, mapped to the two UserCreds-supported families. */
 function groupProvider(agentGroupId: string): UserCredsProvider {
@@ -113,11 +113,26 @@ registerSessionPrepareHook(async (agentGroupId, threadId) => {
 // API-key members get {} (their key rides x-api-key, which the gateway swaps).
 // Codex members get {}: gated on the Claude provider; Codex auth rides OneCLI's
 // gateway auth.json stub (keyed by the per-member identity) — no env var.
+//
+// BASE sessions (no credentialed member — threadId null, a topic-thread id, or a
+// member whose credential was revoked) run under the group's base OneCLI agent,
+// which auto-injects the WORKSPACE DEFAULT secret in `all` mode. If that default
+// is a subscription (OAuth) token, the base container needs the exact same
+// sentinel treatment — otherwise it stays in x-api-key mode, the OAuth secret
+// rewrites `Authorization` but not `x-api-key`, and Anthropic rejects the
+// lingering `x-api-key: placeholder`. An API-key default needs nothing.
 registerContainerEnvResolver((agentGroupId, threadId): Record<string, string> => {
-  if (!threadId || groupProvider(agentGroupId) !== 'claude') return {};
-  const cred = getUserCredential(threadId, 'claude');
-  if (cred?.status !== 'active' || cred.cred_type !== 'oauth_token') return {};
-  return { CLAUDE_CODE_OAUTH_TOKEN: OAUTH_SENTINEL, ANTHROPIC_API_KEY: '' };
+  if (groupProvider(agentGroupId) !== 'claude') return {};
+  const oauthEnv = { CLAUDE_CODE_OAUTH_TOKEN: OAUTH_SENTINEL, ANTHROPIC_API_KEY: '' };
+  // Per-member session: the member's own credential decides the container mode.
+  if (threadId) {
+    const cred = getUserCredential(threadId, 'claude');
+    if (cred?.status === 'active') return cred.cred_type === 'oauth_token' ? oauthEnv : {};
+  }
+  // Base session: the workspace default serves it.
+  const ws = getUserCredential(WORKSPACE_DEFAULT_USER_ID, 'claude');
+  if (ws?.status === 'active' && ws.cred_type === 'oauth_token') return oauthEnv;
+  return {};
 });
 
 // Approval routing: reverse a UserCreds per-member identity back to its agent group

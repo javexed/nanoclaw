@@ -16,6 +16,23 @@ import crypto from 'crypto';
 
 const ID_PREFIX = 'user-creds-';
 
+/**
+ * Reserved synthetic user id for the WORKSPACE DEFAULT Anthropic credential — the
+ * owner/global-admin-managed fallback that any agent session uses when its member
+ * has NOT connected their own user credential. Stored through the same
+ * `user_credentials` table + OneCLI `anthropic` secret machinery as a real member,
+ * but under this id it is deliberately NEVER enrolled onto a per-member agent
+ * (`ensureGroupEnrollment` must skip it): it stays an unassigned, `all`-mode
+ * workspace secret that base agents auto-inject. It never authenticates, so it
+ * can't collide with a real `<channel>:<handle>` user id.
+ */
+export const WORKSPACE_DEFAULT_USER_ID = 'workspace-default';
+
+/** True for the reserved workspace-default id — guards it out of member/enrollment paths. */
+export function isWorkspaceDefaultUser(userId: string): boolean {
+  return userId === WORKSPACE_DEFAULT_USER_ID;
+}
+
 /** A readable, valid-charset slug of a namespaced user id (e.g. `webchat:tailscale:a@x.com`). */
 export function userSlug(userId: string): string {
   const base = userId

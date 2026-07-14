@@ -84,6 +84,15 @@ HOOK_FILES=(
   src/host-sweep.ts
   src/cli/resources/groups.ts
   src/cli/resources/groups.test.ts
+  src/db/sessions.ts
+  src/modules/agent-to-agent/write-destinations.ts
+  src/modules/agent-to-agent/write-destinations.test.ts
+  src/modules/self-mod/apply.ts
+  src/modules/self-mod/apply.test.ts
+  src/modules/approvals/response-handler.test.ts
+  src/db/container-configs.ts
+  container/agent-runner/src/mcp-tools/index.ts
+  container/agent-runner/src/formatter.ts
 )
 echo "→ Reversing webchat core-file hooks …"
 for f in "${HOOK_FILES[@]}"; do
@@ -155,7 +164,21 @@ rm -rf \
   docs/webchat/threads.md \
   docs/webchat/threads-qa.md \
   docs/webchat/thread-engaged-agents.md \
-  docs/webchat/thread-context-sync.md
+  docs/webchat/thread-context-sync.md \
+  src/modules/learning \
+  src/modules/skills \
+  src/db/skill-drafts.ts \
+  src/db/migrations/module-learning-skill-drafts.ts \
+  src/db/migrations/module-learning-config.ts \
+  src/db/migrations/module-mcp-hardening.ts \
+  container/agent-runner/src/mcp-tools/draft-skill.ts \
+  container/agent-runner/src/mcp-tools/draft-skill.test.ts \
+  container/agent-runner/src/auto-review.test.ts \
+  container/agent-runner/src/learn-command.test.ts \
+  container/agent-runner/src/learning-review.test.ts \
+  container/agent-runner/src/providers/rate-limit.test.ts \
+  docs/learning-loop.md \
+  docs/design/learning-loop.md
 
 # ── 4. Unwire the channels barrel ────────────────────────────────────────
 if grep -qF "'./webchat/index.js'" src/channels/index.ts; then
@@ -190,6 +213,17 @@ src = src.replace(
 // and no dependency on the (already-removed) module source. Mirrors install
 // step 4's auto-derive.
 src = src.replace(/^\s*moduleWebchat[A-Za-z0-9]*,\n/gm, '');
+
+// File-based migrations (numbered NNN-*.ts and module-*.ts) were rm'd in
+// step 3 — any import in this index whose source file no longer exists is
+// dangling and would break the build. Remove the import AND its array entry,
+// generically: presence on disk is the single source of truth.
+import { existsSync } from 'node:fs';
+for (const m of [...src.matchAll(/import \{ (\w+) \} from '\.\/([\w.-]+)\.js';\n/g)]) {
+  if (existsSync('src/db/migrations/' + m[2] + '.ts')) continue;
+  src = src.replace(m[0], '');
+  src = src.replace(new RegExp('^\\s*' + m[1] + ',\\n', 'm'), '');
+}
 
 if (before !== src) {
   writeFileSync(target, src);

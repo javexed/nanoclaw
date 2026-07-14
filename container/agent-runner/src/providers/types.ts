@@ -7,6 +7,14 @@ export interface AgentProvider {
   readonly supportsNativeSlashCommands: boolean;
 
   /**
+   * Optional. True when the provider can run a QueryInput.learningReview query
+   * with the toolset actually restricted and the session forked. Advertising
+   * this without enforcing it would silently hand a "restricted" review the
+   * full toolset — so only set it where both halves are real.
+   */
+  readonly supportsRestrictedReview?: boolean;
+
+  /**
    * Optional. When true, the runner scaffolds a persistent `memory/` tree in the
    * agent's workspace at boot. Providers with their own native memory (e.g.
    * Claude's `CLAUDE.local.md`) omit this and get nothing — memory is opt-in per
@@ -65,6 +73,13 @@ export interface ProviderExchange {
  * providers; individual providers may ignore any they don't need.
  */
 export interface ProviderOptions {
+  /**
+   * Which Claude settings scopes the provider loads (SDK settingSources).
+   * Default: all of project/user/local. An escalation fallback passes a list
+   * WITHOUT 'user' so the group's settings.json env (e.g. a local-router
+   * ANTHROPIC_BASE_URL, which beats process env) cannot capture its query.
+   */
+  settingSources?: Array<'project' | 'user' | 'local'>;
   assistantName?: string;
   mcpServers?: Record<string, McpServerConfig>;
   env?: Record<string, string | undefined>;
@@ -101,6 +116,16 @@ export interface QueryInput {
   systemContext?: {
     instructions?: string;
   };
+
+  /**
+   * Run this query as a LEARNING REVIEW (docs/design/learning-loop.md §2): the
+   * session's transcript in context, but a toolset restricted to draft_skill
+   * alone — no destinations, no a2a, no self-mod, no shell — and a session FORK,
+   * so nothing the review does disturbs the main conversation. Providers that
+   * can't honor the restriction must not advertise supportsRestrictedReview;
+   * the runner then falls back to an ordinary in-turn review.
+   */
+  learningReview?: boolean;
 }
 
 /**
@@ -117,12 +142,16 @@ export interface McpStdioServerConfig {
   command: string;
   args?: string[];
   env?: Record<string, string>;
+  /** Tool allowlist for this server — absent means every tool it exposes. */
+  enabledTools?: string[];
 }
 
 export interface McpRemoteServerConfig {
   type: 'sse' | 'http';
   url: string;
   headers?: Record<string, string>;
+  /** Tool allowlist for this server — absent means every tool it exposes. */
+  enabledTools?: string[];
 }
 
 export interface AgentQuery {

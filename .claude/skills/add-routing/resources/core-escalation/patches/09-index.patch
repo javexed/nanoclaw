@@ -1,5 +1,5 @@
 diff --git a/container/agent-runner/src/index.ts b/container/agent-runner/src/index.ts
-index fc0a62e5..05662c51 100644
+index 33679d23..f6c389ea 100644
 --- a/container/agent-runner/src/index.ts
 +++ b/container/agent-runner/src/index.ts
 @@ -32,7 +32,7 @@ import { ensureMemoryScaffold } from './memory-scaffold.js';
@@ -11,23 +11,29 @@ index fc0a62e5..05662c51 100644
  import { runPollLoop } from './poll-loop.js';
  
  function log(msg: string): void {
-@@ -104,12 +104,35 @@ async function main(): Promise<void> {
+@@ -104,6 +104,33 @@ async function main(): Promise<void> {
    // and keeps its native memory untouched.
    if (provider.usesMemoryScaffold) ensureMemoryScaffold();
  
 +  // Escalation provider (§16c) — same options as the primary so MCP tools and
-+  // identity carry over. A misconfigured name (provider not in this image)
-+  // must not take the whole agent down: log and run without escalation.
++  // identity carry over, EXCEPT user settings: the group's settings.json env
++  // (a local-router ANTHROPIC_BASE_URL under the direct path) beats process
++  // env, so the fallback skips the 'user' scope entirely — its query goes to
++  // the provider's real API, not back into the router that just failed.
 +  let fallbackProvider: AgentProvider | undefined;
 +  let fallbackProviderName: string | undefined;
 +  const fallbackName = config.fallbackProvider?.toLowerCase();
-+  if (fallbackName && fallbackName !== providerName) {
++  // Same-name fallback is legitimate under the direct-router path: primary
++  // claude points at the local router via the group's settings.json env, the
++  // fallback is claude WITHOUT that scope — same provider, different backend.
++  if (fallbackName) {
 +    try {
 +      fallbackProvider = createProvider(fallbackName as ProviderName, {
 +        assistantName: config.assistantName || undefined,
 +        mcpServers,
-+        env: { ...process.env },
++        env: { ...process.env, ANTHROPIC_BASE_URL: undefined, ANTHROPIC_MODEL: undefined },
 +        additionalDirectories: additionalDirectories.length > 0 ? additionalDirectories : undefined,
++        settingSources: ['project', 'local'],
 +      });
 +      fallbackProviderName = fallbackName;
 +      log(`Fallback provider armed: ${fallbackName}`);
@@ -39,9 +45,10 @@ index fc0a62e5..05662c51 100644
    await runPollLoop({
      provider,
      providerName,
-     cwd: CWD,
+@@ -111,6 +138,8 @@ async function main(): Promise<void> {
      systemContext: { instructions },
      lenientOutput: config.lenientOutput,
+     learning: config.learning,
 +    fallbackProvider,
 +    fallbackProviderName,
    });

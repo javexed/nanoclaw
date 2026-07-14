@@ -1,5 +1,5 @@
 diff --git a/src/db/container-configs.ts b/src/db/container-configs.ts
-index 219c73fe..dd04d5df 100644
+index 8846e890..1bded42c 100644
 --- a/src/db/container-configs.ts
 +++ b/src/db/container-configs.ts
 @@ -9,6 +9,7 @@ const SCALAR_COLUMNS = new Set([
@@ -8,7 +8,7 @@ index 219c73fe..dd04d5df 100644
    'cli_scope',
 +  'fallback_provider',
  ]);
- const JSON_COLUMNS = new Set(['skills', 'mcp_servers', 'packages_apt', 'packages_npm', 'additional_mounts']);
+ const JSON_COLUMNS = new Set(['skills', 'mcp_servers', 'packages_apt', 'packages_npm', 'additional_mounts', 'learning']);
  
 @@ -55,7 +56,14 @@ export function updateContainerConfigScalars(
    updates: Partial<

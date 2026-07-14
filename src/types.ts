@@ -39,6 +39,7 @@ export interface ContainerConfigRow {
   packages_npm: string; // JSON: string[]
   additional_mounts: string; // JSON: AdditionalMountConfig[]
   cli_scope: string; // 'disabled' | 'group' | 'global'
+  learning?: string | null; // JSON: { autoTrigger?, autoKeep?, cooldownMinutes? } — see docs/learning-loop.md
   updated_at: string;
 }
 

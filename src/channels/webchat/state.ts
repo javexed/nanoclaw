@@ -107,6 +107,32 @@ export function extractHandles(text: string): string[] {
   return out;
 }
 
+// ── Active agent turns (for thinking-bubble replay on room re-join) ─────────
+// Status frames are broadcast live only to clients CURRENTLY in the room (see
+// broadcast below), and are ephemeral — so a client that leaves and returns
+// mid-turn never sees the bubble again. Track which agents have an open turn
+// per room so a re-join can replay a synthetic `start`. Keyed roomId → Set of
+// agent names. start adds; done/stalled removes.
+const activeTurns = new Map<string, Set<string>>();
+
+export function recordTurnStart(roomId: string, agentName: string): void {
+  let set = activeTurns.get(roomId);
+  if (!set) activeTurns.set(roomId, (set = new Set()));
+  set.add(agentName);
+}
+
+export function recordTurnEnd(roomId: string, agentName: string): void {
+  const set = activeTurns.get(roomId);
+  if (!set) return;
+  set.delete(agentName);
+  if (set.size === 0) activeTurns.delete(roomId);
+}
+
+/** Agent names with an open turn in this room — replayed to a joining client. */
+export function getActiveTurns(roomId: string): string[] {
+  return [...(activeTurns.get(roomId) ?? [])];
+}
+
 export function broadcast(roomId: string, msg: object, excludeId?: string): void {
   const isMessage = (msg as { type?: string }).type === 'message';
   const outgoing = isMessage

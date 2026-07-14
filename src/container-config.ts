@@ -34,6 +34,8 @@ export interface McpStdioServerConfig {
   args?: string[];
   env?: Record<string, string>;
   instructions?: string;
+  /** Tool allowlist — absent means every tool the server exposes. */
+  enabledTools?: string[];
 }
 
 export interface McpRemoteServerConfig {
@@ -41,6 +43,8 @@ export interface McpRemoteServerConfig {
   url: string;
   headers?: Record<string, string>;
   instructions?: string;
+  /** Tool allowlist — absent means every tool the server exposes. */
+  enabledTools?: string[];
 }
 
 export interface AdditionalMountConfig {
@@ -70,6 +74,13 @@ export interface ContainerConfig {
    * via resolveContainerConfigAugmentation. Read by the agent-runner.
    */
   lenientOutput?: boolean;
+  /**
+   * Learning-loop behavior (docs/learning-loop.md). Absent keys mean defaults:
+   * autoTrigger ON (a busy turn auto-runs the review; it only STAGES a draft),
+   * autoKeep OFF (auto-accepting self-written context is an owner-level opt-in),
+   * cooldownMinutes 30.
+   */
+  learning?: { autoTrigger?: boolean; autoKeep?: boolean; cooldownMinutes?: number };
 }
 
 /** Build a `ContainerConfig` from a DB row + agent group identity. */
@@ -90,7 +101,18 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     maxMessagesPerPrompt: row.max_messages_per_prompt ?? undefined,
     model: row.model ?? undefined,
     effort: row.effort ?? undefined,
+    learning: parseLearning(row.learning),
   };
+}
+
+function parseLearning(raw: string | null | undefined): ContainerConfig['learning'] {
+  if (!raw) return undefined;
+  try {
+    const v = JSON.parse(raw) as Record<string, unknown>;
+    return v && typeof v === 'object' && Object.keys(v).length > 0 ? (v as ContainerConfig['learning']) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

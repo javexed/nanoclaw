@@ -16,6 +16,10 @@ describe('envForModel — ollama base URL', () => {
     } as never);
     expect(env.ANTHROPIC_BASE_URL).toBe('http://192.168.1.127:11434');
     expect(env.ANTHROPIC_MODEL).toBe('llama3.2:3b');
+    // Must bypass the OneCLI credential proxy — it only fronts known providers
+    // and RESETs redirected Ollama calls (docs/ollama.md). Regression guard.
+    expect(env.NO_PROXY).toBe('192.168.1.127');
+    expect(env.no_proxy).toBe('192.168.1.127');
   });
 
   it('strips a trailing slash but still does not append /v1', () => {
@@ -40,8 +44,11 @@ describe('envForModel — container-facing URL rewrite', () => {
       endpoint: 'http://127.0.0.1:4000/v1',
       model_id: 'gemma4:latest',
     } as never);
-    expect(env.OPENAI_BASE_URL).toBe('http://host.docker.internal:4000/v1');
-    expect(env.OPENAI_MODEL).toBe('gemma4:latest');
+    // Direct path: Anthropic-spec vars, trailing /v1 stripped (the SDK appends
+    // the full /v1/messages path; LiteLLM serves it at the root, like Ollama).
+    expect(env.ANTHROPIC_BASE_URL).toBe('http://host.docker.internal:4000');
+    expect(env.ANTHROPIC_MODEL).toBe('gemma4:latest');
+    expect(env.NO_PROXY).toBe('host.docker.internal');
   });
 
   it('rewrites localhost for ollama models; LAN hosts pass through', () => {

@@ -105,6 +105,21 @@ export function upsertUserCredential(
     .run(userId, provider, secretId, credType, now, now);
 }
 
+/**
+ * Every non-null vault secret id tracked by a user-level credential row (all
+ * users + the workspace default). Used by workspace-default reconciliation to
+ * tell an untracked legacy `anthropic` secret (safe to remove) apart from a
+ * member's own secret — which may be UNASSIGNED between connect and first-use
+ * enrollment, so "unassigned" alone is not a safe discriminator.
+ */
+export function listAllTrackedSecretIds(): string[] {
+  return (
+    getDb().prepare(`SELECT secret_id FROM user_credentials WHERE secret_id IS NOT NULL`).all() as {
+      secret_id: string;
+    }[]
+  ).map((r) => r.secret_id);
+}
+
 export function setUserCredentialStatus(userId: string, provider: UserCredsProvider, status: UserCredsStatus): void {
   getDb()
     .prepare(`UPDATE user_credentials SET status = ?, updated_at = ? WHERE user_id = ? AND provider = ?`)

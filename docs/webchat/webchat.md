@@ -251,13 +251,34 @@ Loaded from `.env` into `process.env` (if unset) by the adapter's `env-load.ts`
   `GET|PUT|DELETE /api/agents/:id`, `PUT …/instructions`, `GET|PUT …/rooms`,
   `PUT …/model`, `GET|PUT …/mcp-servers`, `PUT …/status`.
 - **MCP** — `GET|POST /api/mcp-servers`, `POST /api/mcp-servers/probe`,
-  `PUT|DELETE /api/mcp-servers/:id`.
+  `PUT|DELETE /api/mcp-servers/:id`. Hardening: `POST …/:id/repin` (re-approve
+  a drifted tool surface), `PUT …/:id/tools` (per-server tool allowlist →
+  SDK `allowedTools`), `PUT …/:id/auth` (host-side bearer credential),
+  `POST …/:id/oauth/start` + `GET /api/mcp-servers/oauth/callback` (OAuth 2.1 +
+  PKCE via discovery/DCR). Remote servers are health-probed hourly and their
+  tool surface hash-pinned at approval — description drift ("rug pull") flags
+  the server in the MCP tab until re-approved. Servers with host-side auth are
+  synced to containers as a RELAY url (`:3102/relay/:id`) + per-(agent,server)
+  token; the real credential never enters container.json.
 - **Models / Ollama / router** — `GET|POST /api/models`,
   `POST /api/models/discover|probe|bulk`, `PUT|DELETE /api/models/:id`,
   `GET /api/ollama/hosts|models|pulls`, `POST /api/ollama/pull`,
   `GET|PUT /api/router/routes`, `POST /api/router/classify`,
   `GET /api/router/decisions|metrics|models`, `GET|POST /api/router/install`,
   `GET|POST /api/litellm/roster-refresh`.
+- **Skills** — `GET /api/skills`, `POST /api/skills/import` (pool) +
+  `POST /api/skills/inspect` (pre-import preview: inventory + lint, writes
+  nothing), `GET /api/skills/updates` + `POST /api/skills/:name/update`
+  (imports are SHA-pinned; update re-imports from the recorded source,
+  snapshotting the outgoing version), `GET /api/skills/catalog|suggest|sources`,
+  `PUT|DELETE /api/skills/sources/:id`, `GET /api/skills/duplicates` +
+  `POST /api/skills/promote`, `GET|PUT|DELETE /api/skills/:name`.
+  Per-agent: `GET|PUT /api/agents/:id/skills`, `POST …/skills/import` (scoped),
+  `DELETE …/skills/scoped/:name`, `POST …/skills/scoped/:name/revert`,
+  `POST …/skills/archived/:name/restore`, `GET|PUT /api/agents/:id/learning`.
+  Learning-loop drafts: `GET /api/skill-drafts`, `GET|PUT|DELETE
+  /api/skill-drafts/:id`, `POST /api/skill-drafts/:id/keep`
+  (see [docs/learning-loop.md](../learning-loop.md)).
 - **Approvals / permissions / push** — `GET /api/approvals/pending`,
   `POST /api/approvals/:id/respond`, `GET /api/users`, `DELETE /api/users/:id`,
   `POST /api/permissions/grant|revoke`, `GET /api/push/vapid-public`,

@@ -23,7 +23,8 @@ import { timingSafeEqual } from 'crypto';
 import { hasTable, getDb } from '../../db/connection.js';
 import { log } from '../../log.js';
 import { upsertUser } from '../../modules/permissions/db/users.js';
-import { ensureOwnerRoleOnFirstLogin } from './roles.js';
+import { getBearerTokenDisabled, getPromoteFirstTailscaleOwner, setPromoteFirstTailscaleOwner } from './db.js';
+import { ensureOwnerRoleOnFirstLogin, grantOwnerRole } from './roles.js';
 
 const WEBCHAT_TOKEN = process.env.WEBCHAT_TOKEN || '';
 const TRUSTED_PROXY_RAW = (process.env.WEBCHAT_TRUSTED_PROXY_IPS || '').trim();
@@ -73,7 +74,7 @@ export async function authenticateRequest(req: IncomingMessage): Promise<AuthRes
   //    PWA passes via `Sec-WebSocket-Protocol: bearer.<token>` so the secret
   //    stays out of URLs (and therefore out of proxy access logs).
   const providedToken = extractBearer(req);
-  if (WEBCHAT_TOKEN && providedToken && safeEqual(providedToken, WEBCHAT_TOKEN)) {
+  if (bearerActive() && providedToken && safeEqual(providedToken, WEBCHAT_TOKEN)) {
     return finalize({ source: 'bearer', userId: 'webchat:owner', displayName: 'operator' });
   }
 
@@ -89,6 +90,23 @@ export async function authenticateRequest(req: IncomingMessage): Promise<AuthRes
 
   // 3. Tailscale identity.
   if (TAILSCALE_ENABLED) {
+    // 3a. Tailscale Serve (HTTPS front). `tailscale serve` terminates TLS on
+    //     the *.ts.net name and forwards to loopback, injecting
+    //     Tailscale-User-Login. Honor it ONLY from a loopback source — serve is
+    //     always localhost→localhost, so the same header from any other IP is a
+    //     forgery (a direct :PORT hit impersonating a tailnet user) and is
+    //     ignored. Minting the SAME `webchat:tailscale:<login>` id that whois
+    //     produces keeps identity continuous across the http-tailnet → https-
+    //     serve switch, so an owner claimed over http stays owner over https.
+    const serveLogin = tailscaleServeIdentity(req, remoteIp);
+    if (serveLogin) {
+      return finalize({
+        source: 'tailscale',
+        userId: `webchat:tailscale:${normalizeId(serveLogin)}`,
+        displayName: serveLogin,
+      });
+    }
+    // 3b. Direct tailnet connection — whois the peer's tailnet IP.
     const tsUser = await tailscaleWhois(remoteIp);
     if (tsUser) {
       return finalize({
@@ -120,9 +138,20 @@ export function requiresExplicitAuth(host: string): boolean {
   return host !== '127.0.0.1' && host !== 'localhost' && host !== '::1';
 }
 
-/** True when at least one non-localhost auth method is configured. */
+/**
+ * Whether the bearer token is currently a usable auth method: configured AND not
+ * retired by the owner. Once an alternative method (Tailscale/SSO) is live the
+ * owner can disable the bearer token from Settings — auth.ts then ignores
+ * WEBCHAT_TOKEN even though its value still sits in .env (see the bearer_token_
+ * disabled flag / moduleWebchatBearerAuth).
+ */
+function bearerActive(): boolean {
+  return Boolean(WEBCHAT_TOKEN) && !getBearerTokenDisabled();
+}
+
+/** True when at least one non-localhost auth method is currently usable. */
 export function hasExplicitAuth(): boolean {
-  return Boolean(WEBCHAT_TOKEN) || TAILSCALE_ENABLED || TRUSTED_PROXY_RAW.length > 0;
+  return bearerActive() || TAILSCALE_ENABLED || TRUSTED_PROXY_RAW.length > 0;
 }
 
 // ── Tailscale health probe ──
@@ -186,11 +215,44 @@ export function getAuthInfo(): {
 } {
   return {
     methods: {
-      bearer: Boolean(WEBCHAT_TOKEN),
+      bearer: bearerActive(),
       tailscale: TAILSCALE_ENABLED,
       proxy: TRUSTED_PROXY_RAW.length > 0,
     },
     tailscaleHealthy: tailscaleHealthy === true,
+  };
+}
+
+/**
+ * Owner-only auth-management view for Settings: which methods exist, whether the
+ * bearer token is currently honored, and whether it's safe to retire it. The
+ * bearer token may only be disabled when an alternative method is actually
+ * usable (Tailscale up, or a trusted-proxy/SSO method configured) so turning it
+ * off can never lock everyone out. Unlike getAuthInfo this is gated behind auth.
+ */
+export function getAuthManagementInfo(): {
+  bearerConfigured: boolean;
+  bearerActive: boolean;
+  tailscale: { enabled: boolean; healthy: boolean };
+  proxy: boolean;
+  hasAlternativeAuth: boolean;
+  canDisableBearer: boolean;
+  canEnableBearer: boolean;
+} {
+  const proxy = TRUSTED_PROXY_RAW.length > 0;
+  const tailscaleUsable = TAILSCALE_ENABLED && tailscaleHealthy === true;
+  const hasAlternativeAuth = tailscaleUsable || proxy;
+  const active = bearerActive();
+  return {
+    bearerConfigured: Boolean(WEBCHAT_TOKEN),
+    bearerActive: active,
+    tailscale: { enabled: TAILSCALE_ENABLED, healthy: tailscaleHealthy === true },
+    proxy,
+    hasAlternativeAuth,
+    // Can retire the token only while it's live AND something else can auth.
+    canDisableBearer: active && hasAlternativeAuth,
+    // Can bring it back whenever it's configured but currently inert.
+    canEnableBearer: Boolean(WEBCHAT_TOKEN) && !active,
   };
 }
 
@@ -308,6 +370,22 @@ function authenticateTrustedProxy(req: IncomingMessage, remoteIp: string): { ide
   return { identity: user };
 }
 
+/**
+ * Identity from a `tailscale serve` HTTPS front. Serve proxies from loopback
+ * and injects `Tailscale-User-Login` — the tailnet login, the same string
+ * whois returns as `UserProfile.LoginName`, so both paths mint an identical
+ * `webchat:tailscale:<login>` id. Honor it ONLY when the request arrives on
+ * loopback: serve is always localhost→localhost, so this header from a
+ * non-loopback source is a spoof (a direct :PORT hit) and must be rejected.
+ * Exported so that security boundary is unit-tested directly.
+ */
+export function tailscaleServeIdentity(req: IncomingMessage, remoteIp: string): string | null {
+  if (!isLocalhost(remoteIp)) return null;
+  const raw = req.headers['tailscale-user-login'];
+  const login = Array.isArray(raw) ? raw[0] : raw;
+  return typeof login === 'string' && login.trim() ? login.trim() : null;
+}
+
 async function tailscaleWhois(ip: string): Promise<string | null> {
   const cleanIp = ip.replace(/^::ffff:/, '');
   return new Promise((resolve) => {
@@ -378,5 +456,12 @@ function finalize(args: { source: AuthResult['source']; userId: string; displayN
     }
   }
   ensureOwnerRoleOnFirstLogin(args.userId);
+  // One-shot: if the operator opted into Tailscale in the wizard, the FIRST
+  // tailscale identity to authenticate is promoted to owner (co-owner with the
+  // bearer bootstrap), then the flag disarms so later tailnet peers don't get it.
+  if (args.source === 'tailscale' && getPromoteFirstTailscaleOwner()) {
+    grantOwnerRole(args.userId, 'webchat:first-tailscale-owner');
+    setPromoteFirstTailscaleOwner(false);
+  }
   return { ok: true, userId: args.userId, displayName: args.displayName, source: args.source };
 }

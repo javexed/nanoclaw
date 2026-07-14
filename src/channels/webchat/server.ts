@@ -95,7 +95,7 @@ import {
   setAgentStatus,
   updateAgentGroup,
 } from '../../db/agent-groups.js';
-import { createMessagingGroupAgent, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
+import { createMessagingGroupAgent, getMessagingGroup, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import { syncSessionContext, type ContextMessage } from '../../session-manager.js';
 import { getPendingApproval, getSession, getSessionsByAgentGroup } from '../../db/sessions.js';
 import { insertMessage, openInboundDb } from '../../db/session-db.js';
@@ -134,13 +134,17 @@ import {
   authenticateRequest,
   canonicalizeWebchatUserId,
   getAuthInfo,
+  getAuthManagementInfo,
   hasExplicitAuth,
   probeTailscaleHealth,
   requiresExplicitAuth,
   warnIfAutoProxyTrust,
 } from './auth.js';
+import { getTailscaleServeState, enableTailscaleServe } from './tailscale-serve.js';
 import {
   getPullsSnapshot,
+  getOllamaLocalState,
+  startOllamaInstall,
   getRosterRefreshState,
   dryClassify,
   getRouteSuggestions,
@@ -180,6 +184,7 @@ import {
   getArchivedRoomIds,
   getHiddenRoomIdsForUser,
   getAssignedModelForAgent,
+  getEffectiveModelForAgent,
   getPrimeAgentForWebchatRoom,
   getRoomEngageDefault,
   setRoomEngageDefault,
@@ -239,6 +244,7 @@ import {
   type WebchatSkillSource,
 } from './db.js';
 import { DraftError, draftAgent } from './drafter.js';
+import { recommendForHost } from './model-recommend.js';
 import {
   KNOWN_ANTHROPIC_MODELS,
   discoverOllamaModels,
@@ -246,8 +252,6 @@ import {
   validateModel,
   writeAgentSettingsForAssignedModel,
   syncAgentProviderForAssignedModel,
-  providerForModelKind,
-  opencodeProviderInstalled,
 } from './models.js';
 import { handleChunkedUpload, handleFileServe, handleMultipartUpload } from './files.js';
 import { initWebPush, isValidPushEndpoint } from './push.js';
@@ -262,6 +266,15 @@ import {
   setRoomModeOverride,
   getCredentialsConfig,
   setCredentialsConfig,
+  getOnboardingComplete,
+  setOnboardingComplete,
+  setBearerTokenDisabled,
+  getMarketplaceDisabled,
+  setMarketplaceDisabled,
+  getPromoteFirstTailscaleOwner,
+  setPromoteFirstTailscaleOwner,
+  getDefaultModelId,
+  setDefaultModelId,
   type CredentialsConfig,
   type CredentialMode,
 } from './db.js';
@@ -286,7 +299,12 @@ function userCredsRateLimited(userId: string, action: string): boolean {
   return false;
 }
 
-import { storeUserCredential, revokeUserCredential } from '../../modules/user-credentials/onboard.js';
+import {
+  storeUserCredential,
+  revokeUserCredential,
+  setWorkspaceDefaultCredential,
+} from '../../modules/user-credentials/onboard.js';
+import { WORKSPACE_DEFAULT_USER_ID } from '../../modules/user-credentials/identity.js';
 import {
   startClaudeMint,
   mintClaudeToken,
@@ -302,7 +320,21 @@ import {
   getUserCredential,
   listEnrolledGroups,
 } from '../../modules/user-credentials/db.js';
-import { getContainerConfig, updateContainerConfigJson } from '../../db/container-configs.js';
+import {
+  getContainerConfig,
+  updateContainerConfigJson,
+  ensureContainerConfig,
+  updateContainerConfigScalars,
+} from '../../db/container-configs.js';
+import {
+  listSkillDrafts,
+  getSkillDraft,
+  readSkillDraftBody,
+  resolveSkillDraft,
+  updateSkillDraftBody,
+} from '../../db/skill-drafts.js';
+import type { SkillDraft } from '../../db/skill-drafts.js';
+import { markRoomSkillDraftResolved } from './db.js';
 import type { McpServerConfig } from '../../container-config.js';
 import { validateMcpServerName } from '../../mcp-server-config.js';
 import {
@@ -314,6 +346,10 @@ import {
   getWebchatMcpServer,
   getWebchatMcpServerByName,
   listWebchatMcpServers,
+  pinMcpToolSurface,
+  setMcpServerAuth,
+  setMcpServerDrift,
+  setMcpServerEnabledTools,
   syncAgentMcpConfig,
   unassignMcpServerFromAgent,
   updateWebchatMcpServer,
@@ -322,8 +358,19 @@ import {
   type WebchatMcpServerInput,
 } from './mcp-registry.js';
 import { probeMcpEndpoint } from './mcp-probe.js';
+import { checkMcpServer } from './mcp-health.js';
+import { finishOAuthFlow, parseMcpAuth, startOAuthFlow } from './mcp-auth.js';
 import { broadcast, broadcastRooms } from './state.js';
 import { setupWebSocket } from './ws.js';
+import {
+  findDuplicateScopedSkills,
+  listArchivedSkills,
+  promoteScopedSkill,
+  restoreArchivedSkill,
+} from '../../modules/learning/curator.js';
+import { listRevisions, revertLastRevision, snapshotRevision } from '../../modules/learning/apply.js';
+import { inspectSkillFiles } from '../../modules/skills/inspect.js';
+import { applySkillDraft } from '../../modules/learning/apply.js';
 
 const DEFAULT_PORT = 3100;
 const DEFAULT_HOST = '127.0.0.1';
@@ -529,6 +576,14 @@ async function handleHttp(
     return json(res, 200, getAuthInfo());
   }
 
+  // Static PWA assets — the app shell that CONTAINS the login screen — must be
+  // reachable BEFORE auth. Otherwise a token-only deployment (no localhost
+  // auto-pass, no tailscale) 401s index.html/app.js and the user never sees the
+  // field to enter their token. servePwa only serves real files under publicDir
+  // (path-traversal guarded) and returns false for anything that isn't a file,
+  // so every /api/* route still falls through to the auth gate below.
+  if (method === 'GET' && servePwa(req, res, publicDir)) return;
+
   const auth = await authenticateRequest(req);
   if (!auth.ok) {
     return json(res, 401, { error: auth.reason });
@@ -614,7 +669,14 @@ async function handleHttp(
     return json(
       res,
       200,
-      agents.map((a) => ({ ...a, is_prime: a.id === primeAgentId })),
+      agents.map((a) => ({
+        ...a,
+        is_prime: a.id === primeAgentId,
+        // Whether this agent auto-runs the learning review after busy turns.
+        // Member-visible on purpose: the client uses it to suppress the manual
+        // nudge (auto already ran — a tap would just double the review).
+        learning_auto: parseAgentLearning(a.id).autoTrigger !== false,
+      })),
     );
   }
   // People you can @-mention in this room: anyone with a handle who can access
@@ -954,6 +1016,366 @@ async function handleHttp(
     } catch (err) {
       return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
     }
+  }
+
+  // ── Workspace DEFAULT logins (owner / global admin ONLY) ────────────────────────
+  // The fallback credentials `all`-mode base agents auto-inject when a member has no
+  // user credential of their own — `claude` (Anthropic key or subscription) and,
+  // when the Codex provider is installed, `codex` (OpenAI key or ChatGPT
+  // subscription). STRICTLY admin-only on EVERY verb incl. GET — a non-admin gets
+  // 403 with no body, so even the existence/connection state of the defaults never
+  // leaks (unlike /api/webchat/credentials-config, which is world-readable so room
+  // UIs can see accepted types).
+  if (url.pathname === '/api/workspace-credential' && (method === 'GET' || method === 'PUT' || method === 'DELETE')) {
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
+    const credState = (provider: 'claude' | 'codex') => {
+      const row = getUserCredential(WORKSPACE_DEFAULT_USER_ID, provider);
+      const connected = row?.status === 'active';
+      return { connected, credType: connected ? (row?.cred_type ?? null) : null };
+    };
+    if (method === 'GET') {
+      // Flat claude fields (the original shape) + a codex block + the workspace
+      // default MODEL (the Ollama-engine analogue of the default credential).
+      const defaultModelId = getDefaultModelId();
+      const defaultModel = defaultModelId ? getWebchatModel(defaultModelId) : undefined;
+      return json(res, 200, {
+        ...credState('claude'),
+        provider: 'claude',
+        codex: credState('codex'),
+        codexAvailable: codexAvailable(),
+        defaultModelId: defaultModel?.id ?? null,
+        defaultModelName: defaultModel ? `${defaultModel.name} (${defaultModel.model_id})` : null,
+      });
+    }
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (userCredsRateLimited(userId, 'connect'))
+      return json(res, 429, { error: 'Too many attempts — wait a moment and try again.' });
+    // Provider: PUT reads it from the body below; DELETE from the query string.
+    try {
+      if (method === 'DELETE') {
+        const provider = url.searchParams.get('provider') === 'codex' ? 'codex' : 'claude';
+        const priorOauth = credState(provider).credType === 'oauth_token';
+        await revokeUserCredential(realOnecliAdmin, WORKSPACE_DEFAULT_USER_ID, provider);
+        restartGroupsForWorkspaceCredChange(provider, priorOauth, false);
+        return json(res, 200, { ok: true });
+      }
+      const raw = await readJsonBody(req, res);
+      if (raw === null) return;
+      let body: { provider?: unknown; type?: unknown; apiKey?: unknown; token?: unknown };
+      try {
+        body = JSON.parse(raw) as typeof body;
+      } catch {
+        return json(res, 400, { error: 'Invalid JSON' });
+      }
+      const provider = body.provider === 'codex' ? 'codex' : 'claude';
+      if (provider === 'codex' && !codexAvailable())
+        return json(res, 400, { error: 'Codex support isn’t installed yet — add it with /add-codex first.' });
+      const priorOauth = credState(provider).credType === 'oauth_token';
+      if (body.type === 'oauth_token') {
+        const token = typeof body.token === 'string' ? body.token.trim() : '';
+        if (provider === 'codex') {
+          // A ChatGPT/Codex subscription = a whole auth.json (normally from the
+          // browser mint; pasting is the fallback). Mirror the member validation.
+          let ok = false;
+          try {
+            const parsed = JSON.parse(token) as Record<string, unknown>;
+            ok = Boolean(parsed.tokens || parsed.OPENAI_API_KEY);
+          } catch {
+            ok = false;
+          }
+          if (!ok)
+            return json(res, 400, {
+              error: 'Expected a Codex auth.json — use “Connect with ChatGPT subscription” instead of pasting.',
+            });
+        } else if (!/^sk-ant-oat/.test(token)) {
+          // Claude subscription: pasted `claude setup-token` output. The base-agent
+          // sentinel wiring (user-credentials/index.ts env resolver) flips base
+          // containers into OAuth mode to match.
+          return json(res, 400, {
+            error: 'Expected a Claude subscription token from `claude setup-token` (sk-ant-oat…)',
+          });
+        }
+        await setWorkspaceDefaultCredential(realOnecliAdmin, provider, token, 'oauth_token');
+        afterWorkspaceCredentialSet(provider, priorOauth, true);
+        return json(res, 200, { ok: true });
+      }
+      const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
+      if (provider === 'codex') {
+        if (!/^sk-/.test(apiKey)) return json(res, 400, { error: 'Expected an OpenAI API key (sk-…)' });
+      } else if (!/^sk-ant-/.test(apiKey)) {
+        return json(res, 400, { error: 'Expected an Anthropic API key (sk-ant-…)' });
+      }
+      await setWorkspaceDefaultCredential(realOnecliAdmin, provider, apiKey, 'api_key');
+      afterWorkspaceCredentialSet(provider, priorOauth, false);
+      return json(res, 200, { ok: true });
+    } catch (err) {
+      log.error('Workspace default credential failed', {
+        userId,
+        err: err instanceof Error ? err.message : err,
+      });
+      return json(res, 502, { error: 'Credential setup failed — check OneCLI is running.' });
+    }
+  }
+
+  // ── Workspace-default OAuth browser-mint (owner / global admin ONLY) ────────────
+  // Same throwaway-container `claude setup-token` flow as the per-member mint, but
+  // the captured token is stored as the WORKSPACE DEFAULT (synthetic id), and the
+  // gates are admin-only instead of room access + the member OAuth opt-in (that
+  // policy governs members; the operator setting the workspace fallback is above it).
+  const wsCredMintMatch = url.pathname.match(/^\/api\/workspace-credential\/oauth\/(start|code|cancel)$/);
+  if (wsCredMintMatch && method === 'POST') {
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { sessionId?: unknown; code?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    const step = wsCredMintMatch[1];
+    if (step === 'cancel') {
+      if (typeof body.sessionId === 'string') cancelMint(userId, body.sessionId);
+      return json(res, 200, { ok: true });
+    }
+    try {
+      if (step === 'start') {
+        if (activeMintCount() >= MAX_ACTIVE_MINTS)
+          return json(res, 429, { error: 'Too many sign-ins in progress — try again shortly.' });
+        if (userCredsRateLimited(userId, 'mint-start'))
+          return json(res, 429, { error: 'Too many attempts — wait a moment and try again.' });
+        const { sessionId, url: signinUrl } = await startClaudeMint(userId);
+        return json(res, 200, { sessionId, url: signinUrl });
+      }
+      // step === 'code': mint, then store as the workspace default. The spawn-time
+      // sentinel mode may have changed (none/key → oauth) — respawn containers.
+      if (typeof body.sessionId !== 'string' || typeof body.code !== 'string')
+        return json(res, 400, { error: 'sessionId and code required' });
+      const priorRow = getUserCredential(WORKSPACE_DEFAULT_USER_ID, 'claude');
+      const priorOauth = priorRow?.status === 'active' && priorRow.cred_type === 'oauth_token';
+      const token = await mintClaudeToken(userId, body.sessionId, body.code);
+      await setWorkspaceDefaultCredential(realOnecliAdmin, 'claude', token, 'oauth_token');
+      afterWorkspaceCredentialSet('claude', priorOauth, true);
+      return json(res, 200, { ok: true });
+    } catch (err) {
+      return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  // ── Workspace-default Codex browser-mint (owner / global admin ONLY) ────────────
+  // Same `codex login --device-auth` throwaway-container flow as the per-member
+  // Codex mint, but the captured auth.json is stored as the WORKSPACE DEFAULT
+  // (synthetic id) `openai` secret that `all`-mode Codex base agents auto-inject.
+  const wsCodexMintMatch = url.pathname.match(/^\/api\/workspace-credential\/codex\/(start|finish|cancel)$/);
+  if (wsCodexMintMatch && method === 'POST') {
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { sessionId?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    const step = wsCodexMintMatch[1];
+    if (step === 'cancel') {
+      if (typeof body.sessionId === 'string') cancelMint(userId, body.sessionId);
+      return json(res, 200, { ok: true });
+    }
+    if (!codexAvailable())
+      return json(res, 400, { error: 'Codex support isn’t installed yet — add it with /add-codex first.' });
+    try {
+      if (step === 'start') {
+        if (activeMintCount() >= MAX_ACTIVE_MINTS)
+          return json(res, 429, { error: 'Too many sign-ins in progress — try again shortly.' });
+        if (userCredsRateLimited(userId, 'mint-start'))
+          return json(res, 429, { error: 'Too many attempts — wait a moment and try again.' });
+        const { sessionId, url: signinUrl, userCode } = await startCodexMint(userId);
+        return json(res, 200, { sessionId, url: signinUrl, userCode });
+      }
+      // step === 'finish': wait for auth.json, then store as the workspace default.
+      if (typeof body.sessionId !== 'string') return json(res, 400, { error: 'sessionId required' });
+      const priorRow = getUserCredential(WORKSPACE_DEFAULT_USER_ID, 'codex');
+      const priorOauth = priorRow?.status === 'active' && priorRow.cred_type === 'oauth_token';
+      const authJson = await finishCodexMint(userId, body.sessionId);
+      await setWorkspaceDefaultCredential(realOnecliAdmin, 'codex', authJson, 'oauth_token');
+      afterWorkspaceCredentialSet('codex', priorOauth, true);
+      return json(res, 200, { ok: true });
+    } catch (err) {
+      return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  // ── Workspace DEFAULT model (owner / global admin ONLY) ─────────────────────────
+  // The ollama-kind roster model every claude-family agent WITHOUT its own
+  // assignment falls back to — what makes "default engine: Ollama" a true
+  // workspace-wide default rather than a one-agent assignment. Same strict
+  // admin gating as the workspace credential.
+  if (url.pathname === '/api/workspace-model' && method === 'PUT') {
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { modelId?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    if (body.modelId !== null) {
+      if (typeof body.modelId !== 'string' || !body.modelId.trim())
+        return json(res, 400, { error: 'modelId must be a string or null' });
+      const model = getWebchatModel(body.modelId.trim());
+      if (!model) return json(res, 404, { error: 'Model not found' });
+      if (model.kind !== 'ollama')
+        return json(res, 400, { error: 'The workspace default model must be an ollama roster model' });
+      if (!model.endpoint) return json(res, 400, { error: 'That model has no endpoint to call' });
+      setDefaultModelId(model.id);
+    } else {
+      setDefaultModelId(null);
+    }
+    refreshUnassignedGroupsForDefaultModel('Workspace default model changed');
+    return json(res, 200, { ok: true, defaultModelId: getDefaultModelId() });
+  }
+
+  // ── First-run setup wizard state ────────────────────────────────────────────────
+  // GET is authenticated (any member) so the client can decide whether to auto-open
+  // the wizard; non-admins always get complete:true + canEdit:false so it never
+  // blocks or shows for them. PUT (finish/dismiss/reset) is owner/global-admin only.
+  if (url.pathname === '/api/webchat/onboarding' && (method === 'GET' || method === 'PUT')) {
+    const canEdit = isOwner(userId) || isGlobalAdmin(userId);
+    if (method === 'GET') {
+      return json(res, 200, { complete: canEdit ? getOnboardingComplete() : true, canEdit });
+    }
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!canEdit) return json(res, 403, { error: 'Forbidden' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { complete?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    if (typeof body.complete !== 'boolean') return json(res, 400, { error: 'complete must be a boolean' });
+    setOnboardingComplete(body.complete);
+    return json(res, 200, { complete: body.complete });
+  }
+
+  // ── Feature toggles: MCP + skills marketplace ───────────────────────────────
+  // GET is any authed user (the client hides the MCP/Skills tabs when off; non-
+  // admins get the flag only). PUT is owner/global-admin — flips it on/off
+  // (default on/recommended). Disabling also 403s the endpoints (gate above).
+  if (url.pathname === '/api/webchat/features' && (method === 'GET' || method === 'PUT')) {
+    const canEdit = isOwner(userId) || isGlobalAdmin(userId);
+    if (method === 'GET') {
+      return json(res, 200, { marketplaceEnabled: !getMarketplaceDisabled(), canEdit });
+    }
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!canEdit) return json(res, 403, { error: 'Forbidden' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { marketplaceEnabled?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    if (typeof body.marketplaceEnabled !== 'boolean') {
+      return json(res, 400, { error: 'marketplaceEnabled must be a boolean' });
+    }
+    setMarketplaceDisabled(!body.marketplaceEnabled);
+    return json(res, 200, { marketplaceEnabled: !getMarketplaceDisabled() });
+  }
+
+  // ── Wizard opt-in: first Tailscale login becomes owner ──────────────────────
+  // One-shot arm flag. GET/PUT owner/global-admin only. PUT true → the next
+  // tailscale identity to authenticate is promoted to owner (auth.ts finalize),
+  // then the flag disarms itself.
+  if (url.pathname === '/api/webchat/tailscale-owner' && (method === 'GET' || method === 'PUT')) {
+    const canEdit = isOwner(userId) || isGlobalAdmin(userId);
+    if (method === 'GET') {
+      return json(res, 200, { armed: getPromoteFirstTailscaleOwner(), canEdit });
+    }
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!canEdit) return json(res, 403, { error: 'Forbidden' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { armed?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    if (typeof body.armed !== 'boolean') return json(res, 400, { error: 'armed must be a boolean' });
+    setPromoteFirstTailscaleOwner(body.armed);
+    return json(res, 200, { armed: getPromoteFirstTailscaleOwner() });
+  }
+
+  // ── Enable HTTPS over Tailscale (`tailscale serve`) ─────────────────────────
+  // Owner/global-admin only. GET reports whether tailscaled is up, the https
+  // URL, and whether serve is already on. POST runs `tailscale serve --bg
+  // <port>` so webchat is reachable at https://<node>.ts.net with a real cert.
+  // Identity continuity across the http→https switch lives in auth.ts
+  // (tailscaleServeIdentity maps Serve's header back to the whois id).
+  if (url.pathname === '/api/webchat/tailscale-https' && (method === 'GET' || method === 'POST')) {
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
+    if (method === 'GET') {
+      return json(res, 200, await getTailscaleServeState());
+    }
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const port = Number(process.env.WEBCHAT_PORT || DEFAULT_PORT);
+    const result = await enableTailscaleServe(port);
+    return json(res, result.ok ? 200 : 400, result);
+  }
+
+  // ── Access & security: retire the bearer token ──────────────────────────────
+  // Owner/global-admin only. GET reports the auth-method picture so Settings can
+  // offer to drop the bootstrap bearer token once Tailscale or SSO/trusted-proxy
+  // (EntraID) is live. PUT flips it. Disabling is refused unless (a) something
+  // else can authenticate server-side AND (b) THIS request already arrived via a
+  // non-bearer method — so the admin proves the alternative works for their own
+  // device and can't lock themselves (or everyone) out.
+  if (url.pathname === '/api/webchat/auth' && method === 'GET') {
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
+    return json(res, 200, getAuthManagementInfo());
+  }
+  if (url.pathname === '/api/webchat/auth/bearer' && method === 'PUT') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { active?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    if (typeof body.active !== 'boolean') return json(res, 400, { error: 'active must be a boolean' });
+    const info = getAuthManagementInfo();
+    if (!info.bearerConfigured) {
+      return json(res, 400, { error: 'No bearer token is configured (WEBCHAT_TOKEN is unset).' });
+    }
+    if (body.active === false) {
+      if (!info.hasAlternativeAuth) {
+        return json(res, 400, {
+          error:
+            'Set up Tailscale or an SSO / trusted-proxy method first — disabling the bearer token now would leave no way to sign in.',
+        });
+      }
+      if (auth.source === 'bearer') {
+        return json(res, 400, {
+          error:
+            'Reconnect via Tailscale or SSO first, then disable the bearer token — otherwise this session would be locked out.',
+        });
+      }
+      setBearerTokenDisabled(true);
+    } else {
+      setBearerTokenDisabled(false);
+    }
+    return json(res, 200, getAuthManagementInfo());
   }
 
   const roomAgentMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/agents\/([^/]+)$/);
@@ -1324,7 +1746,23 @@ async function handleHttp(
     // ALL agents the caller manages become columns/nodes (not just wired ones),
     // so unused agents show as orphans and can be wired from the matrix.
     const agents = listAgentsForUser(userId).map((a) => ({ id: a.id, name: a.name }));
-    return json(res, 200, getWebchatTopology(rooms, agents));
+    const topo = getWebchatTopology(rooms, agents);
+    // SCOPED skills only — the ones wired to a specific agent (including anything
+    // the learning loop produced). The shared pool is on ~every agent, so drawing
+    // it would add hundreds of identical edges that say nothing about any one
+    // agent; it stays visible in the agent's own settings. A skill wired to two
+    // agents is ONE node with two edges — that's the fact worth seeing.
+    const skillMap = new Map<string, { id: string; name: string; origin: string | null }>();
+    const skillEdges: { agent: string; skill: string }[] = [];
+    for (const a of agents) {
+      for (const sk of listScopedSkills(a.id)) {
+        if (!skillMap.has(sk.name)) {
+          skillMap.set(sk.name, { id: sk.name, name: sk.name, origin: sk.origin?.label ?? null });
+        }
+        skillEdges.push({ agent: a.id, skill: sk.name });
+      }
+    }
+    return json(res, 200, { ...topo, skills: [...skillMap.values()], skillEdges });
   }
 
   // Full-text search across the caller's accessible rooms (FTS5). Scoped to
@@ -1516,6 +1954,19 @@ async function handleHttp(
   // same field `ncl groups config add-mcp-server` writes and the container
   // reads — and restarts the group's containers. List responses never include
   // env/headers (they may hold credentials).
+  // MCP + skills marketplace can be turned off workspace-wide (hardened installs
+  // — both are code-execution surfaces). Gate every management endpoint at the
+  // server, not just the UI, per the admin-surface rule (DOM hide + server 403).
+  if (
+    (url.pathname === '/api/mcp-servers' ||
+      url.pathname.startsWith('/api/mcp-servers/') ||
+      url.pathname === '/api/skills' ||
+      url.pathname.startsWith('/api/skills/')) &&
+    getMarketplaceDisabled()
+  ) {
+    return json(res, 403, { error: 'MCP and the skills marketplace are disabled by the workspace owner.' });
+  }
+
   // MCP registry is admin-only (scoped admin or higher) — end to end.
   if (url.pathname === '/api/mcp-servers' && method === 'GET') {
     if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
@@ -1526,10 +1977,156 @@ async function handleHttp(
     if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
     return createMcpServerHandler(req, res);
   }
+  // Read-only discovery over the public MCP registry. Admin-gated like the rest of
+  // the MCP surface; adds no write path (a row prefills the existing add form, so
+  // every server still goes through probe → create).
+  if (url.pathname === '/api/mcp-sources' && method === 'GET') {
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
+    return json(res, 200, {
+      sources: [{ ...MCP_REGISTRY_SOURCE, disabled: isSourceDisabled(MCP_REGISTRY_ID) }],
+    });
+  }
+  const mcpSourceMatch = url.pathname.match(/^\/api\/mcp-sources\/([^/]+)$/);
+  if (mcpSourceMatch && method === 'PUT') {
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const id = decodeURIComponent(mcpSourceMatch[1]);
+    if (id !== MCP_REGISTRY_ID) return json(res, 404, { error: 'Unknown source' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let disabled = false;
+    try {
+      disabled = !!(JSON.parse(raw) as { disabled?: unknown }).disabled;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    setSourceDisabled(MCP_REGISTRY_ID, disabled);
+    return json(res, 200, { ok: true, disabled });
+  }
+  if (url.pathname === '/api/mcp-catalog' && method === 'GET') {
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
+    return mcpCatalogHandler(res, url.searchParams.get('q') || '');
+  }
   if (url.pathname === '/api/mcp-servers/probe' && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
     return probeMcpServerHandler(req, res);
+  }
+  // OAuth callback: the admin's browser lands here from the authorization
+  // server. Auth = whois like everything else, plus the single-use state.
+  if (url.pathname === '/api/mcp-servers/oauth/callback' && method === 'GET') {
+    const code = url.searchParams.get('code') || '';
+    const state = url.searchParams.get('state') || '';
+    if (!code || !state) return json(res, 400, { error: 'Missing code/state' });
+    try {
+      const { serverId } = await finishOAuthFlow(state, code);
+      const server = getWebchatMcpServer(serverId);
+      if (server) {
+        // Re-sync every assigned agent onto the relay URL now that auth exists.
+        for (const gid of getAgentsAssignedToMcpServer(serverId)) {
+          syncAgentMcpConfig(gid, server, true);
+          reloadAgentMcpServers(gid);
+        }
+        void checkMcpServer(server).catch(() => {});
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(
+        '<!doctype html><meta charset="utf-8"><title>Connected</title><body style="font-family:system-ui;padding:2rem">✅ MCP server connected — you can close this tab and return to NanoClaw.</body>',
+      );
+      return;
+    } catch (err) {
+      res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(
+        `<!doctype html><meta charset="utf-8"><title>Failed</title><body style="font-family:system-ui;padding:2rem">OAuth failed: ${escapeHtml(err instanceof Error ? err.message : String(err))}</body>`,
+      );
+      return;
+    }
+  }
+  const mcpOauthStartMatch = url.pathname.match(/^\/api\/mcp-servers\/([^/]+)\/oauth\/start$/);
+  if (mcpOauthStartMatch && method === 'POST') {
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let staticClient: { client_id: string; client_secret?: string } | undefined;
+    try {
+      const b = JSON.parse(raw || '{}') as { client_id?: string; client_secret?: string };
+      if (b.client_id) staticClient = { client_id: String(b.client_id), client_secret: b.client_secret };
+    } catch {
+      /* empty body is fine */
+    }
+    const host = String(req.headers.host || '');
+    if (!host) return json(res, 400, { error: 'Missing Host header' });
+    const redirectUri = `https://${host}/api/mcp-servers/oauth/callback`;
+    try {
+      const authorizeUrl = await startOAuthFlow(decodeURIComponent(mcpOauthStartMatch[1]), redirectUri, staticClient);
+      return json(res, 200, { authorizeUrl });
+    } catch (err) {
+      return json(res, 422, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  // Re-approve a drifted tool surface: pin what the server exposes NOW.
+  const mcpRepinMatch = url.pathname.match(/^\/api\/mcp-servers\/([^/]+)\/repin$/);
+  if (mcpRepinMatch && method === 'POST') {
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const server = getWebchatMcpServer(decodeURIComponent(mcpRepinMatch[1]));
+    if (!server) return json(res, 404, { error: 'MCP server not found' });
+    if (server.transport === 'stdio' || !server.url) return json(res, 400, { error: 'Only remote servers are pinned' });
+    setMcpServerDrift(server.id, null);
+    getDb().prepare(`UPDATE webchat_mcp_servers SET pinned_tools = NULL WHERE id = ?`).run(server.id);
+    const health = await checkMcpServer(getWebchatMcpServer(server.id)!); // re-probe pins the current surface
+    return json(res, 200, { ok: true, health });
+  }
+  // Tool allowlist for a server (null/empty = all tools). Flows into each
+  // assigned agent's container config → the SDK's allowedTools filter.
+  const mcpToolsMatch = url.pathname.match(/^\/api\/mcp-servers\/([^/]+)\/tools$/);
+  if (mcpToolsMatch && method === 'PUT') {
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const server = getWebchatMcpServer(decodeURIComponent(mcpToolsMatch[1]));
+    if (!server) return json(res, 404, { error: 'MCP server not found' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let enabled: string[] | null = null;
+    try {
+      const b = JSON.parse(raw) as { enabled?: unknown };
+      if (Array.isArray(b.enabled)) enabled = b.enabled.map(String).slice(0, 500);
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    setMcpServerEnabledTools(server.id, enabled && enabled.length ? enabled : null);
+    const updated = getWebchatMcpServer(server.id)!;
+    for (const gid of getAgentsAssignedToMcpServer(server.id)) {
+      syncAgentMcpConfig(gid, updated, true);
+      reloadAgentMcpServers(gid);
+    }
+    return json(res, 200, { ok: true });
+  }
+  // Host-side credential for a server: {token} sets a bearer secret, null
+  // clears. Never echoed back; containers switch to the relay on next sync.
+  const mcpAuthMatch = url.pathname.match(/^\/api\/mcp-servers\/([^/]+)\/auth$/);
+  if (mcpAuthMatch && method === 'PUT') {
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const server = getWebchatMcpServer(decodeURIComponent(mcpAuthMatch[1]));
+    if (!server) return json(res, 404, { error: 'MCP server not found' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let token: string | null = null;
+    try {
+      const b = JSON.parse(raw) as { token?: unknown };
+      token = typeof b.token === 'string' && b.token.trim() ? b.token.trim() : null;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    setMcpServerAuth(server.id, token ? { kind: 'bearer', token } : null);
+    const updated = getWebchatMcpServer(server.id)!;
+    for (const gid of getAgentsAssignedToMcpServer(server.id)) {
+      syncAgentMcpConfig(gid, updated, true);
+      reloadAgentMcpServers(gid);
+    }
+    return json(res, 200, { ok: true, hasAuth: !!token });
   }
   const mcpServerIdMatch = url.pathname.match(/^\/api\/mcp-servers\/([^/]+)$/);
   if (mcpServerIdMatch && method === 'PUT') {
@@ -1612,14 +2209,68 @@ async function handleHttp(
     }
     if (method === 'PUT') return putSkillSourceHandler(req, res, sourceId);
     catalogCache.delete(sourceId);
-    return deleteSkillSource(sourceId)
-      ? json(res, 200, { ok: true })
-      : json(res, 404, { error: 'Source not found' });
+    return deleteSkillSource(sourceId) ? json(res, 200, { ok: true }) : json(res, 404, { error: 'Source not found' });
   }
   // Delete a user skill (imported/uploaded). Shipped skills can't be removed.
   // Read / write / delete a single skill. GET returns its SKILL.md (any
   // source); PUT creates or edits a USER skill's SKILL.md (shipped skills are
   // read-only — they're repo files); DELETE removes a user skill.
+  // Cross-agent duplicates + promotion (learning loop). Detection is read-only
+  // and admin-visible; PROMOTION writes the shared pool — install-wide reach —
+  // so it stays owner/global-admin, the pool's own boundary.
+  // Pre-import inspection: fetch the skill's files WITHOUT writing anything and
+  // return the "what's inside" inventory + lint findings. Read-only, so any
+  // admin may look (per-group admins import scoped skills through the same
+  // preview). NOTE: literal /api/skills/* routes must stay ABOVE the
+  // /api/skills/:name matcher.
+  if (url.pathname === '/api/skills/inspect' && method === 'POST') {
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    return inspectSkillHandler(req, res);
+  }
+  // Update checks for pinned pool imports: which user skills' upstream has
+  // moved since their recorded commit. Read-only.
+  if (url.pathname === '/api/skills/updates' && method === 'GET') {
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
+    return skillUpdatesHandler(res);
+  }
+  const skillUpdateMatch = url.pathname.match(/^\/api\/skills\/([^/]+)\/update$/);
+  if (skillUpdateMatch && method === 'POST') {
+    // Same gate as pool import — an update IS a pool import.
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    return applySkillUpdateHandler(res, decodeURIComponent(skillUpdateMatch[1]));
+  }
+  if (url.pathname === '/api/skills/duplicates' && method === 'GET') {
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
+    const dups = findDuplicateScopedSkills().map((d) => ({
+      ...d,
+      agents: d.agents.map((id) => getAgentGroup(id)?.name || id),
+    }));
+    return json(res, 200, { duplicates: dups });
+  }
+  if (url.pathname === '/api/skills/promote' && method === 'POST') {
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let name = '';
+    try {
+      name = sanitizeSkillName(String((JSON.parse(raw) as { name?: unknown }).name || ''));
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    if (!name) return json(res, 400, { error: 'Invalid skill name' });
+    const dup = findDuplicateScopedSkills().find((d) => d.name === name);
+    const r = promoteScopedSkill(name);
+    if (!r.ok) return json(res, 409, { error: r.error });
+    // Every holder's containers must respawn to see the pooled copy.
+    let restarted = 0;
+    for (const g of listAgentsForUser(userId)) {
+      if (dup?.agents.includes(g.id)) restarted += restartAgentGroupContainers(g.id, 'Skill promoted to shared pool');
+    }
+    return json(res, 200, { ok: true, restarted });
+  }
   const skillItemMatch = url.pathname.match(/^\/api\/skills\/([^/]+)$/);
   if (skillItemMatch && (method === 'GET' || method === 'PUT' || method === 'DELETE')) {
     if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
@@ -1651,7 +2302,13 @@ async function handleHttp(
       const enabled = sel === 'all' ? available.map((s) => s.name) : sel;
       // Also surface skills wired to THIS agent only (real dirs in its own
       // .claude-shared/skills), which the shared pool doesn't include.
-      return json(res, 200, { available, enabled, scoped: listScopedSkills(group.id) });
+      return json(res, 200, {
+        available,
+        enabled,
+        scoped: listScopedSkills(group.id),
+        // Curator output: scoped skills archived for disuse. Restorable, never deleted.
+        archived: listArchivedSkills(group.id),
+      });
     }
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     return setAgentSkillsHandler(req, res, group.id);
@@ -1667,6 +2324,80 @@ async function handleHttp(
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     return importScopedSkillHandler(req, res, group.id);
   }
+  // Learning-loop settings, per agent. Two toggles, two owners (docs/learning-loop.md):
+  //   autoTrigger — spends tokens, stages drafts → per-agent ADMIN.
+  //   autoKeep    — writes live agent context unreviewed → OWNER/GLOBAL ADMIN only,
+  //                 the same boundary as every other skill write.
+  const agentLearningMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/learning$/);
+  if (agentLearningMatch && (method === 'GET' || method === 'PUT')) {
+    const group = resolveAgent(decodeURIComponent(agentLearningMatch[1]));
+    if (!group) return json(res, 404, { error: 'Agent not found' });
+    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+    const current = parseAgentLearning(group.id);
+    // Auto-keep is admin-tier like the manual Keep it automates: a scoped admin
+    // can already keep any draft for their agent with a tap, so gating the
+    // toggle higher only added friction, not protection. The blast radius is
+    // unchanged — a kept skill is scoped to the one agent they administer.
+    const canAutoKeep = hasAdminPrivilege(userId, group.id);
+    if (method === 'GET') {
+      return json(res, 200, {
+        autoTrigger: current.autoTrigger !== false, // absent = on
+        autoKeep: current.autoKeep === true, // absent = off
+        canAutoKeep,
+      });
+    }
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { autoTrigger?: unknown; autoKeep?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    const next = { ...current };
+    if (typeof body.autoTrigger === 'boolean') next.autoTrigger = body.autoTrigger;
+    if (typeof body.autoKeep === 'boolean') {
+      if (!canAutoKeep) return json(res, 403, { error: 'Admin privilege required for auto-keep' });
+      next.autoKeep = body.autoKeep;
+    }
+    updateContainerConfigJson(group.id, 'learning', next);
+    // Config materializes at spawn — restart so the container sees it now.
+    const restarted = restartAgentGroupContainers(group.id, 'Learning settings changed');
+    return json(res, 200, {
+      ok: true,
+      autoTrigger: next.autoTrigger !== false,
+      autoKeep: next.autoKeep === true,
+      canAutoKeep,
+      restarted,
+    });
+  }
+  const skillRevertMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/skills\/scoped\/([^/]+)\/revert$/);
+  if (skillRevertMatch && method === 'POST') {
+    const group = resolveAgent(decodeURIComponent(skillRevertMatch[1]));
+    if (!group) return json(res, 404, { error: 'Agent not found' });
+    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const name = sanitizeSkillName(decodeURIComponent(skillRevertMatch[2]));
+    if (!name) return json(res, 400, { error: 'Invalid skill name' });
+    const r = revertLastRevision(scopedSkillsDir(group.id), name);
+    if (!r.ok) return json(res, 409, { error: r.error });
+    const restarted = restartAgentGroupContainers(group.id, 'Skill revision reverted');
+    return json(res, 200, { ok: true, restarted });
+  }
+  const skillRestoreMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/skills\/archived\/([^/]+)\/restore$/);
+  if (skillRestoreMatch && method === 'POST') {
+    const group = resolveAgent(decodeURIComponent(skillRestoreMatch[1]));
+    if (!group) return json(res, 404, { error: 'Agent not found' });
+    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const name = sanitizeSkillName(decodeURIComponent(skillRestoreMatch[2]));
+    if (!name) return json(res, 400, { error: 'Invalid skill name' });
+    const r = restoreArchivedSkill(group.id, name);
+    if (!r.ok) return json(res, 409, { error: r.error });
+    const restarted = restartAgentGroupContainers(group.id, 'Webchat archived skill restored');
+    return json(res, 200, { ok: true, restarted });
+  }
   const agentScopedSkillMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/skills\/scoped\/([^/]+)$/);
   if (agentScopedSkillMatch && method === 'DELETE') {
     const group = resolveAgent(decodeURIComponent(agentScopedSkillMatch[1]));
@@ -1674,6 +2405,97 @@ async function handleHttp(
     if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     return deleteScopedSkillHandler(res, group.id, decodeURIComponent(agentScopedSkillMatch[2]));
+  }
+
+  // ── Learning loop: skill drafts (proposed skills awaiting review) ───────
+  if (url.pathname === '/api/skill-drafts' && method === 'GET') {
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
+    const drafts = listSkillDrafts().map((d) => ({
+      id: d.id,
+      skillName: d.skill_name,
+      description: d.description,
+      kind: d.kind,
+      targetSkill: d.target_skill,
+      agentGroupId: d.agent_group_id,
+      agentName: getAgentGroup(d.agent_group_id)?.name || d.agent_group_id,
+      createdAt: d.created_at,
+      // The conversation this draft was distilled FROM — reviewing a skill
+      // without the session that produced it is guessing.
+      roomId: draftSourceRoom(d.session_id),
+    }));
+    return json(res, 200, { drafts });
+  }
+  const draftMatch = url.pathname.match(/^\/api\/skill-drafts\/([^/]+)$/);
+  if (draftMatch && method === 'PUT') {
+    // Edit a pending draft's body before keeping it. Same tier as Keep: admin
+    // over the agent the draft belongs to — editing shapes what gets kept.
+    const id = decodeURIComponent(draftMatch[1]);
+    const draft = getSkillDraft(id);
+    if (!draft || draft.status !== 'pending') return json(res, 404, { error: 'Draft not found' });
+    if (!hasAdminPrivilege(userId, draft.agent_group_id)) return json(res, 403, { error: 'Admin privilege required' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body = '';
+    try {
+      body = String((JSON.parse(raw) as { body?: unknown }).body || '');
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    if (!/^---\s*\n[\s\S]*?description:\s*\S[\s\S]*?\n---/.test(body)) {
+      return json(res, 400, { error: 'Body must be a SKILL.md with YAML front-matter including a description' });
+    }
+    if (!updateSkillDraftBody(id, body)) return json(res, 404, { error: 'Draft not found' });
+    return json(res, 200, { ok: true });
+  }
+  if (draftMatch && (method === 'GET' || method === 'DELETE')) {
+    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
+    const id = decodeURIComponent(draftMatch[1]);
+    const draft = getSkillDraft(id);
+    if (!draft || draft.status !== 'pending') return json(res, 404, { error: 'Draft not found' });
+    if (method === 'GET') {
+      // For a patch, hand back the version it would REPLACE too, so the reviewer
+      // sees what actually changes rather than a wall of unchanged text.
+      let currentBody = '';
+      if (draft.kind === 'patch' && draft.target_skill) {
+        currentBody = readSkillBody(draft.agent_group_id, draft.target_skill);
+      }
+      return json(res, 200, {
+        id: draft.id,
+        skillName: draft.skill_name,
+        description: draft.description,
+        kind: draft.kind,
+        targetSkill: draft.target_skill,
+        agentGroupId: draft.agent_group_id,
+        body: readSkillDraftBody(id) || '',
+        currentBody,
+      });
+    }
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!resolveSkillDraft(id, 'discarded')) return json(res, 404, { error: 'Draft not found' });
+    resolveDraftCard(id, 'discarded', userId);
+    return json(res, 200, { ok: true });
+  }
+  // Keep + wire a draft to an agent group (scoped, origin "learned").
+  // Trial run (learning loop): mount the DRAFT into a fresh thread's session —
+  // and only that session — so the skill can be judged by observed behavior
+  // before Keep. The overlay lives at data/trial-skills/<group>/<thread>/ and
+  // is cleaned up when the draft resolves.
+  const draftTrialMatch = url.pathname.match(/^\/api\/skill-drafts\/([^/]+)\/trial$/);
+  if (draftTrialMatch && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const draft = getSkillDraft(decodeURIComponent(draftTrialMatch[1]));
+    if (!draft) return json(res, 404, { error: 'Draft not found' });
+    if (!hasAdminPrivilege(userId, draft.agent_group_id)) return json(res, 403, { error: 'Admin privilege required' });
+    return startSkillTrialHandler(res, draft);
+  }
+  const draftKeepMatch = url.pathname.match(/^\/api\/skill-drafts\/([^/]+)\/keep$/);
+  if (draftKeepMatch && method === 'POST') {
+    const id = decodeURIComponent(draftKeepMatch[1]);
+    const draft = getSkillDraft(id);
+    if (!draft || draft.status !== 'pending') return json(res, 404, { error: 'Draft not found' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    return keepSkillDraftHandler(req, res, userId, draft);
   }
 
   // ── Lifecycle status (active | paused | archived) ──────────────────────
@@ -1931,6 +2753,22 @@ async function handleHttp(
     if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
     return json(res, 200, { pulls: getPullsSnapshot() });
   }
+  // Wizard: hardware profile + a recommended local model to prefill the download.
+  if (url.pathname === '/api/ollama/recommend' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    return json(res, 200, recommendForHost());
+  }
+  // Local Ollama for the wizard: status probe + one-click rootless install.
+  if (url.pathname === '/api/ollama/local' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    return json(res, 200, await getOllamaLocalState());
+  }
+  if (url.pathname === '/api/ollama/install' && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const result = startOllamaInstall();
+    return json(res, result.started ? 200 : 409, result);
+  }
   if (url.pathname === '/api/ollama/pull' && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
@@ -2141,9 +2979,7 @@ async function handleHttp(
     return pushUnsubscribe(req, res, userId);
   }
 
-  // ── Static PWA ────────────────────────────────────────────────────────
-  if (method === 'GET' && servePwa(req, res, publicDir)) return;
-
+  // Static PWA is served pre-auth (see the servePwa call above the auth gate).
   return json(res, 404, { error: 'Not found' });
 }
 
@@ -3029,6 +3865,11 @@ function deriveEffectiveModelLabel(agentGroupId: string): string | null {
     return model || 'OpenCode';
   }
   if (provider === 'codex') return 'Codex';
+  // Claude family with no assignment: the group may still run on the WORKSPACE
+  // DEFAULT model (the wizard's Ollama engine). Label it honestly — showing
+  // "anthropic" for an agent that answers via Ollama misleads the operator.
+  const effective = getEffectiveModelForAgent(agentGroupId);
+  if (effective) return `${effective.model_id} (workspace default)`;
   return null;
 }
 
@@ -3548,21 +4389,31 @@ async function writeInstructions(req: IncomingMessage, res: ServerResponse, id: 
  * Refs to agents in the room create / add-agent endpoints. Either an existing
  * agent (by id) or a new agent created inline.
  */
-type AgentRef = { kind: 'existing'; id: string } | { kind: 'new'; name: string; instructions?: string };
+type AgentRef =
+  | { kind: 'existing'; id: string }
+  | { kind: 'new'; name: string; instructions?: string; provider?: 'codex' };
 
 function parseAgentRef(raw: unknown): AgentRef | { error: string } {
   if (!raw || typeof raw !== 'object') return { error: 'Invalid agent reference' };
-  const r = raw as { kind?: unknown; id?: unknown; name?: unknown; instructions?: unknown };
+  const r = raw as { kind?: unknown; id?: unknown; name?: unknown; instructions?: unknown; provider?: unknown };
   if (r.kind === 'existing') {
     if (typeof r.id !== 'string' || !r.id.trim()) return { error: 'agent.id required for kind=existing' };
     return { kind: 'existing', id: r.id.trim() };
   }
   if (r.kind === 'new') {
     if (typeof r.name !== 'string' || !r.name.trim()) return { error: 'agent.name required for kind=new' };
+    // Optional non-default provider for the new agent (wizard "default engine"
+    // = Codex). Only 'codex' is accepted — 'claude' is the implicit default,
+    // and opencode groups are wired by their own installer, not room-create.
+    if (r.provider !== undefined) {
+      if (r.provider !== 'codex') return { error: "agent.provider must be 'codex' when set" };
+      if (!codexAvailable()) return { error: 'Codex support isn’t installed yet — add it with /add-codex first.' };
+    }
     return {
       kind: 'new',
       name: r.name.trim(),
       instructions: typeof r.instructions === 'string' ? r.instructions : undefined,
+      provider: r.provider as 'codex' | undefined,
     };
   }
   return { error: 'agent.kind must be "existing" or "new"' };
@@ -3593,6 +4444,16 @@ function createBareAgentGroup(
     return { error: `Could not create agent group: ${(err as Error).message}`, status: 409 };
   }
   initGroupFilesystem(group, { instructions: opts.instructions });
+  // Materialize the model env NOW: a group born AFTER the workspace default
+  // model was set would otherwise have no settings.json until some later
+  // model change — its first container would fall through to api.anthropic.com
+  // (surfaced as a OneCLI 401 in the wizard's Ollama flow, where the default
+  // is set one step before the first agent is created).
+  try {
+    writeAgentSettingsForAssignedModel(group.id);
+  } catch (err) {
+    log.warn('Webchat: settings.json write for new agent group failed', { agentGroupId: group.id, err });
+  }
   return { group };
 }
 
@@ -3645,6 +4506,12 @@ async function createRoomHandler(req: IncomingMessage, res: ServerResponse): Pro
     }
     createdAgentIds.push(result.group.id);
     wireIds.push(result.group.id);
+    // Non-default provider (validated in parseAgentRef): pin it on the group's
+    // container config so the first spawn already runs the right harness.
+    if (ref.provider) {
+      ensureContainerConfig(result.group.id);
+      updateContainerConfigScalars(result.group.id, { provider: ref.provider });
+    }
   }
 
   try {
@@ -3995,6 +4862,12 @@ function deleteModelHandler(res: ServerResponse, id: string, force: boolean): vo
     });
   }
   deleteWebchatModel(id);
+  // If this model was the workspace default, clear it and refresh the groups
+  // that were inheriting it (they fall back to the workspace credential).
+  if (getDefaultModelId() === id) {
+    setDefaultModelId(null);
+    refreshUnassignedGroupsForDefaultModel('Workspace default model deleted');
+  }
   // Refresh settings.json for any newly-orphaned agents and respawn them so a
   // live container doesn't keep using the now-dead ollama env block (it would
   // otherwise fail against a deleted endpoint until it idled out).
@@ -4162,13 +5035,6 @@ async function assignAgentModelHandler(req: IncomingMessage, res: ServerResponse
     }
     const model = getWebchatModel(body.modelId.trim());
     if (!model) return json(res, 404, { error: 'Model not found' });
-    // The kind decides the agent provider; refuse an assignment the install
-    // can't run rather than leaving the group wedged on a dead provider.
-    if (providerForModelKind(model.kind) === 'opencode' && !opencodeProviderInstalled()) {
-      return json(res, 400, {
-        error: 'This model kind runs on the OpenCode provider — install it with /add-opencode first.',
-      });
-    }
     assignModelToAgent(agentGroupId, body.modelId.trim());
   }
   reloadAgentModelEnv(agentGroupId, 'Webchat model reassigned');
@@ -4213,6 +5079,78 @@ function reloadAgentModelEnv(agentGroupId: string, reason: string): void {
   }
 }
 
+/**
+ * Respawn containers after a workspace-default credential MODE change (key ↔
+ * subscription, or removing an OAuth default). The Claude OAuth sentinel env and
+ * the Codex gateway auth stub are applied at container SPAWN, so a running
+ * container would keep the wrong auth mode until it idles out. Scoped to the
+ * groups the provider actually serves: `claude` → every non-Codex group;
+ * `codex` → Codex groups only. Value-only rotation (same mode) needs no restart —
+ * OneCLI swaps the real credential on the wire per request.
+ */
+function restartGroupsForWorkspaceCredChange(
+  provider: 'claude' | 'codex',
+  priorOauth: boolean,
+  nowOauth: boolean,
+): void {
+  if (priorOauth === nowOauth) return;
+  for (const g of getAllAgentGroups()) {
+    const groupProvider = getContainerConfig(g.id)?.provider === 'codex' ? 'codex' : 'claude';
+    if (groupProvider !== provider) continue;
+    try {
+      restartAgentGroupContainers(g.id, 'Workspace default credential mode changed');
+    } catch (err) {
+      log.warn('Webchat: container restart after workspace-cred change failed', { agentGroupId: g.id, err });
+    }
+  }
+}
+
+/**
+ * Aftermath of SETTING a workspace-default credential (the wizard's engine
+ * choice). Choosing Claude/Codex supersedes a leftover Ollama workspace-default
+ * MODEL — which otherwise still wins for base agents (getEffectiveModelForAgent
+ * returns the default model regardless of credential), so connecting Claude
+ * would silently keep agents on the local model. Clear the default model, then
+ * respawn the affected groups (the respawn also applies the OAuth sentinel).
+ */
+function afterWorkspaceCredentialSet(provider: 'claude' | 'codex', priorOauth: boolean, nowOauth: boolean): void {
+  // The default model is always an ollama-kind (claude-family) model, so it only
+  // conflicts with a claude engine — a codex credential leaves it untouched.
+  const clearModel = provider === 'claude' && getDefaultModelId() !== null;
+  if (clearModel) {
+    setDefaultModelId(null);
+    // Rewrites settings.json (drops the ollama env) + respawns unassigned
+    // claude-family groups; the respawn also picks up the new OAuth sentinel.
+    refreshUnassignedGroupsForDefaultModel(`Workspace engine set to ${provider}`);
+  } else {
+    restartGroupsForWorkspaceCredChange(provider, priorOauth, nowOauth);
+  }
+}
+
+/**
+ * Re-materialize settings.json + respawn for every claude-family group WITHOUT
+ * its own model assignment — the population the workspace default model serves.
+ * Assigned groups are untouched (their assignment wins), as are codex/opencode
+ * groups (their harness ignores the ANTHROPIC_* env this writes).
+ */
+function refreshUnassignedGroupsForDefaultModel(reason: string): void {
+  for (const g of getAllAgentGroups()) {
+    if (getAssignedModelForAgent(g.id)) continue;
+    const provider = getContainerConfig(g.id)?.provider;
+    if (provider && provider !== 'claude') continue;
+    try {
+      writeAgentSettingsForAssignedModel(g.id);
+    } catch (err) {
+      log.warn('Webchat: settings.json write for default-model change failed', { agentGroupId: g.id, reason, err });
+    }
+    try {
+      restartAgentGroupContainers(g.id, reason);
+    } catch (err) {
+      log.warn('Webchat: container restart for default-model change failed', { agentGroupId: g.id, reason, err });
+    }
+  }
+}
+
 /** Restart a group's containers so an mcp_servers change is picked up at spawn. */
 function reloadAgentMcpServers(agentGroupId: string): void {
   try {
@@ -4236,15 +5174,38 @@ interface McpServerForUI {
   /** Endpoint summary — url (remote) or command (stdio). Never env/headers. */
   target: string;
   agents_assigned: number;
+  health: Record<string, unknown> | null;
+  drift: Record<string, unknown> | null;
+  pinned_tools: { name: string; description: string }[] | null;
+  enabled_tools: string[] | null;
+  /** Presence + kind only — the credential never leaves the host. */
+  auth: { kind: string } | null;
 }
 
 function mcpServerForUI(s: WebchatMcpServer): McpServerForUI {
+  const parse = (v: string | null) => {
+    try {
+      return v ? (JSON.parse(v) as Record<string, unknown>) : null;
+    } catch {
+      return null;
+    }
+  };
+  const pinned = parse(s.pinned_tools) as { tools?: { name: string; description: string }[] } | null;
   return {
     id: s.id,
     name: s.name,
     transport: s.transport,
     target: (s.transport === 'stdio' ? s.command : s.url) ?? '',
     agents_assigned: getAgentsAssignedToMcpServer(s.id).length,
+    health: parse(s.health),
+    drift: parse(s.drift),
+    pinned_tools: pinned?.tools ?? null,
+    enabled_tools: (parse(s.enabled_tools) as unknown as string[] | null) ?? null,
+    // Presence only — the credential itself never leaves the host.
+    auth: (() => {
+      const a = parseMcpAuth(s);
+      return a ? { kind: a.kind } : null;
+    })(),
   };
 }
 
@@ -4295,6 +5256,20 @@ async function createMcpServerHandler(req: IncomingMessage, res: ServerResponse)
     return json(res, 409, { error: `An MCP server named "${input.name}" already exists` });
   }
   const server = createWebchatMcpServer(input);
+  // The add form probes before saving — that probed surface is the operator's
+  // approval, so pin it as the drift baseline right here.
+  if (Array.isArray(body.tools) && body.tools.length) {
+    try {
+      pinMcpToolSurface(
+        server.id,
+        (body.tools as { name?: unknown; description?: unknown }[])
+          .filter((t) => typeof t?.name === 'string')
+          .map((t) => ({ name: String(t.name), description: String(t.description ?? '') })),
+      );
+    } catch {
+      /* pin is protection, not a gate */
+    }
+  }
   return json(res, 200, { ok: true, server: mcpServerForUI(server) });
 }
 
@@ -4364,6 +5339,171 @@ function deleteMcpServerHandler(res: ServerResponse, id: string, force: boolean)
   return json(res, 200, { ok: true, unassigned_count: assigned.length });
 }
 
+/**
+ * MCP catalog — the official Model Context Protocol registry.
+ *
+ * Read-only discovery. It NEVER writes: a row just prefills the existing add form,
+ * so every server still goes through probe → create, and the catalog adds no new
+ * write path to the MCP config.
+ *
+ * Two classes of entry, and the difference is the whole security story:
+ *
+ *   remote  — {type, url}. The container dials OUT to a hosted server. No foreign
+ *             code runs on this machine.
+ *   package — an npm/pypi package run over stdio. Adding one EXECUTES third-party
+ *             code inside the agent container, alongside its credentials. Flagged
+ *             `runsCode` so the UI can gate it behind an explicit confirm.
+ *
+ * Trust: there is no "official" tier here. Nothing in the registry is published by
+ * Anthropic — and a name match would be actively dangerous, because third parties
+ * publish servers *called* things like `anthropic-admin-mcp`. The badge shows the
+ * real publisher namespace (the part before the '/') and nothing more.
+ */
+const MCP_REGISTRY_URL = 'https://registry.modelcontextprotocol.io/v0/servers';
+/**
+ * The registry is a code-wired built-in source, exactly like the skills
+ * marketplace — so it switches off the same way, through webchat_disabled_sources.
+ * Same id space, same helpers, no new table.
+ */
+const MCP_REGISTRY_ID = 'mcp-registry';
+const MCP_REGISTRY_SOURCE = {
+  id: MCP_REGISTRY_ID,
+  name: 'Model Context Protocol registry',
+  url: 'https://registry.modelcontextprotocol.io',
+  official: false, // community-published; nobody vets these
+};
+
+interface McpCatalogRow {
+  name: string;
+  title: string;
+  description: string;
+  version: string;
+  publisher: string;
+  kind: 'remote' | 'package';
+  runsCode: boolean;
+  url?: string;
+  transport?: 'http' | 'sse';
+  command?: string;
+  args?: string[];
+  /** Where the operator can go to actually READ this thing before trusting it. */
+  repoUrl?: string;
+  websiteUrl?: string;
+}
+
+const mcpCatalogCache = new Map<string, { at: number; rows: McpCatalogRow[] }>();
+const MCP_CATALOG_TTL_MS = 5 * 60_000;
+
+/** Compare dotted versions numerically so 1.10.0 beats 1.9.0 (string sort doesn't). */
+function versionGreater(a: string, b: string): boolean {
+  const pa = String(a).split('.').map((n) => parseInt(n, 10) || 0);
+  const pb = String(b).split('.').map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] ?? 0;
+    const y = pb[i] ?? 0;
+    if (x !== y) return x > y;
+  }
+  return false;
+}
+
+/** How a package identifier becomes a runnable stdio command. */
+function packageCommand(
+  registryType: string,
+  identifier: string,
+  version?: string,
+): { command: string; args: string[] } | null {
+  // Pin to the registry entry's immutable version — an unpinned `npx -y pkg`
+  // re-resolves LATEST at every container spawn, which is exactly the
+  // trusted-package-turns-malicious window (the postmark-mcp pattern). Only
+  // pin when the string looks like a real version; the registry accepts any
+  // ≤255-char string and a junk pin would break the install loudly.
+  const pin = version && /^\d+\.\d+/.test(version) ? version : null;
+  if (registryType === 'npm') return { command: 'npx', args: ['-y', pin ? `${identifier}@${pin}` : identifier] };
+  if (registryType === 'pypi') return { command: 'uvx', args: [pin ? `${identifier}==${pin}` : identifier] };
+  return null; // oci/other — we don't synthesize a command we can't vouch for
+}
+
+/** Third-party strings end up in an <a href> — allow http(s) only, nothing else. */
+export function safeHttpUrl(u: unknown): string | undefined {
+  if (typeof u !== 'string' || !u) return undefined;
+  try {
+    const parsed = new URL(u);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function normalizeMcpRegistry(payload: unknown): McpCatalogRow[] {
+  const servers = (payload as { servers?: { server?: Record<string, unknown> }[] })?.servers || [];
+  const byName = new Map<string, McpCatalogRow>();
+  for (const entry of servers) {
+    const s = entry?.server;
+    if (!s || typeof s.name !== 'string') continue;
+    const name = s.name;
+    const version = String(s.version || '0');
+    const prev = byName.get(name);
+    // The registry lists every published version — keep only the newest.
+    if (prev && !versionGreater(version, prev.version)) continue;
+
+    const remotes = (s.remotes as { type?: string; url?: string }[] | undefined) || [];
+    const packages =
+      (s.packages as { registryType?: string; identifier?: string }[] | undefined) || [];
+
+    const repo = s.repository as { url?: string } | undefined;
+    const base = {
+      name,
+      title: String(s.title || name.split('/').pop() || name),
+      description: String(s.description || ''),
+      version,
+      publisher: name.includes('/') ? name.split('/')[0] : '',
+      // Only ever surface http(s) links — a registry entry is third-party data, and
+      // it must not be able to inject a javascript:/data: URL into an <a href>.
+      repoUrl: safeHttpUrl(repo?.url),
+      websiteUrl: safeHttpUrl(s.websiteUrl),
+    };
+
+    // Prefer the remote form when a server offers both — it's the safe one.
+    const remote = remotes.find((r) => r.url);
+    if (remote?.url) {
+      byName.set(name, {
+        ...base,
+        kind: 'remote',
+        runsCode: false,
+        url: remote.url,
+        // The registry says streamable-http / sse; our config takes http | sse.
+        transport: remote.type === 'sse' ? 'sse' : 'http',
+      });
+      continue;
+    }
+    const pkg = packages.find((p) => p.identifier && p.registryType);
+    if (pkg) {
+      const cmd = packageCommand(String(pkg.registryType), String(pkg.identifier), version);
+      if (!cmd) continue;
+      byName.set(name, { ...base, kind: 'package', runsCode: true, command: cmd.command, args: cmd.args });
+    }
+  }
+  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function mcpCatalogHandler(res: ServerResponse, q: string): Promise<void> {
+  // Switched off in Settings → the catalog is gone, server-side too. Not just
+  // hidden in the UI: no request is made to the registry at all.
+  if (isSourceDisabled(MCP_REGISTRY_ID)) return json(res, 200, { servers: [], disabled: true });
+  const key = q.trim().toLowerCase();
+  const hit = mcpCatalogCache.get(key);
+  if (hit && Date.now() - hit.at < MCP_CATALOG_TTL_MS) return json(res, 200, { servers: hit.rows });
+  try {
+    const target = `${MCP_REGISTRY_URL}?limit=100${key ? `&search=${encodeURIComponent(key)}` : ''}`;
+    const r = await fetch(target, { signal: AbortSignal.timeout(10_000) });
+    if (!r.ok) return json(res, 502, { error: `Registry returned ${r.status}` });
+    const rows = normalizeMcpRegistry(await r.json());
+    mcpCatalogCache.set(key, { at: Date.now(), rows });
+    return json(res, 200, { servers: rows });
+  } catch (err) {
+    return json(res, 502, { error: 'Registry unreachable: ' + (err instanceof Error ? err.message : String(err)) });
+  }
+}
+
 async function probeMcpServerHandler(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const raw = await readJsonBody(req, res);
   if (raw === null) return;
@@ -4401,16 +5541,111 @@ const USER_SKILLS_DIR = path.join(process.cwd(), 'data', 'user-skills');
 // ("Anthropic", "obra/superpowers", "awesomeskill.ai", …) long after import.
 // A sidecar (not front-matter) keeps it out of the agent-facing SKILL.md and
 // self-cleans when the skill folder is deleted.
-type SkillOrigin = { label: string; url?: string; official?: boolean };
+type SkillOriginRef = { owner: string; repo: string; branch: string; dir: string };
+type SkillOrigin = {
+  label: string;
+  url?: string;
+  official?: boolean;
+  /** Commit SHA the import was taken at — the pin that makes updates checkable. */
+  sha?: string;
+  /** Where to re-fetch from for update checks / re-imports. */
+  ref?: SkillOriginRef;
+};
 function sanitizeOrigin(input: unknown): SkillOrigin | null {
   if (!input || typeof input !== 'object') return null;
   const o = input as Record<string, unknown>;
-  const label = String(o.label ?? '').trim().slice(0, 60);
+  const label = String(o.label ?? '')
+    .trim()
+    .slice(0, 60);
   if (!label) return null;
   const u = String(o.url ?? '').trim();
   const url = /^https:\/\/\S+$/i.test(u) && u.length <= 300 ? u : undefined;
-  return { label, url, official: !!o.official };
+  const out: SkillOrigin = { label, url, official: !!o.official };
+  if (typeof o.sha === 'string' && /^[0-9a-f]{7,40}$/i.test(o.sha)) out.sha = o.sha;
+  const r = o.ref as Record<string, unknown> | undefined;
+  if (r && typeof r === 'object') {
+    const part = (v: unknown) => String(v ?? '').slice(0, 200);
+    const ref = { owner: part(r.owner), repo: part(r.repo), branch: part(r.branch), dir: part(r.dir) };
+    if (ref.owner && ref.repo && ref.branch && /^[\w.-]+$/.test(ref.owner) && /^[\w.-]+$/.test(ref.repo)) {
+      out.ref = ref;
+    }
+  }
+  return out;
 }
+
+/**
+ * Latest commit SHA touching a path — the freshness probe for update checks
+ * and the pin recorded at import. Best-effort: null on any failure (an import
+ * must never fail because a SHA lookup did). Cached like the catalogs.
+ */
+const shaCache = new Map<string, { at: number; sha: string | null }>();
+async function latestCommitSha(ref: SkillOriginRef, maxAgeMs = 3600_000): Promise<string | null> {
+  const key = `${ref.owner}/${ref.repo}@${ref.branch}:${ref.dir}`;
+  const hit = shaCache.get(key);
+  if (hit && Date.now() - hit.at < maxAgeMs) return hit.sha;
+  let sha: string | null = null;
+  try {
+    const api =
+      `https://api.github.com/repos/${ref.owner}/${ref.repo}/commits` +
+      `?sha=${encodeURIComponent(ref.branch)}&per_page=1` +
+      (ref.dir ? `&path=${encodeURIComponent(ref.dir)}` : '');
+    const r = await githubFetch(api, { 'User-Agent': 'nanoclaw', Accept: 'application/vnd.github+json' });
+    if (r.ok) {
+      const commits = (await r.json()) as Array<{ sha?: string }>;
+      sha = commits?.[0]?.sha ?? null;
+    }
+  } catch {
+    /* best-effort */
+  }
+  shaCache.set(key, { at: Date.now(), sha });
+  return sha;
+}
+/**
+ * Read a skill's current SKILL.md as the AGENT sees it: its own scoped copy wins,
+ * otherwise the shared pool (shipped skills, then the user pool). Used to show a
+ * patch draft against the version it would actually replace. Empty string when the
+ * target can't be resolved — the caller renders that as "new file".
+ */
+/** Resolve a draft's source session to its webchat room, when there is one. */
+function draftSourceRoom(sessionId: string | null): string | null {
+  if (!sessionId) return null;
+  try {
+    const sess = getSession(sessionId);
+    if (!sess?.messaging_group_id) return null;
+    const mg = getMessagingGroup(sess.messaging_group_id);
+    return mg && mg.channel_type === 'webchat' ? mg.platform_id : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseAgentLearning(agentGroupId: string): { autoTrigger?: boolean; autoKeep?: boolean; cooldownMinutes?: number } {
+  try {
+    const raw = getContainerConfig(agentGroupId)?.learning;
+    return raw ? (JSON.parse(raw) as ReturnType<typeof parseAgentLearning>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function readSkillBody(agentGroupId: string, skillName: string): string {
+  const name = sanitizeSkillName(skillName);
+  if (!name) return '';
+  const candidates = [
+    path.join(scopedSkillsDir(agentGroupId), name),
+    path.join(process.cwd(), 'container', 'skills', name),
+    path.join(USER_SKILLS_DIR, name),
+  ];
+  for (const dir of candidates) {
+    try {
+      return fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8');
+    } catch {
+      /* try the next location */
+    }
+  }
+  return '';
+}
+
 function readSkillOrigin(skillDir: string): SkillOrigin | null {
   try {
     return sanitizeOrigin(JSON.parse(fs.readFileSync(path.join(skillDir, '.origin.json'), 'utf8')));
@@ -4465,9 +5700,11 @@ function listAvailableSkills(): AvailableSkill[] {
 function scopedSkillsDir(agentGroupId: string): string {
   return path.join(DATA_DIR, 'v2-sessions', agentGroupId, '.claude-shared', 'skills');
 }
-function listScopedSkills(agentGroupId: string): Array<{ name: string; description: string; origin: SkillOrigin | null }> {
+function listScopedSkills(
+  agentGroupId: string,
+): Array<{ name: string; description: string; origin: SkillOrigin | null; invocations: number; hasHistory: boolean }> {
   const dir = scopedSkillsDir(agentGroupId);
-  const out: Array<{ name: string; description: string; origin: SkillOrigin | null }> = [];
+  const out: Array<{ name: string; description: string; origin: SkillOrigin | null; invocations: number; hasHistory: boolean }> = [];
   let entries: string[];
   try {
     entries = fs.readdirSync(dir);
@@ -4480,7 +5717,19 @@ function listScopedSkills(agentGroupId: string): Array<{ name: string; descripti
       if (!fs.lstatSync(p).isDirectory()) continue; // lstat: skip pooled symlinks, keep real dirs
       const text = fs.readFileSync(path.join(p, 'SKILL.md'), 'utf8');
       const fm = text.match(/^---\s*\n([\s\S]*?)\n---/);
-      out.push({ name: entry, description: fm ? frontMatterDescription(fm[1]) : '', origin: readSkillOrigin(p) });
+      let invocations = 0;
+      try {
+        invocations = parseInt(fs.readFileSync(path.join(p, '.invocations'), 'utf8'), 10) || 0;
+      } catch {
+        /* never invoked */
+      }
+      out.push({
+        name: entry,
+        description: fm ? frontMatterDescription(fm[1]) : '',
+        origin: readSkillOrigin(p),
+        invocations,
+        hasHistory: listRevisions(dir, entry).length > 0,
+      });
     } catch {
       continue; // symlink (isDirectory false via lstat) or no SKILL.md
     }
@@ -4567,11 +5816,16 @@ async function fetchGithubDir(
 // managed by global admins from Settings). Listing goes through the GitHub API
 // (1 call); descriptions come from raw.githubusercontent (not API-rate-limited).
 // Cached for an hour — catalogs change rarely and the API allows 60/hr.
-const catalogCache = new Map<string, { at: number; skills: Array<{ name: string; description: string; url: string }> }>();
+const catalogCache = new Map<
+  string,
+  { at: number; skills: Array<{ name: string; description: string; url: string }> }
+>();
 
 // Fetch (or serve cached) the skill list for one source row. Throws only when
 // there's no cache to fall back on.
-async function loadCatalog(src: WebchatSkillSource): Promise<Array<{ name: string; description: string; url: string }>> {
+async function loadCatalog(
+  src: WebchatSkillSource,
+): Promise<Array<{ name: string; description: string; url: string }>> {
   let entry = catalogCache.get(src.id);
   if (!entry || Date.now() - entry.at > 3600_000) {
     try {
@@ -4656,7 +5910,9 @@ const MARKETPLACE_ID = 'awesomeskill';
 async function fetchMarketplace(
   q: string,
   limit = 25,
-): Promise<Array<{ name: string; title: string; description: string; repo: string; stars: number; reviewUrl: string }>> {
+): Promise<
+  Array<{ name: string; title: string; description: string; repo: string; stars: number; reviewUrl: string }>
+> {
   const query = q.trim().slice(0, 100);
   try {
     const r = await fetch(`${SKILL_DISCOVERY_URL}?q=${encodeURIComponent(query)}&limit=${limit}&sort=stars`, {
@@ -4666,7 +5922,9 @@ async function fetchMarketplace(
     if (!r.ok) throw new Error(`Discovery API ${r.status}`);
     const raw = (await r.json()) as unknown;
     const rec = raw as { results?: unknown; skills?: unknown; data?: unknown };
-    const items = (Array.isArray(raw) ? raw : rec.results || rec.skills || rec.data || []) as Array<Record<string, unknown>>;
+    const items = (Array.isArray(raw) ? raw : rec.results || rec.skills || rec.data || []) as Array<
+      Record<string, unknown>
+    >;
     return items
       .map((s) => {
         const repo = String(s.githubRepo || '').trim();
@@ -4728,15 +5986,33 @@ async function catalogPoolHandler(res: ServerResponse, tier: string, q: string):
       if (!name || seen.has(name)) continue;
       if (query && !`${name} ${s.description}`.toLowerCase().includes(ql)) continue;
       seen.add(name);
-      out.push({ name, description: s.description, origin, installed: installed.has(name), review: s.url, ref: { url: s.url } });
+      out.push({
+        name,
+        description: s.description,
+        origin,
+        installed: installed.has(name),
+        review: s.url,
+        ref: { url: s.url },
+      });
     }
   }
   if (!wantOfficial && !isSourceDisabled(MARKETPLACE_ID)) {
-    const origin: SkillOrigin = { label: SKILL_DISCOVERY_SOURCE.name, url: SKILL_DISCOVERY_SOURCE.url, official: false };
+    const origin: SkillOrigin = {
+      label: SKILL_DISCOVERY_SOURCE.name,
+      url: SKILL_DISCOVERY_SOURCE.url,
+      official: false,
+    };
     for (const m of await fetchMarketplace(query)) {
       if (!m.name || seen.has(m.name)) continue;
       seen.add(m.name);
-      out.push({ name: m.name, description: m.description, origin, installed: installed.has(m.name), review: m.reviewUrl, ref: { repo: m.repo, name: m.title } });
+      out.push({
+        name: m.name,
+        description: m.description,
+        origin,
+        installed: installed.has(m.name),
+        review: m.reviewUrl,
+        ref: { repo: m.repo, name: m.title },
+      });
     }
   }
   // Sort by name so collections interleave — no source is grouped first. (Dedup
@@ -4748,9 +6024,7 @@ async function catalogPoolHandler(res: ServerResponse, tier: string, q: string):
 // Parse a GitHub folder URL into skill-source components (shared by the source
 // editor and validated the same way as skill imports).
 function parseGithubDirUrl(url: string): { owner: string; repo: string; branch: string; dir: string } | null {
-  const m = url
-    .trim()
-    .match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/tree\/([^/]+)\/(.+?)\/?$/);
+  const m = url.trim().match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/tree\/([^/]+)\/(.+?)\/?$/);
   return m ? { owner: m[1], repo: m[2], branch: m[3], dir: m[4] } : null;
 }
 
@@ -4758,7 +6032,9 @@ function parseGithubDirUrl(url: string): { owner: string; repo: string; branch: 
 // (…/tree/branch/dir), a branch URL (…/tree/branch → whole branch), OR a bare
 // repo root (…/owner/repo → default branch, whole repo). loadCatalog walks the
 // tree from `dir`, so an empty dir means "find skills anywhere in the repo".
-async function resolveSourceUrl(url: string): Promise<{ owner: string; repo: string; branch: string; dir: string } | null> {
+async function resolveSourceUrl(
+  url: string,
+): Promise<{ owner: string; repo: string; branch: string; dir: string } | null> {
   const u = url.trim();
   const folder = parseGithubDirUrl(u);
   if (folder) return folder;
@@ -4810,7 +6086,9 @@ async function putSkillSourceHandler(req: IncomingMessage, res: ServerResponse, 
     const skills = await loadCatalog(probe);
     if (skills.length === 0) return json(res, 422, { error: 'That folder contains no skill directories' });
   } catch (err) {
-    return json(res, 422, { error: 'Could not list that folder: ' + (err instanceof Error ? err.message : String(err)) });
+    return json(res, 422, {
+      error: 'Could not list that folder: ' + (err instanceof Error ? err.message : String(err)),
+    });
   }
   upsertSkillSource(probe);
   return json(res, 200, { ok: true, source: { id: clean, label } });
@@ -4825,7 +6103,18 @@ async function putSkillSourceHandler(req: IncomingMessage, res: ServerResponse, 
 const SKILL_SYNONYMS: Record<string, string[]> = {
   pdf: ['pdf', 'pdfs', 'document', 'documents', 'form', 'forms'],
   docx: ['word', 'docx', 'document', 'documents', 'letter', 'report', 'reports'],
-  xlsx: ['excel', 'xlsx', 'spreadsheet', 'spreadsheets', 'csv', 'budget', 'finance', 'financial', 'invoice', 'invoices'],
+  xlsx: [
+    'excel',
+    'xlsx',
+    'spreadsheet',
+    'spreadsheets',
+    'csv',
+    'budget',
+    'finance',
+    'financial',
+    'invoice',
+    'invoices',
+  ],
   pptx: ['powerpoint', 'pptx', 'presentation', 'presentations', 'slides', 'deck', 'decks'],
   'frontend-design': ['website', 'websites', 'frontend', 'ui', 'web', 'landing', 'design'],
   'web-artifacts-builder': ['website', 'webapp', 'web', 'app', 'artifact'],
@@ -4867,9 +6156,11 @@ async function suggestSkillsHandler(res: ServerResponse, text: string): Promise<
   const installedNames = new Set(installed.map((s) => s.name));
   // Candidates: installed skills + every catalog entry (cached; a cold cache
   // fetch can take a couple of seconds on the very first call — fine for a form).
-  const candidates: Array<{ name: string; description: string; source: string; url?: string }> = installed.map(
-    (s) => ({ name: s.name, description: s.description, source: 'installed' }),
-  );
+  const candidates: Array<{ name: string; description: string; source: string; url?: string }> = installed.map((s) => ({
+    name: s.name,
+    description: s.description,
+    source: 'installed',
+  }));
   for (const src of listSkillSources()) {
     try {
       for (const s of await loadCatalog(src)) {
@@ -4910,7 +6201,8 @@ async function resolveDiscoveredSkillUrl(repoRaw: string, name: string): Promise
     return r.json();
   };
   const branch = ((await gh('')) as { default_branch?: string }).default_branch || 'main';
-  const tree = ((await gh(`/git/trees/${branch}?recursive=1`)) as { tree?: Array<{ path: string; type: string }> }).tree || [];
+  const tree =
+    ((await gh(`/git/trees/${branch}?recursive=1`)) as { tree?: Array<{ path: string; type: string }> }).tree || [];
   const skillMds = tree.filter((t) => t.type === 'blob' && /(^|\/)SKILL\.md$/i.test(t.path));
   const want = sanitizeSkillName(name);
   const parentDir = (p: string) => p.split('/').slice(-2)[0] || '';
@@ -4961,6 +6253,10 @@ async function importSkillHandler(req: IncomingMessage, res: ServerResponse): Pr
     url: `https://github.com/${owner}/${repo}`,
     official: false,
   };
+  // Pin the import: record where it came from and the commit it was taken at,
+  // so "update available" is checkable later. Best-effort — never blocks.
+  origin.ref = { owner, repo, branch, dir };
+  origin.sha = (await latestCommitSha(origin.ref, 0)) ?? undefined;
   // Name after the skill folder, or the repo itself when the skill is the root.
   const skillName = sanitizeSkillName((dir ? dir.split('/').pop() : repo) || repo);
   if (!skillName) return json(res, 400, { error: 'Could not derive a skill name from the URL' });
@@ -4995,7 +6291,210 @@ async function importSkillHandler(req: IncomingMessage, res: ServerResponse): Pr
     fs.rmSync(staging, { recursive: true, force: true });
     return json(res, 500, { error: 'Write failed: ' + (err instanceof Error ? err.message : String(err)) });
   }
-  return json(res, 200, { ok: true, name: skillName, files: files.length });
+  // Callers that skipped the /inspect preview (direct API use, the agent-create
+  // wizard's batch) still get the lint findings in the response.
+  const inspection = inspectSkillFiles(skillName, files, { official: origin.official });
+  return json(res, 200, { ok: true, name: skillName, files: files.length, warnings: inspection.warnings });
+}
+
+/**
+ * Pre-import preview: resolve the same body /api/skills/import takes, fetch the
+ * files, inspect — write NOTHING. The client shows this before the user
+ * confirms; a failed preview falls back to the old text-only confirm.
+ */
+function escapeHtml(t: string): string {
+  return t.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+}
+
+async function inspectSkillHandler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { url?: unknown; repo?: unknown; name?: unknown; official?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  let url = String(body.url || '').trim();
+  if (!url && body.repo) {
+    try {
+      url = await resolveDiscoveredSkillUrl(String(body.repo), String(body.name || ''));
+    } catch (err) {
+      return json(res, 422, { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  const resolved = await resolveSourceUrl(url);
+  if (!resolved) return json(res, 400, { error: 'Expected a GitHub repo or folder URL' });
+  const { owner, repo, branch, dir } = resolved;
+  const skillName = sanitizeSkillName((dir ? dir.split('/').pop() : repo) || repo);
+  let files: Array<{ rel: string; content: Buffer }>;
+  try {
+    files = await fetchGithubDir(owner, repo, branch, dir);
+  } catch (err) {
+    return json(res, 502, { error: 'Fetch failed: ' + (err instanceof Error ? err.message : String(err)) });
+  }
+  if (!files.some((f) => f.rel === 'SKILL.md')) {
+    return json(res, 422, { error: 'That folder has no SKILL.md — not an Agent Skill' });
+  }
+  return json(res, 200, {
+    name: skillName,
+    ...inspectSkillFiles(skillName, files, { official: !!body.official }),
+  });
+}
+
+/** Pool skills whose pinned upstream has moved: {name, hasUpdate}. */
+async function skillUpdatesHandler(res: ServerResponse): Promise<void> {
+  const updates: Array<{ name: string; hasUpdate: boolean }> = [];
+  let entries: string[] = [];
+  try {
+    entries = fs.readdirSync(USER_SKILLS_DIR);
+  } catch {
+    /* no pool yet */
+  }
+  await Promise.all(
+    entries.map(async (name) => {
+      const origin = readSkillOrigin(path.join(USER_SKILLS_DIR, name));
+      if (!origin?.sha || !origin.ref) return; // unpinned (pre-pinning import or hand-written)
+      const latest = await latestCommitSha(origin.ref);
+      if (latest) updates.push({ name, hasUpdate: latest !== origin.sha });
+    }),
+  );
+  return json(res, 200, { updates: updates.sort((a, b) => a.name.localeCompare(b.name)) });
+}
+
+/**
+ * Re-import a pinned pool skill from its recorded ref at upstream HEAD. The
+ * outgoing version is snapshotted into the pool's .history first — an update
+ * is as revertible as a learned-skill patch.
+ */
+async function applySkillUpdateHandler(res: ServerResponse, name: string): Promise<void> {
+  const clean = sanitizeSkillName(name);
+  const dest = path.join(USER_SKILLS_DIR, clean);
+  if (!clean || !fs.existsSync(dest)) return json(res, 404, { error: 'Skill not found' });
+  const origin = readSkillOrigin(dest);
+  if (!origin?.ref) return json(res, 409, { error: 'This skill has no recorded source to update from' });
+  let files: Array<{ rel: string; content: Buffer }>;
+  try {
+    files = await fetchGithubDir(origin.ref.owner, origin.ref.repo, origin.ref.branch, origin.ref.dir);
+  } catch (err) {
+    return json(res, 502, { error: 'Fetch failed: ' + (err instanceof Error ? err.message : String(err)) });
+  }
+  if (!files.some((f) => f.rel === 'SKILL.md')) {
+    return json(res, 422, { error: 'Upstream no longer has a SKILL.md at the recorded path' });
+  }
+  try {
+    snapshotRevision(USER_SKILLS_DIR, clean);
+  } catch {
+    /* history is protection, not a gate */
+  }
+  const newSha = (await latestCommitSha(origin.ref, 0)) ?? undefined;
+  const staging = `${dest}.updating`;
+  try {
+    fs.rmSync(staging, { recursive: true, force: true });
+    for (const f of files) {
+      const target = path.join(staging, f.rel);
+      if (target !== staging && !target.startsWith(staging + path.sep)) continue; // no traversal
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, f.content);
+    }
+    fs.writeFileSync(path.join(staging, '.origin.json'), JSON.stringify({ ...origin, sha: newSha }));
+    fs.rmSync(dest, { recursive: true, force: true });
+    fs.renameSync(staging, dest);
+  } catch (err) {
+    fs.rmSync(staging, { recursive: true, force: true });
+    return json(res, 500, { error: 'Write failed: ' + (err instanceof Error ? err.message : String(err)) });
+  }
+  const inspection = inspectSkillFiles(clean, files, { official: origin.official });
+  return json(res, 200, { ok: true, name: clean, files: files.length, warnings: inspection.warnings });
+}
+
+const TRIAL_SKILLS_ROOT = path.join(DATA_DIR, 'trial-skills');
+
+/**
+ * Start (or resume) a trial for a draft: write the draft body as an overlay
+ * skill under data/trial-skills/<group>/<thread>/, create a "Trial:" thread in
+ * the draft's source room, and let the per-session overlay mount
+ * (container-runner) do the isolation. Re-pressing Try refreshes the overlay
+ * body and reuses the existing thread — no thread spam.
+ */
+function startSkillTrialHandler(res: ServerResponse, draft: SkillDraft): void {
+  const roomId = draftSourceRoom(draft.session_id);
+  if (!roomId) return json(res, 409, { error: 'This draft has no webchat source room to trial in' });
+  const body = readSkillDraftBody(draft.id);
+  if (!body) return json(res, 410, { error: 'Draft body missing' });
+  const isPatch = draft.kind === 'patch' && !!draft.target_skill;
+  const name = sanitizeSkillName(isPatch ? String(draft.target_skill) : draft.skill_name);
+  if (!name) return json(res, 400, { error: 'Invalid skill name' });
+
+  const groupRoot = path.join(TRIAL_SKILLS_ROOT, draft.agent_group_id);
+  // Resume: an existing overlay for this draft whose thread still exists.
+  try {
+    for (const threadId of fs.existsSync(groupRoot) ? fs.readdirSync(groupRoot) : []) {
+      const marker = path.join(groupRoot, threadId, name, '.trial.json');
+      try {
+        const m = JSON.parse(fs.readFileSync(marker, 'utf8')) as { draftId?: string };
+        if (m.draftId !== draft.id) continue;
+        if (!getWebchatThread(roomId, threadId)) continue;
+        fs.writeFileSync(path.join(groupRoot, threadId, name, 'SKILL.md'), body); // refresh edits
+        return json(res, 200, { ok: true, roomId, threadId, name, resumed: true });
+      } catch {
+        continue;
+      }
+    }
+  } catch {
+    /* fall through to a fresh trial */
+  }
+
+  const thread = createWebchatThread(roomId, `Trial: ${name}`.slice(0, 80));
+  const dir = path.join(groupRoot, thread.thread_id, name);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'SKILL.md'), body);
+    fs.writeFileSync(path.join(dir, '.trial.json'), JSON.stringify({ draftId: draft.id, createdAt: Date.now() }));
+  } catch (err) {
+    return json(res, 500, { error: 'Write failed: ' + (err instanceof Error ? err.message : String(err)) });
+  }
+  broadcastRooms(); // the new thread shows up in every sidebar
+  return json(res, 200, { ok: true, roomId, threadId: thread.thread_id, name });
+}
+
+/** Remove every trial overlay belonging to a draft (called when it resolves). */
+export function cleanupTrialOverlays(draftId: string): void {
+  let groups: string[] = [];
+  try {
+    groups = fs.readdirSync(TRIAL_SKILLS_ROOT);
+  } catch {
+    return;
+  }
+  for (const g of groups) {
+    let threads: string[] = [];
+    try {
+      threads = fs.readdirSync(path.join(TRIAL_SKILLS_ROOT, g));
+    } catch {
+      continue;
+    }
+    for (const t of threads) {
+      const threadDir = path.join(TRIAL_SKILLS_ROOT, g, t);
+      let names: string[] = [];
+      try {
+        names = fs.readdirSync(threadDir);
+      } catch {
+        continue;
+      }
+      for (const n of names) {
+        try {
+          const m = JSON.parse(fs.readFileSync(path.join(threadDir, n, '.trial.json'), 'utf8')) as {
+            draftId?: string;
+          };
+          if (m.draftId !== draftId) continue;
+          fs.rmSync(path.join(threadDir, n), { recursive: true, force: true });
+          if (fs.readdirSync(threadDir).length === 0) fs.rmSync(threadDir, { recursive: true, force: true });
+        } catch {
+          continue;
+        }
+      }
+    }
+  }
 }
 
 function deleteUserSkillHandler(res: ServerResponse, name: string): void {
@@ -5114,7 +6613,11 @@ async function setAgentSkillsHandler(req: IncomingMessage, res: ServerResponse, 
 // Import a GitHub skill wired to ONE agent group: staged into that group's own
 // .claude-shared/skills/<name> (a real dir), so only that group loads it. Accepts
 // a repo/folder URL (incl. a bare repo root for a one-skill repo).
-async function importScopedSkillHandler(req: IncomingMessage, res: ServerResponse, agentGroupId: string): Promise<void> {
+async function importScopedSkillHandler(
+  req: IncomingMessage,
+  res: ServerResponse,
+  agentGroupId: string,
+): Promise<void> {
   const raw = await readJsonBody(req, res);
   if (raw === null) return;
   let body: { url?: unknown; repo?: unknown; name?: unknown; origin?: unknown };
@@ -5161,6 +6664,8 @@ async function importScopedSkillHandler(req: IncomingMessage, res: ServerRespons
   if (!files.some((f) => f.rel === 'SKILL.md')) {
     return json(res, 422, { error: 'That folder has no SKILL.md — not an Agent Skill' });
   }
+  origin.ref = { owner, repo, branch, dir };
+  origin.sha = (await latestCommitSha(origin.ref, 0)) ?? undefined;
   const dir0 = scopedSkillsDir(agentGroupId);
   const dest = path.join(dir0, skillName);
   const staging = `${dest}.importing`;
@@ -5181,7 +6686,8 @@ async function importScopedSkillHandler(req: IncomingMessage, res: ServerRespons
     return json(res, 500, { error: 'Write failed: ' + (err instanceof Error ? err.message : String(err)) });
   }
   const restarted = restartAgentGroupContainers(agentGroupId, 'Webchat scoped skill added');
-  return json(res, 200, { ok: true, name: skillName, files: files.length, restarted });
+  const inspection = inspectSkillFiles(skillName, files, { official: origin.official });
+  return json(res, 200, { ok: true, name: skillName, files: files.length, restarted, warnings: inspection.warnings });
 }
 
 // Remove a scoped skill (a real dir) from a group's .claude-shared/skills. Only
@@ -5204,6 +6710,41 @@ function deleteScopedSkillHandler(res: ServerResponse, agentGroupId: string, nam
   }
   const restarted = restartAgentGroupContainers(agentGroupId, 'Webchat scoped skill removed');
   return json(res, 200, { ok: true, restarted });
+}
+
+// Flip the in-room "proposed skill" card (if the draft was surfaced in a webchat
+// room) so it stops being actionable, and push the update to connected clients.
+function resolveDraftCard(draftId: string, outcome: 'kept' | 'discarded', userId: string): void {
+  const flipped = markRoomSkillDraftResolved(draftId, outcome, userId);
+  if (flipped) broadcast(flipped.roomId, { type: 'message', ...flipped.message });
+}
+
+// Keep + wire a learning-loop draft: write its SKILL.md into the chosen agent's
+// own .claude-shared/skills (scoped, origin "learned"), then mark it kept.
+async function keepSkillDraftHandler(
+  req: IncomingMessage,
+  res: ServerResponse,
+  userId: string,
+  draft: { id: string; skill_name: string; kind?: string; target_skill?: string | null },
+): Promise<void> {
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let agentGroupId = '';
+  try {
+    agentGroupId = String((JSON.parse(raw) as { agentGroupId?: unknown }).agentGroupId || '');
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  const group = resolveAgent(agentGroupId);
+  if (!group) return json(res, 404, { error: 'Agent not found' });
+  if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+  // The write itself lives in modules/learning/apply.ts — ONE implementation
+  // shared with auto-keep, so the two paths cannot drift.
+  const r = applySkillDraft({ ...draft, agent_group_id: group.id } as Parameters<typeof applySkillDraft>[0],
+    draft.kind === 'patch' ? 'Webchat skill revision applied' : 'Webchat learned skill kept');
+  if (!r.ok) return json(res, r.status, { error: r.error });
+  resolveDraftCard(draft.id, 'kept', userId);
+  return json(res, 200, { ok: true, name: r.name, patched: r.patched, forkedFromPool: r.forkedFromPool, restarted: r.restarted });
 }
 
 function listAgentMcpHandler(res: ServerResponse, agentGroupId: string): void {

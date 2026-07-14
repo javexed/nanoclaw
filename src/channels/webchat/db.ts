@@ -10,6 +10,7 @@ import { randomUUID } from 'crypto';
 
 import { getDb, hasTable } from '../../db/connection.js';
 import { createMessagingGroup, deleteMessagingGroup, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
+import { getMcpServersForAgent } from './mcp-registry.js';
 
 /**
  * "Webchat room" is a UI-level alias for `messaging_groups WHERE channel_type='webchat'`.
@@ -45,7 +46,7 @@ export interface WebchatMessage {
   sender: string;
   sender_type: string;
   content: string;
-  message_type: 'text' | 'file' | 'a2a' | 'approval' | 'approval_resolved' | 'context-divider';
+  message_type: 'text' | 'file' | 'a2a' | 'approval' | 'approval_resolved' | 'context-divider' | 'skill_draft';
   file_meta?: FileMeta | null;
   created_at: number;
   /** Provenance for thread context sync: null=native, 'pulled' (from main),
@@ -60,7 +61,7 @@ interface WebchatMessageRow {
   sender: string;
   sender_type: string;
   content: string;
-  message_type: 'text' | 'file' | 'a2a' | 'approval' | 'approval_resolved';
+  message_type: 'text' | 'file' | 'a2a' | 'approval' | 'approval_resolved' | 'skill_draft';
   file_meta: string | null;
   created_at: number;
 }
@@ -641,6 +642,155 @@ export function setCredentialsConfig(patch: Partial<CredentialsConfig>): void {
     );
 }
 
+/**
+ * First-run wizard state (webchat_settings singleton). Defaults to `false`
+ * (not onboarded) if the row/table/column is missing, so a fresh install shows
+ * the wizard rather than silently skipping it.
+ */
+export function getOnboardingComplete(): boolean {
+  try {
+    const row = getDb().prepare(`SELECT onboarding_complete FROM webchat_settings WHERE id = 1`).get() as
+      | { onboarding_complete: number }
+      | undefined;
+    return row?.onboarding_complete === 1;
+  } catch {
+    return false;
+  }
+}
+
+export function setOnboardingComplete(complete: boolean): void {
+  // Seed the singleton from current config so the NOT NULL columns are satisfied
+  // if the row doesn't exist yet, then flip only onboarding_complete on conflict.
+  const cfg = getCredentialsConfig();
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_settings
+         (id, default_credential_mode, allow_anthropic_key, allow_claude_oauth, allow_openai_key, allow_codex_oauth, onboarding_complete, updated_at)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         onboarding_complete = excluded.onboarding_complete,
+         updated_at          = excluded.updated_at`,
+    )
+    .run(
+      cfg.defaultMode,
+      cfg.allowAnthropicKey ? 1 : 0,
+      cfg.allowClaudeOauth ? 1 : 0,
+      cfg.allowOpenaiKey ? 1 : 0,
+      cfg.allowCodexOauth ? 1 : 0,
+      complete ? 1 : 0,
+      Date.now(),
+    );
+}
+
+// Bearer-token opt-out: true = WEBCHAT_TOKEN is ignored by auth.ts (the owner
+// retired it in favour of Tailscale/SSO). Default false so the seeded token
+// keeps working until explicitly disabled. See moduleWebchatBearerAuth.
+export function getBearerTokenDisabled(): boolean {
+  try {
+    const row = getDb().prepare(`SELECT bearer_token_disabled FROM webchat_settings WHERE id = 1`).get() as
+      | { bearer_token_disabled: number }
+      | undefined;
+    return row?.bearer_token_disabled === 1;
+  } catch {
+    return false;
+  }
+}
+
+export function setBearerTokenDisabled(disabled: boolean): void {
+  // Seed the singleton from current config so the NOT NULL columns are satisfied
+  // if the row doesn't exist yet, then flip only bearer_token_disabled.
+  const cfg = getCredentialsConfig();
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_settings
+         (id, default_credential_mode, allow_anthropic_key, allow_claude_oauth, allow_openai_key, allow_codex_oauth, bearer_token_disabled, updated_at)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         bearer_token_disabled = excluded.bearer_token_disabled,
+         updated_at            = excluded.updated_at`,
+    )
+    .run(
+      cfg.defaultMode,
+      cfg.allowAnthropicKey ? 1 : 0,
+      cfg.allowClaudeOauth ? 1 : 0,
+      cfg.allowOpenaiKey ? 1 : 0,
+      cfg.allowCodexOauth ? 1 : 0,
+      disabled ? 1 : 0,
+      Date.now(),
+    );
+}
+
+// MCP + skills-marketplace opt-out: true = both features are turned off (tabs
+// hidden + endpoints 403). Default false (enabled). See moduleWebchatMarketplaceToggle.
+export function getMarketplaceDisabled(): boolean {
+  try {
+    const row = getDb().prepare(`SELECT marketplace_disabled FROM webchat_settings WHERE id = 1`).get() as
+      | { marketplace_disabled: number }
+      | undefined;
+    return row?.marketplace_disabled === 1;
+  } catch {
+    return false;
+  }
+}
+
+export function setMarketplaceDisabled(disabled: boolean): void {
+  const cfg = getCredentialsConfig();
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_settings
+         (id, default_credential_mode, allow_anthropic_key, allow_claude_oauth, allow_openai_key, allow_codex_oauth, marketplace_disabled, updated_at)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         marketplace_disabled = excluded.marketplace_disabled,
+         updated_at           = excluded.updated_at`,
+    )
+    .run(
+      cfg.defaultMode,
+      cfg.allowAnthropicKey ? 1 : 0,
+      cfg.allowClaudeOauth ? 1 : 0,
+      cfg.allowOpenaiKey ? 1 : 0,
+      cfg.allowCodexOauth ? 1 : 0,
+      disabled ? 1 : 0,
+      Date.now(),
+    );
+}
+
+// One-shot "first Tailscale login becomes owner" arm flag (wizard opt-in).
+// true = the next tailscale identity to authenticate is granted owner, then the
+// flag clears. See moduleWebchatTailscaleOwner + auth.ts finalize().
+export function getPromoteFirstTailscaleOwner(): boolean {
+  try {
+    const row = getDb().prepare(`SELECT promote_first_tailscale_owner FROM webchat_settings WHERE id = 1`).get() as
+      | { promote_first_tailscale_owner: number }
+      | undefined;
+    return row?.promote_first_tailscale_owner === 1;
+  } catch {
+    return false;
+  }
+}
+
+export function setPromoteFirstTailscaleOwner(enabled: boolean): void {
+  const cfg = getCredentialsConfig();
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_settings
+         (id, default_credential_mode, allow_anthropic_key, allow_claude_oauth, allow_openai_key, allow_codex_oauth, promote_first_tailscale_owner, updated_at)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         promote_first_tailscale_owner = excluded.promote_first_tailscale_owner,
+         updated_at                    = excluded.updated_at`,
+    )
+    .run(
+      cfg.defaultMode,
+      cfg.allowAnthropicKey ? 1 : 0,
+      cfg.allowClaudeOauth ? 1 : 0,
+      cfg.allowOpenaiKey ? 1 : 0,
+      cfg.allowCodexOauth ? 1 : 0,
+      enabled ? 1 : 0,
+      Date.now(),
+    );
+}
+
 // Per-room mode override: NULL = inherit the global default.
 export type RoomModeOverride = CredentialMode | null;
 
@@ -744,6 +894,84 @@ export function storeWebchatApprovalCard(
     )
     .run({ ...msg, file_meta: null });
   return msg;
+}
+
+/**
+ * An actionable "proposed skill" card in the agent's own room (learning loop).
+ * Same shape as the approval card: a persisted row the client renders with
+ * Keep/Discard, flipped to resolved once handled.
+ */
+export function storeWebchatSkillDraftCard(
+  roomId: string,
+  sender: string,
+  payload: {
+    draftId: string;
+    skillName: string;
+    description: string;
+    kind: 'create' | 'patch';
+    targetSkill: string | null;
+    agentGroupId: string;
+    agentName: string;
+  },
+  threadId = 'main',
+): WebchatMessage {
+  const msg: WebchatMessage = {
+    id: `skill-draft-card-${payload.draftId}`,
+    room_id: roomId,
+    thread_id: threadId,
+    sender,
+    sender_type: 'agent',
+    content: JSON.stringify({ ...payload, status: 'pending' }),
+    message_type: 'skill_draft',
+    file_meta: null,
+    created_at: Date.now(),
+  };
+  getDb()
+    .prepare(
+      `INSERT OR REPLACE INTO webchat_messages (id, room_id, thread_id, sender, sender_type, content, message_type, file_meta, created_at)
+       VALUES (@id, @room_id, @thread_id, @sender, @sender_type, @content, @message_type, @file_meta, @created_at)`,
+    )
+    .run({ ...msg, file_meta: null });
+  return msg;
+}
+
+/**
+ * Where a draft's in-room card stands: how many messages have arrived in its
+ * room since it was posted. The expiry sweep uses this as the server-side proxy
+ * for "the card is no longer visible in the chat" — a card with dozens of newer
+ * messages after it has scrolled away for anyone opening the room. Null when no
+ * card exists at all (a non-webchat draft, or one from before cards shipped).
+ */
+export function skillDraftCardPosition(draftId: string): { roomId: string; newerMessages: number } | null {
+  const id = `skill-draft-card-${draftId}`;
+  const row = getDb()
+    .prepare('SELECT room_id, created_at FROM webchat_messages WHERE id = ?')
+    .get(id) as { room_id: string; created_at: number } | undefined;
+  if (!row) return null;
+  const n = getDb()
+    .prepare('SELECT count(*) AS n FROM webchat_messages WHERE room_id = ? AND created_at > ? AND id != ?')
+    .get(row.room_id, row.created_at, id) as { n: number };
+  return { roomId: row.room_id, newerMessages: n.n };
+}
+
+/** Flip a proposed-skill card to resolved (kept | discarded). No-op if absent. */
+export function markRoomSkillDraftResolved(
+  draftId: string,
+  outcome: 'kept' | 'discarded',
+  resolvedBy: string,
+): { roomId: string; message: WebchatMessage } | null {
+  const id = `skill-draft-card-${draftId}`;
+  const row = getDb().prepare('SELECT * FROM webchat_messages WHERE id = ?').get(id) as WebchatMessage | undefined;
+  if (!row) return null;
+  let payload: Record<string, unknown> = {};
+  try {
+    payload = JSON.parse(row.content) as Record<string, unknown>;
+  } catch {
+    /* keep whatever we can */
+  }
+  const content = JSON.stringify({ ...payload, status: outcome, resolvedBy });
+  getDb().prepare('UPDATE webchat_messages SET content = ? WHERE id = ?').run(content, id);
+  return { roomId: row.room_id, message: { ...row, content } };
 }
 
 /**
@@ -1472,6 +1700,14 @@ export interface WebchatTopology {
   agents: { id: string; name: string; modelId: string | null; modelName: string | null }[];
   models: { id: string; name: string }[];
   edges: { room: string; agent: string }[]; // room↔agent wirings
+  /**
+   * MCP servers an agent can reach. They belong in the picture: a room's messages
+   * flow to an agent, and that agent can hand them to a third-party tool server —
+   * which is exactly the sort of reach you want to SEE rather than infer from a
+   * settings drawer. `remote` means the container dials out to someone else's host.
+   */
+  mcpServers: { id: string; name: string; remote: boolean; host: string | null }[];
+  mcpEdges: { agent: string; mcp: string }[];
 }
 
 /**
@@ -1500,11 +1736,36 @@ export function getWebchatTopology(
   }
   const modelMap = new Map<string, { id: string; name: string }>();
   for (const a of agentNodes) if (a.modelId) modelMap.set(a.modelId, { id: a.modelId, name: a.modelName ?? a.modelId });
+
+  // MCP servers reachable from each agent. Only servers actually attached to an
+  // agent in view appear — an unattached server has no reach, so it isn't a node.
+  const mcpMap = new Map<string, { id: string; name: string; remote: boolean; host: string | null }>();
+  const mcpEdges: { agent: string; mcp: string }[] = [];
+  for (const a of agentNodes) {
+    for (const srv of getMcpServersForAgent(a.id)) {
+      if (!mcpMap.has(srv.id)) {
+        const remote = srv.transport !== 'stdio';
+        let host: string | null = null;
+        if (remote && srv.url) {
+          try {
+            host = new URL(srv.url).host;
+          } catch {
+            host = srv.url;
+          }
+        }
+        mcpMap.set(srv.id, { id: srv.id, name: srv.name, remote, host });
+      }
+      mcpEdges.push({ agent: a.id, mcp: srv.id });
+    }
+  }
+
   return {
     rooms: rooms.map((r) => ({ id: r.id, name: r.name })),
     agents: agentNodes,
     models: [...modelMap.values()],
     edges,
+    mcpServers: [...mcpMap.values()],
+    mcpEdges,
   };
 }
 
@@ -1514,6 +1775,58 @@ export function getAssignedModelForAgent(agentGroupId: string): WebchatModel | n
     .get(agentGroupId) as { model_id: string } | undefined;
   if (!row) return null;
   return getWebchatModel(row.model_id) ?? null;
+}
+
+/**
+ * Workspace DEFAULT model (webchat_settings singleton) — the ollama-kind
+ * roster model every claude-family agent WITHOUT its own assignment falls
+ * back to. The model analogue of the workspace default credential.
+ */
+export function getDefaultModelId(): string | null {
+  try {
+    const row = getDb().prepare(`SELECT default_model_id FROM webchat_settings WHERE id = 1`).get() as
+      | { default_model_id: string | null }
+      | undefined;
+    return row?.default_model_id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function setDefaultModelId(modelId: string | null): void {
+  // Seed the singleton (NOT NULL columns) if absent, then flip only this column.
+  const cfg = getCredentialsConfig();
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_settings
+         (id, default_credential_mode, allow_anthropic_key, allow_claude_oauth, allow_openai_key, allow_codex_oauth, default_model_id, updated_at)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         default_model_id = excluded.default_model_id,
+         updated_at       = excluded.updated_at`,
+    )
+    .run(
+      cfg.defaultMode,
+      cfg.allowAnthropicKey ? 1 : 0,
+      cfg.allowClaudeOauth ? 1 : 0,
+      cfg.allowOpenaiKey ? 1 : 0,
+      cfg.allowCodexOauth ? 1 : 0,
+      modelId,
+      Date.now(),
+    );
+}
+
+/**
+ * The model that actually powers an agent: its own assignment, else the
+ * workspace default. This is what the settings.json writer and the
+ * lenientOutput augmentor consume — per-agent assignment always wins,
+ * mirroring member-credential > workspace-credential layering.
+ */
+export function getEffectiveModelForAgent(agentGroupId: string): WebchatModel | null {
+  const assigned = getAssignedModelForAgent(agentGroupId);
+  if (assigned) return assigned;
+  const defaultId = getDefaultModelId();
+  return defaultId ? (getWebchatModel(defaultId) ?? null) : null;
 }
 
 export function assignModelToAgent(agentGroupId: string, modelId: string): void {

@@ -119,6 +119,40 @@ export function ensureOwnerRoleOnFirstLogin(userId: string): void {
 }
 
 /**
+ * Grant global owner to a SPECIFIC identity (co-owner-safe), even if an owner
+ * already exists. Used by the wizard's "first Tailscale login becomes owner"
+ * opt-in: the bearer bootstrap already holds owner, and this promotes the
+ * operator's real (Tailscale) identity alongside it. Idempotent per user —
+ * won't create a duplicate owner row for the same id. Returns true if inserted.
+ */
+export function grantOwnerRole(userId: string, grantedBy: string | null = null): boolean {
+  const db = getDb();
+  if (!hasTable(db, 'user_roles')) return false;
+  if (hasTable(db, 'users')) {
+    db.prepare(`INSERT OR IGNORE INTO users (id, kind, display_name, created_at) VALUES (?, 'webchat', NULL, ?)`).run(
+      userId,
+      new Date().toISOString(),
+    );
+  }
+  try {
+    const result = db
+      .prepare(
+        `INSERT INTO user_roles (user_id, role, agent_group_id, granted_by, granted_at)
+         SELECT ?, 'owner', NULL, ?, ?
+         WHERE NOT EXISTS (
+           SELECT 1 FROM user_roles WHERE user_id = ? AND role = 'owner' AND agent_group_id IS NULL
+         )`,
+      )
+      .run(userId, grantedBy, new Date().toISOString(), userId);
+    if (result.changes > 0) log.info('Webchat: granted owner role', { userId, grantedBy });
+    return result.changes > 0;
+  } catch (err) {
+    log.warn('Webchat: failed to grant owner role', { userId, err });
+    return false;
+  }
+}
+
+/**
  * Optional startup probe — log a fatal-style warning when the permissions
  * module isn't installed, so an operator notices the fail-open posture.
  * Doesn't change runtime behavior; some installs deliberately skip the

@@ -46,18 +46,24 @@ import { registerContainerConfigAugmentor } from '../../container-runtime.js';
 import { registerChannelAdapter } from '../channel-registry.js';
 import type { AgentActivityStatus, ChannelAdapter, ChannelSetup, OutboundMessage } from '../adapter.js';
 import { redactSensitiveData } from './redact.js';
-import { startWebchatServer, stopWebchatServer, type WebchatServer } from './server.js';
+import { cleanupTrialOverlays, startWebchatServer, stopWebchatServer, type WebchatServer } from './server.js';
+import { sweepMcpHealth } from './mcp-health.js';
+import { startMcpRelay, stopMcpRelay } from './mcp-relay.js';
 import {
   APPROVAL_INBOX_PREFIX,
   deleteWebchatApprovalIndex,
   findActiveAgentForWebchatRoom,
   getAssignedModelForAgent,
+  getEffectiveModelForAgent,
   getWebchatApprovalInboxes,
   getWebchatRoom,
   isApprovalInbox,
   markRoomApprovalResolved,
+  markRoomSkillDraftResolved,
+  skillDraftCardPosition,
   recordWebchatApproval,
   storeWebchatApprovalCard,
+  storeWebchatSkillDraftCard,
   storeWebchatMessage,
   storeWebchatFileMessage,
   sessionKeyToThread,
@@ -65,12 +71,17 @@ import {
   type FileMeta,
   type WebchatRoomAgent,
 } from './db.js';
-import { broadcast, pushApprovalResolvedToUser, pushApprovalToUser } from './state.js';
+import { broadcast, pushApprovalResolvedToUser, pushApprovalToUser, recordTurnStart, recordTurnEnd } from './state.js';
 import {
   registerApprovalRequestedListener,
   registerApprovalResolvedHandler,
 } from '../../modules/approvals/primitive.js';
 import { startReconcileLoop, stopReconcileLoop } from './reconcile.js';
+import {
+  registerSkillDraftProposedListener,
+  registerSkillDraftResolvedListener,
+} from '../../modules/learning/events.js';
+import { listSkillDrafts, resolveSkillDraft } from '../../db/skill-drafts.js';
 
 export const CHANNEL_TYPE = 'webchat';
 
@@ -118,6 +129,23 @@ function createAdapter(): ChannelAdapter {
       // for channel type webchat" and mark a message delivered without
       // actually delivering. See reconcile.ts for details.
       startReconcileLoop(server);
+      // Hourly draft-expiry sweep (see sweepExpiredSkillDrafts above).
+      draftExpiryTimer = setInterval(() => {
+        try {
+          sweepExpiredSkillDrafts();
+        } catch (err) {
+          log.error('Draft expiry sweep failed', { err });
+        }
+      }, 60 * 60 * 1000);
+      // MCP auth relay (credentials stay host-side) + hourly health/drift sweep.
+      startMcpRelay();
+      mcpHealthTimer = setInterval(() => {
+        sweepMcpHealth().catch((err) => log.error('MCP health sweep failed', { err }));
+      }, 60 * 60 * 1000);
+      // First pass shortly after boot so the MCP tab has fresh status.
+      setTimeout(() => {
+        sweepMcpHealth().catch((err) => log.error('MCP health sweep failed', { err }));
+      }, 30_000).unref?.();
       // Agents spawned outside the PWA (e.g. via a2a's `create_agent` MCP
       // tool) intentionally have no webchat wiring. The operator wires
       // them into rooms on demand — agents are entities, rooms are
@@ -126,6 +154,15 @@ function createAdapter(): ChannelAdapter {
 
     async teardown(): Promise<void> {
       stopReconcileLoop();
+      stopMcpRelay();
+      if (mcpHealthTimer) {
+        clearInterval(mcpHealthTimer);
+        mcpHealthTimer = null;
+      }
+      if (draftExpiryTimer) {
+        clearInterval(draftExpiryTimer);
+        draftExpiryTimer = null;
+      }
       if (server) {
         await stopWebchatServer(server);
         server = null;
@@ -283,6 +320,12 @@ function createAdapter(): ChannelAdapter {
       // Redact before broadcast — tool targets (file paths, commands) and
       // reasoning summaries can echo secrets. The whole room sees this frame.
       const redact = (s: string | null): string | null => (s == null ? null : redactSensitiveData(s));
+      // Track turn lifecycle so a client that re-joins mid-turn can replay the
+      // bubble (a leave→return otherwise loses it — status frames are ephemeral
+      // and room-scoped). Fall back to a stable key when the frame is unnamed.
+      const turnAgent = status.agentName ?? '';
+      if (status.kind === 'start') recordTurnStart(platformId, turnAgent);
+      else if (status.kind === 'done' || status.kind === 'stalled') recordTurnEnd(platformId, turnAgent);
       server.broadcast(platformId, {
         type: 'status',
         room_id: platformId,
@@ -398,7 +441,7 @@ registerChannelAdapter('webchat', {
 // container.json so the runner delivers unwrapped prose to the origin room
 // instead. Claude/anthropic groups are unaffected (strict protocol preserved).
 registerContainerConfigAugmentor((agentGroupId) =>
-  getAssignedModelForAgent(agentGroupId)?.kind === 'ollama' ? { lenientOutput: true } : {},
+  getEffectiveModelForAgent(agentGroupId)?.kind === 'ollama' ? { lenientOutput: true } : {},
 );
 
 // Fan-out cleanup: when an approval resolves (first responder approves/rejects),
@@ -443,3 +486,79 @@ registerApprovalRequestedListener((e) => {
   recordWebchatApproval(e.approvalId, roomId);
   broadcast(roomId, { type: 'message', ...card });
 });
+
+// Learning loop: when an agent proposes a skill, drop an actionable card into
+// ITS OWN room — that's where the work happened, so that's where the operator
+// should be able to Keep/Discard it (rather than hunting in the Skills tab).
+// Best-effort; webchat rooms only.
+registerSkillDraftProposedListener((e) => {
+  const mg = e.session.messaging_group_id ? getMessagingGroup(e.session.messaging_group_id) : null;
+  if (!mg || mg.channel_type !== 'webchat') return;
+  const roomId = mg.platform_id;
+  const card = storeWebchatSkillDraftCard(
+    roomId,
+    e.agentName,
+    {
+      draftId: e.draftId,
+      skillName: e.skillName,
+      description: e.description,
+      kind: e.kind,
+      targetSkill: e.targetSkill,
+      agentGroupId: e.agentGroupId,
+      agentName: e.agentName,
+    },
+    e.session.thread_id ?? 'main',
+  );
+  broadcast(roomId, { type: 'message', ...card });
+});
+
+// Auto-keep (or any non-webchat resolution) still flips the in-room card, so
+// the room shows '✅ … kept' instead of dangling actionable buttons for a
+// draft that no longer exists.
+registerSkillDraftResolvedListener((e) => {
+  const flipped = markRoomSkillDraftResolved(e.draftId, e.outcome, e.by);
+  if (flipped) broadcast(flipped.roomId, { type: 'message', ...flipped.message });
+  // A resolved draft's trial overlay is dead weight — remove it so the next
+  // spawn of the trial thread's session runs without the draft. The trial
+  // thread itself stays (it's a readable record); remove it like any thread.
+  try {
+    cleanupTrialOverlays(e.draftId);
+  } catch {
+    /* best-effort */
+  }
+});
+
+/**
+ * Draft expiry: a pending draft self-discards only when BOTH are true —
+ * it's older than 24h, AND its in-room card has scrolled out of the chat
+ * (enough newer messages that nobody opening the room sees it). A card still
+ * in view stays actionable forever; age alone never kills something a human
+ * might be looking at. Drafts with no card at all (non-webchat) expire on age.
+ * Discard deletes only the draft — nothing else — so the worst case of a wrong
+ * expiry is re-running /learn.
+ */
+export const DRAFT_EXPIRY_MS = 24 * 60 * 60 * 1000;
+export const DRAFT_SCROLLED_AWAY_MESSAGES = 30;
+
+export function draftHasExpired(ageMs: number, card: { newerMessages: number } | null): boolean {
+  if (ageMs < DRAFT_EXPIRY_MS) return false;
+  if (card === null) return true; // no card anywhere — nothing keeps it in view
+  return card.newerMessages >= DRAFT_SCROLLED_AWAY_MESSAGES;
+}
+
+export function sweepExpiredSkillDrafts(): number {
+  let expired = 0;
+  for (const d of listSkillDrafts()) {
+    const age = Date.now() - d.created_at;
+    if (!draftHasExpired(age, skillDraftCardPosition(d.id))) continue;
+    if (!resolveSkillDraft(d.id, 'discarded')) continue;
+    expired++;
+    const flipped = markRoomSkillDraftResolved(d.id, 'discarded', 'expired');
+    if (flipped) broadcast(flipped.roomId, { type: 'message', ...flipped.message });
+    log.info('Skill draft expired', { id: d.id, skill: d.skill_name, ageHours: Math.round(age / 3_600_000) });
+  }
+  return expired;
+}
+
+let draftExpiryTimer: ReturnType<typeof setInterval> | null = null;
+let mcpHealthTimer: ReturnType<typeof setInterval> | null = null;

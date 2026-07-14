@@ -29,6 +29,12 @@ export interface RunnerConfig {
    * scratchpad. See dispatchResultText in poll-loop.ts.
    */
   lenientOutput?: boolean;
+  /**
+   * Learning-loop behavior (host's container.json). autoTrigger absent = ON;
+   * cooldownMinutes absent = 30. autoKeep is host-side only — the container
+   * never auto-accepts anything.
+   */
+  learning?: { autoTrigger?: boolean; autoKeep?: boolean; cooldownMinutes?: number };
 }
 
 const DEFAULT_MAX_MESSAGES = 10;
@@ -56,6 +62,7 @@ export function loadConfig(): RunnerConfig {
     agentGroupId: (raw.agentGroupId as string) || '',
     maxMessagesPerPrompt: (raw.maxMessagesPerPrompt as number) || DEFAULT_MAX_MESSAGES,
     mcpServers: (raw.mcpServers as RunnerConfig['mcpServers']) || {},
+    learning: raw.learning as RunnerConfig['learning'],
     model: (raw.model as string) || undefined,
     effort: (raw.effort as string) || undefined,
     lenientOutput: raw.lenientOutput === true,
