@@ -1,6 +1,6 @@
 {
   "name": "nanoclaw",
-  "version": "2.1.40",
+  "version": "2.1.53",
   "description": "Personal Claude assistant. Lightweight, secure, customizable.",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
@@ -39,7 +39,8 @@
     "kleur": "^4.1.5",
     "undici": "7.16.0",
     "web-push": "3.6.7",
-    "ws": "8.20.0"
+    "ws": "8.20.0",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",

@@ -137,6 +137,7 @@ if [ -z "$INST" ]; then fail "no install-webchat.sh on $CHANNEL"; else
       .github/*|repo-tokens/*) covered=yes ;;                                       # CI workflows + README badge assets — repo infra, never installed onto a user tree
       templates/*) covered=yes ;;                                                   # repo-resident agent templates + their docs — carried by the base install, not the webchat overlay
       setup/*) covered=yes ;;                                                       # base install/setup scripts (e.g. the headless setup:auto fix) — delivered by the base install / release tarball; webchat's own setup/get-oauth-token.sh is separately in NEW_PATHS
+      deploy/*) covered=yes ;;                                                     # host-agnostic installer (VM/Pi/bare metal) — repo-resident tooling run FROM the repo, never delivered by the webchat overlay
       src/cli/*|container/agent-runner/src/cli/*) covered=yes ;;                    # base ncl admin CLI (host + container) — a base feature with zero webchat references; reaches installs via the base tree / release tarball, not the overlay
     esac
     [ "$covered" = no ] && uncovered="${uncovered}${f}"$'\n'

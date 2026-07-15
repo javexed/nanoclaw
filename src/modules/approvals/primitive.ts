@@ -22,7 +22,7 @@
  * if either module becomes genuinely optional (see REFACTOR_PLAN open q #3).
  */
 import { normalizeOptions, type RawOption } from '../../channels/ask-question.js';
-import { createPendingApproval, getSession } from '../../db/sessions.js';
+import { createPendingApproval, deletePendingApproval, getSession } from '../../db/sessions.js';
 import { getDeliveryAdapter } from '../../delivery.js';
 import { wakeContainer } from '../../container-runner.js';
 import { log } from '../../log.js';
@@ -58,6 +58,12 @@ const APPROVAL_OPTIONS: RawOption[] = [
 export interface ApprovalHandlerContext {
   session: Session;
   payload: Record<string, unknown>;
+  /**
+   * The verified approval row — the grant an approved continuation carries
+   * when it re-enters its guarded entry point. Still live here; resolution
+   * deletes it after the handler returns, so a grant executes exactly once.
+   */
+  approval: PendingApproval;
   /** User ID of the admin who approved. Empty string if unknown. */
   userId: string;
   /** Send a system chat message to the requesting agent's session. */
@@ -346,6 +352,10 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
       }
     }
     if (delivered.length === 0) {
+      // No approver ever saw the card — remove the row so it can't linger as
+      // a pending approval nobody can act on (upstream's cleanup, applied to
+      // the fan-out case).
+      deletePendingApproval(approvalId);
       notifyAgent(session, `${action} failed: could not deliver approval request to any approver.`);
       return;
     }

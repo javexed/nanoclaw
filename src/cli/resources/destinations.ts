@@ -34,6 +34,27 @@ import { registerResource } from '../crud.js';
  * Idempotent — safe to call when there are no active sessions or no SDK
  * state files yet.
  */
+/**
+ * Upstream-shaped export (wirings.ts postCreate): live-project the central
+ * agent_destinations rows into every session's inbound.db WITHOUT the full
+ * session invalidation refreshAgentSessions does. New wirings have no stale
+ * prompt-cache problem, so projection alone is enough there.
+ */
+export async function projectDestinationsToSessions(agentGroupId: string): Promise<void> {
+  const { writeDestinations } = await import('../../modules/agent-to-agent/write-destinations.js');
+  for (const session of getSessionsByAgentGroup(agentGroupId)) {
+    try {
+      writeDestinations(agentGroupId, session.id);
+    } catch (err) {
+      log.warn('writeDestinations failed; agent will pick up changes on next spawn', {
+        agentGroupId,
+        sessionId: session.id,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+}
+
 function refreshAgentSessions(agentGroupId: string, reason: string): void {
   const sessions = getSessionsByAgentGroup(agentGroupId).filter((s) => s.status === 'active');
   for (const s of sessions) {
@@ -106,7 +127,7 @@ registerResource({
       name: 'local_name',
       type: 'string',
       description:
-        'Name the agent uses to address this target (e.g. <message to="local_name">). Unique per agent. Lowercase, dash-separated.',
+        'Name the agent uses to address this target (e.g. send_message({ to: "local_name", ... })). Unique per agent. Lowercase, dash-separated.',
     },
     {
       name: 'target_type',
@@ -119,10 +140,39 @@ registerResource({
       type: 'string',
       description: "The target's ID — messaging_groups.id for channels, agent_groups.id for agents.",
     },
+    { name: 'channel_type', type: 'string', description: 'Resolved channel type for channel destinations.' },
+    { name: 'display_name', type: 'string', description: 'Resolved chat title or agent name.' },
     { name: 'created_at', type: 'string', description: 'Auto-set.' },
   ],
-  operations: { list: 'open' },
+  operations: {},
   customOperations: {
+    list: {
+      access: 'open',
+      description: 'List destinations with resolved channel/title labels.',
+      handler: async (args) => {
+        const agentGroupId = (args.agent_group_id as string | undefined) ?? (args.id as string | undefined);
+        const params: unknown[] = [];
+        const where = agentGroupId ? 'WHERE ad.agent_group_id = ?' : '';
+        if (agentGroupId) params.push(agentGroupId);
+        return getDb()
+          .prepare(
+            `SELECT
+               ad.agent_group_id,
+               ad.local_name,
+               ad.target_type,
+               ad.target_id,
+               CASE WHEN ad.target_type = 'channel' THEN mg.channel_type ELSE NULL END AS channel_type,
+               CASE WHEN ad.target_type = 'channel' THEN mg.name ELSE ag.name END AS display_name,
+               ad.created_at
+             FROM agent_destinations ad
+             LEFT JOIN messaging_groups mg ON ad.target_type = 'channel' AND ad.target_id = mg.id
+             LEFT JOIN agent_groups ag ON ad.target_type = 'agent' AND ad.target_id = ag.id
+             ${where}
+             ORDER BY ad.agent_group_id, ad.local_name`,
+          )
+          .all(...params);
+      },
+    },
     add: {
       access: 'approval',
       description: 'Add a destination for an agent. Use --agent-group-id, --local-name, --target-type, --target-id.',
@@ -140,9 +190,9 @@ registerResource({
         getDb()
           .prepare(
             `INSERT INTO agent_destinations (agent_group_id, local_name, target_type, target_id, created_at)
-             VALUES (?, ?, ?, ?, datetime('now'))`,
+             VALUES (?, ?, ?, ?, ?)`,
           )
-          .run(agentGroupId, localName, targetType, targetId);
+          .run(agentGroupId, localName, targetType, targetId, new Date().toISOString());
         refreshAgentSessions(agentGroupId, `destination added: ${localName}`);
         return { agent_group_id: agentGroupId, local_name: localName, target_type: targetType, target_id: targetId };
       },

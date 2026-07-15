@@ -27,6 +27,7 @@ import { moduleLearningRoomSettings } from './module-learning-room-settings.js';
 import { moduleContainerEgress } from './module-container-egress.js';
 import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js';
 import { migration018 } from './018-approvals-approver-user-id.js';
+import { migration019 } from './019-wiring-threads.js';
 
 import {
   moduleWebchat,
@@ -95,6 +96,7 @@ export const migrations: Migration[] = [
   migration014,
   migration015,
   migration016,
+  migration019,
   moduleWebchat,
   moduleWebchatDropRooms,
   moduleWebchatRoomPrimes,

@@ -16,7 +16,7 @@ function log(msg: string): void {
   console.error(`[mcp-tools] ${msg}`);
 }
 
-const TOOL_MODULES = ['./core.js', './scheduling.js', './interactive.js', './agents.js', './self-mod.js', './draft-skill.js'];
+const TOOL_MODULES = ['./core.js', './interactive.js', './agents.js', './self-mod.js', './draft-skill.js'];
 for (const mod of TOOL_MODULES) {
   try {
     await import(mod);

@@ -177,7 +177,7 @@ async function spawnContainer(session: Session): Promise<void> {
     return;
   }
 
-  // Refresh the destination map and default reply routing so any admin
+  // Refresh the destination map and current-thread routing so any admin
   // changes take effect on wake. Destinations come from the agent-to-agent
   // module — skip when the module isn't installed (table absent).
   if (hasTable(getDb(), 'agent_destinations')) {
@@ -486,12 +486,30 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
     if (!target) continue; // skill no longer exists in either source — skip
     const linkPath = path.join(skillsDir, skill);
     let current: string | null = null;
+    let isRealEntry = false;
     try {
-      current = fs.lstatSync(linkPath).isSymbolicLink() ? fs.readlinkSync(linkPath) : '';
+      const st = fs.lstatSync(linkPath);
+      if (st.isSymbolicLink()) {
+        current = fs.readlinkSync(linkPath);
+      } else {
+        // A real entry here is either a template overlay (intentional; see
+        // src/group-skills.ts) or a stale pre-refactor skill copy that shadows
+        // the shared skill (#3001). No marker distinguishes them yet, so
+        // surface the skip instead of staying silent — and never delete it.
+        current = '';
+        isRealEntry = true;
+      }
     } catch {
       current = null; // no entry
     }
     if (current === target) continue; // already correct
+    if (isRealEntry) {
+      log.warn(
+        'Skill not symlinked: real entry occupies the path (template overlay or stale pre-refactor copy)',
+        { skill, path: linkPath },
+      );
+      continue;
+    }
     try {
       if (current !== null) fs.unlinkSync(linkPath);
     } catch {
