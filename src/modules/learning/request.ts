@@ -13,8 +13,10 @@ import { createSkillDraft } from '../../db/skill-drafts.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { notifySkillDraftProposed, notifySkillDraftResolved } from './events.js';
 import { applySkillDraft } from './apply.js';
+import { findKeepOverlaps } from './overlap.js';
 import { getSkillDraft, listSkillDrafts, resolveSkillDraft } from '../../db/skill-drafts.js';
 import { getContainerConfig } from '../../db/container-configs.js';
+import { getRoomLearning } from './room-settings.js';
 
 function sanitizeSkillName(raw: string): string {
   return String(raw || '')
@@ -89,9 +91,24 @@ export async function handleProposeSkill(
   // Auto-keep (docs/learning-loop.md §4) — OFF unless an owner/global admin
   // switched it on for this agent. It reuses the exact same apply path as the
   // human Keep, so the only thing autonomy removes is the wait, never a rule.
-  if (isAutoKeepEnabled(session.agent_group_id)) {
+  if (isAutoKeepEnabled(session)) {
     const draft = getSkillDraft(id);
     if (draft) {
+      // Keep-time overlap review, autonomous flavor: a human can click
+      // "Keep anyway" — autonomy can't. Any detected overlap degrades
+      // auto-keep to the normal staged flow so a person decides.
+      try {
+        const overlaps = await findKeepOverlaps(draft);
+        if (overlaps.length > 0) {
+          log.info('Auto-keep held — possible overlap; draft stays pending', {
+            id,
+            overlaps: overlaps.map((o) => `${o.name} (${o.source})`),
+          });
+          return;
+        }
+      } catch {
+        /* review failure never blocks the staged flow */
+      }
       const r = applySkillDraft(draft, 'Learning auto-keep applied a skill draft');
       if (r.ok) {
         log.info('Skill draft auto-kept', { id, agentGroup: session.agent_group_id, name: r.name, patched: r.patched });
@@ -105,9 +122,19 @@ export async function handleProposeSkill(
   }
 }
 
-function isAutoKeepEnabled(agentGroupId: string): boolean {
+function isAutoKeepEnabled(session: Session): boolean {
+  // Room layer first (learning_room_settings) — the room the lesson came from
+  // overrides the agent default. Absent → agent config → default OFF.
   try {
-    const raw = getContainerConfig(agentGroupId)?.learning;
+    if (session.messaging_group_id) {
+      const room = getRoomLearning(session.messaging_group_id);
+      if (room.autoKeep !== undefined) return room.autoKeep === true;
+    }
+  } catch {
+    /* fall through to the agent level */
+  }
+  try {
+    const raw = getContainerConfig(session.agent_group_id)?.learning;
     if (!raw) return false;
     return (JSON.parse(raw) as { autoKeep?: boolean }).autoKeep === true;
   } catch {

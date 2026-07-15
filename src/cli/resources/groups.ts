@@ -131,6 +131,8 @@ registerResource({
             agent_group_members: 0,
             user_roles: 0,
             container_configs: 0,
+            skill_drafts: 0,
+            agent_message_policies: 0,
           };
 
           if (hasAgentDestinations) {
@@ -167,6 +169,17 @@ registerResource({
             .prepare('DELETE FROM agent_group_members WHERE agent_group_id = ?')
             .run(groupId).changes;
           counts.user_roles = db.prepare('DELETE FROM user_roles WHERE agent_group_id = ?').run(groupId).changes;
+          // Newer FK-bearing tables (guarded — module-installed): learning-loop
+          // drafts, and a2a policies which key by from/to rather than
+          // agent_group_id. Either would abort the whole transaction.
+          if (hasTable(db, 'skill_drafts')) {
+            counts.skill_drafts = db.prepare('DELETE FROM skill_drafts WHERE agent_group_id = ?').run(groupId).changes;
+          }
+          if (hasTable(db, 'agent_message_policies')) {
+            counts.agent_message_policies = db
+              .prepare('DELETE FROM agent_message_policies WHERE from_agent_group_id = ? OR to_agent_group_id = ?')
+              .run(groupId, groupId).changes;
+          }
           // migration-014 has ON DELETE CASCADE on container_configs.agent_group_id;
           // the explicit delete here mirrors the other tables and surfaces the count.
           counts.container_configs = db
@@ -244,7 +257,7 @@ registerResource({
       access: 'approval',
       description:
         'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope.',
+        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --egress (open|host-only|none).',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -254,7 +267,14 @@ registerResource({
         const updates: Partial<
           Pick<
             ContainerConfigRow,
-            'provider' | 'model' | 'effort' | 'image_tag' | 'assistant_name' | 'max_messages_per_prompt' | 'cli_scope'
+            | 'provider'
+            | 'model'
+            | 'effort'
+            | 'image_tag'
+            | 'assistant_name'
+            | 'max_messages_per_prompt'
+            | 'cli_scope'
+            | 'egress'
           >
         > = {};
         if (args.provider !== undefined) updates.provider = args.provider as string;
@@ -272,9 +292,18 @@ registerResource({
           updates.cli_scope = scope;
         }
 
+        if (args.egress !== undefined) {
+          const egress = args.egress as string;
+          if (!['open', 'host-only', 'none'].includes(egress)) {
+            throw new Error('--egress must be one of: open, host-only, none');
+          }
+          // 'open' is the default — store NULL so the row reads as unset.
+          updates.egress = egress === 'open' ? null : egress;
+        }
+
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --egress',
           );
         }
 

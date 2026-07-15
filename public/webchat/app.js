@@ -148,6 +148,66 @@ function enterAuthedApp() {
   }
   // First-run: owner/global-admin sees the setup wizard once until finished.
   void maybeAutoOpenWizard();
+  // Nudge to retire the shared bearer token once a stronger identity is live.
+  void maybeSuggestBearerRetire();
+}
+
+// ── Suggest retiring the bearer token once a stronger identity is live ───────
+// Fires when THIS session authenticated via Tailscale/proxy (not bearer), the
+// shared bearer token is still active, and it's safe to drop (an alternative
+// method works). That's the natural moment — e.g. right after the first
+// Tailscale login is promoted to owner — so the operator doesn't have to hunt
+// through Settings. Dismissible; the same control lives in Settings → Access.
+let bearerRetireWired = false;
+async function maybeSuggestBearerRetire() {
+  const banner = $('#bearer-retire-banner');
+  if (!banner) return;
+  if (localStorage.getItem('nanoclaw-bearer-retire-dismissed') === '1') return;
+  let info = null;
+  try {
+    const r = await authFetch('/api/webchat/auth'); // owner/global-admin only (403 otherwise)
+    if (r.ok) info = await r.json();
+  } catch {
+    info = null;
+  }
+  // Only when the token is still live, an alternative can authenticate, AND this
+  // very session is non-bearer — otherwise the retire endpoint would refuse it.
+  if (!info || !info.bearerActive || !info.canDisableBearer || info.sessionSource === 'bearer') return;
+
+  if (!bearerRetireWired) {
+    bearerRetireWired = true;
+    $('#bearer-retire-disable')?.addEventListener('click', () => retireBearerFromBanner());
+    $('#bearer-retire-dismiss')?.addEventListener('click', () => {
+      localStorage.setItem('nanoclaw-bearer-retire-dismissed', '1');
+      banner.hidden = true;
+    });
+  }
+  banner.hidden = false;
+}
+
+async function retireBearerFromBanner() {
+  const banner = $('#bearer-retire-banner');
+  const btn = $('#bearer-retire-disable');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await authFetch('/api/webchat/auth/bearer', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+      body: JSON.stringify({ active: false }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (r.ok) {
+      showToast('Bearer token disabled — access is via Tailscale/SSO', { kind: 'success' });
+      localStorage.setItem('nanoclaw-bearer-retire-dismissed', '1');
+      if (banner) banner.hidden = true;
+    } else {
+      showToast(data.error || 'Could not disable the bearer token', { kind: 'error', timeout: 8000 });
+    }
+  } catch {
+    showToast('Connection failed', { kind: 'error' });
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function initApp() {
@@ -181,6 +241,85 @@ function rememberServerAuthHint(methods) {
   try {
     localStorage.setItem('webchat-server-tailscale', serverUsesTailscale ? '1' : '0');
   } catch {}
+}
+
+// ── Connection diagnosis ───────────────────────────────────────────────────
+// "Reconnecting…" alone can't tell the user WHERE the path broke. Three states
+// are distinguishable from a browser:
+//   offline — navigator.onLine is false (no network at all)
+//   no-path — an internet probe succeeds but the server stays unreachable; on
+//             a Tailscale-auth install that means Tailscale is off on THIS
+//             device (we can't probe tailscaled itself: Quad100 is plain HTTP,
+//             blocked as mixed content from an HTTPS page)
+//   unknown — the probe failed too; plain "no internet" wording
+// The probe races two no-cors /generate_204 fetches (Tailscale's own DERP
+// relay + gstatic; both CSP-allowed in server.ts): an opaque response
+// resolving proves internet works without reading any content. Throttled —
+// reconnect retries fire on a backoff and don't each need a fresh probe.
+let lastProbeAt = 0;
+let lastDiagnosis = null; // { text, offer } from the most recent probe
+
+async function probeInternet() {
+  const hit = (url) =>
+    fetch(url, {
+      mode: 'no-cors',
+      cache: 'no-store',
+      signal: typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(4000) : undefined,
+    });
+  try {
+    await Promise.any([
+      hit('https://derp1.tailscale.com/generate_204'),
+      hit('https://www.gstatic.com/generate_204'),
+    ]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function setConnectionBanner(text, offerOpenTailscale) {
+  const banner = $('#connection-banner');
+  banner.replaceChildren(document.createTextNode(text));
+  // Best-effort app-scheme hop, mobile only — desktop has no tailscale://
+  // handler and the tray UI is one click away anyway.
+  if (offerOpenTailscale && /iPhone|iPad|Android/i.test(navigator.userAgent)) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'banner-action';
+    btn.textContent = 'Open Tailscale';
+    btn.addEventListener('click', () => {
+      location.href = 'tailscale://';
+    });
+    banner.appendChild(btn);
+  }
+  banner.classList.add('visible');
+}
+
+async function diagnoseConnection() {
+  if (!navigator.onLine) {
+    setConnectionBanner('You’re offline. Reconnecting when the network returns…');
+    return;
+  }
+  if (Date.now() - lastProbeAt < 10000) {
+    // Throttled — but each retry's onclose resets the banner to the generic
+    // text, so re-apply the standing diagnosis instead of losing it.
+    if (lastDiagnosis) setConnectionBanner(lastDiagnosis.text, lastDiagnosis.offer);
+    return;
+  }
+  lastProbeAt = Date.now();
+  const internetUp = await probeInternet();
+  // The socket may have recovered while the probe ran — never overwrite a
+  // hidden banner.
+  if (ws && ws.readyState === WebSocket.OPEN) return;
+  lastDiagnosis = internetUp
+    ? {
+        text: serverUsesTailscale
+          ? 'Internet is up but the server is unreachable — check that Tailscale is connected on this device.'
+          : 'Internet is up but the server is unreachable — it may be down.',
+        offer: serverUsesTailscale,
+      }
+    : { text: 'No internet connection. Reconnecting…', offer: false };
+  setConnectionBanner(lastDiagnosis.text, lastDiagnosis.offer);
 }
 
 // Best-effort: cache the server's auth mode even for already-authenticated
@@ -2159,6 +2298,8 @@ function connect() {
   sock.onopen = () => {
     $('#connection-banner').classList.remove('visible');
     reconnectDelay = 1000;
+    lastProbeAt = 0; // next drop diagnoses fresh, not against a stale probe
+    lastDiagnosis = null;
     sock.send(JSON.stringify({ type: 'auth' }));
   };
 
@@ -2439,11 +2580,8 @@ function connect() {
     // If another socket has since taken over (rapid reconnects, visibility
     // change), let it own the reconnect lifecycle.
     if (ws !== sock) return;
-    const banner = $('#connection-banner');
-    banner.textContent = serverUsesTailscale
-      ? 'Connection lost. Reconnecting… If it doesn’t recover, make sure Tailscale is running on this device and connected to the right tailnet.'
-      : 'Connection lost. Reconnecting…';
-    banner.classList.add('visible');
+    setConnectionBanner('Connection lost. Reconnecting…');
+    void diagnoseConnection();
     myIdentity = '';
     setTimeout(connect, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 30000);
@@ -2469,6 +2607,20 @@ document.addEventListener('visibilitychange', () => {
     // path already re-joins (which reads) when the socket was actually down.
     if (currentRoom) ws.send(JSON.stringify({ type: 'read', room_id: currentRoom, thread_id: currentThread }));
   }
+});
+
+// Network edges. An 'online' edge is the earliest possible reconnect moment —
+// don't sit out a backoff (up to 30s) that started while the radio was off.
+// An 'offline' edge re-diagnoses immediately (no probe needed on that path)
+// so the banner says "offline" instead of a doomed "reconnecting…".
+window.addEventListener('online', () => {
+  if (ws && ws.readyState !== WebSocket.OPEN) {
+    reconnectDelay = 1000;
+    connect();
+  }
+});
+window.addEventListener('offline', () => {
+  if (ws && ws.readyState !== WebSocket.OPEN) void diagnoseConnection();
 });
 
 // Safety-net poll for approvals. WS push + the reconnect/visibilitychange
@@ -2600,8 +2752,8 @@ function renderRooms(rooms) {
     if (room.archived) li.classList.add('archived');
 
     const text = document.createElement('span');
+    text.className = 'room-row-name';
     text.textContent = `#${room.id}`;
-    text.style.flex = '1';
     li.appendChild(text);
 
     // A room where you were @-mentioned gets a distinct "@" badge that takes
@@ -3919,12 +4071,6 @@ function appendSkillDraftCard(msg, beforeNode) {
     view.className = 'btn btn-ghost';
     view.textContent = 'View';
     view.addEventListener('click', () => openSkillDraft(d.draftId));
-    const trial = document.createElement('button');
-    trial.type = 'button';
-    trial.className = 'btn btn-ghost';
-    trial.textContent = 'Try it';
-    trial.title = 'Test the draft in an isolated trial thread before keeping it';
-    trial.addEventListener('click', () => startSkillTrial(d.draftId, trial));
     const keep = document.createElement('button');
     keep.type = 'button';
     keep.className = 'btn btn-primary';
@@ -3942,7 +4088,7 @@ function appendSkillDraftCard(msg, beforeNode) {
     drop.addEventListener('click', () =>
       armUndo(actions, `Discarding ${d.skillName}…`, UNDO_SECONDS, () => discardSkillDraft(d.draftId)),
     );
-    actions.append(view, trial, keep, drop);
+    actions.append(view, keep, drop);
     card.append(head, desc, actions);
     wrap.appendChild(card);
   }
@@ -6089,6 +6235,169 @@ function lineDiff(oldText, newText) {
 // (as opposed to an installed skill) — saveSkillEditor branches on it.
 let skillEditorDraft = null;
 
+// A self-contained SKILL.md viewer/editor modal that overlays the CURRENT view
+// (opened from the agent page, so you never leave it). onSave(content) returns a
+// promise; a thrown error keeps the modal open and surfaces the message.
+function openSkillEditorModal({ name, body, editable, badgeText, onSave }) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  const modal = document.createElement('div');
+  modal.className = 'modal skill-edit-modal';
+  modal.setAttribute('role', 'dialog');
+  modal.setAttribute('aria-modal', 'true');
+  modal.setAttribute('aria-labelledby', 'skill-edit-modal-title');
+
+  const header = document.createElement('div');
+  header.className = 'modal-header';
+  const title = document.createElement('span');
+  title.id = 'skill-edit-modal-title';
+  title.textContent = name;
+  header.appendChild(title);
+  if (badgeText) {
+    const badge = document.createElement('span');
+    badge.className = 'skill-badge skill-badge-user';
+    badge.textContent = badgeText;
+    header.appendChild(badge);
+  }
+
+  const bodyEl = document.createElement('div');
+  bodyEl.className = 'modal-body';
+  const ta = document.createElement('textarea');
+  ta.className = 'skill-edit-textarea';
+  ta.value = body;
+  ta.readOnly = !editable;
+  ta.spellcheck = false;
+  bodyEl.appendChild(ta);
+
+  const footer = document.createElement('div');
+  footer.className = 'confirm-actions';
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'btn-cancel';
+  closeBtn.textContent = editable ? 'Cancel' : 'Close';
+  footer.appendChild(closeBtn);
+  let saveBtn = null;
+  if (editable) {
+    saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'btn btn-primary';
+    saveBtn.textContent = 'Save';
+    footer.appendChild(saveBtn);
+  }
+
+  modal.append(header, bodyEl, footer);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+
+  const onKey = (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      close();
+      return;
+    }
+    // Focus trap: Tab cycles within the dialog (keyboard users must not land
+    // behind the overlay — see manual-checks SC 2.1.2).
+    if (e.key === 'Tab') {
+      const focusables = [ta, closeBtn, saveBtn].filter(Boolean);
+      const i = focusables.indexOf(document.activeElement);
+      if (e.shiftKey && (i <= 0)) {
+        e.preventDefault();
+        focusables[focusables.length - 1].focus();
+      } else if (!e.shiftKey && (i === -1 || i === focusables.length - 1)) {
+        e.preventDefault();
+        focusables[0].focus();
+      }
+    }
+  };
+  const close = () => {
+    overlay.remove();
+    document.removeEventListener('keydown', onKey);
+  };
+  document.addEventListener('keydown', onKey);
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) close();
+  });
+  closeBtn.addEventListener('click', close);
+  if (saveBtn) {
+    saveBtn.addEventListener('click', async () => {
+      saveBtn.disabled = true;
+      const prev = saveBtn.textContent;
+      saveBtn.textContent = 'Saving…';
+      try {
+        await onSave(ta.value);
+        close();
+      } catch (err) {
+        showToast('Save failed: ' + (err?.message || err), { kind: 'error' });
+        saveBtn.disabled = false;
+        saveBtn.textContent = prev;
+      }
+    });
+  }
+  setTimeout(() => ta.focus(), 0);
+}
+
+// View/edit a skill scoped to ONE agent (its own .claude-shared/skills — where a
+// learned-and-kept skill lives). Opens the in-place modal. Scoped skills only
+// affect that agent, so a per-group admin may edit; the server re-checks.
+async function openScopedSkillEditor(agentId, name) {
+  let data = null;
+  try {
+    const res = await authFetch(
+      `/api/agents/${encodeURIComponent(agentId)}/skills/scoped/${encodeURIComponent(name)}/content`,
+    );
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    data = await res.json();
+  } catch (err) {
+    return showToast('Couldn’t load skill: ' + (err?.message || err), { kind: 'error' });
+  }
+  openSkillEditorModal({
+    name: data.name,
+    body: data.body,
+    editable: !!data.editable,
+    badgeText: data.editable ? 'learned · editable (this agent)' : 'read-only',
+    onSave: async (content) => {
+      const res = await authFetch(
+        `/api/agents/${encodeURIComponent(agentId)}/skills/scoped/${encodeURIComponent(name)}/content`,
+        { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }) },
+      );
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(out.error || res.statusText);
+      showToast(`Saved ${out.name} — applies on this agent's next spawn`, { kind: 'success' });
+      if (selectedAgentId) renderAgentSkills(selectedAgentId);
+    },
+  });
+}
+
+// View a shared-pool skill from the agent page, in-place. User-pool skills are
+// editable (server enforces owner/global-admin on save); built-ins are read-only.
+async function openPoolSkillFromAgent(name) {
+  let data = null;
+  try {
+    const res = await authFetch(`/api/skills/${encodeURIComponent(name)}`);
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    data = await res.json();
+  } catch (err) {
+    return showToast('Couldn’t load skill: ' + (err?.message || err), { kind: 'error' });
+  }
+  const editable = data.source === 'user';
+  openSkillEditorModal({
+    name: data.name,
+    body: data.content,
+    editable,
+    badgeText: editable ? 'imported · editable' : 'built-in · read-only',
+    onSave: async (content) => {
+      const res = await authFetch(`/api/skills/${encodeURIComponent(name)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      });
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(out.error || res.statusText);
+      showToast(`Saved ${out.name} — applies on each agent's next spawn`, { kind: 'success' });
+    },
+  });
+}
+
 async function openSkillDraft(id) {
   try {
     const res = await authFetch(`/api/skill-drafts/${encodeURIComponent(id)}`);
@@ -6218,40 +6527,41 @@ const UNDO_SECONDS = 10;
 // Learning-loop trial: mount the draft into a fresh "Trial:" thread's session
 // (and only that session) so the skill is judged by behavior, not prose. The
 // server reuses the same thread on a re-press.
-async function startSkillTrial(draftId, btn) {
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = 'Starting…';
-  }
-  try {
-    const res = await authFetch(`/api/skill-drafts/${encodeURIComponent(draftId)}/trial`, { method: 'POST' });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || res.statusText);
-    const room = lastRoomsList.find((r) => r.id === body.roomId);
-    joinRoom(body.roomId, room ? room.name : body.roomId, undefined, body.threadId);
-    showToast(body.resumed ? 'Trial thread reopened' : `Trial thread ready — only it sees ${body.name}`, {
-      kind: 'success',
-    });
-  } catch (err) {
-    showToast('Trial failed: ' + (err?.message || err), { kind: 'error' });
-  } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = 'Try it';
-    }
-  }
-}
-
-async function keepSkillDraft(d, btn) {
+async function keepSkillDraft(d, btn, force) {
   btn.disabled = true;
   btn.textContent = 'Keeping…';
   try {
-    const res = await authFetch(`/api/skill-drafts/${encodeURIComponent(d.id)}/keep`, {
+    const res = await authFetch(`/api/skill-drafts/${encodeURIComponent(d.id)}/keep${force ? '?force=1' : ''}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ agentGroupId: d.agentGroupId }),
     });
     const body = await res.json().catch(() => ({}));
+    // Overlap review: the server found existing skills/drafts that cover the
+    // same ground. Show them; "Keep anyway" re-sends with force=1.
+    if (res.status === 409 && Array.isArray(body.overlaps) && body.overlaps.length) {
+      btn.disabled = false;
+      btn.textContent = 'Keep';
+      const el = document.createElement('div');
+      for (const o of body.overlaps) {
+        const row = document.createElement('div');
+        row.className = 'import-warning';
+        row.textContent = `⚠ ${o.name} (${o.source === 'pending-draft' ? 'pending draft' : o.source}) — ${o.reason}`;
+        el.appendChild(row);
+      }
+      const hint = document.createElement('div');
+      hint.className = 'import-note';
+      hint.textContent = 'Consider discarding one, or editing this draft into a patch of the existing skill.';
+      el.appendChild(hint);
+      const anyway = await showConfirmModal({
+        title: `Overlaps with ${body.overlaps.length === 1 ? body.overlaps[0].name : body.overlaps.length + ' existing skills'}`,
+        body: el,
+        confirmLabel: 'Keep anyway',
+        destructive: true,
+      });
+      if (anyway) return keepSkillDraft(d, btn, true);
+      return;
+    }
     if (!res.ok) throw new Error(body.error || res.statusText);
     showToast(`Kept ${body.name} — wired to ${d.agentName}`, { kind: 'success' });
     void refreshDraftBadge();
@@ -6263,8 +6573,9 @@ async function keepSkillDraft(d, btn) {
   }
 }
 
+// No confirm modal here: every caller arms the 10s undo timer first — the
+// countdown IS the confirmation, and stacking a modal on top of it double-asks.
 async function discardSkillDraft(id) {
-  if (!(await showConfirmModal({ title: 'Discard proposed skill?', body: 'Removes the draft.', confirmLabel: 'Discard', destructive: true }))) return;
   try {
     const res = await authFetch(`/api/skill-drafts/${encodeURIComponent(id)}`, { method: 'DELETE' });
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
@@ -9018,6 +9329,7 @@ async function openAgentDetail(id) {
 
   // MCP servers wired to this agent (external tool servers).
   renderAgentMcp(id);
+  void renderAgentLearning(id);
 
   // Skills (Anthropic Agent Skills) this agent loads.
   renderAgentSkills(id);
@@ -9325,6 +9637,20 @@ async function renderAgentSkills(agentId) {
     meta.className = 'agent-mcp-meta';
     meta.textContent = s.description || '';
     info.append(name, meta);
+    // Click the info (not the toggle) to view the skill's SKILL.md in place.
+    // Pool skills are editable only by owner/global-admin (server-enforced);
+    // built-ins are read-only. The toggle still owns enable/disable.
+    info.style.cursor = 'pointer';
+    info.setAttribute('role', 'button');
+    info.setAttribute('tabindex', '0');
+    info.title = 'View skill details';
+    info.addEventListener('click', () => openPoolSkillFromAgent(s.name));
+    info.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        openPoolSkillFromAgent(s.name);
+      }
+    });
     const toggle = document.createElement('input');
     toggle.type = 'checkbox';
     toggle.className = 'agent-skill-toggle';
@@ -9369,6 +9695,18 @@ function renderAgentScopedSkills(agentId, scoped) {
     meta.className = 'agent-mcp-meta';
     meta.textContent = s.description || '';
     info.append(head, meta);
+    // Click the info to view/edit this agent's own copy of the skill.
+    info.style.cursor = 'pointer';
+    info.setAttribute('role', 'button');
+    info.setAttribute('tabindex', '0');
+    info.title = 'View / edit this skill';
+    info.addEventListener('click', () => openScopedSkillEditor(agentId, s.name));
+    info.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        openScopedSkillEditor(agentId, s.name);
+      }
+    });
     const del = document.createElement('button');
     del.type = 'button';
     del.className = 'skill-delete';
@@ -9442,6 +9780,314 @@ async function saveAgentSkills(agentId) {
     showToast('Couldn’t save skills: ' + (err?.message || err), { kind: 'error' });
     if (saveBtn) saveBtn.disabled = false;
   }
+}
+
+// Learning defaults (agent-level layer): two On/Off pill pairs backed by the
+// per-agent API. Room 🎓 settings override these — the section says so. The
+// whole accordion hides for non-admins (the GET 403s).
+// ── Agent export / import (backup Phase 1) ──────────────────────────────
+$('#agent-export-btn')?.addEventListener('click', async () => {
+  if (!selectedAgentId) return;
+  const el = document.createElement('div');
+  const lbl = document.createElement('label');
+  lbl.style.display = 'flex';
+  lbl.style.gap = '8px';
+  lbl.style.alignItems = 'center';
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  const txt = document.createElement('span');
+  txt.textContent = 'Include conversations (larger; briefly stops this agent)';
+  lbl.append(cb, txt);
+  el.appendChild(lbl);
+  const note = document.createElement('div');
+  note.className = 'import-note';
+  note.textContent = 'Credentials never export — the bundle lists what to reconnect on import.';
+  el.appendChild(note);
+  const ok = await showConfirmModal({ title: 'Export this agent?', body: el, confirmLabel: 'Export' });
+  if (!ok) return;
+  const a = document.createElement('a');
+  a.href = `/api/agents/${encodeURIComponent(selectedAgentId)}/export${cb.checked ? '?conversations=1' : ''}`;
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  showToast('Export started — check your downloads', { kind: 'success' });
+});
+
+// ── Room export/import (backup Phase 3) ──
+$('#room-export-btn')?.addEventListener('click', () => {
+  const roomId = selectedRoomId || currentRoom;
+  if (!roomId) return;
+  const a = document.createElement('a');
+  a.href = `/api/rooms/${encodeURIComponent(roomId)}/export`;
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  showToast('Room export started', { kind: 'success' });
+});
+
+// Settings → "Import…" routes by bundle type: peek is cheap, both flows
+// share the room/agent file inputs' logic.
+$('#import-any-btn')?.addEventListener('click', () => {
+  const el = document.createElement('div');
+  el.className = 'import-note';
+  el.textContent = 'Pick a .tgz exported from NanoClaw — an agent bundle or a room bundle.';
+  showConfirmModal({ title: 'Import from bundle', body: el, confirmLabel: 'Choose file…' }).then((ok) => {
+    if (ok) $('#import-any-file')?.click();
+  });
+});
+$('#import-any-file')?.addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file) return;
+  // Sniff the manifest by trying the room endpoint first; a format mismatch
+  // comes back as 422 "Not a NanoClaw room export" → retry as agent.
+  const tryUpload = async (endpoint) => {
+    const fd = new FormData();
+    fd.append('bundle', file);
+    const res = await authFetch(endpoint, { method: 'POST', body: fd });
+    const body = await res.json().catch(() => ({}));
+    return { ok: res.ok, body };
+  };
+  showToast('Uploading bundle…', { kind: 'info' });
+  let kind = 'room';
+  let up = await tryUpload('/api/rooms/import');
+  if (!up.ok && /room export/i.test(up.body.error || '')) {
+    kind = 'agent';
+    up = await tryUpload('/api/agents/import');
+  }
+  if (!up.ok) {
+    showToast('Import failed: ' + (up.body.error || 'unrecognized bundle'), { kind: 'error' });
+    return;
+  }
+  if (kind === 'room') return continueRoomImport(up.body);
+  return continueAgentImport(up.body);
+});
+
+$('#import-room-file')?.addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file) return;
+  showToast('Uploading room bundle…', { kind: 'info' });
+  let up;
+  try {
+    const fd = new FormData();
+    fd.append('bundle', file);
+    const res = await authFetch('/api/rooms/import', { method: 'POST', body: fd });
+    up = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(up.error || res.statusText);
+  } catch (err) {
+    showToast('Import failed: ' + (err?.message || err), { kind: 'error' });
+    return;
+  }
+  return continueRoomImport(up);
+});
+
+async function continueRoomImport(up) {
+  const p = up.preview;
+  const el = document.createElement('div');
+  const line = (t, cls) => {
+    const d = document.createElement('div');
+    if (cls) d.className = cls;
+    d.textContent = t;
+    el.appendChild(d);
+  };
+  line(`${p.manifest.entity.name} → imports as #${p.suggestedRoomId}`);
+  line(`${p.manifest.counts.messages} messages · ${p.manifest.counts.threads} threads · ${p.manifest.counts.files} files`);
+  const found = p.agents.filter((a) => a.found).map((a) => a.name);
+  const missing = p.agents.filter((a) => !a.found).map((a) => a.name);
+  if (found.length) line(`Re-wires agents: ${found.join(', ')}`);
+  if (missing.length) line(`⚠ Agents not on this install (wiring skipped): ${missing.join(', ')}`, 'import-warning');
+  const ok = await showConfirmModal({ title: 'Import this room?', body: el, confirmLabel: 'Import' });
+  if (!ok) return;
+  try {
+    const res = await authFetch('/api/rooms/import/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: up.token }),
+    });
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(out.error || res.statusText);
+    showToast(`Imported #${out.roomId} — ${out.messages} messages`, { kind: 'success' });
+  } catch (err) {
+    showToast('Import failed: ' + (err?.message || err), { kind: 'error' });
+  }
+}
+
+// ── System backup (Phase 2) ──
+$('#system-export-btn')?.addEventListener('click', async () => {
+  const el = document.createElement('div');
+  const lbl = document.createElement('label');
+  lbl.style.display = 'flex';
+  lbl.style.gap = '8px';
+  lbl.style.alignItems = 'center';
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  const txt = document.createElement('span');
+  txt.textContent = 'Lean (skip conversation history — much smaller)';
+  lbl.append(cb, txt);
+  el.appendChild(lbl);
+  const note = document.createElement('div');
+  note.className = 'import-note';
+  note.textContent = 'Secrets and host identity never travel; a restored install keeps its own credentials.';
+  el.appendChild(note);
+  const ok = await showConfirmModal({ title: 'Download system backup?', body: el, confirmLabel: 'Download' });
+  if (!ok) return;
+  const a = document.createElement('a');
+  a.href = `/api/system/export${cb.checked ? '?lean=1' : ''}`;
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  showToast('Backup started — this can take a while for large installs', { kind: 'success' });
+});
+
+$('#system-import-btn')?.addEventListener('click', () => $('#system-import-file')?.click());
+$('#system-import-file')?.addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file) return;
+  showToast('Uploading backup…', { kind: 'info' });
+  let up;
+  try {
+    const fd = new FormData();
+    fd.append('bundle', file);
+    const res = await authFetch('/api/system/import', { method: 'POST', body: fd });
+    up = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(up.error || res.statusText);
+  } catch (err) {
+    showToast('Restore failed: ' + (err?.message || err), { kind: 'error' });
+    return;
+  }
+  const m = up.preview.manifest;
+  const el = document.createElement('div');
+  const line = (t, cls) => {
+    const d = document.createElement('div');
+    if (cls) d.className = cls;
+    d.textContent = t;
+    el.appendChild(d);
+  };
+  line(`Backup from ${new Date(m.createdAt).toLocaleString()}${m.lean ? ' (lean — no conversations)' : ''}`);
+  line(`${m.counts.agents} agents · ${m.counts.rooms} rooms · ${m.counts.models} models · ${m.counts.mcpServers} MCP servers`);
+  line('⚠ REPLACES everything on this install. Current state is kept aside as *.pre-restore-* for manual rollback.', 'import-warning');
+  line('The host restarts to finish the restore — the app will reconnect.', 'import-note');
+  const ok = await showConfirmModal({ title: 'Restore this backup?', body: el, confirmLabel: 'Restore and restart', destructive: true });
+  if (!ok) return;
+  try {
+    const res = await authFetch('/api/system/import/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: up.token }),
+    });
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(out.error || res.statusText);
+    showToast('Restoring — the host is restarting…', { kind: 'info' });
+  } catch (err) {
+    showToast('Restore failed: ' + (err?.message || err), { kind: 'error' });
+  }
+});
+
+$('#import-agent-btn')?.addEventListener('click', () => $('#import-agent-file')?.click());
+$('#import-agent-file')?.addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file) return;
+  showToast('Uploading bundle…', { kind: 'info' });
+  let up;
+  try {
+    const fd = new FormData();
+    fd.append('bundle', file);
+    const res = await authFetch('/api/agents/import', { method: 'POST', body: fd });
+    up = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(up.error || res.statusText);
+  } catch (err) {
+    showToast('Import failed: ' + (err?.message || err), { kind: 'error' });
+    return;
+  }
+  return continueAgentImport(up);
+});
+
+async function continueAgentImport(up) {
+  const p = up.preview;
+  const el = document.createElement('div');
+  const line = (t, cls) => {
+    const d = document.createElement('div');
+    if (cls) d.className = cls;
+    d.textContent = t;
+    el.appendChild(d);
+  };
+  line(`${p.manifest.entity.name} → imports as “${p.suggestedName}” (${p.suggestedFolder})`);
+  line(p.manifest.includesConversations ? 'Includes conversation history' : 'Config, memory and skills only');
+  const roomsOk = p.rooms.filter((r) => r.found).map((r) => r.platform_id);
+  const roomsMiss = p.rooms.filter((r) => !r.found).map((r) => r.platform_id);
+  if (roomsOk.length) line(`Re-links rooms: ${roomsOk.join(', ')}`);
+  if (roomsMiss.length) line(`⚠ Rooms not on this install (skipped): ${roomsMiss.join(', ')}`, 'import-warning');
+  const mcpMiss = p.mcpServers.filter((m) => !m.found).map((m) => m.name);
+  if (mcpMiss.length) line(`⚠ MCP servers to recreate: ${mcpMiss.join(', ')}`, 'import-warning');
+  if (!p.modelFound && p.manifest.references.model) line(`⚠ Model not found here: ${p.manifest.references.model.model_id}`, 'import-warning');
+  for (const c of p.manifest.requiredCredentials) line(`⚠ Needs: ${c}`, 'import-warning');
+  const ok = await showConfirmModal({ title: 'Import this agent?', body: el, confirmLabel: 'Import' });
+  if (!ok) return;
+  try {
+    const res = await authFetch('/api/agents/import/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: up.token }),
+    });
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(out.error || res.statusText);
+    showToast(`Imported ${out.name}`, { kind: 'success' });
+    await fetchAgents();
+    renderAgents();
+  } catch (err) {
+    showToast('Import failed: ' + (err?.message || err), { kind: 'error' });
+  }
+}
+
+async function renderAgentLearning(agentId) {
+  const section = $('#agent-learning-section');
+  const accordion = section?.closest('details');
+  if (!section) return;
+  let cfg = null;
+  try {
+    const res = await authFetch(`/api/agents/${encodeURIComponent(agentId)}/learning`);
+    if (res.ok) cfg = await res.json();
+  } catch {}
+  if (!cfg) {
+    if (accordion) accordion.hidden = true;
+    return;
+  }
+  if (accordion) accordion.hidden = false;
+  $('#agent-learning-keep-row').hidden = !cfg.canAutoKeep;
+  const paint = (groupEl, on) => {
+    groupEl.querySelectorAll('.setting-option').forEach((b) => {
+      b.classList.toggle('active', (b.dataset.on === '1') === on);
+    });
+  };
+  paint($('#agent-learning-distill'), cfg.autoTrigger);
+  paint($('#agent-learning-keep'), cfg.autoKeep);
+  const wire = (groupEl, key) => {
+    groupEl.querySelectorAll('.setting-option').forEach((b) => {
+      b.onclick = async () => {
+        const on = b.dataset.on === '1';
+        try {
+          const res = await authFetch(`/api/agents/${encodeURIComponent(agentId)}/learning`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ [key]: on }),
+          });
+          if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Failed');
+          paint(groupEl, on);
+          showToast('Learning defaults saved');
+        } catch (err) {
+          showToast(err.message || 'Could not save', 'error');
+        }
+      };
+    });
+  };
+  wire($('#agent-learning-distill'), 'autoTrigger');
+  wire($('#agent-learning-keep'), 'autoKeep');
 }
 
 async function renderAgentMcp(agentId) {
@@ -10150,12 +10796,6 @@ async function renderRoomSkills() {
     view.className = 'btn btn-ghost';
     view.textContent = 'View';
     view.addEventListener('click', () => openSkillDraft(d.id));
-    const trial = document.createElement('button');
-    trial.type = 'button';
-    trial.className = 'btn btn-ghost';
-    trial.textContent = 'Try it';
-    trial.title = 'Test the draft in an isolated trial thread before keeping it';
-    trial.addEventListener('click', () => startSkillTrial(d.id, trial));
     const keep = document.createElement('button');
     keep.type = 'button';
     keep.className = 'btn btn-primary';
@@ -10177,7 +10817,7 @@ async function renderRoomSkills() {
         void renderRoomSkills();
       }),
     );
-    actions.append(view, trial, keep, drop);
+    actions.append(view, keep, drop);
     li.append(head, desc, actions);
     list.appendChild(li);
   }
@@ -10960,10 +11600,10 @@ const LEARN_NUDGE_MIN_TOOLS = 5;
 const roomAutoLearn = new Map();
 async function refreshRoomAutoLearn(roomId) {
   try {
-    const res = await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/agents`);
+    const res = await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/learning`);
     if (!res.ok) return;
-    const agents = await res.json();
-    roomAutoLearn.set(roomId, agents.some((a) => a.learning_auto === true));
+    const cfg = await res.json();
+    roomAutoLearn.set(roomId, cfg.autoTrigger === true);
   } catch {
     /* keep whatever we knew */
   }
@@ -11007,32 +11647,41 @@ async function toggleLearnMenu() {
   });
   menu.appendChild(now);
 
-  let agents = [];
+  // ONE pair of toggles, scoped to THIS room — the room layer overrides the
+  // wired agents' defaults, so many agents never means many switches.
+  let cfg = null;
   try {
-    agents = await (await authFetch(`/api/rooms/${encodeURIComponent(currentRoom)}/agents`)).json();
+    const res = await authFetch(`/api/rooms/${encodeURIComponent(currentRoom)}/learning`);
+    if (res.ok) cfg = await res.json();
   } catch {
-    agents = [];
+    /* room without learning surface (no wired agents) — trigger row only */
   }
-  for (const a of agents) {
-    let cfg = null;
-    try {
-      const res = await authFetch(`/api/agents/${encodeURIComponent(a.id)}/learning`);
-      if (res.ok) cfg = await res.json();
-    } catch {
-      /* not an admin for this agent — no toggles */
-    }
-    if (!cfg) continue;
-    const suffix = agents.length > 1 ? ` · ${a.name}` : '';
-    menu.appendChild(learnToggleRow(`Auto-distill busy turns${suffix}`, cfg.autoTrigger, (on) =>
-      putLearnSetting(a.id, { autoTrigger: on }),
-    ));
-    if (cfg.canAutoKeep) {
-      menu.appendChild(learnToggleRow(`Auto-keep drafts${suffix}`, cfg.autoKeep, (on) =>
-        putLearnSetting(a.id, { autoKeep: on }),
-      ));
-    }
+  if (cfg && cfg.canManage) {
+    menu.appendChild(
+      learnToggleRow('Auto-distill busy turns (this room)', cfg.autoTrigger, (on) => putRoomLearning({ autoTrigger: on })),
+    );
+    menu.appendChild(
+      learnToggleRow('Auto-keep drafts (this room)', cfg.autoKeep, (on) => putRoomLearning({ autoKeep: on })),
+    );
   }
   menu.hidden = false;
+}
+
+async function putRoomLearning(patch) {
+  try {
+    const res = await authFetch(`/api/rooms/${encodeURIComponent(currentRoom)}/learning`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Failed');
+    showToast('Learning settings saved for this room');
+    void refreshRoomAutoLearn(currentRoom);
+    return true;
+  } catch (err) {
+    showToast(err.message || 'Could not save', 'error');
+    return false;
+  }
 }
 
 function learnToggleRow(label, on, onChange) {
@@ -11056,22 +11705,6 @@ function learnToggleRow(label, on, onChange) {
   return row;
 }
 
-async function putLearnSetting(agentId, patch) {
-  try {
-    const res = await authFetch(`/api/agents/${encodeURIComponent(agentId)}/learning`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(patch),
-    });
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Failed');
-    showToast('Learning settings saved');
-    if (currentRoom) void refreshRoomAutoLearn(currentRoom);
-    return true;
-  } catch (err) {
-    showToast(err.message || 'Could not save', 'error');
-    return false;
-  }
-}
 
 $('#learn-btn')?.addEventListener('click', toggleLearnMenu);
 document.addEventListener('click', (e) => {
@@ -11983,11 +12616,24 @@ function renderRouterPicker() {
   }
   $('#router-delete-btn').disabled = names.length <= 1;
 
-  // Intro reflects the selected profile — assign THIS profile's model to route through it.
+  void updateRoutingIntro();
+}
+
+// DESIGN.md §6 (prose budget): the intro is a PREREQUISITE hint, so it only
+// exists while the prerequisite is unmet — no agent routes through this
+// profile yet. Once the router's model is assigned somewhere, the line goes
+// away; the controls explain themselves.
+async function updateRoutingIntro() {
   const intro = $('#routing-intro');
-  if (intro) {
-    const name = routingCurrentRouter ?? 'auto';
-    intro.innerHTML = `Each route sends matching prompts to a model. Assign the <strong>${esc(name)}</strong> model to an agent to route through this profile; test a prompt below to see where it lands.`;
+  if (!intro) return;
+  const name = routingCurrentRouter ?? 'auto';
+  if (allModels.length === 0) await fetchModels().catch(() => {});
+  if (allAgents.length === 0) await fetchAgents().catch(() => {});
+  const routerModel = allModels.find((m) => m.model_id === name);
+  const inUse = !!routerModel && allAgents.some((a) => a.assigned_model_id === routerModel.id);
+  intro.hidden = inUse;
+  if (!inUse) {
+    intro.innerHTML = `Nothing routes through <strong>${esc(name)}</strong> yet — assign it as an agent's model to activate this profile.`;
   }
 }
 
@@ -13033,11 +13679,24 @@ $('#model-delete').addEventListener('click', async () => {
     if (res.status === 409) {
       const impact = await res.json();
       const n = (impact.assigned_agent_group_ids || []).length;
+      const routes = impact.routes_bound || [];
+      const parts = [];
+      if (n > 0) {
+        parts.push(
+          `"${model.name}" is assigned to ${n} agent${n === 1 ? '' : 's'} — they fall back to the default model on their next spawn.`,
+        );
+      }
+      if (routes.length > 0) {
+        // The rule goes WITH the model — say which ones, per router.
+        parts.push(
+          `Also removes routing rule${routes.length === 1 ? '' : 's'}: ` +
+            routes.map((r) => `${r.route} (${r.router})`).join(', ') +
+            '.',
+        );
+      }
       const confirmed = await showConfirmModal({
         title: 'Delete model',
-        body:
-          `"${model.name}" is assigned to ${n} agent${n === 1 ? '' : 's'}. ` +
-          `They will fall back to the default Anthropic credential + default model on their next session spawn.`,
+        body: parts.join(' ') || impact.error || 'This model is in use.',
         confirmLabel: 'Delete anyway',
         destructive: true,
       });

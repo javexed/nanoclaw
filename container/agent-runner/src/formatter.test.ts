@@ -13,7 +13,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb } from './db/connection.js';
 import { getPendingMessages } from './db/messages-in.js';
-import { formatMessages, stripInternalTags } from './formatter.js';
+import { redactSecrets, formatMessages, stripInternalTags } from './formatter.js';
 import { TIMEZONE } from './timezone.js';
 
 beforeEach(() => {
@@ -192,5 +192,17 @@ describe('stripInternalTags', () => {
     expect(stripInternalTags('<internal>thinking</internal>The answer is 42')).toBe(
       'The answer is 42',
     );
+  });
+});
+
+describe('redactSecrets', () => {
+  it('redacts credential shapes but not ordinary text', () => {
+    expect(redactSecrets('failed: sk-abc123DEF456ghi789 rejected')).toBe('failed: [REDACTED] rejected');
+    expect(redactSecrets('Authorization: Bearer eyJhbGciOi.payload.sig')).toContain('Bearer [REDACTED]');
+    expect(redactSecrets('url?api_key=supersecretvalue&x=1')).toContain('api_key=[REDACTED]');
+    expect(redactSecrets('token ghp_ABCDEFGHIJKLMNOPQRSTuvwx here')).toBe('token [REDACTED] here');
+    expect(redactSecrets('relay mcr_deadbeefcafe1234 refused')).toBe('relay [REDACTED] refused');
+    const clean = 'Model not found: gemma4:latest at host.docker.internal:4000';
+    expect(redactSecrets(clean)).toBe(clean);
   });
 });

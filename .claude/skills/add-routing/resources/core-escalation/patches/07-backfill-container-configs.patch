@@ -1,12 +1,12 @@
 diff --git a/src/backfill-container-configs.ts b/src/backfill-container-configs.ts
-index 5551c90a..0d59117f 100644
+index 3a4e0129..45b4c39b 100644
 --- a/src/backfill-container-configs.ts
 +++ b/src/backfill-container-configs.ts
 @@ -65,6 +65,7 @@ export function backfillContainerConfigs(): void {
        packages_npm: JSON.stringify(legacy.packages?.npm ?? []),
        additional_mounts: JSON.stringify(legacy.additionalMounts ?? []),
-       cli_scope: 'group',
+       egress: null,
 +      fallback_provider: null,
+       cli_scope: 'group',
        updated_at: new Date().toISOString(),
      };
- 

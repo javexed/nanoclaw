@@ -142,19 +142,15 @@ Keep then applies exactly what you saved. Editing is admin-tier, same as Keep �
 it shapes what gets kept. View works from every surface, including the in-room
 card and room settings.
 
-**Try it — trial runs before Keep.** Every draft surface has a *Try it*
-action: it creates a `Trial: <skill>` thread in the draft's source room and
-mounts the draft into **that thread's session only** (threads get their own
-per-session containers; the overlay is a nested read-only mount that shadows
-the group's skills dir inside just that container — sibling sessions never see
-it). Talk to the agent there and judge the skill by behavior, not prose; Keep
-and Discard stay on the original card. Re-pressing Try it reuses the thread
-and refreshes the overlay with any draft edits. When the draft resolves, the
-overlay is removed; the trial thread remains as a readable record — remove it
-like any thread (below).
-
-Thread removal itself uses the same sliding-undo pattern: the thread row swaps
-to a 10-second countdown and the delete only commits when the bar drains.
+**Keep runs an overlap review first.** The draft is compared against the
+agent's scoped skills, its *other pending drafts*, and the shared pool —
+token-similarity always, plus a local-model judge through the LiteLLM router
+when `NANOCLAW_OVERLAP_MODEL` is set in `.env` (e.g. `gemma4:latest`; free,
+on-box). A hit shows *"Overlaps with X — keep anyway?"* with the reason;
+the human can force through, **auto-keep cannot** — any detected overlap
+degrades it to the normal staged flow. This catches the twins exact-name
+dedup can't: the reviewer names skills freely, so the same lesson can arrive
+as `branded-pdf-deliverables` today and `branded-pdf-documents` an hour later.
 
 **Keep and Discard both arm a 10-second undo window** — the buttons swap for a
 sliding countdown and an Undo; the action commits only when the bar empties.
@@ -222,13 +218,20 @@ pooled version.
 | `NANOCLAW_LEARNING_MODEL` | (turn model) | Model for the isolated review pass. |
 | `NANOCLAW_CURATOR_ARCHIVE_DAYS` | `90` | Archive a scoped skill unused this long. `0` or negative disables the curator. |
 
-Per-agent (stored in `container_configs.learning`, edited from the 🎓 popover or
-`PUT /api/agents/:id/learning`; changes restart the agent's containers):
+**Per-room first (the 🎓 popover):** the toggles you see in a room set THAT
+ROOM's auto-distill and auto-keep (`learning_room_settings`, keyed by
+messaging group; `GET|PUT /api/rooms/:id/learning`). One pair of switches per
+room, however many agents are wired — the room layer overrides every wired
+agent's default. Changing them requires admin over every wired agent and
+restarts those agents' containers.
+
+Per-agent defaults (stored in `container_configs.learning`, API-only:
+`PUT /api/agents/:id/learning`) apply wherever a room has no override:
 
 | Key | Default | Who can change it | Meaning |
 |---|---|---|---|
-| `autoTrigger` | `true` | per-agent admin | Busy turns (≥5 tools) auto-run the review. |
-| `autoKeep` | `false` | per-agent admin | Apply drafts immediately, no human review. |
+| `autoTrigger` | `true` | room (🎓) or per-agent API | Busy turns (≥5 tools) auto-run the review. |
+| `autoKeep` | `false` | room (🎓) or per-agent API | Apply drafts immediately, no human review. |
 | `cooldownMinutes` | `30` | per-agent admin (API only) | Minimum gap between auto reviews per container. |
 
 ## 7. Where things live
@@ -240,7 +243,6 @@ Per-agent (stored in `container_configs.learning`, edited from the 🎓 popover 
 | Scoped skills | `data/v2-sessions/<agent>/.claude-shared/skills/<name>/` |
 | Archived skills | `…/skills/.archive/<name>/` |
 | Use telemetry | `…/skills/<name>/.last-invoked`, `…/.invocations` |
-| Trial overlays | `data/trial-skills/<agent>/<thread>/<name>/` (mounted per-session, removed on resolve) |
 | Revision history | `…/skills/.history/<name>/<ts>/` |
 | Curator marker | `data/learning/curator-last-run` |
 | Tool + authoring prompt | `container/agent-runner/src/mcp-tools/draft-skill.ts` |

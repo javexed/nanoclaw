@@ -25,6 +25,7 @@ import {
   isRunnerCommand,
   stripInternalTags,
   type RoutingContext,
+  redactSecrets,
 } from './formatter.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
@@ -78,7 +79,12 @@ export interface PollLoopConfig {
     instructions?: string;
   };
   /** Learning-loop behavior from container.json (see docs/learning-loop.md). */
-  learning?: { autoTrigger?: boolean; autoKeep?: boolean; cooldownMinutes?: number };
+  learning?: {
+    autoTrigger?: boolean;
+    autoKeep?: boolean;
+    cooldownMinutes?: number;
+    rooms?: Record<string, { autoTrigger?: boolean; autoKeep?: boolean }>;
+  };
   /**
    * Optional stop signal. In production the loop runs until the container
    * dies; tests pass a signal so an abandoned loop actually exits instead of
@@ -91,6 +97,7 @@ export interface PollLoopConfig {
    */
   lenientOutput?: boolean;
 }
+
 
 /**
  * Main poll loop. Runs indefinitely until the process is killed.
@@ -325,7 +332,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       if (autoReviewInFlight) return;
       if (
         !shouldAutoReview({
-          learning: config.learning,
+          learning: resolveRoomLearning(config.learning, routing),
           supportsRestrictedReview: config.provider.supportsRestrictedReview === true,
           toolCount,
           hadLearnCommand: learnReviewRequested,
@@ -450,7 +457,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       }
 
       // Write error response so the user knows something went wrong
-      writeUserText(routing, `Error: ${errMsg}`);
+      writeUserText(routing, `Error: ${redactSecrets(errMsg)}`);
     } finally {
       clearCurrentInReplyTo();
     }
@@ -485,6 +492,9 @@ function writeUserText(routing: RoutingContext, text: string): void {
  */
 function surfaceTerminalError(routing: RoutingContext, err: TerminalError | undefined): void {
   if (!err) return;
+  // Provider errors can echo request headers/URLs — redact credential shapes
+  // before anything reaches a chat room (security model §redaction).
+  err = { ...err, message: redactSecrets(err.message) };
   const text =
     err.classification === 'config'
       ? `I couldn't reach the configured model (${err.message}). An admin may need to check this agent's model setting.`
@@ -930,6 +940,22 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  *     back to the full-toolset in-turn review, because nobody is watching it.
  */
 export const AUTO_REVIEW_MIN_TOOLS = 5;
+/**
+ * Room override wins over the agent level: the rooms map is keyed by the
+ * "<channel_type>:<platform_id>" pair the batch's routing context carries.
+ * A room with no entry inherits the agent-level settings untouched.
+ */
+export function resolveRoomLearning(
+  learning: PollLoopConfig['learning'],
+  routing: { channelType: string | null; platformId: string | null },
+): PollLoopConfig['learning'] {
+  const room =
+    routing.channelType && routing.platformId
+      ? learning?.rooms?.[`${routing.channelType}:${routing.platformId}`]
+      : undefined;
+  return room ? { ...learning, ...room } : learning;
+}
+
 export function shouldAutoReview(args: {
   learning: PollLoopConfig['learning'];
   supportsRestrictedReview: boolean;
@@ -1030,6 +1056,7 @@ async function runLearningReview(
 
 function deliverErrorResult(text: string, routing: RoutingContext): void {
   log('Error result with no <message> envelope — delivering to channel');
+  text = redactSecrets(text);
   writeMessageOut({
     id: generateId(),
     in_reply_to: routing.inReplyTo,

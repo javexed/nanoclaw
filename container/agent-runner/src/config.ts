@@ -34,7 +34,13 @@ export interface RunnerConfig {
    * cooldownMinutes absent = 30. autoKeep is host-side only — the container
    * never auto-accepts anything.
    */
-  learning?: { autoTrigger?: boolean; autoKeep?: boolean; cooldownMinutes?: number };
+  learning?: {
+    autoTrigger?: boolean;
+    autoKeep?: boolean;
+    cooldownMinutes?: number;
+    /** Per-room overrides keyed "<channel_type>:<platform_id>"; room wins. */
+    rooms?: Record<string, { autoTrigger?: boolean; autoKeep?: boolean }>;
+  };
 }
 
 const DEFAULT_MAX_MESSAGES = 10;

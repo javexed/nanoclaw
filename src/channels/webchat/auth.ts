@@ -180,9 +180,13 @@ export async function probeTailscaleHealth(): Promise<void> {
     execFile('tailscale', ['status', '--json'], { timeout: 1500 }, (err) => {
       if (err) {
         if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-          log.error(
-            'Webchat: WEBCHAT_TAILSCALE=true but `tailscale` is not on PATH. ' +
-              'Install Tailscale or unset WEBCHAT_TAILSCALE — all tailscale-auth requests will 401.',
+          // Not an error: deployments (e.g. the Proxmox install) enable Tailscale
+          // auth up front so the tailnet flow needs no config, and add Tailscale
+          // later. Until then tailscale-auth simply doesn't apply and other
+          // methods (bearer / proxy) carry access. Informational, once at boot.
+          log.info(
+            'Webchat: WEBCHAT_TAILSCALE=true but `tailscale` is not installed yet — ' +
+              'tailnet sign-in becomes available once you add Tailscale; bearer/proxy auth works meanwhile.',
           );
         } else {
           log.warn('Webchat: `tailscale status` probe failed at boot — tailscaled may not be running or logged in', {

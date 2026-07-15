@@ -131,6 +131,10 @@ export function startMcpRelay(): void {
 }
 
 export function stopMcpRelay(): void {
+  // close() alone waits for idle keep-alive sockets — a single lingering
+  // client (an MCP connection, a stray probe) turns shutdown into a 90s
+  // SIGKILL and an "unclean shutdown" mark for the circuit breaker.
+  relayServer?.closeAllConnections?.();
   relayServer?.close();
   relayServer = null;
 }

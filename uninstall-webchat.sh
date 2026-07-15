@@ -93,6 +93,14 @@ HOOK_FILES=(
   src/db/container-configs.ts
   container/agent-runner/src/mcp-tools/index.ts
   container/agent-runner/src/formatter.ts
+  container/agent-runner/src/formatter.test.ts
+  docs/SECURITY.md
+  src/backfill-container-configs.ts
+  src/container-runner.test.ts
+  src/egress-lockdown.ts
+  src/group-init.ts
+  container/agent-runner/src/mcp-tools/server.ts
+  container/agent-runner/src/mcp-tools/core.instructions.md
 )
 echo "→ Reversing webchat core-file hooks …"
 for f in "${HOOK_FILES[@]}"; do
@@ -178,7 +186,25 @@ rm -rf \
   container/agent-runner/src/learning-review.test.ts \
   container/agent-runner/src/providers/rate-limit.test.ts \
   docs/learning-loop.md \
-  docs/design/learning-loop.md
+  docs/design/learning-loop.md \
+  src/modules/transfer \
+  src/modules/approvals/expiry.ts \
+  src/db/migrations/module-learning-room-settings.ts \
+  src/db/migrations/module-container-egress.ts \
+  src/container-hardening.test.ts \
+  src/db/agent-delete-coverage.test.ts \
+  src/group-init.test.ts \
+  scripts/renew-webchat-cert.sh \
+  setup/webchat-tailscale-https.sh \
+  container/agent-runner/src/mcp-tools/registration.test.ts
+
+# HTTPS cert-renewal timer (installed by setup/webchat-tailscale-https.sh).
+# Cert files under data/tls are left in place, like the rest of data/.
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl --user disable --now webchat-cert-renew.timer 2>/dev/null || true
+  rm -f "$HOME/.config/systemd/user/webchat-cert-renew.service" "$HOME/.config/systemd/user/webchat-cert-renew.timer"
+  systemctl --user daemon-reload 2>/dev/null || true
+fi
 
 # ── 4. Unwire the channels barrel ────────────────────────────────────────
 if grep -qF "'./webchat/index.js'" src/channels/index.ts; then

@@ -25,3 +25,7 @@ Use `mcp__nanoclaw__add_reaction({ messageId, emoji })` to react to a specific i
 ### Internal thoughts
 
 Wrap reasoning in `<internal>...</internal>` tags to mark it as scratchpad — logged but not sent.
+
+### Tool availability
+
+Every `mcp__nanoclaw__*` tool is always in your tool list — call it directly. These tools are never deferred, so ToolSearch reports "no matching deferred tools" for them even though they are callable. That result does not mean the tool is missing.

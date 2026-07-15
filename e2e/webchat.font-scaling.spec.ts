@@ -44,6 +44,12 @@ test.afterAll(async () => {
 });
 
 test('Small/Medium/Large scales rem-based chrome (px→rem regression)', async ({ page }) => {
+  // The first-run setup wizard auto-opens for a fresh owner and its overlay
+  // intercepts every click — report onboarding as complete so specs drive the
+  // app, not the wizard.
+  await page.route('**/api/webchat/onboarding', (r) =>
+    r.fulfill({ contentType: 'application/json', body: JSON.stringify({ canEdit: false, complete: true }) }),
+  );
   await page.goto(baseURL);
   await expect(page.locator('#create-room-btn')).toBeVisible();
 

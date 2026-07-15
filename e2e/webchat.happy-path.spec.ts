@@ -75,6 +75,12 @@ test.afterAll(async () => {
 });
 
 test('enter app, create a room, send a message, see an agent reply', async ({ page }) => {
+  // The first-run setup wizard auto-opens for a fresh owner and its overlay
+  // intercepts every click — report onboarding as complete so specs drive the
+  // app, not the wizard.
+  await page.route('**/api/webchat/onboarding', (r) =>
+    r.fulfill({ contentType: 'application/json', body: JSON.stringify({ canEdit: false, complete: true }) }),
+  );
   await page.goto(baseURL);
 
   // Loopback bypasses auth; only drive the login form if it's actually shown.
@@ -119,7 +125,7 @@ test('enter app, create a room, send a message, see an agent reply', async ({ pa
   // Wiring matrix: the seeded room↔agent wiring shows as one "on" cell.
   await test.step('wiring matrix shows the room↔agent cell as on', async () => {
     await page.click('#overflow-btn');
-    await page.click('.overflow-item[data-action="matrix"]');
+    await page.click('.overflow-item[data-action="wiring"]');
     await expect(page.locator('#matrix .matrix-agent-name')).toContainText('E2E Agent');
     await expect(page.locator('#matrix .matrix-cell.on')).toHaveCount(1);
   });

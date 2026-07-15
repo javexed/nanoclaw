@@ -7,7 +7,7 @@
  * exists for a human who asked, not for an automation nobody is watching).
  */
 import { describe, expect, it } from 'bun:test';
-import { AUTO_REVIEW_MIN_TOOLS, shouldAutoReview } from './poll-loop.js';
+import { AUTO_REVIEW_MIN_TOOLS, resolveRoomLearning, shouldAutoReview } from './poll-loop.js';
 
 const base = {
   learning: undefined as { autoTrigger?: boolean; cooldownMinutes?: number } | undefined,
@@ -52,5 +52,23 @@ describe('shouldAutoReview', () => {
     const fiveAgo = base.now - 5 * 60_000;
     expect(shouldAutoReview({ ...base, learning: { cooldownMinutes: 4 }, lastAutoReviewAt: fiveAgo })).toBe(true);
     expect(shouldAutoReview({ ...base, learning: { cooldownMinutes: 6 }, lastAutoReviewAt: fiveAgo })).toBe(false);
+  });
+});
+
+describe('resolveRoomLearning', () => {
+  const routing = { channelType: 'webchat', platformId: 'excavating' };
+  it('room override wins over the agent level', () => {
+    const learning = { autoTrigger: true, rooms: { 'webchat:excavating': { autoTrigger: false } } };
+    expect(resolveRoomLearning(learning, routing)?.autoTrigger).toBe(false);
+  });
+  it('rooms without an entry inherit agent settings; cooldown passes through', () => {
+    const learning = { autoTrigger: false, cooldownMinutes: 5, rooms: { 'webchat:other-room': { autoTrigger: true } } };
+    const r = resolveRoomLearning(learning, routing);
+    expect(r?.autoTrigger).toBe(false);
+    expect(r?.cooldownMinutes).toBe(5);
+  });
+  it('tolerates missing learning / routing fields', () => {
+    expect(resolveRoomLearning(undefined, routing)).toBeUndefined();
+    expect(resolveRoomLearning({ autoKeep: true }, { channelType: null, platformId: null })?.autoKeep).toBe(true);
   });
 });

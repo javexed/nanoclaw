@@ -290,3 +290,31 @@ function escapeXml(str: string): string {
 export function stripInternalTags(text: string): string {
   return text.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
 }
+
+/**
+ * Redact credential-shaped substrings from text that is about to be shown to
+ * USERS (error surfacing — provider errors can echo request headers/URLs).
+ * Belt-and-suspenders: OneCLI means containers rarely hold real secrets, but
+ * MCP bearer tokens, relay tokens, and operator-pasted keys exist.
+ */
+const SECRET_PATTERNS: RegExp[] = [
+  /\b(sk-[A-Za-z0-9_-]{8,})/g, // OpenAI/Anthropic-style keys
+  /\b(ghp_[A-Za-z0-9]{20,})/g, // GitHub PATs
+  /\b(aoc_[A-Za-z0-9]{8,})/g, // OneCLI proxy tokens
+  /\b(mcr_[A-Za-z0-9]{8,})/g, // MCP relay tokens
+  /(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}/gi,
+  /((?:api[-_]?key|token|password|secret|authorization)=)[^&\s"']{4,}/gi,
+  /(x-api-key['":\s]+)[A-Za-z0-9._-]{8,}/gi,
+];
+
+export function redactSecrets(text: string): string {
+  let out = text;
+  for (const re of SECRET_PATTERNS) {
+    out = out.replace(re, (_m, prefix: string) =>
+      typeof prefix === 'string' && !prefix.startsWith('sk-') && !prefix.startsWith('ghp_') && !prefix.startsWith('aoc_') && !prefix.startsWith('mcr_')
+        ? `${prefix}[REDACTED]`
+        : '[REDACTED]',
+    );
+  }
+  return out;
+}

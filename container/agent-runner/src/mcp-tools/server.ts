@@ -23,6 +23,15 @@ const toolMap = new Map<string, McpToolDefinition>();
 
 export function registerTools(tools: McpToolDefinition[]): void {
   for (const t of tools) {
+    // Shape guard: a malformed definition (e.g. the pre-resync flat
+    // { name, ..., handler } shape) must cost only ITSELF, not the whole
+    // server — an import-time throw on this line once took down every
+    // nanoclaw MCP tool for days, masked because <message> envelopes
+    // bypass MCP entirely.
+    if (typeof (t as Partial<McpToolDefinition> | undefined)?.tool?.name !== 'string' || typeof t?.handler !== 'function') {
+      log(`ERROR: skipping malformed tool definition (expected { tool: { name, ... }, handler }): ${JSON.stringify(t)?.slice(0, 120)}`);
+      continue;
+    }
     if (toolMap.has(t.tool.name)) {
       log(`Warning: tool "${t.tool.name}" already registered, skipping duplicate`);
       continue;
@@ -30,6 +39,11 @@ export function registerTools(tools: McpToolDefinition[]): void {
     allTools.push(t);
     toolMap.set(t.tool.name, t);
   }
+}
+
+/** Test/introspection accessor — the registry exactly as the server serves it. */
+export function registeredTools(): readonly McpToolDefinition[] {
+  return allTools;
 }
 
 export async function startMcpServer(): Promise<void> {

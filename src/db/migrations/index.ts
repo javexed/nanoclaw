@@ -23,6 +23,8 @@ import { moduleApprovalsPendingApprovals } from './module-approvals-pending-appr
 import { moduleLearningSkillDrafts } from './module-learning-skill-drafts.js';
 import { moduleLearningConfig } from './module-learning-config.js';
 import { moduleMcpHardening } from './module-mcp-hardening.js';
+import { moduleLearningRoomSettings } from './module-learning-room-settings.js';
+import { moduleContainerEgress } from './module-container-egress.js';
 import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js';
 import { migration018 } from './018-approvals-approver-user-id.js';
 
@@ -133,6 +135,8 @@ export const migrations: Migration[] = [
   moduleLearningConfig,
   // ALTERs webchat_mcp_servers — must run after moduleWebchatMcpServers creates it. Keep at the end.
   moduleMcpHardening,
+  moduleLearningRoomSettings,
+  moduleContainerEgress,
 ];
 
 /** Row shape of PRAGMA foreign_key_check. Child rowids are stable across a

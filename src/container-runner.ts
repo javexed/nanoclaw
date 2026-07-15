@@ -35,6 +35,7 @@ import {
   stopContainer,
 } from './container-runtime.js';
 import { EGRESS_NETWORK, egressNetworkArgs, ensureEgressNetwork } from './egress-lockdown.js';
+import { EGRESS_LOCKDOWN } from './config.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
@@ -409,31 +410,6 @@ export function buildMounts(
     mounts.push({ hostPath: claudeDir, containerPath: '/home/node/.claude', readonly: false });
   }
 
-  // Per-session skill overlay (learning-loop trials): a draft skill mounted
-  // into THIS session's container only, shadowing a subpath of the group-shared
-  // .claude mount. Docker orders binds by destination depth, so the nested
-  // mount wins inside this container and sibling sessions never see it.
-  // Host layout: data/trial-skills/<agent-group>/<thread-id>/<skill>/SKILL.md
-  if (defaultSurfaces && session.thread_id && /^[\w-]+$/.test(session.thread_id)) {
-    const overlayRoot = path.join(DATA_DIR, 'trial-skills', agentGroup.id, session.thread_id);
-    let overlayNames: string[] = [];
-    try {
-      overlayNames = fs.readdirSync(overlayRoot).filter((n) => !n.startsWith('.'));
-    } catch {
-      /* no trial for this session — the normal case */
-    }
-    for (const name of overlayNames) {
-      if (!/^[\w-]+$/.test(name)) continue;
-      if (!fs.existsSync(path.join(overlayRoot, name, 'SKILL.md'))) continue;
-      mounts.push({
-        hostPath: path.join(overlayRoot, name),
-        containerPath: `/home/node/.claude/skills/${name}`,
-        readonly: true,
-      });
-      log.info('Trial skill overlay mounted', { sessionId: session.id, skill: name });
-    }
-  }
-
   // Shared agent-runner source — read-only, same code for all groups.
   const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
   mounts.push({ hostPath: agentRunnerSrc, containerPath: '/app/src', readonly: true });
@@ -585,6 +561,30 @@ function maxOutputTokensFor(model: string | null | undefined): number {
   return 64_000;
 }
 
+/**
+ * Container hardening flags (security model §container-isolation). Always on
+ * unless NANOCLAW_CONTAINER_NO_HARDEN=1 (the escape hatch for a workload a
+ * dropped capability genuinely breaks — report it, don't live there).
+ *
+ * The image runs as `node` under tini and never escalates, so the drop-ALL
+ * baseline needs only the file-ownership caps package managers and unzip-ish
+ * tools use. no-new-privileges blocks setuid escalation outright; pids-limit
+ * turns a fork bomb into a contained failure (default 512, override via
+ * NANOCLAW_CONTAINER_PIDS_LIMIT).
+ */
+export function containerHardeningArgs(env: NodeJS.ProcessEnv = process.env): string[] {
+  if (env.NANOCLAW_CONTAINER_NO_HARDEN === '1') return [];
+  const pids = env.NANOCLAW_CONTAINER_PIDS_LIMIT || '512';
+  return [
+    '--cap-drop', 'ALL',
+    '--cap-add', 'CHOWN',
+    '--cap-add', 'DAC_OVERRIDE',
+    '--cap-add', 'FOWNER',
+    '--security-opt', 'no-new-privileges',
+    '--pids-limit', pids,
+  ];
+}
+
 async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
@@ -597,12 +597,15 @@ async function buildContainerArgs(
 ): Promise<string[]> {
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
 
-  // Per-container resource caps (opt-in; empty = unbounded, today's behavior).
-  // Only --memory is set. Whether that's a hard cap depends on the host having no
-  // swap (a deployment concern) — on a swapless host --memory is hard and a runaway
-  // is OOM-killed; we don't manage swap from here.
+  // Per-container resource caps. Memory now DEFAULTS to a hard 8g cap — a
+  // runaway agent has OOM-killed real installs (the a2a flood) and an
+  // unbounded default privileges the failure case. CONTAINER_MEMORY_LIMIT
+  // overrides; the literal "none" restores unbounded. CPU stays opt-in
+  // (contention degrades, it doesn't take the host down).
   if (CONTAINER_CPU_LIMIT) args.push('--cpus', CONTAINER_CPU_LIMIT);
-  if (CONTAINER_MEMORY_LIMIT) args.push('--memory', CONTAINER_MEMORY_LIMIT);
+  const memLimit = CONTAINER_MEMORY_LIMIT || '8g';
+  if (memLimit !== 'none') args.push('--memory', memLimit);
+  args.push(...containerHardeningArgs());
 
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
@@ -622,11 +625,23 @@ async function buildContainerArgs(
     }
   }
 
-  // Egress lockdown when enabled — throws if it can't be established, aborting
-  // the spawn rather than running with open egress. Otherwise the host gateway.
-  if (ensureEgressNetwork()) {
+  // Egress policy — most restrictive wins:
+  //   config.egress 'none'       → no network at all (fully local agents);
+  //   config.egress 'host-only'  → the install-wide lockdown mechanism,
+  //                                forced for THIS group (internal network,
+  //                                gateway aliased in, fail-fast contract);
+  //   NANOCLAW_EGRESS_LOCKDOWN   → same mechanism for every group;
+  //   otherwise                  → open egress via the host gateway.
+  if (containerConfig.egress === 'none') {
+    args.push('--network', 'none');
+    log.info('Egress: none (per-group)', { containerName });
+  } else if (ensureEgressNetwork(containerConfig.egress === 'host-only')) {
     args.push(...egressNetworkArgs());
-    log.info('Egress lockdown active', { containerName, network: EGRESS_NETWORK });
+    log.info('Egress lockdown active', {
+      containerName,
+      network: EGRESS_NETWORK,
+      scope: EGRESS_LOCKDOWN ? 'install-wide' : 'per-group',
+    });
   } else {
     args.push(...hostGatewayArgs());
   }

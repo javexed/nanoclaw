@@ -1,8 +1,8 @@
 diff --git a/container/agent-runner/src/poll-loop.ts b/container/agent-runner/src/poll-loop.ts
-index 08d571bc..86dcbece 100644
+index 30ac3061..450c3c4d 100644
 --- a/container/agent-runner/src/poll-loop.ts
 +++ b/container/agent-runner/src/poll-loop.ts
-@@ -90,6 +90,79 @@ export interface PollLoopConfig {
+@@ -96,8 +96,68 @@ export interface PollLoopConfig {
     * Set for ollama-backed agents (see RunnerConfig.lenientOutput).
     */
    lenientOutput?: boolean;
@@ -10,19 +10,15 @@ index 08d571bc..86dcbece 100644
 +   * Escalation provider (llm-router §16c). When set, a turn that fails
 +   * terminally on the primary provider — the router's no_adequate_model
 +   * rejection, a dead backend, a timeout — is re-run ONCE here on a FRESH
-+   * session (never resuming a prior one: reliability over continuity for a
-+   * backstop). One-shot guard: a fallback failure never re-escalates, and the
-+   * next turn goes back to the primary.
++   * session. One-shot: a fallback failure never re-escalates.
 +   */
 +  fallbackProvider?: AgentProvider;
 +  fallbackProviderName?: string;
-+}
-+
+ }
+ 
 +/**
-+ * Re-run the current batch on the fallback provider. Returns the fallback's
-+ * result, or null when no fallback is configured or the fallback itself
-+ * threw. The caller decides whether the fallback result supersedes the
-+ * primary's error (it does only when the fallback actually produced output).
++ * Re-run the current batch on the fallback provider (fresh session; one-shot
++ * stream guard so a hub-style fallback can never capture the loop).
 + */
 +async function runEscalation(
 +  config: PollLoopConfig,
@@ -35,7 +31,6 @@ index 08d571bc..86dcbece 100644
 +  const fallbackName = config.fallbackProviderName;
 +  if (!fallback || !fallbackName) return null;
 +  log(`Escalating turn to fallback provider ${fallbackName} (fresh session)`);
-+  // Thinking-bubble static line: escalated turns are the slow ones — say so.
 +  appendStatusEvent('progress', `Escalating to ${fallbackName.charAt(0).toUpperCase()}${fallbackName.slice(1)}…`);
 +  try {
 +    const q = fallback.query({
@@ -44,13 +39,6 @@ index 08d571bc..86dcbece 100644
 +      cwd: config.cwd,
 +      systemContext: config.systemContext,
 +    });
-+    // Hub-style providers (Claude) keep their query open after a result so
-+    // follow-ups reuse the warm session — as the PRIMARY that's the whole
-+    // point, but an open FALLBACK query becomes the loop's active query and
-+    // silently captures every subsequent message: the group is then stuck on
-+    // the fallback until the container recycles. Enforce one-shot at the
-+    // stream level: end the query after its first result so processQuery
-+    // returns and the next turn starts on the primary.
 +    const singleTurn: AgentQuery = {
 +      push: (m) => q.push(m),
 +      end: () => q.end(),
@@ -79,10 +67,11 @@ index 08d571bc..86dcbece 100644
 +    log(`Fallback provider ${fallbackName} failed too: ${err instanceof Error ? err.message : String(err)}`);
 +    return null;
 +  }
- }
++}
  
  /**
-@@ -365,6 +438,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+  * Main poll loop. Runs indefinitely until the process is killed.
+@@ -372,6 +432,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
          config.lenientOutput ?? false,
          config.signal,
          maybeAutoReview,
@@ -90,7 +79,7 @@ index 08d571bc..86dcbece 100644
        );
  
        // Shutdown, not turn failure: the stop signal aborted the query
-@@ -399,6 +473,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+@@ -406,6 +467,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
            config.lenientOutput ?? false,
            config.signal,
            maybeAutoReview,
@@ -98,18 +87,16 @@ index 08d571bc..86dcbece 100644
          );
        }
  
-@@ -407,6 +482,19 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+@@ -414,6 +476,17 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
          setContinuation(config.providerName, continuation);
        }
  
-+      // Escalation (§16c): the primary failed terminally (after its self-heal
-+      // retry) — give the fallback provider one shot at the same batch before
-+      // surfacing the error. Runs on hard failure and on the router's
-+      // no_adequate_model rejection alike; both arrive here as terminal errors.
++      // Escalation (§16c): the primary failed terminally — one shot on the
++      // fallback before surfacing the error.
 +      if (result.terminalError && config.fallbackProvider) {
 +        const escalated = await runEscalation(config, routing, processingIds, prompt, originDests);
 +        if (escalated && !escalated.terminalError && escalated.producedOutput) {
-+          result = escalated; // the fallback session is deliberately not persisted
++          result = escalated;
 +        } else if (escalated?.terminalError) {
 +          log(`Fallback terminal error: ${escalated.terminalError.message}`);
 +        }
@@ -118,39 +105,36 @@ index 08d571bc..86dcbece 100644
        // (A) Non-quota terminal error (model not found, backend unreachable, an
        // error result, or the SDK dying mid-stream): surface it to the user
        // instead of dropping the turn. The quota case writes its own message
-@@ -449,8 +537,15 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+@@ -456,8 +529,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
          clearContinuation(config.providerName);
        }
  
 -      // Write error response so the user knows something went wrong
--      writeUserText(routing, `Error: ${errMsg}`);
-+      // Escalation (§16c), thrown-error flavor: timeouts and mid-stream
-+      // failures land here rather than as terminal-error results. Same
-+      // one-shot fallback; the original error is surfaced unless the
-+      // fallback actually delivered output.
+-      writeUserText(routing, `Error: ${redactSecrets(errMsg)}`);
++      // Escalation (§16c), thrown-error flavor. The original error surfaces
++      // unless the fallback actually delivered output.
 +      const escalated = await runEscalation(config, routing, processingIds, prompt, originDests);
 +      if (!(escalated && !escalated.terminalError && escalated.producedOutput)) {
 +        // Write error response so the user knows something went wrong
-+        writeUserText(routing, `Error: ${errMsg}`);
++        writeUserText(routing, `Error: ${redactSecrets(errMsg)}`);
 +      }
      } finally {
        clearCurrentInReplyTo();
      }
-@@ -569,6 +664,13 @@ export async function processQuery(
+@@ -579,6 +657,12 @@ export async function processQuery(
     * never stall behind it.
     */
    onTurnComplete?: (toolCount: number) => void,
 +  /**
-+   * Escalation is armed (§16c): an error-shaped RESULT (SDK is_error — the
-+   * router's no_adequate_model 400, a dead backend, a billing error arriving
-+   * as text) becomes a terminalError for the caller to escalate, instead of
-+   * being delivered to the user as the final word.
++   * Escalation is armed (§16c): an error-shaped RESULT (SDK is_error unset on
++   * real API failures — measured; classify by content) becomes a
++   * terminalError for the caller to escalate instead of the final word.
 +   */
 +  escalateErrorResults = false,
  ): Promise<QueryResult> {
    let queryContinuation: string | undefined;
    let done = false;
-@@ -800,12 +902,13 @@ export async function processQuery(
+@@ -810,12 +894,8 @@ export async function processQuery(
          if (onTurnComplete) onTurnComplete(getTurnToolCount());
          if (event.text) {
            const { sent, hasUnwrapped } = dispatchResultText(event.text, routing, originDests, lenient);
@@ -160,34 +144,24 @@ index 08d571bc..86dcbece 100644
 -            // scratchpad, and skip the re-wrap nudge — it would just re-hammer
 -            // the failing gateway turn after turn.
 -            deliverErrorResult(event.text, routing);
-+          // The SDK does not reliably set is_error for API failures that
-+          // surface as result text (measured: the router's no_adequate_model
-+          // 400 arrives with is_error unset). Same lesson as rate limits:
-+          // classify by content. Only unsendable text (sent === 0) is ever
-+          // tested, so a legitimate wrapped reply can never match.
 +          const errorShaped = event.isError === true || /^API Error: \d{3}\b/.test(event.text.trim());
 +          if (sent === 0 && errorShaped) {
              notifyExchangeComplete(onExchangeComplete, {
                prompt: archivePrompts[0] ?? initialPrompt,
                result: event.text,
-@@ -813,6 +916,22 @@ export async function processQuery(
+@@ -823,6 +903,17 @@ export async function processQuery(
                status: 'error',
              });
              archivePrompts.shift();
 +            if (escalateErrorResults) {
-+              // Fallback armed: hand the error up as a terminalError so the
-+              // outer loop escalates the batch instead of showing the user a
-+              // raw API error the backstop exists to absorb. END the query:
-+              // a hub-style primary keeps its stream open after a result, and
-+              // processQuery only returns (letting the caller escalate) when
-+              // the stream closes.
++              // Fallback armed: hand the error up as a terminalError and END
++              // the query — a hub-style primary keeps its stream open after a
++              // result, and processQuery only returns when the stream closes.
 +              terminalError = { message: event.text };
 +              query.end();
 +            } else {
-+              // Non-retryable error turn (e.g. a 403 billing_error) with no
-+              // <message> envelope: deliver the notice instead of dropping it
-+              // as scratchpad, and skip the re-wrap nudge — it would just
-+              // re-hammer the failing gateway turn after turn.
++              // Non-retryable error turn with no <message> envelope: deliver
++              // the notice instead of dropping it as scratchpad.
 +              deliverErrorResult(event.text, routing);
 +            }
            } else {

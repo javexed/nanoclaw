@@ -65,9 +65,13 @@ describe('per-container resource limits (structural)', () => {
     expect(src).toMatch(/if \(CONTAINER_CPU_LIMIT\)[\s\S]*?args\.push\('--cpus', CONTAINER_CPU_LIMIT\)/);
   });
 
-  it('guards --memory behind a truthy CONTAINER_MEMORY_LIMIT (and sets no swap flag)', () => {
+  it('memory defaults to a hard 8g cap; the literal "none" restores unbounded', () => {
+    // Policy change (docs/SECURITY.md §Container Hardening): unbounded-by-
+    // default privileged the failure case — a runaway agent has OOM-killed
+    // real installs. CONTAINER_MEMORY_LIMIT overrides; 'none' disables.
     const src = fs.readFileSync(path.join(process.cwd(), 'src', 'container-runner.ts'), 'utf-8');
-    expect(src).toMatch(/if \(CONTAINER_MEMORY_LIMIT\) args\.push\('--memory', CONTAINER_MEMORY_LIMIT\)/);
+    expect(src).toMatch(/const memLimit = CONTAINER_MEMORY_LIMIT \|\| '8g'/);
+    expect(src).toMatch(/if \(memLimit !== 'none'\) args\.push\('--memory', memLimit\)/);
     expect(src).not.toContain('--memory-swap');
   });
 

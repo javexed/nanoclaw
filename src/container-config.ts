@@ -12,6 +12,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { GROUPS_DIR } from './config.js';
+import { roomLearningMapForAgent } from './modules/learning/room-settings.js';
 import { resolveContainerConfigAugmentation } from './container-runtime.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { getAgentGroup } from './db/agent-groups.js';
@@ -67,6 +68,8 @@ export interface ContainerConfig {
   maxMessagesPerPrompt?: number;
   model?: string;
   effort?: string;
+  /** Network egress mode: 'open' (default) | 'host-only' | 'none'. */
+  egress?: string;
   /**
    * Deliver unwrapped agent prose to the originating room instead of dropping
    * it as scratchpad. Contributed by an installed module (webchat sets it for
@@ -80,7 +83,17 @@ export interface ContainerConfig {
    * autoKeep OFF (auto-accepting self-written context is an owner-level opt-in),
    * cooldownMinutes 30.
    */
-  learning?: { autoTrigger?: boolean; autoKeep?: boolean; cooldownMinutes?: number };
+  learning?: {
+    autoTrigger?: boolean;
+    autoKeep?: boolean;
+    cooldownMinutes?: number;
+    /**
+     * Per-room overrides, keyed "<channel_type>:<platform_id>" — the pair the
+     * agent-runner knows from its routing context. Composed at materialize
+     * time from learning_room_settings; room keys win over the top level.
+     */
+    rooms?: Record<string, { autoTrigger?: boolean; autoKeep?: boolean }>;
+  };
 }
 
 /** Build a `ContainerConfig` from a DB row + agent group identity. */
@@ -101,6 +114,7 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     maxMessagesPerPrompt: row.max_messages_per_prompt ?? undefined,
     model: row.model ?? undefined,
     effort: row.effort ?? undefined,
+    egress: row.egress ?? undefined,
     learning: parseLearning(row.learning),
   };
 }
@@ -131,6 +145,15 @@ export function materializeContainerJson(agentGroupId: string): ContainerConfig 
   // groups). Augmentors only add keys not owned by the DB row, so a stray key
   // can't clobber core config; spread last so an explicit contribution wins.
   const config = { ...configFromDb(row, group), ...resolveContainerConfigAugmentation(agentGroupId) };
+
+  // Per-room learning overrides (auto-distill / auto-keep set from a room's
+  // 🎓 menu) ride the same learning blob, keyed by the routing pair the
+  // runner already knows. Rooms win over the agent level; see
+  // src/modules/learning/room-settings.ts for the precedence contract.
+  const roomLearning = roomLearningMapForAgent(agentGroupId);
+  if (Object.keys(roomLearning).length > 0) {
+    config.learning = { ...(config.learning ?? {}), rooms: roomLearning };
+  }
 
   const p = path.join(GROUPS_DIR, group.folder, 'container.json');
   const dir = path.dirname(p);

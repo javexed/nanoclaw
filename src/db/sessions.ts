@@ -181,6 +181,16 @@ export function getPendingApproval(approvalId: string): PendingApproval | undefi
     | undefined;
 }
 
+/** Pending approvals created before `cutoffMs` (epoch) — the TTL sweep's feed. */
+export function getExpiredPendingApprovals(cutoffMs: number): PendingApproval[] {
+  return (getDb().prepare(`SELECT * FROM pending_approvals WHERE status = 'pending'`).all() as PendingApproval[]).filter(
+    (a) => {
+      const t = Date.parse(a.created_at);
+      return Number.isFinite(t) && t <= cutoffMs;
+    },
+  );
+}
+
 export function updatePendingApprovalStatus(approvalId: string, status: PendingApproval['status']): void {
   getDb().prepare('UPDATE pending_approvals SET status = ? WHERE approval_id = ?').run(status, approvalId);
 }

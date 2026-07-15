@@ -199,6 +199,10 @@
     </div>
 
     <div id="app">
+      <!-- Fixed overlay (out of flow): must render from BOTH panes, so it
+           can't live inside #chat, which is display:none on the mobile room
+           list — display:none kills fixed descendants too. -->
+      <div id="connection-banner" class="connection-banner">Connection lost. Reconnecting…</div>
       <nav id="sidebar">
         <div class="sidebar-header">
           <div class="sidebar-header-row">
@@ -296,6 +300,8 @@
           <button id="hidden-toggle" class="archived-toggle" type="button" hidden></button>
           <button id="archived-toggle" class="archived-toggle" type="button" hidden></button>
           <button id="create-room-btn" class="btn btn-secondary btn-list-footer">+ New room</button>
+          <input id="import-room-file" type="file" accept=".tgz,.gz,application/gzip" hidden />
+          <input id="import-any-file" type="file" accept=".tgz,.gz,application/gzip" hidden />
         </div>
       </nav>
       <div id="approval-toasts" class="approval-toasts" aria-live="polite"></div>
@@ -393,7 +399,6 @@
             </div>
           </div>
         </div>
-        <div id="connection-banner" class="connection-banner">Connection lost. Reconnecting…</div>
         <div id="user-creds-banner" class="user-creds-banner" hidden>
           <input
             id="user-creds-key-input"
@@ -405,6 +410,16 @@
           />
           <button id="user-creds-oauth-btn" type="button" hidden>Connect to Claude</button>
           <button id="user-creds-connect-btn" type="button" class="secondary">API key</button>
+        </div>
+        <!-- Offered once the operator is on a Tailscale/SSO session as owner and the
+             shared bearer token is still live — the safe moment to retire it (e.g.
+             right after the first Tailscale login is promoted to owner). -->
+        <div id="bearer-retire-banner" class="bearer-retire-banner" hidden>
+          <span class="bearer-retire-text"
+            >You're signed in over Tailscale as owner — the shared bearer token is no longer needed.</span
+          >
+          <button id="bearer-retire-disable" type="button">Disable token</button>
+          <button id="bearer-retire-dismiss" type="button" class="secondary">Not now</button>
         </div>
         <div id="chat-body">
           <div id="chat-content">
@@ -554,6 +569,28 @@
                     <button type="button" id="agent-skills-save" class="btn btn-primary" disabled>Save skills</button>
                   </div>
                 </details>
+                <!-- Learning defaults (learning loop): the agent-level layer —
+                     applies in every room without a 🎓 room override. -->
+                <details class="agent-accordion">
+                  <summary class="agent-accordion-summary"><span class="form-label">Learning defaults</span><span class="agent-accordion-count" id="agent-learning-count"></span></summary>
+                  <div id="agent-learning-section" class="agent-learning-section">
+                    <p class="room-prime-note">Room 🎓 settings override these.</p>
+                    <div class="agent-learning-row">
+                      <span>Auto-distill busy turns</span>
+                      <div class="setting-options" id="agent-learning-distill" role="group" aria-label="Auto-distill default">
+                        <button type="button" class="setting-option" data-on="1">On</button>
+                        <button type="button" class="setting-option" data-on="0">Off</button>
+                      </div>
+                    </div>
+                    <div class="agent-learning-row" id="agent-learning-keep-row">
+                      <span>Auto-keep drafts</span>
+                      <div class="setting-options" id="agent-learning-keep" role="group" aria-label="Auto-keep default">
+                        <button type="button" class="setting-option" data-on="1">On</button>
+                        <button type="button" class="setting-option" data-on="0">Off</button>
+                      </div>
+                    </div>
+                  </div>
+                </details>
                 <!-- Rooms this agent is wired to (assign / unassign) via the shared
                      attach picker. -->
                 <details class="agent-accordion" open>
@@ -580,6 +617,9 @@
                 </div>
                 <div class="agent-detail-actions">
                   <button type="submit" class="btn btn-primary">Save</button>
+                </div>
+                <div class="agent-export-row">
+                  <button type="button" id="agent-export-btn" class="btn btn-ghost">Export agent…</button>
                 </div>
                 <div class="agent-detail-danger">
                   <button type="button" id="agent-delete" class="btn btn-danger">Delete this agent</button>
@@ -738,6 +778,7 @@
                   <ul id="room-skills-list" class="room-skills-list"></ul>
                 </div>
                 <div class="agent-detail-actions">
+                  <button type="button" id="room-export-btn" class="btn btn-ghost">Export room…</button>
                   <button type="button" id="room-archive-toggle" class="btn btn-secondary" hidden>Archive room</button>
                   <button type="button" id="room-delete" class="btn btn-danger">Delete room</button>
                 </div>
@@ -1177,6 +1218,8 @@
             <ul id="agent-list"></ul>
             <button id="agent-show-archived" class="agent-show-archived" hidden type="button"></button>
             <button id="create-agent-btn" class="btn btn-secondary btn-list-footer">+ New agent</button>
+            <button id="import-agent-btn" class="btn btn-ghost btn-list-footer" type="button">Import agent…</button>
+            <input id="import-agent-file" type="file" accept=".tgz,.gz,application/gzip" hidden />
           </div>
           <div id="mtab-models" class="manage-pane" role="tabpanel" hidden>
             <ul id="model-list"></ul>
@@ -1742,6 +1785,22 @@
             <div id="settings-mcp-sources" class="settings-credentials" hidden>
               <h3 class="settings-section-title">MCP registry</h3>
               <ul id="mcp-sources-list" class="skill-sources-list"></ul>
+            </div>
+            <div class="settings-credentials" id="settings-backup">
+              <h3 class="settings-section-title">Backup</h3>
+              <div class="setting-group install-row">
+                <span class="setting-label">System backup</span>
+                <button id="system-export-btn" class="btn btn-secondary" type="button">Download…</button>
+              </div>
+              <div class="setting-group install-row">
+                <span class="setting-label">Import a room or agent</span>
+                <button id="import-any-btn" class="btn btn-secondary" type="button">Import…</button>
+              </div>
+              <div class="setting-group install-row">
+                <span class="setting-label">Restore from backup</span>
+                <button id="system-import-btn" class="btn btn-danger" type="button">Restore…</button>
+                <input id="system-import-file" type="file" accept=".tgz,.gz,application/gzip" hidden />
+              </div>
             </div>
             <div id="settings-routing" class="settings-credentials" hidden>
               <!-- Install-row pattern: name left, action right — Install button →

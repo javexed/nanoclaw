@@ -129,7 +129,7 @@ export function setupWebSocket(
   server: http.Server,
   hooks: WSHooks,
   authenticate: (req: http.IncomingMessage) => Promise<AuthForUpgrade | null>,
-): void {
+): WebSocketServer {
   const wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD });
 
   // Ping/pong keepalive — terminate clients that don't pong within the window.
@@ -422,4 +422,6 @@ export function setupWebSocket(
       }
     });
   });
+
+  return wss;
 }
