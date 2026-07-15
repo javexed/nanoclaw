@@ -59,8 +59,11 @@ function gatewayAttached(): boolean {
  * EgressLockdownError when enabled but unestablishable — fail fast rather than
  * spawn an agent with open egress.
  */
-export function ensureEgressNetwork(): boolean {
-  if (!EGRESS_LOCKDOWN) return false;
+export function ensureEgressNetwork(force = false): boolean {
+  // Install-wide opt-in (NANOCLAW_EGRESS_LOCKDOWN) or a per-group
+  // egress='host-only' (`force`) — same network, same gateway aliasing,
+  // same fail-fast contract either way.
+  if (!EGRESS_LOCKDOWN && !force) return false;
 
   if (
     !dockerOk(['network', 'inspect', EGRESS_NETWORK]) &&

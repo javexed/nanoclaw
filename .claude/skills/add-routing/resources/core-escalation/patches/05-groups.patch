@@ -1,56 +1,32 @@
 diff --git a/src/cli/resources/groups.ts b/src/cli/resources/groups.ts
-index 866078b9..b96d5781 100644
+index f7007d1f..1ec4f68e 100644
 --- a/src/cli/resources/groups.ts
 +++ b/src/cli/resources/groups.ts
-@@ -27,6 +27,7 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
-     image_tag: row.image_tag,
-     assistant_name: row.assistant_name,
-     max_messages_per_prompt: row.max_messages_per_prompt,
-+    fallback_provider: row.fallback_provider,
-     skills: JSON.parse(row.skills),
-     mcp_servers: JSON.parse(row.mcp_servers),
-     packages_apt: JSON.parse(row.packages_apt),
-@@ -244,7 +245,8 @@ registerResource({
+@@ -257,7 +257,7 @@ registerResource({
        access: 'approval',
        description:
          'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
--        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope.',
-+        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --fallback-provider. ' +
-+        '--fallback-provider <name>|none — provider a terminally-failed turn is retried on once (llm-router §16c escalation).',
+-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --egress (open|host-only|none).',
++        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --egress (open|host-only|none), --fallback-provider <name>|none.',
        handler: async (args) => {
          const id = args.id as string;
          if (!id) throw new Error('--id is required');
-@@ -254,7 +256,14 @@ registerResource({
-         const updates: Partial<
-           Pick<
-             ContainerConfigRow,
--            'provider' | 'model' | 'effort' | 'image_tag' | 'assistant_name' | 'max_messages_per_prompt' | 'cli_scope'
-+            | 'provider'
-+            | 'model'
-+            | 'effort'
-+            | 'image_tag'
-+            | 'assistant_name'
-+            | 'max_messages_per_prompt'
-+            | 'cli_scope'
+@@ -275,6 +275,7 @@ registerResource({
+             | 'max_messages_per_prompt'
+             | 'cli_scope'
+             | 'egress'
 +            | 'fallback_provider'
            >
          > = {};
          if (args.provider !== undefined) updates.provider = args.provider as string;
-@@ -271,10 +280,16 @@ registerResource({
-           }
+@@ -292,6 +293,10 @@ registerResource({
            updates.cli_scope = scope;
          }
+ 
 +        if (args['fallback-provider'] !== undefined || args.fallback_provider !== undefined) {
-+          const fp = (args['fallback-provider'] ?? args.fallback_provider) as string;
-+          // 'none' clears the escalation target (NULL). The provider name is
-+          // validated container-side at spawn (registry lookup), same as --provider.
-+          updates.fallback_provider = fp === 'none' || fp === '' ? null : fp;
++          const fp = String(args['fallback-provider'] ?? args.fallback_provider);
++          updates.fallback_provider = fp === 'none' ? null : fp;
 +        }
- 
-         if (Object.keys(updates).length === 0) {
-           throw new Error(
--            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope',
-+            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --fallback-provider',
-           );
-         }
- 
+         if (args.egress !== undefined) {
+           const egress = args.egress as string;
+           if (!['open', 'host-only', 'none'].includes(egress)) {

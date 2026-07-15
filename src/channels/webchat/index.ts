@@ -46,7 +46,7 @@ import { registerContainerConfigAugmentor } from '../../container-runtime.js';
 import { registerChannelAdapter } from '../channel-registry.js';
 import type { AgentActivityStatus, ChannelAdapter, ChannelSetup, OutboundMessage } from '../adapter.js';
 import { redactSensitiveData } from './redact.js';
-import { cleanupTrialOverlays, startWebchatServer, stopWebchatServer, type WebchatServer } from './server.js';
+import { startWebchatServer, stopWebchatServer, type WebchatServer } from './server.js';
 import { sweepMcpHealth } from './mcp-health.js';
 import { startMcpRelay, stopMcpRelay } from './mcp-relay.js';
 import {
@@ -518,14 +518,6 @@ registerSkillDraftProposedListener((e) => {
 registerSkillDraftResolvedListener((e) => {
   const flipped = markRoomSkillDraftResolved(e.draftId, e.outcome, e.by);
   if (flipped) broadcast(flipped.roomId, { type: 'message', ...flipped.message });
-  // A resolved draft's trial overlay is dead weight — remove it so the next
-  // spawn of the trial thread's session runs without the draft. The trial
-  // thread itself stays (it's a readable record); remove it like any thread.
-  try {
-    cleanupTrialOverlays(e.draftId);
-  } catch {
-    /* best-effort */
-  }
 });
 
 /**

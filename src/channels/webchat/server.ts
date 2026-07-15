@@ -95,7 +95,12 @@ import {
   setAgentStatus,
   updateAgentGroup,
 } from '../../db/agent-groups.js';
-import { createMessagingGroupAgent, getMessagingGroup, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
+import {
+  createMessagingGroupAgent,
+  getMessagingGroup,
+  getMessagingGroupAgents,
+  getMessagingGroupByPlatform,
+} from '../../db/messaging-groups.js';
 import { syncSessionContext, type ContextMessage } from '../../session-manager.js';
 import { getPendingApproval, getSession, getSessionsByAgentGroup } from '../../db/sessions.js';
 import { insertMessage, openInboundDb } from '../../db/session-db.js';
@@ -154,6 +159,7 @@ import {
   mergeRoutesUpdate,
   primaryRouter,
   readRoutesConfig,
+  removeRouteFromConfig,
   recentDecisions,
   type RoutesUpdate,
   writeRoutesConfig,
@@ -371,6 +377,32 @@ import {
 import { listRevisions, revertLastRevision, snapshotRevision } from '../../modules/learning/apply.js';
 import { inspectSkillFiles } from '../../modules/skills/inspect.js';
 import { applySkillDraft } from '../../modules/learning/apply.js';
+import { findKeepOverlaps } from '../../modules/learning/overlap.js';
+import { getRoomLearning, setRoomLearning } from '../../modules/learning/room-settings.js';
+import {
+  applyImport,
+  exportTarArgs,
+  extractBundle,
+  previewImport,
+  stageAgentExport,
+} from '../../modules/transfer/agent-transfer.js';
+import {
+  executeSystemRestore,
+  isSafeSystemEntry,
+  previewSystemImport,
+  stageSystemExport,
+  systemTarArgs,
+} from '../../modules/transfer/system-transfer.js';
+import { closeDb } from '../../db/connection.js';
+import {
+  applyRoomImport,
+  isSafeRoomEntry,
+  previewRoomImport,
+  roomTarArgs,
+  stageRoomExport,
+} from '../../modules/transfer/room-transfer.js';
+import { spawn } from 'child_process';
+import Busboy from 'busboy';
 
 const DEFAULT_PORT = 3100;
 const DEFAULT_HOST = '127.0.0.1';
@@ -403,6 +435,7 @@ export interface WebchatServer {
   port: number;
   tls: boolean;
   http: HttpServer;
+  wss: import('ws').WebSocketServer;
   broadcast: (roomId: string, payload: unknown) => void;
   persistOutboundFile: (roomId: string, file: OutboundFile) => string;
 }
@@ -464,7 +497,7 @@ export async function startWebchatServer(hooks: WebchatServerHooks): Promise<Web
     httpServer = createHttpServer(requestHandler);
   }
 
-  setupWebSocket(httpServer, { onInbound: hooks.onInbound }, async (req) => {
+  const wss = setupWebSocket(httpServer, { onInbound: hooks.onInbound }, async (req) => {
     const auth = await authenticateRequest(req);
     if (!auth.ok) return null;
     return { userId: auth.userId, displayName: auth.displayName };
@@ -498,6 +531,7 @@ export async function startWebchatServer(hooks: WebchatServerHooks): Promise<Web
     port,
     tls: tlsEnabled,
     http: httpServer,
+    wss,
     broadcast: (roomId, payload) => {
       broadcast(roomId, payload as object);
     },
@@ -506,6 +540,17 @@ export async function startWebchatServer(hooks: WebchatServerHooks): Promise<Web
 }
 
 export async function stopWebchatServer(server: WebchatServer): Promise<void> {
+  // close() waits for every open socket — and a webchat server ALWAYS has
+  // open sockets (connected PWAs, WebSocket upgrades, keep-alive API calls).
+  // Without force-closing, shutdown hangs until systemd's 90s SIGKILL, which
+  // marks the run "unclean" and inflates the crash circuit breaker on every
+  // routine restart.
+  // closeAllConnections() EXCLUDES upgraded sockets by design — the open
+  // WebSocket clients (every connected PWA) are exactly what held close()
+  // until systemd's 90s SIGKILL. Terminate them first, then the rest.
+  for (const client of server.wss.clients) client.terminate();
+  server.wss.close();
+  server.http.closeAllConnections?.();
   await new Promise<void>((resolve) => {
     server.http.close(() => resolve());
   });
@@ -548,7 +593,10 @@ async function handleHttp(
   res.setHeader(
     'Content-Security-Policy',
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-      "img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; " +
+      // connect-src additionally allows the two /generate_204 connectivity
+      // probes the connection-lost banner uses to tell "Tailscale is off on
+      // this device" apart from "no internet" (no-cors, response never read).
+      "img-src 'self' data: blob:; connect-src 'self' https://derp1.tailscale.com https://www.gstatic.com; font-src 'self'; " +
       "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
   );
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -1340,7 +1388,11 @@ async function handleHttp(
   // device and can't lock themselves (or everyone) out.
   if (url.pathname === '/api/webchat/auth' && method === 'GET') {
     if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
-    return json(res, 200, getAuthManagementInfo());
+    // sessionSource lets the client tell whether disabling the bearer token will
+    // actually succeed from THIS session: the retire endpoint refuses a disable
+    // requested over bearer (self-lockout guard), so the "retire it now" prompt
+    // should only surface when the caller arrived via tailscale / proxy.
+    return json(res, 200, { ...getAuthManagementInfo(), sessionSource: auth.source });
   }
   if (url.pathname === '/api/webchat/auth/bearer' && method === 'PUT') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
@@ -2324,10 +2376,210 @@ async function handleHttp(
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     return importScopedSkillHandler(req, res, group.id);
   }
+  // Read / edit the SKILL.md of a skill scoped to ONE agent (its own
+  // .claude-shared/skills — where a learned-and-kept or per-agent import lives).
+  // A scoped skill affects only this agent, so per-group admin is sufficient to
+  // view AND edit — it can never reach an agent the caller can't access. (Pool
+  // skills fan out install-wide and stay owner/global-admin via /api/skills/:name.)
+  // The /content suffix keeps this distinct from the scoped wire/unwire routes.
+  const scopedSkillContentMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/skills\/scoped\/([^/]+)\/content$/);
+  if (scopedSkillContentMatch && (method === 'GET' || method === 'PUT')) {
+    const group = resolveAgent(decodeURIComponent(scopedSkillContentMatch[1]));
+    if (!group) return json(res, 404, { error: 'Agent not found' });
+    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+    const name = sanitizeSkillName(decodeURIComponent(scopedSkillContentMatch[2]));
+    if (!name) return json(res, 400, { error: 'Invalid skill name' });
+    if (method === 'GET') return getScopedSkillContentHandler(res, group.id, name);
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    return putScopedSkillContentHandler(req, res, group.id, name);
+  }
   // Learning-loop settings, per agent. Two toggles, two owners (docs/learning-loop.md):
   //   autoTrigger — spends tokens, stages drafts → per-agent ADMIN.
   //   autoKeep    — writes live agent context unreviewed → OWNER/GLOBAL ADMIN only,
   //                 the same boundary as every other skill write.
+  // Per-ROOM learning settings — the layer the 🎓 menu edits. Room overrides
+  // the wired agents' per-agent config; the effective view resolves
+  // room → first wired agent → defaults, so the toggles show what will
+  // actually happen in THIS room.
+  const roomLearningMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/learning$/);
+  if (roomLearningMatch && (method === 'GET' || method === 'PUT')) {
+    const roomId = decodeURIComponent(roomLearningMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    const mg = getMessagingGroupByPlatform('webchat', roomId);
+    if (!mg) return json(res, 404, { error: 'Room has no messaging group' });
+    const wired = getMessagingGroupAgents(mg.id).map((w) => ({ id: w.agent_group_id }));
+    // Both toggles spend or commit on the wired agents' behalf — admin over
+    // every one of them (a room is only as governable as its least-governed
+    // agent).
+    const canManage = wired.length > 0 && wired.every((a) => hasAdminPrivilege(userId, a.id));
+    const room = getRoomLearning(mg.id);
+    const agentFallback = wired.length > 0 ? parseAgentLearning(wired[0].id) : {};
+    const effective = {
+      autoTrigger: room.autoTrigger ?? (agentFallback.autoTrigger !== false),
+      autoKeep: room.autoKeep ?? (agentFallback.autoKeep === true),
+    };
+    if (method === 'GET') {
+      return json(res, 200, { ...effective, canManage, roomOverride: room });
+    }
+    if (!canManage) return json(res, 403, { error: 'Admin privilege over every wired agent required' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { autoTrigger?: unknown; autoKeep?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    // Boolean sets the room override; explicit null CLEARS it (back to the
+    // agent-level default) — JSON.stringify drops undefined keys on save.
+    const patch: { autoTrigger?: boolean; autoKeep?: boolean } = {};
+    if (typeof body.autoTrigger === 'boolean' || body.autoTrigger === null) {
+      patch.autoTrigger = body.autoTrigger ?? undefined;
+    }
+    if (typeof body.autoKeep === 'boolean' || body.autoKeep === null) {
+      patch.autoKeep = body.autoKeep ?? undefined;
+    }
+    const next = setRoomLearning(mg.id, patch);
+    // Auto-trigger lives in the CONTAINER config (rooms map) — respawn the
+    // wired agents so their next turn sees it. Auto-keep is host-side and
+    // needs no restart, but the map rides along anyway.
+    let restarted = 0;
+    for (const a of wired) restarted += restartAgentGroupContainers(a.id, 'Room learning settings changed');
+    return json(res, 200, {
+      autoTrigger: next.autoTrigger ?? (agentFallback.autoTrigger !== false),
+      autoKeep: next.autoKeep ?? (agentFallback.autoKeep === true),
+      canManage,
+      roomOverride: next,
+      restarted,
+    });
+  }
+  // ── System backup (Phase 2): export streams; restore swaps + reboots ──
+  if (url.pathname === '/api/system/export' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const lean = url.searchParams.get('lean') === '1';
+    let stage: string;
+    try {
+      stage = await stageSystemExport(lean);
+    } catch (err) {
+      return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+    }
+    const fname = `nanoclaw-system-${new Date().toISOString().slice(0, 10)}${lean ? '-lean' : ''}.tgz`;
+    res.writeHead(200, {
+      'Content-Type': 'application/gzip',
+      'Content-Disposition': `attachment; filename="${fname}"`,
+    });
+    const tar = spawnTar(systemTarArgs(stage, lean));
+    tar.stdout?.pipe(res);
+    let tarErr = '';
+    tar.stderr?.on('data', (d: Buffer) => (tarErr += d));
+    tar.on('close', (code: number) => {
+      fs.rmSync(stage, { recursive: true, force: true });
+      // tar exits 1 for "file changed as we read it" — tolerable on a live
+      // system; only exit 2 (fatal) voids the stream.
+      if (code !== null && code >= 2) {
+        log.error('System export tar failed', { code, err: tarErr.slice(0, 300) });
+        res.destroy();
+      } else {
+        res.end();
+      }
+    });
+    res.on('close', () => tar.kill('SIGTERM'));
+    return;
+  }
+  if (url.pathname === '/api/system/import' && method === 'POST') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    return importSystemUploadHandler(req, res);
+  }
+  if (url.pathname === '/api/system/import/apply' && method === 'POST') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    return importSystemApplyHandler(req, res);
+  }
+  // ── Room export/import (backup Phase 3) ───────────────────────────────
+  const roomExportMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/export$/);
+  if (roomExportMatch && method === 'GET') {
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+    const roomId = decodeURIComponent(roomExportMatch[1]);
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+    let staged: { stage: string };
+    try {
+      staged = stageRoomExport(roomId);
+    } catch (err) {
+      return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+    }
+    res.writeHead(200, {
+      'Content-Type': 'application/gzip',
+      'Content-Disposition': `attachment; filename="nanoclaw-room-${roomId}-${new Date().toISOString().slice(0, 10)}.tgz"`,
+    });
+    const tar = spawnTar(roomTarArgs(staged.stage, roomId));
+    tar.stdout?.pipe(res);
+    tar.on('close', (code: number) => {
+      fs.rmSync(staged.stage, { recursive: true, force: true });
+      if (code !== null && code >= 2) res.destroy();
+      else res.end();
+    });
+    res.on('close', () => tar.kill('SIGTERM'));
+    return;
+  }
+  if (url.pathname === '/api/rooms/import' && method === 'POST') {
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    return importRoomUploadHandler(req, res);
+  }
+  if (url.pathname === '/api/rooms/import/apply' && method === 'POST') {
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    return importRoomApplyHandler(req, res);
+  }
+  // ── Agent export/import (backup Phase 1) ──────────────────────────────
+  const agentExportMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/export$/);
+  if (agentExportMatch && method === 'GET') {
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+    const group = resolveAgent(decodeURIComponent(agentExportMatch[1]));
+    if (!group) return json(res, 404, { error: 'Agent not found' });
+    const withConvos = url.searchParams.get('conversations') === '1';
+    // Session DBs are DELETE-mode journals — only safe to copy with the
+    // agent's containers stopped. They respawn on the next message.
+    if (withConvos) restartAgentGroupContainers(group.id, 'Export with conversations');
+    let stage: string;
+    try {
+      stage = stageAgentExport(group.id, withConvos);
+    } catch (err) {
+      return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+    }
+    const fname = `nanoclaw-agent-${group.folder}-${new Date().toISOString().slice(0, 10)}.tgz`;
+    res.writeHead(200, {
+      'Content-Type': 'application/gzip',
+      'Content-Disposition': `attachment; filename="${fname}"`,
+    });
+    const tar = spawnTar(exportTarArgs(stage, group, withConvos));
+    tar.stdout?.pipe(res);
+    let tarErr = '';
+    tar.stderr?.on('data', (d: Buffer) => (tarErr += d));
+    tar.on('close', (code: number) => {
+      fs.rmSync(stage, { recursive: true, force: true });
+      if (code !== 0) {
+        log.error('Agent export tar failed', { agent: group.id, code, err: tarErr.slice(0, 300) });
+        res.destroy();
+      } else {
+        res.end();
+      }
+    });
+    res.on('close', () => tar.kill('SIGTERM'));
+    return;
+  }
+  if (url.pathname === '/api/agents/import' && method === 'POST') {
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    return importAgentUploadHandler(req, res);
+  }
+  if (url.pathname === '/api/agents/import/apply' && method === 'POST') {
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    return importAgentApplyHandler(req, res);
+  }
   const agentLearningMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/learning$/);
   if (agentLearningMatch && (method === 'GET' || method === 'PUT')) {
     const group = resolveAgent(decodeURIComponent(agentLearningMatch[1]));
@@ -2477,18 +2729,6 @@ async function handleHttp(
     return json(res, 200, { ok: true });
   }
   // Keep + wire a draft to an agent group (scoped, origin "learned").
-  // Trial run (learning loop): mount the DRAFT into a fresh thread's session —
-  // and only that session — so the skill can be judged by observed behavior
-  // before Keep. The overlay lives at data/trial-skills/<group>/<thread>/ and
-  // is cleaned up when the draft resolves.
-  const draftTrialMatch = url.pathname.match(/^\/api\/skill-drafts\/([^/]+)\/trial$/);
-  if (draftTrialMatch && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const draft = getSkillDraft(decodeURIComponent(draftTrialMatch[1]));
-    if (!draft) return json(res, 404, { error: 'Draft not found' });
-    if (!hasAdminPrivilege(userId, draft.agent_group_id)) return json(res, 403, { error: 'Admin privilege required' });
-    return startSkillTrialHandler(res, draft);
-  }
   const draftKeepMatch = url.pathname.match(/^\/api\/skill-drafts\/([^/]+)\/keep$/);
   if (draftKeepMatch && method === 'POST') {
     const id = decodeURIComponent(draftKeepMatch[1]);
@@ -4310,6 +4550,216 @@ async function draftAgentHandler(req: IncomingMessage, res: ServerResponse): Pro
   }
 }
 
+// Staged agent imports awaiting apply: token → extracted bundle dir. 15-min
+// TTL; apply or expiry removes the dir.
+const pendingAgentImports = new Map<string, { dir: string; at: number }>();
+const IMPORT_TTL_MS = 15 * 60 * 1000;
+// Staged bundles can be GBs — sweep on a timer, not only on the next upload
+// (an abandoned preview would otherwise squat /tmp for the process lifetime).
+setInterval(sweepPendingImports, 5 * 60 * 1000).unref();
+function sweepPendingImports(): void {
+  for (const [k, v] of pendingAgentImports) {
+    if (Date.now() - v.at > IMPORT_TTL_MS) {
+      fs.rmSync(v.dir, { recursive: true, force: true });
+      pendingAgentImports.delete(k);
+    }
+  }
+}
+
+function spawnTar(args: string[]): ReturnType<typeof spawn> {
+  return spawn('tar', args);
+}
+
+async function spoolUploadToTmp(req: IncomingMessage): Promise<string> {
+  const tmpFile = path.join(os.tmpdir(), `ncl-upload-${randomUUID()}.tgz`);
+  await new Promise<void>((resolve, reject) => {
+    const bb = Busboy({ headers: req.headers, limits: { fileSize: 16 * 1024 * 1024 * 1024, files: 1 } });
+    let got = false;
+    bb.on('file', (_name, stream) => {
+      got = true;
+      const out = fs.createWriteStream(tmpFile);
+      stream.pipe(out);
+      out.on('finish', resolve);
+      out.on('error', reject);
+    });
+    bb.on('error', reject);
+    bb.on('close', () => {
+      if (!got) reject(new Error('No file in upload'));
+    });
+    req.pipe(bb);
+  });
+  return tmpFile;
+}
+
+async function importSystemUploadHandler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  sweepPendingImports();
+  let tmpFile: string | null = null;
+  try {
+    tmpFile = await spoolUploadToTmp(req);
+    // System bundles use their own member allowlist.
+    const listing = await new Promise<string>((resolve, reject) => {
+      const p = spawnTar(['-tzf', tmpFile!]);
+      let out = '';
+      let err = '';
+      p.stdout?.on('data', (d: Buffer) => (out += d));
+      p.stderr?.on('data', (d: Buffer) => (err += d));
+      p.on('close', (code: number) => (code === 0 ? resolve(out) : reject(new Error(`tar -t failed: ${err.slice(0, 200)}`))));
+    });
+    const bad = listing.split('\n').filter(Boolean).filter((e) => !isSafeSystemEntry(e));
+    if (bad.length > 0) throw new Error(`Bundle contains unsafe paths: ${bad.slice(0, 3).join(', ')}`);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-sysimport-'));
+    await new Promise<void>((resolve, reject) => {
+      const p = spawnTar(['-xzf', tmpFile!, '-C', dir, '--no-same-owner']);
+      let err = '';
+      p.stderr?.on('data', (d: Buffer) => (err += d));
+      p.on('close', (code: number) => (code === 0 ? resolve() : reject(new Error(`tar -x failed: ${err.slice(0, 200)}`))));
+    });
+    const preview = previewSystemImport(dir);
+    const token = randomUUID();
+    pendingAgentImports.set(token, { dir, at: Date.now() });
+    return json(res, 200, { token, preview });
+  } catch (err) {
+    return json(res, 422, { error: err instanceof Error ? err.message : String(err) });
+  } finally {
+    if (tmpFile) fs.rmSync(tmpFile, { force: true });
+  }
+}
+
+async function importSystemApplyHandler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { token?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  const staged = pendingAgentImports.get(String(body.token || ''));
+  if (!staged) return json(res, 410, { error: 'Import expired — upload the bundle again' });
+  let preview: ReturnType<typeof previewSystemImport>;
+  try {
+    preview = previewSystemImport(staged.dir);
+  } catch (err) {
+    return json(res, 422, { error: err instanceof Error ? err.message : String(err) });
+  }
+  if (!preview.schemaOk) {
+    return json(res, 409, {
+      error: `Backup schema (v${preview.manifest.schemaVersion}) is newer than this install (v${preview.currentSchemaVersion}) — update NanoClaw first.`,
+    });
+  }
+  pendingAgentImports.delete(String(body.token));
+  // Respond FIRST — the restore ends this process by design.
+  json(res, 200, { ok: true, restarting: true });
+  log.warn('System restore starting — the host will exit and boot on restored data');
+  executeSystemRestore(staged.dir, closeDb);
+}
+
+async function importRoomUploadHandler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  sweepPendingImports();
+  let tmpFile: string | null = null;
+  try {
+    tmpFile = await spoolUploadToTmp(req);
+    const listing = await new Promise<string>((resolve, reject) => {
+      const p = spawnTar(['-tzf', tmpFile!]);
+      let out = '';
+      let err = '';
+      p.stdout?.on('data', (d: Buffer) => (out += d));
+      p.stderr?.on('data', (d: Buffer) => (err += d));
+      p.on('close', (code: number) => (code === 0 ? resolve(out) : reject(new Error(`tar -t failed: ${err.slice(0, 200)}`))));
+    });
+    const bad = listing.split('\n').filter(Boolean).filter((e) => !isSafeRoomEntry(e));
+    if (bad.length > 0) throw new Error(`Bundle contains unsafe paths: ${bad.slice(0, 3).join(', ')}`);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-roomimport-'));
+    await new Promise<void>((resolve, reject) => {
+      const p = spawnTar(['-xzf', tmpFile!, '-C', dir, '--no-same-owner']);
+      let err = '';
+      p.stderr?.on('data', (d: Buffer) => (err += d));
+      p.on('close', (code: number) => (code === 0 ? resolve() : reject(new Error(`tar -x failed: ${err.slice(0, 200)}`))));
+    });
+    const preview = previewRoomImport(dir);
+    const token = randomUUID();
+    pendingAgentImports.set(token, { dir, at: Date.now() });
+    return json(res, 200, { token, preview });
+  } catch (err) {
+    return json(res, 422, { error: err instanceof Error ? err.message : String(err) });
+  } finally {
+    if (tmpFile) fs.rmSync(tmpFile, { force: true });
+  }
+}
+
+async function importRoomApplyHandler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { token?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  const staged = pendingAgentImports.get(String(body.token || ''));
+  if (!staged) return json(res, 410, { error: 'Import expired — upload the bundle again' });
+  try {
+    const result = applyRoomImport(staged.dir);
+    pendingAgentImports.delete(String(body.token));
+    fs.rmSync(staged.dir, { recursive: true, force: true });
+    broadcastRooms();
+    return json(res, 200, { ok: true, ...result });
+  } catch (err) {
+    log.error('Room import apply failed', { err });
+    return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+async function importAgentUploadHandler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  sweepPendingImports();
+  let tmpFile: string | null = null;
+  try {
+    tmpFile = await spoolUploadToTmp(req);
+    const dir = await extractBundle(tmpFile);
+    const preview = previewImport(dir);
+    const token = randomUUID();
+    pendingAgentImports.set(token, { dir, at: Date.now() });
+    return json(res, 200, { token, preview });
+  } catch (err) {
+    return json(res, 422, { error: err instanceof Error ? err.message : String(err) });
+  } finally {
+    if (tmpFile) fs.rmSync(tmpFile, { force: true });
+  }
+}
+
+async function importAgentApplyHandler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { token?: unknown; name?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  const staged = pendingAgentImports.get(String(body.token || ''));
+  if (!staged) return json(res, 410, { error: 'Import expired — upload the bundle again' });
+  try {
+    const result = applyImport(staged.dir, { name: typeof body.name === 'string' ? body.name : undefined });
+    // Post-link derived state: MCP config re-sync + model env materialization —
+    // the same helpers the interactive flows use, so nothing drifts.
+    for (const mcpName of result.attachedMcp) {
+      const server = getWebchatMcpServerByName(mcpName);
+      if (server) syncAgentMcpConfig(result.id, server, true);
+    }
+    if (result.modelAssigned) {
+      writeAgentSettingsForAssignedModel(result.id);
+      syncAgentProviderForAssignedModel(result.id);
+    }
+    pendingAgentImports.delete(String(body.token));
+    fs.rmSync(staged.dir, { recursive: true, force: true });
+    broadcastRooms();
+    return json(res, 200, { ok: true, ...result });
+  } catch (err) {
+    log.error('Agent import apply failed', { err });
+    return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
 function deleteAgentHandler(res: ServerResponse, id: string): void {
   const group = getAgentGroup(id);
   if (!group) return json(res, 404, { error: 'Agent not found' });
@@ -4319,6 +4769,11 @@ function deleteAgentHandler(res: ServerResponse, id: string): void {
   // down before deleteAgentGroup. Captured before the tx so post-commit
   // resource cleanup can find them.
   const sessions = findSessionsByAgentGroup(id);
+  // Draft BODY dirs live on disk keyed by draft id — capture before the tx
+  // deletes the rows, remove after commit.
+  const draftIds = listSkillDrafts()
+    .filter((d) => d.agent_group_id === id)
+    .map((d) => d.id);
 
   try {
     getDb().transaction(() => {
@@ -4328,12 +4783,34 @@ function deleteAgentHandler(res: ServerResponse, id: string): void {
       // Drop the model assignment too — the agent is going away, no point
       // keeping a row pointing at a dead agent_group_id.
       unassignModelFromAgent(id);
-      // Drop agent_destinations rows owned by this agent — the FK
-      // (agent_destinations.agent_group_id REFERENCES agent_groups.id) would
-      // otherwise block deleteAgentGroup. Guarded — a2a module may not be
-      // installed, in which case the table is absent.
-      if (hasTable(db, 'agent_destinations')) {
-        db.prepare(`DELETE FROM agent_destinations WHERE agent_group_id = ?`).run(id);
+      // Drop EVERY row that FK-references agent_groups.id — any one of them
+      // aborts deleteAgentGroup with "FOREIGN KEY constraint failed". This
+      // list mirrors the schema's referencing tables (guarded per table:
+      // module tables may be absent on a given install). container_configs
+      // is the one every modern agent has (learning/model writes ensure it),
+      // which is how a "clean-looking" unwired agent still refused deletion.
+      for (const table of [
+        'agent_destinations',
+        'container_configs',
+        'user_roles', // scoped roles die with the agent; global roles have NULL agent_group_id and don't match
+        'agent_group_members',
+        'pending_approvals',
+        'pending_sender_approvals',
+        'pending_channel_approvals',
+        'skill_drafts',
+        'webchat_agent_mcp_servers',
+      ]) {
+        if (hasTable(db, table)) {
+          db.prepare(`DELETE FROM ${table} WHERE agent_group_id = ?`).run(id);
+        }
+      }
+      // a2a policies key by from/to, not agent_group_id — either side dying
+      // kills the policy.
+      if (hasTable(db, 'agent_message_policies')) {
+        db.prepare(`DELETE FROM agent_message_policies WHERE from_agent_group_id = ? OR to_agent_group_id = ?`).run(
+          id,
+          id,
+        );
       }
       // Delete the home room (its own session rows are already gone above).
       deleteWebchatRoom(group.folder);
@@ -4346,6 +4823,14 @@ function deleteAgentHandler(res: ServerResponse, id: string): void {
   }
 
   void teardownSessionResources(sessions, `webchat agent ${id} deleted`);
+
+  for (const draftId of draftIds) {
+    try {
+      fs.rmSync(path.join(process.cwd(), 'data', 'skill-drafts', draftId), { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  }
 
   const dir = path.resolve(GROUPS_DIR, group.folder);
   try {
@@ -4849,17 +5334,66 @@ async function updateModelHandler(req: IncomingMessage, res: ServerResponse, id:
   return json(res, 200, { ok: true });
 }
 
+/**
+ * Routing rules bound to a model's model_id, across every router profile.
+ * Deleting the model would leave them dangling — classified prompts routed
+ * onto a binding that no longer exists.
+ */
+export function routesBoundToModel(
+  modelId: string,
+  cfg: Record<string, unknown> | null = readRoutesConfig(),
+): { router: string; route: string }[] {
+  if (!cfg) return [];
+  const out: { router: string; route: string }[] = [];
+  for (const rname of listRouters(cfg)) {
+    const view = routerView(cfg, rname);
+    for (const r of view.routes) {
+      if (!r.escalate && r.model === modelId) out.push({ router: view.name, route: r.name });
+    }
+  }
+  return out;
+}
+
 function deleteModelHandler(res: ServerResponse, id: string, force: boolean): void {
   const existing = getWebchatModel(id);
   if (!existing) return json(res, 404, { error: 'Model not found' });
   const assigned = getAgentsAssignedToModel(id);
-  if (assigned.length > 0 && !force) {
-    // Cascade-with-confirmation per Q3: refuse without ?force=1, surface
-    // the impact list so the PWA can prompt the operator.
+  // Routing rules bound to this model (matched by model_id) join the same
+  // cascade-with-confirmation: surfaced in the 409, REMOVED on force — the
+  // operator expected the rule to go with the model, and a dangling binding
+  // 400s at classification time once the router config regenerates.
+  const bound = routesBoundToModel(existing.model_id);
+  if ((assigned.length > 0 || bound.length > 0) && !force) {
     return json(res, 409, {
-      error: 'Model is assigned to agents. Re-POST with ?force=1 to unassign and delete.',
+      error: 'Model is in use. Re-request with ?force=1 to detach and delete.',
       assigned_agent_group_ids: assigned,
+      routes_bound: bound,
     });
+  }
+  // A router's DEFAULT route can't silently vanish — every classification can
+  // land on it. Rebind the default before deleting the model it points at.
+  if (bound.length > 0) {
+    const cfg0 = readRoutesConfig();
+    const defaults = bound.filter(({ router, route }) => cfg0 && routerView(cfg0, router).default_route === route);
+    if (defaults.length > 0) {
+      return json(res, 409, {
+        error: `Route "${defaults[0].route}" is ${defaults[0].router}'s default — rebind the default before deleting this model.`,
+        routes_bound: bound,
+      });
+    }
+  }
+  if (bound.length > 0) {
+    const cfg = readRoutesConfig();
+    if (cfg) {
+      for (const { router, route } of bound) {
+        try {
+          removeRouteFromConfig(cfg, router, route);
+        } catch (err) {
+          log.warn('Model delete: could not remove bound route', { router, route, err: String(err) });
+        }
+      }
+      writeRoutesConfig(cfg);
+    }
   }
   deleteWebchatModel(id);
   // If this model was the workspace default, clear it and refresh the groups
@@ -6408,95 +6942,6 @@ async function applySkillUpdateHandler(res: ServerResponse, name: string): Promi
   return json(res, 200, { ok: true, name: clean, files: files.length, warnings: inspection.warnings });
 }
 
-const TRIAL_SKILLS_ROOT = path.join(DATA_DIR, 'trial-skills');
-
-/**
- * Start (or resume) a trial for a draft: write the draft body as an overlay
- * skill under data/trial-skills/<group>/<thread>/, create a "Trial:" thread in
- * the draft's source room, and let the per-session overlay mount
- * (container-runner) do the isolation. Re-pressing Try refreshes the overlay
- * body and reuses the existing thread — no thread spam.
- */
-function startSkillTrialHandler(res: ServerResponse, draft: SkillDraft): void {
-  const roomId = draftSourceRoom(draft.session_id);
-  if (!roomId) return json(res, 409, { error: 'This draft has no webchat source room to trial in' });
-  const body = readSkillDraftBody(draft.id);
-  if (!body) return json(res, 410, { error: 'Draft body missing' });
-  const isPatch = draft.kind === 'patch' && !!draft.target_skill;
-  const name = sanitizeSkillName(isPatch ? String(draft.target_skill) : draft.skill_name);
-  if (!name) return json(res, 400, { error: 'Invalid skill name' });
-
-  const groupRoot = path.join(TRIAL_SKILLS_ROOT, draft.agent_group_id);
-  // Resume: an existing overlay for this draft whose thread still exists.
-  try {
-    for (const threadId of fs.existsSync(groupRoot) ? fs.readdirSync(groupRoot) : []) {
-      const marker = path.join(groupRoot, threadId, name, '.trial.json');
-      try {
-        const m = JSON.parse(fs.readFileSync(marker, 'utf8')) as { draftId?: string };
-        if (m.draftId !== draft.id) continue;
-        if (!getWebchatThread(roomId, threadId)) continue;
-        fs.writeFileSync(path.join(groupRoot, threadId, name, 'SKILL.md'), body); // refresh edits
-        return json(res, 200, { ok: true, roomId, threadId, name, resumed: true });
-      } catch {
-        continue;
-      }
-    }
-  } catch {
-    /* fall through to a fresh trial */
-  }
-
-  const thread = createWebchatThread(roomId, `Trial: ${name}`.slice(0, 80));
-  const dir = path.join(groupRoot, thread.thread_id, name);
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'SKILL.md'), body);
-    fs.writeFileSync(path.join(dir, '.trial.json'), JSON.stringify({ draftId: draft.id, createdAt: Date.now() }));
-  } catch (err) {
-    return json(res, 500, { error: 'Write failed: ' + (err instanceof Error ? err.message : String(err)) });
-  }
-  broadcastRooms(); // the new thread shows up in every sidebar
-  return json(res, 200, { ok: true, roomId, threadId: thread.thread_id, name });
-}
-
-/** Remove every trial overlay belonging to a draft (called when it resolves). */
-export function cleanupTrialOverlays(draftId: string): void {
-  let groups: string[] = [];
-  try {
-    groups = fs.readdirSync(TRIAL_SKILLS_ROOT);
-  } catch {
-    return;
-  }
-  for (const g of groups) {
-    let threads: string[] = [];
-    try {
-      threads = fs.readdirSync(path.join(TRIAL_SKILLS_ROOT, g));
-    } catch {
-      continue;
-    }
-    for (const t of threads) {
-      const threadDir = path.join(TRIAL_SKILLS_ROOT, g, t);
-      let names: string[] = [];
-      try {
-        names = fs.readdirSync(threadDir);
-      } catch {
-        continue;
-      }
-      for (const n of names) {
-        try {
-          const m = JSON.parse(fs.readFileSync(path.join(threadDir, n, '.trial.json'), 'utf8')) as {
-            draftId?: string;
-          };
-          if (m.draftId !== draftId) continue;
-          fs.rmSync(path.join(threadDir, n), { recursive: true, force: true });
-          if (fs.readdirSync(threadDir).length === 0) fs.rmSync(threadDir, { recursive: true, force: true });
-        } catch {
-          continue;
-        }
-      }
-    }
-  }
-}
-
 function deleteUserSkillHandler(res: ServerResponse, name: string): void {
   const clean = sanitizeSkillName(name);
   if (clean && fs.existsSync(path.join(process.cwd(), 'container', 'skills', clean))) {
@@ -6513,6 +6958,57 @@ function deleteUserSkillHandler(res: ServerResponse, name: string): void {
 }
 
 // Read a skill's SKILL.md (either source) for the viewer/editor.
+// Return the SKILL.md of a skill scoped to one agent. Caller auth (per-group
+// admin) is checked at the route. Scoped skills are always user-editable.
+function getScopedSkillContentHandler(res: ServerResponse, agentGroupId: string, name: string): void {
+  const file = path.join(scopedSkillsDir(agentGroupId), name, 'SKILL.md');
+  let body: string;
+  try {
+    body = fs.readFileSync(file, 'utf8');
+  } catch {
+    return json(res, 404, { error: 'Skill not found' });
+  }
+  return json(res, 200, { name, body, source: 'scoped', editable: true });
+}
+
+// Overwrite a scoped skill's SKILL.md. Snapshots a revision first (revertable),
+// then respawns the one agent so it loads the edit. Per-group admin only —
+// enforced at the route; the write can't touch any other agent.
+async function putScopedSkillContentHandler(
+  req: IncomingMessage,
+  res: ServerResponse,
+  agentGroupId: string,
+  name: string,
+): Promise<void> {
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let content = '';
+  try {
+    content = String((JSON.parse(raw) as { content?: unknown }).content || '');
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  // Same explicit cap as the pool-skill editor (putUserSkillHandler) — the
+  // global body limit is a backstop, not a contract.
+  if (content.length > 512 * 1024) return json(res, 413, { error: 'SKILL.md exceeds 512KB' });
+  if (!/^---\s*\n[\s\S]*?description:\s*\S[\s\S]*?\n---/.test(content)) {
+    return json(res, 400, { error: 'Body must be a SKILL.md with YAML front-matter including a description' });
+  }
+  const dir = scopedSkillsDir(agentGroupId);
+  const skillDir = path.join(dir, name);
+  if (!fs.existsSync(path.join(skillDir, 'SKILL.md'))) {
+    return json(res, 404, { error: 'Skill not found' });
+  }
+  try {
+    snapshotRevision(dir, name);
+  } catch {
+    /* best-effort history; never block the save */
+  }
+  fs.writeFileSync(path.join(skillDir, 'SKILL.md'), content, 'utf8');
+  const restarted = restartAgentGroupContainers(agentGroupId, `Scoped skill ${name} edited`);
+  return json(res, 200, { ok: true, name, restarted });
+}
+
 function getSkillContentHandler(res: ServerResponse, name: string): void {
   const clean = sanitizeSkillName(name);
   if (!clean) return json(res, 404, { error: 'Skill not found' });
@@ -6738,6 +7234,24 @@ async function keepSkillDraftHandler(
   const group = resolveAgent(agentGroupId);
   if (!group) return json(res, 404, { error: 'Agent not found' });
   if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+  // Keep-time overlap review: compare the draft against the agent's scoped
+  // skills, its OTHER pending drafts, and the pool. Advisory, not a wall —
+  // the human overrides with force=1 ("Keep anyway"). Detects the twins the
+  // exact-name supersede can't (the reviewer names skills freely).
+  const force = new URL(req.url || '', 'http://x').searchParams.get('force') === '1';
+  if (!force) {
+    try {
+      const overlaps = await findKeepOverlaps(getSkillDraft(draft.id)!);
+      if (overlaps.length > 0) {
+        return json(res, 409, {
+          error: 'Possible overlap with existing skills',
+          overlaps: overlaps.map((o) => ({ name: o.name, source: o.source, reason: o.reason })),
+        });
+      }
+    } catch (err) {
+      log.warn('Keep overlap review failed — keeping without it', { draftId: draft.id, err: String(err) });
+    }
+  }
   // The write itself lives in modules/learning/apply.ts — ONE implementation
   // shared with auto-keep, so the two paths cannot drift.
   const r = applySkillDraft({ ...draft, agent_group_id: group.id } as Parameters<typeof applySkillDraft>[0],

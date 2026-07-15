@@ -107,10 +107,18 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
     sh /tmp/install-cli-tools.sh /tmp/cli-tools.json
 
 # ---- rtk (token-compression proxy, invoked via the PreToolUse hook) ----------
-# Static musl binary → runs on the glibc base. Baked into the image (NOT mounted)
-# because this install's mount-security rejects absolute container mount paths.
+# Compresses Bash tool output before it reaches the model (the hook itself is
+# seeded by group-init's default settings.json). Baked into the image (NOT
+# mounted) because mount-security rejects absolute container mount paths.
+# Arch-aware: x86_64 ships a static musl build; arm64 (Raspberry Pi, ARM VMs)
+# ships gnu — the node:22-slim base is glibc either way.
 ARG RTK_VERSION=v0.42.0
-RUN curl -fsSL "https://github.com/rtk-ai/rtk/releases/download/${RTK_VERSION}/rtk-x86_64-unknown-linux-musl.tar.gz" -o /tmp/rtk.tar.gz && \
+RUN case "$(uname -m)" in \
+      x86_64)  RTK_TRIPLE=x86_64-unknown-linux-musl ;; \
+      aarch64) RTK_TRIPLE=aarch64-unknown-linux-gnu ;; \
+      *) echo "rtk: unsupported arch $(uname -m)" >&2 && exit 1 ;; \
+    esac && \
+    curl -fsSL "https://github.com/rtk-ai/rtk/releases/download/${RTK_VERSION}/rtk-${RTK_TRIPLE}.tar.gz" -o /tmp/rtk.tar.gz && \
     tar -xzf /tmp/rtk.tar.gz -C /usr/local/bin rtk && \
     chmod +x /usr/local/bin/rtk && \
     rm -f /tmp/rtk.tar.gz && \

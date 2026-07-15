@@ -1,27 +1,19 @@
 diff --git a/src/db/container-configs.ts b/src/db/container-configs.ts
-index 8846e890..1bded42c 100644
+index 48743064..bf47f107 100644
 --- a/src/db/container-configs.ts
 +++ b/src/db/container-configs.ts
-@@ -9,6 +9,7 @@ const SCALAR_COLUMNS = new Set([
-   'assistant_name',
+@@ -10,6 +10,7 @@ const SCALAR_COLUMNS = new Set([
    'max_messages_per_prompt',
    'cli_scope',
+   'egress',
 +  'fallback_provider',
  ]);
  const JSON_COLUMNS = new Set(['skills', 'mcp_servers', 'packages_apt', 'packages_npm', 'additional_mounts', 'learning']);
  
-@@ -55,7 +56,14 @@ export function updateContainerConfigScalars(
-   updates: Partial<
-     Pick<
-       ContainerConfigRow,
--      'provider' | 'model' | 'effort' | 'image_tag' | 'assistant_name' | 'max_messages_per_prompt' | 'cli_scope'
-+      | 'provider'
-+      | 'model'
-+      | 'effort'
-+      | 'image_tag'
-+      | 'assistant_name'
-+      | 'max_messages_per_prompt'
-+      | 'cli_scope'
+@@ -64,6 +65,7 @@ export function updateContainerConfigScalars(
+       | 'max_messages_per_prompt'
+       | 'cli_scope'
+       | 'egress'
 +      | 'fallback_provider'
      >
    >,

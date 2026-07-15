@@ -11,6 +11,7 @@ import {
   getRosterRefreshState,
   listHostModels,
   parseConfiguredHosts,
+  removeRouteFromConfig,
   startPull,
 } from './ollama-manage.js';
 
@@ -362,5 +363,37 @@ describe('router management (picker)', () => {
     expect(() =>
       mergeRoutesUpdate(existing, { routes: [{ name: 'x', description: 'valid enough', model: 'm' }] }, 'ghost'),
     ).toThrow(/no router named/);
+  });
+});
+
+describe('removeRouteFromConfig', () => {
+  const base = () => ({
+    routers: {
+      auto: {
+        default_route: 'general',
+        routes: [
+          { name: 'general', description: 'g', model: 'gemma4:latest' },
+          { name: 'vision', description: 'v', model: 'LLaVA:latest' },
+        ],
+      },
+    },
+  });
+
+  it('removes a non-default route (the model-delete cascade)', () => {
+    const cfg = base() as unknown as Record<string, unknown>;
+    removeRouteFromConfig(cfg, 'auto', 'vision');
+    const routes = (cfg.routers as Record<string, { routes: { name: string }[] }>).auto.routes;
+    expect(routes.map((r) => r.name)).toEqual(['general']);
+  });
+
+  it("refuses the router's default route", () => {
+    const cfg = base() as unknown as Record<string, unknown>;
+    expect(() => removeRouteFromConfig(cfg, 'auto', 'general')).toThrow(/default/);
+  });
+
+  it('throws on an unknown router', () => {
+    expect(() => removeRouteFromConfig(base() as unknown as Record<string, unknown>, 'nope', 'vision')).toThrow(
+      /no router/,
+    );
   });
 });

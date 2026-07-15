@@ -175,6 +175,20 @@ async function main(): Promise<void> {
 /** Graceful shutdown. */
 async function shutdown(signal: string): Promise<void> {
   log.info('Shutdown signal received', { signal });
+  // Shutdown watchdog: teardown gets 10s, then we exit CLEANLY anyway. A
+  // single hanging await in any teardown step otherwise rides to systemd's
+  // 90s SIGKILL, which marks the run "unclean" and inflates the crash
+  // circuit breaker on every routine restart (observed repeatedly: attempts
+  // climbed to 9 purely from slow stops). Exiting 0 here is honest — we WERE
+  // asked to stop; the remaining teardown is best-effort cleanup, and every
+  // component must already survive a hard kill (crash-consistency is the
+  // design baseline).
+  const watchdog = setTimeout(() => {
+    log.warn('Shutdown watchdog fired — teardown exceeded 10s, exiting clean');
+    resetCircuitBreaker();
+    process.exit(0);
+  }, 10_000);
+  watchdog.unref();
   for (const cb of getShutdownCallbacks()) {
     try {
       await cb();

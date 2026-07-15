@@ -27,6 +27,7 @@
  *        claimed a message and went quiet past tolerance since the claim."
  */
 import type Database from 'better-sqlite3';
+import { sweepExpiredApprovals } from './modules/approvals/expiry.js';
 import fs from 'fs';
 
 import { ensureEgressNetwork } from './egress-lockdown.js';
@@ -131,6 +132,13 @@ export function stopHostSweep(): void {
 }
 
 async function sweep(): Promise<void> {
+  // Approval TTL (security model §approvals): unanswered approvals deny
+  // themselves after NANOCLAW_APPROVAL_TTL_HOURS (default 24h).
+  try {
+    await sweepExpiredApprovals();
+  } catch (err) {
+    log.warn('Approval expiry sweep failed', { err: String(err) });
+  }
   if (!running) return;
 
   // Re-heal the egress network so already-running agents keep their gateway hop

@@ -285,6 +285,32 @@ describe('startWebchatServer — boot gate', () => {
     }
   });
 
+  it('GET /api/webchat/auth reports the caller session source (gates the retire prompt)', async () => {
+    const TOKEN = 'a'.repeat(32);
+    const server = await loadServerWithEnv({
+      WEBCHAT_HOST: '0.0.0.0',
+      WEBCHAT_PORT: '0',
+      WEBCHAT_TOKEN: TOKEN,
+      WEBCHAT_TRUSTED_PROXY_IPS: '127.0.0.1',
+      WEBCHAT_TRUSTED_PROXY_HEADER: 'x-forwarded-user',
+    });
+    const wc = await server.startWebchatServer(noopHooks);
+    try {
+      const port = portOf(wc);
+      // Proxy identity authenticates first → becomes owner (first-login), so the
+      // owner-gated GET returns 200. sessionSource='proxy-header' is the non-bearer
+      // signal the client uses to safely offer the retire prompt (bearer sessions
+      // report 'bearer' and are suppressed, since the endpoint refuses a self-lockout).
+      const viaProxy = await httpRequest(port, 'GET', '/api/webchat/auth', { 'x-forwarded-user': 'alice' });
+      expect(viaProxy.status).toBe(200);
+      const info = JSON.parse(viaProxy.body);
+      expect(info.sessionSource).toBe('proxy-header');
+      expect(info.canDisableBearer).toBe(true);
+    } finally {
+      await server.stopWebchatServer(wc);
+    }
+  });
+
   it('disables the bearer token when a trusted-proxy method is live and used', async () => {
     const TOKEN = 'a'.repeat(32);
     const server = await loadServerWithEnv({

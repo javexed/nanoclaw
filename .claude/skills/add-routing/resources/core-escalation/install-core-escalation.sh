@@ -35,16 +35,28 @@ for PATCH in "$HERE"/patches/*.patch; do
   name="${PATCH##*/}"
   if git apply --reverse --check "$PATCH" 2>/dev/null; then
     echo "  = $name: already applied (skip)"
-  elif git apply --3way "$PATCH" 2>/dev/null; then
+    continue
+  fi
+  # Snapshot the touched files FIRST: on conflict we restore the working tree
+  # as it was, never `git checkout HEAD` — the working tree is routinely ahead
+  # of HEAD (synced from the channel branch), and reverting to HEAD silently
+  # destroys those newer files. (This exact failure happened twice.)
+  SNAP=$(mktemp -d)
+  TOUCHED=$(git apply --numstat "$PATCH" | cut -f3)
+  for f in $TOUCHED; do
+    [ -f "$f" ] && mkdir -p "$SNAP/$(dirname "$f")" && cp "$f" "$SNAP/$f"
+  done
+  if git apply --3way "$PATCH" 2>/dev/null || git apply "$PATCH" 2>/dev/null; then
     echo "  → $name: applied"
   else
-    # 3-way could not reconcile — restore the touched files and flag.
-    for f in $(git apply --numstat "$PATCH" | cut -f3); do
-      git checkout HEAD -- "$f" 2>/dev/null || true
+    for f in $TOUCHED; do
+      if [ -f "$SNAP/$f" ]; then cp "$SNAP/$f" "$f"; fi
+      git restore --staged "$f" 2>/dev/null || true
     done
     CONFLICTS+=("$name")
     echo "  !! $name: conflicts with your checkout — left unchanged" >&2
   fi
+  rm -rf "$SNAP"
 done
 
 # ── 2. New file (migration) ───────────────────────────────────────────────

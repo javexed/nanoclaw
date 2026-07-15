@@ -213,6 +213,15 @@ WEBCHAT_HOOK_ALLOWLIST=(
   src/db/container-configs.ts
   container/agent-runner/src/mcp-tools/index.ts
   container/agent-runner/src/formatter.ts
+  # Security batch + rtk + MCP-hardening hooks (2026-07 cycle):
+  container/agent-runner/src/formatter.test.ts
+  docs/SECURITY.md
+  src/backfill-container-configs.ts
+  src/container-runner.test.ts
+  src/egress-lockdown.ts
+  src/group-init.ts
+  container/agent-runner/src/mcp-tools/server.ts
+  container/agent-runner/src/mcp-tools/core.instructions.md
 )
 DECLARED=$(git show "$CHANNEL:install-webchat.sh" 2>/dev/null \
   | awk '/^HOOK_FILES=\(/{f=1;next} f&&/^\)/{f=0} f{gsub(/^[ \t]+/,"");print}')

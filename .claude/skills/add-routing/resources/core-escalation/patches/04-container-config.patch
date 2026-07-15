@@ -1,24 +1,23 @@
 diff --git a/src/container-config.ts b/src/container-config.ts
-index 285c7071..cad68046 100644
+index c45b746c..72a41d43 100644
 --- a/src/container-config.ts
 +++ b/src/container-config.ts
-@@ -67,6 +67,12 @@ export interface ContainerConfig {
-   maxMessagesPerPrompt?: number;
-   model?: string;
+@@ -70,6 +70,11 @@ export interface ContainerConfig {
    effort?: string;
+   /** Network egress mode: 'open' (default) | 'host-only' | 'none'. */
+   egress?: string;
 +  /**
 +   * Escalation provider (llm-router §16c). When set, the agent-runner re-runs
-+   * a terminally-failed turn ONCE on this provider (fresh session) — covers
-+   * the router's no_adequate_model rejection and hard failures alike.
++   * a terminally-failed turn ONCE on this provider (fresh session).
 +   */
 +  fallbackProvider?: string;
    /**
     * Deliver unwrapped agent prose to the originating room instead of dropping
     * it as scratchpad. Contributed by an installed module (webchat sets it for
-@@ -101,6 +107,7 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
-     maxMessagesPerPrompt: row.max_messages_per_prompt ?? undefined,
+@@ -115,6 +120,7 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
      model: row.model ?? undefined,
      effort: row.effort ?? undefined,
+     egress: row.egress ?? undefined,
 +    fallbackProvider: row.fallback_provider ?? undefined,
      learning: parseLearning(row.learning),
    };

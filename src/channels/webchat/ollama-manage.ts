@@ -846,6 +846,25 @@ export function addRouter(cfg: Record<string, unknown>, name: string): Record<st
   return next;
 }
 
+/**
+ * Remove ONE route from a named router (model-delete cascade). Refuses the
+ * router's default route — the default is the fallback every classification
+ * can land on; rebind it before deleting the model it points at.
+ */
+export function removeRouteFromConfig(cfg: Record<string, unknown>, routerName: string, routeName: string): void {
+  const next = toMultiRouter(cfg);
+  const routers = next.routers as Record<string, { routes?: RouteDef[]; default_route?: string }>;
+  const r = routers[routerName];
+  if (!r) throw new Error(`no router named "${routerName}"`);
+  if (r.default_route === routeName) {
+    throw new Error(`route "${routeName}" is ${routerName}'s default — rebind the default first`);
+  }
+  r.routes = (r.routes ?? []).filter((x) => x.name !== routeName);
+  cfg.routers = routers;
+  if ('routes' in cfg) delete (cfg as Record<string, unknown>).routes;
+  if ('default_route' in cfg) delete (cfg as Record<string, unknown>).default_route;
+}
+
 /** Remove a router. Refuses the last one. Returns the new cfg. */
 export function deleteRouter(cfg: Record<string, unknown>, name: string): Record<string, unknown> {
   const next = toMultiRouter(cfg);

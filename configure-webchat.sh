@@ -68,6 +68,8 @@ if [ "$mode" = "2" ]; then
       echo "  Tailscale login there becomes owner. Then turn on real HTTPS from the"
       echo "  setup wizard (or Settings → Access), which runs 'tailscale serve', and"
       echo "  retire the token."
+      echo "  Alternative — server-native TLS (no serve proxy; cert + daily"
+      echo "  auto-renew timer in one step): bash setup/webchat-tailscale-https.sh"
       echo "  ⚠  Same-machine loopback won't authenticate via tailscale; open the"
       echo "     tailnet hostname/IP, not 127.0.0.1."
       ;;

@@ -1,5 +1,5 @@
 diff --git a/src/db/migrations/index.ts b/src/db/migrations/index.ts
-index 4d501d7b..fe1b9541 100644
+index d01a1064..3f6e37a8 100644
 --- a/src/db/migrations/index.ts
 +++ b/src/db/migrations/index.ts
 @@ -19,6 +19,7 @@ import { migration021 } from './021-byok-oauth.js';
@@ -10,7 +10,7 @@ index 4d501d7b..fe1b9541 100644
  import { moduleApprovalsPendingApprovals } from './module-approvals-pending-approvals.js';
  import { moduleLearningSkillDrafts } from './module-learning-skill-drafts.js';
  import { moduleLearningConfig } from './module-learning-config.js';
-@@ -113,6 +114,7 @@ export const migrations: Migration[] = [
+@@ -115,6 +116,7 @@ export const migrations: Migration[] = [
    migration022,
    migration023,
    migration024,

@@ -7,7 +7,7 @@ import { log } from './log.js';
 import { providerProvidesAgentSurfaces } from './providers/provider-container-registry.js';
 import type { AgentGroup } from './types.js';
 
-const DEFAULT_SETTINGS_JSON =
+export const DEFAULT_SETTINGS_JSON =
   JSON.stringify(
     {
       env: {
@@ -22,6 +22,20 @@ const DEFAULT_SETTINGS_JSON =
               {
                 type: 'command',
                 command: 'bun /app/src/compact-instructions.ts',
+              },
+            ],
+          },
+        ],
+        // rtk compresses Bash tool output before it reaches the model. The
+        // binary is baked into the agent image (container/Dockerfile); a
+        // failing/absent hook command is non-blocking for the tool call.
+        PreToolUse: [
+          {
+            matcher: 'Bash',
+            hooks: [
+              {
+                type: 'command',
+                command: 'rtk hook claude',
               },
             ],
           },
@@ -124,6 +138,7 @@ export function initGroupFilesystem(
       initialized.push('settings.json');
     } else {
       ensurePreCompactHook(settingsFile, initialized);
+      ensureRtkHook(settingsFile, initialized);
     }
 
     // Skills directory — created empty here; symlinks are synced at spawn
@@ -169,6 +184,36 @@ function ensurePreCompactHook(settingsFile: string, initialized: string[]): void
 
     fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n');
     initialized.push('settings.json (added PreCompact hook)');
+  } catch {
+    // Don't break init if settings.json is malformed — it'll use whatever's there.
+  }
+}
+
+const RTK_HOOK_COMMAND = 'rtk hook claude';
+
+/**
+ * Patch an existing settings.json to add the rtk PreToolUse hook if missing.
+ * Same contract as ensurePreCompactHook: runs on every group init, preserves
+ * whatever other hooks the operator has, never breaks init on malformed JSON.
+ * Exported for the wiring test.
+ */
+export function ensureRtkHook(settingsFile: string, initialized: string[]): void {
+  try {
+    const raw = fs.readFileSync(settingsFile, 'utf-8');
+    const settings = JSON.parse(raw);
+
+    const existing = settings.hooks?.PreToolUse as unknown[] | undefined;
+    if (existing && JSON.stringify(existing).includes(RTK_HOOK_COMMAND)) return;
+
+    if (!settings.hooks) settings.hooks = {};
+    if (!settings.hooks.PreToolUse) settings.hooks.PreToolUse = [];
+    settings.hooks.PreToolUse.push({
+      matcher: 'Bash',
+      hooks: [{ type: 'command', command: RTK_HOOK_COMMAND }],
+    });
+
+    fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n');
+    initialized.push('settings.json (added rtk hook)');
   } catch {
     // Don't break init if settings.json is malformed — it'll use whatever's there.
   }

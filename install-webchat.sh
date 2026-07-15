@@ -205,6 +205,19 @@ NEW_PATHS=(
   container/agent-runner/src/providers/rate-limit.test.ts
   docs/learning-loop.md
   docs/design/learning-loop.md
+  # Backup/import (transfer bundles) + security batch (approval TTL, per-group
+  # egress, hardening/coverage tests). Migration files register via step 4a;
+  # keep them in version order (203 before 204).
+  src/modules/transfer
+  src/modules/approvals/expiry.ts
+  src/db/migrations/module-learning-room-settings.ts
+  src/db/migrations/module-container-egress.ts
+  src/container-hardening.test.ts
+  src/db/agent-delete-coverage.test.ts
+  src/group-init.test.ts
+  scripts/renew-webchat-cert.sh
+  setup/webchat-tailscale-https.sh
+  container/agent-runner/src/mcp-tools/registration.test.ts
 )
 echo "→ Copying webchat-owned files …"
 git checkout "$BR" -- "${NEW_PATHS[@]}"
@@ -275,6 +288,14 @@ HOOK_FILES=(
   src/db/container-configs.ts
   container/agent-runner/src/mcp-tools/index.ts
   container/agent-runner/src/formatter.ts
+  container/agent-runner/src/formatter.test.ts
+  docs/SECURITY.md
+  src/backfill-container-configs.ts
+  src/container-runner.test.ts
+  src/egress-lockdown.ts
+  src/group-init.ts
+  container/agent-runner/src/mcp-tools/server.ts
+  container/agent-runner/src/mcp-tools/core.instructions.md
 )
 CONFLICTS=()
 echo "→ Applying webchat core-file hooks …"
@@ -362,9 +383,15 @@ fi
 # against the user's array body, so re-installs / upgrades add only what's
 # missing. (Heredoc'd temp script to dodge bash-escape gymnastics in the
 # regex literals.)
+# Comment lines are excluded (an ordering comment may NAME a symbol — e.g.
+# "must run after moduleWebchatMcpServers creates it" — and a match there
+# would duplicate the import identifier, breaking the build), and the list
+# is deduped order-preserving as a belt-and-braces guard.
 WEBCHAT_SYMBOLS=$(git show "$BR:src/db/migrations/index.ts" \
   | sed -n '/const migrations: Migration\[\] = \[/,/\];/p' \
-  | grep -oE 'moduleWebchat[A-Za-z0-9]*')
+  | grep -vE '^\s*//' \
+  | grep -oE 'moduleWebchat[A-Za-z0-9]*' \
+  | awk '!seen[$0]++')
 if [ -z "$WEBCHAT_SYMBOLS" ]; then
   echo "install-webchat: no webchat migrations found on $BR — aborting" >&2
   exit 1

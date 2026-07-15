@@ -851,6 +851,16 @@ export const moduleWebchatOnboarding: Migration = {
     );
     if (!hasCol) {
       db.exec(`ALTER TABLE webchat_settings ADD COLUMN onboarding_complete INTEGER NOT NULL DEFAULT 0`);
+      // An install that already has agent groups finished setup long ago — an
+      // upgrade must never pop the first-run wizard at it. Default 0 (above) is
+      // only correct for a genuinely fresh install, i.e. one with no agent
+      // groups at the moment this migration first runs. The webchat_settings
+      // id=1 row is seeded by an earlier migration, so this UPDATE reliably
+      // lands on it.
+      const alreadyConfigured = (db.prepare('SELECT COUNT(*) AS n FROM agent_groups').get() as { n: number }).n > 0;
+      if (alreadyConfigured) {
+        db.exec(`UPDATE webchat_settings SET onboarding_complete = 1 WHERE id = 1`);
+      }
     }
   },
 };
