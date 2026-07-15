@@ -50,12 +50,7 @@ function killedIds() {
 
 describe('applyInstallPackages', () => {
   it('respawns the requester (with wake) and active siblings (without), skipping ended sessions', async () => {
-    await applyInstallPackages({
-      session: SESSIONS[0],
-      payload: { apt: ['admesh'] },
-      userId: 'u',
-      notify: vi.fn(),
-    } as never);
+    await applyInstallPackages({ apt: ['admesh'] }, SESSIONS[0]);
 
     expect(killedIds()).toContain('sess-req');
     expect(killedIds()).toContain('sess-sibling');
@@ -74,12 +69,7 @@ describe('applyInstallPackages', () => {
 
 describe('applyAddMcpServer', () => {
   it('also respawns active siblings so they see the new MCP server', async () => {
-    await applyAddMcpServer({
-      session: SESSIONS[0],
-      payload: { name: 'windows', command: 'x', args: [], env: {} },
-      userId: 'u',
-      notify: vi.fn(),
-    } as never);
+    await applyAddMcpServer({ name: 'windows', command: 'x', args: [], env: {} }, SESSIONS[0]);
     expect(killedIds()).toEqual(expect.arrayContaining(['sess-req', 'sess-sibling']));
     expect(killedIds()).not.toContain('sess-ended');
   });

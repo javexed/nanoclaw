@@ -32,6 +32,7 @@ const TEST_DIR = '/tmp/nanoclaw-test-cli-groups';
 import { initTestDb, closeDb, runMigrations, createAgentGroup, getDb } from '../../db/index.js';
 import { createSession } from '../../db/sessions.js';
 import { dispatch } from '../dispatch.js';
+import { ensureContainerConfig, getContainerConfig } from '../../db/container-configs.js';
 // Side-effect import: registers the `groups-*` commands (including delete).
 import './groups.js';
 
@@ -285,5 +286,45 @@ describe('groups CLI config add-mcp-server — stdio + remote transports', () =>
   it('rejects an invalid --type', async () => {
     const resp = await addMcp({ id: GID, name: 'bad2', url: 'http://x', type: 'ws' });
     expect(resp.ok).toBe(false);
+  });
+});
+
+describe('groups config add-mount / remove-mount (host-only)', () => {
+  beforeEach(() => {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    runMigrations(initTestDb());
+  });
+  afterEach(() => {
+    closeDb();
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+  });
+
+  it('adds a mount idempotently and removes it (host caller)', async () => {
+    const GID = 'ag-mount';
+    createAgentGroup({ id: GID, name: 'm', folder: 'm', agent_provider: null, created_at: now() });
+    ensureContainerConfig(GID);
+    const args = { id: GID, host: '/data/.gmail-mcp', container: '/home/node/.gmail-mcp', ro: true };
+
+    const add = await dispatch({ id: 'r1', command: 'groups-config-add-mount', args }, { caller: 'host' });
+    expect(add.ok).toBe(true);
+    expect(JSON.parse(getContainerConfig(GID)!.additional_mounts)).toEqual([
+      { hostPath: '/data/.gmail-mcp', containerPath: '/home/node/.gmail-mcp', readonly: true },
+    ]);
+
+    // idempotent: a second add does not duplicate
+    await dispatch({ id: 'r2', command: 'groups-config-add-mount', args }, { caller: 'host' });
+    expect(JSON.parse(getContainerConfig(GID)!.additional_mounts)).toHaveLength(1);
+
+    const rm = await dispatch(
+      {
+        id: 'r3',
+        command: 'groups-config-remove-mount',
+        args: { id: GID, host: '/data/.gmail-mcp', container: '/home/node/.gmail-mcp' },
+      },
+      { caller: 'host' },
+    );
+    expect(rm.ok).toBe(true);
+    expect(JSON.parse(getContainerConfig(GID)!.additional_mounts)).toEqual([]);
   });
 });

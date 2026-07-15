@@ -1,8 +1,8 @@
 diff --git a/container/agent-runner/src/poll-loop.ts b/container/agent-runner/src/poll-loop.ts
-index 30ac3061..450c3c4d 100644
+index 219470d9..61cb3ebe 100644
 --- a/container/agent-runner/src/poll-loop.ts
 +++ b/container/agent-runner/src/poll-loop.ts
-@@ -96,8 +96,68 @@ export interface PollLoopConfig {
+@@ -102,6 +102,67 @@ export interface PollLoopConfig {
     * Set for ollama-backed agents (see RunnerConfig.lenientOutput).
     */
    lenientOutput?: boolean;
@@ -14,8 +14,8 @@ index 30ac3061..450c3c4d 100644
 +   */
 +  fallbackProvider?: AgentProvider;
 +  fallbackProviderName?: string;
- }
- 
++}
++
 +/**
 + * Re-run the current batch on the fallback provider (fresh session; one-shot
 + * stream guard so a hub-style fallback can never capture the loop).
@@ -67,11 +67,10 @@ index 30ac3061..450c3c4d 100644
 +    log(`Fallback provider ${fallbackName} failed too: ${err instanceof Error ? err.message : String(err)}`);
 +    return null;
 +  }
-+}
+ }
  
- /**
-  * Main poll loop. Runs indefinitely until the process is killed.
-@@ -372,6 +432,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+ 
+@@ -378,6 +439,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
          config.lenientOutput ?? false,
          config.signal,
          maybeAutoReview,
@@ -79,16 +78,12 @@ index 30ac3061..450c3c4d 100644
        );
  
        // Shutdown, not turn failure: the stop signal aborted the query
-@@ -406,6 +467,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+@@ -412,9 +474,21 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
            config.lenientOutput ?? false,
            config.signal,
            maybeAutoReview,
 +          !!config.fallbackProvider,
          );
-       }
- 
-@@ -414,6 +476,17 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
-         setContinuation(config.providerName, continuation);
        }
  
 +      // Escalation (§16c): the primary failed terminally — one shot on the
@@ -102,10 +97,10 @@ index 30ac3061..450c3c4d 100644
 +        }
 +      }
 +
-       // (A) Non-quota terminal error (model not found, backend unreachable, an
-       // error result, or the SDK dying mid-stream): surface it to the user
-       // instead of dropping the turn. The quota case writes its own message
-@@ -456,8 +529,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+       if (result.continuation && result.continuation !== continuation) {
+         continuation = result.continuation;
+         setContinuation(config.providerName, continuation);
+@@ -462,8 +536,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
          clearContinuation(config.providerName);
        }
  
@@ -118,10 +113,10 @@ index 30ac3061..450c3c4d 100644
 +        // Write error response so the user knows something went wrong
 +        writeUserText(routing, `Error: ${redactSecrets(errMsg)}`);
 +      }
-     } finally {
-       clearCurrentInReplyTo();
-     }
-@@ -579,6 +657,12 @@ export async function processQuery(
+ 
+       // The batch is still acked completed below (no redelivery). Without
+       // this line the only log trace of the errored turn is "Query error"
+@@ -590,6 +669,12 @@ export async function processQuery(
     * never stall behind it.
     */
    onTurnComplete?: (toolCount: number) => void,
@@ -134,36 +129,26 @@ index 30ac3061..450c3c4d 100644
  ): Promise<QueryResult> {
    let queryContinuation: string | undefined;
    let done = false;
-@@ -810,12 +894,8 @@ export async function processQuery(
-         if (onTurnComplete) onTurnComplete(getTurnToolCount());
-         if (event.text) {
-           const { sent, hasUnwrapped } = dispatchResultText(event.text, routing, originDests, lenient);
--          if (sent === 0 && event.isError === true) {
--            // Non-retryable error turn (e.g. a 403 billing_error) with no
--            // <message> envelope: deliver the notice instead of dropping it as
--            // scratchpad, and skip the re-wrap nudge — it would just re-hammer
--            // the failing gateway turn after turn.
--            deliverErrorResult(event.text, routing);
+@@ -830,7 +915,21 @@ export async function processQuery(
+           // while explicit append-log calls remain optional additive notes.
+           // Errors included: a failed run's text belongs in its log, not chat.
+           if (routing.taskRun && !taskBlockNudged) autoAppendTaskLog(event.text);
+-          if (sent === 0 && event.isError === true && !routing.taskRun) {
 +          const errorShaped = event.isError === true || /^API Error: \d{3}\b/.test(event.text.trim());
-+          if (sent === 0 && errorShaped) {
-             notifyExchangeComplete(onExchangeComplete, {
-               prompt: archivePrompts[0] ?? initialPrompt,
-               result: event.text,
-@@ -823,6 +903,17 @@ export async function processQuery(
-               status: 'error',
-             });
-             archivePrompts.shift();
-+            if (escalateErrorResults) {
-+              // Fallback armed: hand the error up as a terminalError and END
-+              // the query — a hub-style primary keeps its stream open after a
-+              // result, and processQuery only returns when the stream closes.
-+              terminalError = { message: event.text };
-+              query.end();
-+            } else {
-+              // Non-retryable error turn with no <message> envelope: deliver
-+              // the notice instead of dropping it as scratchpad.
-+              deliverErrorResult(event.text, routing);
-+            }
-           } else {
-             const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
-             notifyExchangeComplete(onExchangeComplete, {
++          if (sent === 0 && errorShaped && escalateErrorResults && !routing.taskRun) {
++            // Fallback armed: hand the error up as a terminalError and END
++            // the query — a hub-style primary keeps its stream open after a
++            // result, and processQuery only returns when the stream closes.
++            notifyExchangeComplete(onExchangeComplete, {
++              prompt: archivePrompts[0] ?? initialPrompt,
++              result: event.text,
++              continuation: queryContinuation ?? initialContinuation,
++              status: 'error',
++            });
++            archivePrompts.shift();
++            terminalError = { message: event.text };
++            query.end();
++          } else if (sent === 0 && event.isError === true && !routing.taskRun) {
+             // Non-retryable error turn (e.g. a 403 billing_error) with no
+             // <message> envelope: deliver the notice instead of dropping it as
+             // scratchpad, and skip the re-wrap nudge — it would just re-hammer

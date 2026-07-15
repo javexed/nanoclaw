@@ -15,7 +15,6 @@ import type { McpToolDefinition } from './types.js';
 // Same list as index.ts TOOL_MODULES (index.ts itself would start the stdio
 // server on import, so the modules are loaded directly here).
 await import('./core.js');
-await import('./scheduling.js');
 await import('./interactive.js');
 await import('./agents.js');
 await import('./self-mod.js');
@@ -35,7 +34,7 @@ describe('MCP tool registry', () => {
 
   it('the core tools agents are promised are present', () => {
     const names = new Set(registeredTools().map((t) => t.tool.name));
-    for (const expected of ['send_message', 'send_file', 'add_reaction', 'schedule_task', 'ask_user_question']) {
+    for (const expected of ['send_message', 'send_file', 'add_reaction', 'ask_user_question']) {
       expect(names.has(expected), `missing tool: ${expected}`).toBe(true);
     }
   });

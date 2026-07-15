@@ -233,7 +233,7 @@ Parse the diff output for lines that contain `[BREAKING]` anywhere in the line. 
 ```
 
 If no `[BREAKING]` lines are found:
-- Skip this step silently. Proceed to Step 7 (skill updates check).
+- Skip this step silently. Proceed to Step 7.
 
 If one or more `[BREAKING]` lines are found:
 - Display a warning header to the user: "This update includes breaking changes that may require action:"
@@ -244,7 +244,7 @@ If one or more `[BREAKING]` lines are found:
   - "Skip — I'll handle these manually"
 - Set `multiSelect: true` so the user can pick multiple skills if there are several breaking changes.
 - For each skill the user selects, invoke it using the Skill tool.
-- After all selected skills complete (or if user chose Skip), proceed to Step 7 (skill updates check).
+- After all selected skills complete (or if user chose Skip), proceed to Step 7.
 
 # Step 7: Skill updates (part of updating NanoClaw)
 
@@ -280,6 +280,34 @@ Keep it to these two options — the per-skill selection lives inside
   touches container code, `/update-skills` rebuilds the agent image itself — see
   its Step 4 — so nothing container-related is owed back here.)
 - On "Skip": note that `/update-skills` can be run anytime, then proceed.
+
+## Known behavior changes when channel adapters update
+
+Channel adapters now declare per-channel wiring defaults (engage mode, threading,
+sender policy). Updating trunk alone changes nothing for existing rows, but once
+`/update-skills` pulls current adapter copies, two deliberate behavior changes
+land. If the user's install has Slack, Discord, or WhatsApp, tell them:
+
+1. **Slack/Discord DM replies move top-level.** Both adapters now declare
+   `threads: false` for DMs, so DM replies stop chasing per-message sub-threads
+   and land in the main DM view, matching the DM session (which was already
+   flat). Group/channel threading is unchanged. To keep the old in-thread DM
+   behavior for a specific wiring, override it per wiring:
+   `ncl wirings update <wiring-id> --threads true`.
+2. **Shared-identity channels stop raising stranger approval cards.** On
+   channels where the linked account is the operator's personal identity, the
+   mechanics differ by channel: WhatsApp personal-number mode suppresses the
+   mention signal entirely (no auto-created messaging groups, no cards);
+   iMessage and WeChat still emit DM mention signals — stranger DMs still
+   auto-create `messaging_groups` rows — but their declared `strict` policy
+   makes those rows drop unknown senders silently instead of raising
+   channel-registration cards to the admin.
+
+**WhatsApp installs on a shared/personal number should re-run `/add-whatsapp`**
+after the skill update: it now asks the dedicated-vs-personal question
+explicitly (writing `ASSISTANT_HAS_OWN_NUMBER` to `.env`), audits for legacy
+mis-wired group rows from spam-era approval cards, and shows how to clear
+stale pending approvals.
 
 Proceed to Step 7.9.
 
