@@ -8,7 +8,7 @@ The agent-runner has two layers:
 
 1. **Agent-runner core** — owns the poll loop, message formatting, DB reads/writes, MCP tool implementations, routing, status management, media handling. This is NanoClaw-specific and shared across all providers.
 
-2. **Agent provider** — owns the SDK interaction. Takes formatted prompts, pushes them to the SDK, yields events back. Trunk ships the `claude` provider; additional providers (OpenCode, Codex, etc.) are installed by `/add-<provider>` skills from the `providers` branch.
+2. **Agent provider** — owns the SDK interaction. Takes formatted prompts, pushes them to the SDK, yields events back. Trunk ships the `claude` provider; additional providers (Codex, Ollama, etc.) are installed by `/add-<provider>` skills from the `providers` branch.
 
 The boundary: the agent-runner decides **what** to send and **what to do** with results. The provider decides **how** to talk to the SDK.
 
@@ -118,7 +118,7 @@ type ProviderEvent =
 
 ## Provider Implementations
 
-Only the `claude` provider ships in trunk. The Codex and OpenCode sections below document the provider interface for reference and for skills that install additional providers — they are not baked into the core image.
+Only the `claude` provider ships in trunk. The Codex section below documents the provider interface for reference and for skills that install additional providers — they are not baked into the core image.
 
 ### Claude Provider
 
@@ -288,74 +288,7 @@ class CodexProvider implements AgentProvider {
 - `sandboxMode`, `approvalPolicy`, `networkAccessEnabled` from env vars
 - Conversation archiving (Codex doesn't have PreCompact)
 
-### OpenCode Provider
-
-Wraps `@opencode-ai/sdk`.
-
-```typescript
-class OpenCodeProvider implements AgentProvider {
-  query(input: QueryInput): AgentQuery {
-    // OpenCode runs a local server — create it once, reuse across queries
-    const { client, server } = await createOpencode({ config: this.buildConfig(input) });
-    const { stream } = await client.event.subscribe();
-
-    let aborted = false;
-    let pendingFollowUp: string | null = null;
-
-    return {
-      push: (msg) => {
-        pendingFollowUp = msg;
-        server.close();  // interrupt current query
-      },
-      end: () => { /* no-op */ },
-      abort: () => { aborted = true; server.close(); },
-      events: this.run(client, server, stream, input, () => pendingFollowUp),
-    };
-  }
-
-  private async *run(client, server, stream, input, getPendingFollowUp): AsyncIterable<ProviderEvent> {
-    const session = await client.session.create();
-    yield { type: 'init', continuation: session.data.id };
-
-    await client.session.promptAsync({
-      path: { id: session.data.id },
-      body: { parts: [{ type: 'text', text: input.prompt }] },
-    });
-
-    for await (const event of stream) {
-      if (event.type === 'session.idle') {
-        // Collect result text from accumulated message parts
-        const resultText = this.extractResult(event);
-        yield { type: 'result', text: resultText };
-
-        const followUp = getPendingFollowUp();
-        if (followUp) {
-          await client.session.promptAsync({
-            path: { id: session.data.id },
-            body: { parts: [{ type: 'text', text: followUp }] },
-          });
-          continue;
-        }
-
-        return;
-      }
-
-      if (event.type === 'session.error') {
-        yield { type: 'error', message: event.properties?.error?.data?.message, retryable: false };
-        return;
-      }
-    }
-  }
-}
-```
-
-**OpenCode-specific behavior inside the provider:**
-- Local gRPC/HTTP server lifecycle (`server.close()`)
-- SSE event stream for output
-- Provider/model selection via config (`OPENCODE_PROVIDER`, `OPENCODE_MODEL`)
-- MCP config format translation (`type: 'local'`, `command: [cmd, ...args]`, `environment`)
-- System prompt injected via `<system>` prefix in prompt text
-- No resume support (sessions are always new or reused by ID)
+> **Note:** OpenCode was previously documented here as an additional provider. It has been removed. OpenAI-compatible and cloud backends (OpenRouter, OpenAI, Google, DeepSeek, LM Studio, vLLM, llama.cpp, …) no longer run through a separate harness — they run on the default `claude` provider, consumed via LiteLLM's Anthropic-spec `/v1/messages` surface (install `/add-litellm`). Such models point `ANTHROPIC_BASE_URL` at the LiteLLM endpoint and the Claude SDK talks to it natively.
 
 ## Agent-Runner Core
 
@@ -391,7 +324,7 @@ Everything below is handled by the agent-runner, not the provider.
 └─────────────────────────────────────────┘
 ```
 
-**Concurrent polling during active query:** While the provider is running a query, the agent-runner continues polling messages_in on a short interval (~500ms). New pending messages are formatted and pushed into the active query via `provider.push()`. This lets follow-up messages arrive while the agent is processing — Claude handles this natively, Codex/OpenCode handle it via abort+restart internally.
+**Concurrent polling during active query:** While the provider is running a query, the agent-runner continues polling messages_in on a short interval (~500ms). New pending messages are formatted and pushed into the active query via `provider.push()`. This lets follow-up messages arrive while the agent is processing — Claude handles this natively, Codex handles it via abort+restart internally.
 
 **Idle behavior:** When no messages are pending and no query is active, the agent-runner sleeps briefly (1s) and re-polls. The container stays warm until the host kills it (idle timeout).
 
@@ -692,8 +625,8 @@ The agent-runner inspects attachments in chat/chat-sdk messages and handles them
 
 **Provider-native content blocks:**
 
-| Type | Claude | Codex / OpenCode |
-|------|--------|------------------|
+| Type | Claude | Codex |
+|------|--------|-------|
 | Images (JPEG, PNG, GIF, WebP) | Native image content block | Save to disk |
 | PDFs | Native document content block | Save to disk |
 | Audio | Native audio content block | Save to disk |
@@ -714,7 +647,7 @@ For channels where direct download isn't possible (e.g., WhatsApp buffered strea
 
 **Content block construction (Claude):** The agent-runner builds multi-part `MessageParam` content: `[{ type: 'image', source: { type: 'base64', media_type, data } }, { type: 'text', text: '...' }]`. The prompt passed to the provider is not a plain string in this case — the `QueryInput.prompt` field needs to support structured content for Claude. The provider's `query()` method handles the format-specific construction.
 
-**Content block construction (Codex/OpenCode):** Everything is text. File references are inlined in the prompt string. The provider receives a plain string prompt.
+**Content block construction (Codex):** Everything is text. File references are inlined in the prompt string. The provider receives a plain string prompt.
 
 #### Outbound (agent → messages_out)
 

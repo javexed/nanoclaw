@@ -180,4 +180,4 @@ In-tree exemplars for the code archetypes. (Two carry known smells, kept deliber
 - `add-slack`: Chat SDK channel registration; the template for the whole channel family.
 - `add-deltachat`: native channel registration.
 - `add-atomic-chat-tool`: MCP-tool wiring across both runtimes (container registration and host env-helper call).
-- `add-opencode` / `add-codex`: the provider multi-point archetype, with two barrels, Dockerfile pins, and per-tree registration tests.
+- `add-codex`: the provider multi-point archetype, with two barrels, Dockerfile pins, and per-tree registration tests.

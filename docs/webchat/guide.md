@@ -102,7 +102,7 @@ register model endpoints and assign them per agent:
 - **Ollama host management** — list hosts, stream model **pulls** with a progress
   bar, and refresh the router roster.
 
-*(`openai-compatible` models require the `/add-opencode` provider.)*
+*(`openai-compatible` models require `/add-litellm`, which fronts them on the default Claude harness.)*
 
 ---
 

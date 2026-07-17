@@ -1,0 +1,26 @@
+# Local-build fallback for CPUs the official ghcr.io/ggml-org/whisper.cpp
+# images crash on (they're compiled on AVX-512 runners with no runtime
+# dispatch — SIGILL on e.g. Coffee Lake). Building here uses -march=native on
+# THE USER'S OWN CPU: maximally compatible and fastest. Source is pinned by
+# commit (WHISPER_COMMIT build-arg, same commit as the image tag the installer
+# tried first), so provenance is as strong as the prebuilt path.
+#
+# Layout mirrors the official image (binary under /app/build/bin, bash -c
+# entrypoint) so the installer's `docker run` line works with either.
+FROM ubuntu:24.04 AS build
+RUN apt-get update && \
+  apt-get install -y --no-install-recommends build-essential cmake git ca-certificates && \
+  rm -rf /var/lib/apt/lists/*
+ARG WHISPER_COMMIT
+RUN git clone https://github.com/ggml-org/whisper.cpp /src && \
+  cd /src && git checkout "$WHISPER_COMMIT"
+RUN cmake -S /src -B /src/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF && \
+  cmake --build /src/build --target whisper-server -j"$(nproc)"
+
+FROM ubuntu:24.04
+RUN apt-get update && \
+  apt-get install -y --no-install-recommends libgomp1 && \
+  rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=build /src/build/bin/whisper-server /app/build/bin/whisper-server
+ENTRYPOINT ["bash", "-c"]

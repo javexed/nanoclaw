@@ -64,7 +64,7 @@ If no channel or provider skills are installed:
 - Stop here.
 
 If installed channel/provider skills are found:
-- Show the list (e.g. `slack`, `discord`, `opencode`).
+- Show the list (e.g. `slack`, `discord`, `codex`).
 - Use AskUserQuestion with `multiSelect: true` to let the user pick which skills to re-apply.
   - One option per installed channel/provider (e.g. "Re-apply Slack (/add-slack)").
   - Add an option: "Skip — don't update any skills now".

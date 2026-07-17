@@ -127,6 +127,152 @@ async function checkAuth() {
   return false;
 }
 
+// ── Text-to-speech ─────────────────────────────────────────────────────────
+// Agent replies get a "read aloud" control. Two backends, one affordance:
+// server-side synthesis (Kokoro / any OpenAI-compatible endpoint) when the host
+// has WEBCHAT_TTS_ENABLED, else the browser's built-in Web Speech API (device
+// voices, no backend). See src/channels/webchat/tts.ts and /add-webchat-tts.
+let ttsServerEnabled = false; // set by loadTtsConfig from /api/tts/config
+let ttsReadAloudEnabled = false; // workspace-level (owner-set) — gates the speaker
+let ttsCurrentAudio = null; // the Audio element currently playing (server mode)
+let ttsCurrentBtn = null; // the button whose message is currently playing
+
+async function loadTtsConfig() {
+  try {
+    const r = await authFetch('/api/tts/config');
+    if (r.ok) {
+      const cfg = await r.json();
+      ttsServerEnabled = cfg.enabled === true;
+      ttsReadAloudEnabled = cfg.readAloud === true;
+    }
+  } catch {
+    ttsServerEnabled = false;
+  }
+}
+
+// True when we can speak at all — server TTS on, or the browser has Web Speech.
+function ttsAvailable() {
+  return ttsServerEnabled || (typeof window !== 'undefined' && 'speechSynthesis' in window);
+}
+
+// Markdown → speakable plain text. Strips syntax so the voice reads prose, not
+// backticks and brackets; fenced code collapses to a short placeholder rather
+// than being read line by line.
+function ttsPlainText(md) {
+  return String(md || '')
+    .replace(/```[\s\S]*?```/g, ' (code block) ')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/^[>#\s]*/gm, '')
+    .replace(/[*_~]/g, '')
+    .replace(/\n{2,}/g, '. ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function resetTtsButton(btn) {
+  if (!btn) return;
+  btn.classList.remove('tts-playing', 'tts-loading');
+  btn.innerHTML = lucide('volume-2');
+  btn.setAttribute('aria-label', 'Read aloud');
+  btn.title = 'Read aloud';
+}
+
+function markTtsPlaying(btn) {
+  btn.classList.remove('tts-loading');
+  btn.classList.add('tts-playing');
+  btn.innerHTML = lucide('square');
+  btn.setAttribute('aria-label', 'Stop');
+  btn.title = 'Stop';
+}
+
+function stopTts() {
+  if (ttsCurrentAudio) {
+    ttsCurrentAudio.pause();
+    if (ttsCurrentAudio.src) URL.revokeObjectURL(ttsCurrentAudio.src);
+    ttsCurrentAudio = null;
+  }
+  if (typeof window !== 'undefined' && 'speechSynthesis' in window) window.speechSynthesis.cancel();
+  resetTtsButton(ttsCurrentBtn);
+  ttsCurrentBtn = null;
+}
+
+// Build the read-aloud button for an agent bubble. Returns null when no TTS
+// path exists (so the button is simply omitted). `getText` is called at click
+// time so the freshest bubble content is spoken.
+function buildTtsButton(getText) {
+  // Workspace-gated: the OWNER turns Read aloud on for everyone in
+  // Settings → Features (per-device switches confused shared rooms).
+  // TODO(a11y): an auto-read mode (speak replies as they arrive, no tap)
+  // would help low-vision / hands-free use — likely per-room when it comes.
+  if (!ttsReadAloudEnabled || !ttsAvailable()) return null;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'tts-btn';
+  resetTtsButton(btn);
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (ttsCurrentBtn === btn) {
+      stopTts(); // clicking the playing message stops it
+      return;
+    }
+    stopTts(); // stop any other in-flight playback first
+    const text = (getText() || '').trim();
+    if (text) void speak(text, btn);
+  });
+  return btn;
+}
+
+async function speak(text, btn) {
+  ttsCurrentBtn = btn;
+  if (ttsServerEnabled) {
+    btn.classList.add('tts-loading');
+    btn.setAttribute('aria-label', 'Synthesizing…');
+    try {
+      const r = await authFetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      if (!r.ok) throw new Error(`tts ${r.status}`);
+      const blob = await r.blob();
+      if (ttsCurrentBtn !== btn) return; // a later click superseded us mid-fetch
+      const audio = new Audio(URL.createObjectURL(blob));
+      ttsCurrentAudio = audio;
+      audio.addEventListener('ended', () => {
+        if (ttsCurrentBtn === btn) stopTts();
+      });
+      audio.addEventListener('error', () => {
+        if (ttsCurrentBtn === btn) stopTts();
+      });
+      markTtsPlaying(btn);
+      await audio.play();
+      return;
+    } catch (err) {
+      console.error('Server TTS failed; falling back to Web Speech', err);
+      // fall through to the Web Speech path below — unless a later click
+      // superseded this one mid-fetch, in which case stale audio must not
+      // start speaking over the newer playback.
+      if (ttsCurrentBtn !== btn) return;
+    }
+  }
+  if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.addEventListener('end', () => {
+      if (ttsCurrentBtn === btn) stopTts();
+    });
+    utter.addEventListener('error', () => {
+      if (ttsCurrentBtn === btn) stopTts();
+    });
+    markTtsPlaying(btn);
+    window.speechSynthesis.speak(utter);
+  } else {
+    stopTts();
+    showToast('Audio playback failed', { kind: 'error' });
+  }
+}
+
 // Shared post-auth entry: reveal the app, open the socket, and run first-run
 // hooks. Called from BOTH initApp (reload with a stored token) and the login
 // form (fresh token entry) — the wizard must auto-open in both, not only on a
@@ -150,6 +296,11 @@ function enterAuthedApp() {
   void maybeAutoOpenWizard();
   // Nudge to retire the shared bearer token once a stronger identity is live.
   void maybeSuggestBearerRetire();
+  // Voice dictation: reveal the mic when the server has an STT backend.
+  void initSttFeature();
+  // Probe whether server-backed TTS is available so agent bubbles can offer a
+  // play control (falls back to the browser's Web Speech voices when off).
+  void loadTtsConfig();
 }
 
 // ── Suggest retiring the bearer token once a stronger identity is live ───────
@@ -351,6 +502,7 @@ async function applyLoginHint() {
     return;
   }
   const subtitle = $('.login-subtitle');
+  subtitle.hidden = false; // default visible; a branch below may hide it
   const m = info.methods || {};
   rememberServerAuthHint(m);
 
@@ -364,16 +516,12 @@ async function applyLoginHint() {
   if (m.tailscale && info.tailscaleHealthy) {
     // The common case: tailscale is set up on the server; the user just
     // needs Tailscale running on the device they're reading this on.
-    subtitle.innerHTML =
-      'Tailscale should sign you in automatically. ' +
-      'Make sure Tailscale is installed and running on this device (phone, laptop, etc.) and connected to the right tailnet, then refresh this page.' +
-      (m.bearer ? '<br><br>Or enter a bearer token below.' : '');
+    subtitle.textContent =
+      'Tailscale should sign you in automatically — make sure it’s running on this device, then refresh.';
   } else if (m.tailscale && !info.tailscaleHealthy) {
-    // The rare case: server-side Tailscale is actually down.
-    subtitle.innerHTML =
-      "Tailscale sign-in isn't working on this server right now. " +
-      'Whoever set this up will need to take a look.' +
-      (m.bearer ? '<br><br>If you have an access token, you can use it below.' : '');
+    // The rare case: server-side Tailscale is actually down — no prose, the token
+    // box speaks for itself.
+    subtitle.hidden = true;
   } else if (m.proxy && !m.bearer) {
     subtitle.innerHTML =
       "Couldn't sign you in — your reverse proxy didn't pass an identity through. " +
@@ -420,11 +568,16 @@ function esc(s) {
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────
-const DEFAULTS = { theme: 'dark', font: 'medium', sendKey: 'ctrl-enter', notifications: true };
+const DEFAULTS = { theme: 'dark', font: 'medium', sendKey: 'enter', notifications: true,
+};
 
 function loadSettings() {
   try {
-    return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('nanoclaw-settings') || '{}') };
+    const raw = JSON.parse(localStorage.getItem('nanoclaw-settings') || '{}');
+    delete raw.readAloud;
+    delete raw.readAloudRooms; // short-lived per-room experiment
+    delete raw.readAloudDefault; // moved to the workspace (owner-set) setting
+    return { ...DEFAULTS, ...raw };
   } catch {
     return { ...DEFAULTS };
   }
@@ -435,6 +588,7 @@ function saveSettings(settings) {
 }
 
 let settings = loadSettings();
+
 
 function applySettings() {
   document.documentElement.setAttribute('data-theme', settings.theme);
@@ -462,6 +616,7 @@ function renderSettingsModal() {
   });
   // Notifications
   $('#notif-toggle').checked = settings.notifications;
+
 }
 
 // ── Workspace credentials policy (Settings → User credentials, owner-only) ──
@@ -621,24 +776,30 @@ async function renderAccessSettings() {
   clearTimeout(bearerConfirmTimer);
   btn.dataset.confirming = '';
 
+  // Install-row idiom (like Auto routing): state lives in the badge, the
+  // explanation in its tooltip — no standing prose.
+  const badge = $('#access-bearer-badge');
+  const setBadge = (text, title) => {
+    badge.hidden = false;
+    badge.textContent = text;
+    badge.title = title;
+  };
   if (!info.bearerConfigured) {
     btn.hidden = true;
-    hint.textContent = 'No bearer token is configured — access is controlled by your other auth method.';
+    setBadge('Not set', 'No bearer token is configured — access is controlled by your other auth method.');
   } else if (info.bearerActive && info.canDisableBearer) {
     btn.hidden = false;
     btn.dataset.want = 'disable';
     btn.textContent = 'Disable';
-    hint.textContent =
-      'You also have Tailscale or SSO, so the shared bearer token is no longer needed. Disabling it is recommended.';
+    setBadge('Active', 'You also have Tailscale or SSO, so the shared bearer token is no longer needed.');
   } else if (info.bearerActive) {
     btn.hidden = true;
-    hint.textContent =
-      'Required for access. Set up Tailscale or an SSO / trusted-proxy method to retire this shared token.';
+    setBadge('Required', 'Required for access. Set up Tailscale or SSO to retire this shared token.');
   } else {
     btn.hidden = false;
     btn.dataset.want = 'enable';
     btn.textContent = 'Re-enable';
-    hint.textContent = 'Disabled — access is via Tailscale or SSO. The token in .env is ignored until re-enabled.';
+    setBadge('Disabled', 'Access is via Tailscale or SSO. The token in .env is ignored until re-enabled.');
   }
 
   renderHttpsSettings();
@@ -673,19 +834,20 @@ async function renderHttpsSettings() {
     return;
   }
   row.hidden = false;
-  hint.hidden = false;
+  const badge = $('#access-https-badge');
+  hint.hidden = true; // prose only for errors (written by enableTailscaleHttps)
   if (state.active) {
     btn.hidden = true;
-    hint.innerHTML = state.url
-      ? `HTTPS is on — reach this at <a href="${esc(state.url)}" target="_blank" rel="noopener">${esc(state.url)}</a>.`
-      : 'HTTPS is on via Tailscale.';
+    badge.hidden = false;
+    // Both flavors (serve / native cert) are tailnet-scoped — the tooltip
+    // carries the URL + scope instead of standing prose.
+    badge.title = `${state.url || 'HTTPS via Tailscale'} — only reachable over your tailnet.`;
   } else {
+    badge.hidden = true;
     btn.hidden = false;
     btn.disabled = false;
-    btn.textContent = 'Enable HTTPS';
-    hint.textContent = state.url
-      ? `Serve this over Tailscale at ${state.url} with a real certificate — enables PWA install, push, and voice.`
-      : 'Front webchat with a real Tailscale certificate — enables PWA install, push, and voice.';
+    btn.textContent = 'Enable';
+    btn.title = 'Serve over Tailscale with a real certificate — enables PWA install, push, and voice.';
   }
 }
 
@@ -745,7 +907,10 @@ async function toggleBearerToken(wantActive) {
     const data = await r.json().catch(() => ({}));
     if (!r.ok) {
       showToast(data.error || 'Could not change the bearer setting', { kind: 'error', timeout: 8000 });
-      if (data.error) hint.textContent = data.error;
+      if (data.error) {
+        hint.hidden = false;
+        hint.textContent = data.error;
+      }
     } else {
       showToast(wantActive ? 'Bearer token re-enabled' : 'Bearer token disabled — access is via Tailscale/SSO', {
         kind: 'success',
@@ -759,76 +924,6 @@ async function toggleBearerToken(wantActive) {
   }
 }
 
-// ── Features: MCP + skills marketplace toggle ────────────────────────────────
-// Owner/global-admin only (GET 403s the edit for others → section hidden). On by
-// default; disabling hides the MCP + Skills tabs (server also 403s the endpoints).
-let featuresWired = false;
-let featuresConfirmTimer = null;
-async function renderFeaturesSettings() {
-  const section = $('#settings-features');
-  if (!section) return;
-  let info = null;
-  try {
-    const r = await authFetch('/api/webchat/features');
-    if (r.ok) info = await r.json();
-  } catch {
-    info = null;
-  }
-  section.hidden = !(info && info.canEdit);
-  if (section.hidden) return;
-  const btn = $('#features-marketplace-btn');
-  const hint = $('#features-marketplace-hint');
-  const on = info.marketplaceEnabled !== false;
-  if (!featuresWired) {
-    featuresWired = true;
-    btn.addEventListener('click', () => toggleMarketplace(btn.dataset.on !== 'true'));
-  }
-  clearTimeout(featuresConfirmTimer);
-  btn.dataset.confirming = '';
-  btn.dataset.on = String(on);
-  btn.textContent = on ? 'Disable' : 'Enable';
-  hint.textContent = on
-    ? 'On (recommended). Admins can wire MCP servers and import skills from the marketplace. Turn off for a locked-down deployment.'
-    : 'Disabled — the MCP and Skills tabs are hidden and their endpoints refuse requests. Re-enable to restore them.';
-}
-
-async function toggleMarketplace(enable) {
-  const btn = $('#features-marketplace-btn');
-  // Two-step confirm when disabling (hides features workspace-wide).
-  if (!enable && btn.dataset.confirming !== '1') {
-    btn.dataset.confirming = '1';
-    const restore = btn.textContent;
-    btn.textContent = 'Click again to disable';
-    featuresConfirmTimer = setTimeout(() => {
-      btn.dataset.confirming = '';
-      btn.textContent = restore;
-    }, 4000);
-    return;
-  }
-  clearTimeout(featuresConfirmTimer);
-  btn.dataset.confirming = '';
-  btn.disabled = true;
-  try {
-    const r = await authFetch('/api/webchat/features', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
-      body: JSON.stringify({ marketplaceEnabled: enable }),
-    });
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) showToast(data.error || 'Could not change the setting', { kind: 'error' });
-    else
-      showToast(enable ? 'MCP & skills marketplace enabled' : 'MCP & skills marketplace disabled', {
-        kind: 'success',
-      });
-  } catch {
-    showToast('Connection failed', { kind: 'error' });
-  } finally {
-    btn.disabled = false;
-    marketplaceEnabled = enable; // reflect nav immediately, no reload
-    applyMarketplaceNav();
-    renderFeaturesSettings();
-  }
-}
 
 // Show/hide the MCP + Skills nav for the current session (admin AND enabled).
 function applyMarketplaceNav() {
@@ -844,13 +939,72 @@ function applyMarketplaceNav() {
 // incomplete (see maybeAutoOpenWizard); re-openable from Settings. Every step is
 // skippable and reuses existing endpoints. Closing (X) or reaching Finish marks
 // onboarding complete so it never re-nags.
-const WIZARD_STEPS = 2;
+const WIZARD_STEPS = 3;
 let wizardStep = 0;
 let wizardWired = false;
 let wizardOllamaProbe = null; // last successful Ollama probe { kind, endpoint, models }
 let wizardEngine = 'claude'; // default (fallback) engine chosen in step 0
 let wizardOllamaModelId = null; // first roster model added in the Ollama panel — assigned to the created agent
 let wizardCodexAvailable = false;
+let codexInstallActive = false;
+let wizardCred = null; // last /api/workspace-credential snapshot — gates step-0 Next
+
+// One-click Codex provider install from the wizard engine step. Unlike Ollama/
+// LiteLLM, this mutates the source tree, rebuilds the agent image (minutes), and
+// then RESTARTS the host — codexAvailable only flips once the process re-imports
+// the provider barrel. So the poll rides through the restart: the connection
+// drops, recovers, and by then `installed` is true.
+async function runCodexInstall() {
+  const btn = $('#wizard-codex-install');
+  const log = $('#wizard-codex-install-log');
+  if (!btn || codexInstallActive) return;
+  codexInstallActive = true;
+  log.hidden = false;
+  log.textContent = 'Starting… copies the provider, rebuilds the agent image, then restarts the server.';
+  const done = wizardBusy(btn, 'Installing…');
+  try {
+    const res = await authFetch('/api/codex/install', { method: 'POST' });
+    if (!res.ok && res.status !== 202) {
+      const err = await res.json().catch(() => ({}));
+      log.textContent = 'Install failed: ' + (err.error || res.status);
+      showToast(err.error || 'Codex install failed', { kind: 'error' });
+      return;
+    }
+    let sawRestart = false;
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 2500));
+      let st;
+      try {
+        st = await (await authFetch('/api/codex/install')).json();
+      } catch {
+        // Connection dropped — the host is restarting to load Codex.
+        sawRestart = true;
+        log.textContent = 'Rebuilt — restarting the server to load Codex…';
+        continue;
+      }
+      if (Array.isArray(st.lines) && st.lines.length) log.textContent = st.lines.slice(-14).join('\n');
+      if (st.installed) {
+        log.textContent = 'Codex installed and loaded. Connect your ChatGPT/OpenAI credentials below.';
+        showToast('Codex installed', { kind: 'success' });
+        break;
+      }
+      // A non-zero exit with no pending restart means the build failed — never
+      // restarted, so the tree is unchanged-but-partial; the log has the reason.
+      if (!st.running && st.exitCode != null && st.exitCode !== 0 && !sawRestart) {
+        log.textContent = 'Install failed — see log:\n' + (st.lines || []).slice(-14).join('\n');
+        showToast('Codex install failed — see log', { kind: 'error' });
+        break;
+      }
+    }
+  } catch (err) {
+    log.textContent = 'Install error: ' + err.message;
+    showToast('Codex install error', { kind: 'error' });
+  } finally {
+    done();
+    codexInstallActive = false;
+    refreshWizardCredState(); // reflect installed → show the connect controls
+  }
+}
 
 function buildWizardDots() {
   const dots = $('#wizard-dots');
@@ -877,13 +1031,17 @@ async function refreshWizardCredState() {
   } catch {
     return; // non-fatal — controls stay as-is
   }
+  wizardCred = s;
   wizardCodexAvailable = !!s.codexAvailable;
   const credWord = (t) => (t === 'oauth_token' ? 'subscription' : 'API key');
 
+  // Every engine row carries an at-a-glance readiness chip in the same three
+  // states — not connected / not installed → ✓ connected — so step 0 reads as
+  // one mental model: pick an engine, finish its inline setup, Next unlocks.
   const claudeChip = $('#wizard-chip-claude');
   if (claudeChip) {
-    claudeChip.hidden = !s.connected;
-    claudeChip.textContent = '✓ connected';
+    claudeChip.hidden = false;
+    claudeChip.textContent = s.connected ? '✓ connected' : 'not connected';
     claudeChip.classList.toggle('ok', !!s.connected);
   }
   $('#wizard-claude-connect').hidden = !!s.connected;
@@ -892,22 +1050,25 @@ async function refreshWizardCredState() {
 
   const codexChip = $('#wizard-chip-codex');
   if (codexChip) {
-    codexChip.textContent = s.codex?.connected ? '✓ connected' : wizardCodexAvailable ? '' : 'not installed';
-    codexChip.hidden = codexChip.textContent === '';
+    codexChip.hidden = false;
+    codexChip.textContent = s.codex?.connected ? '✓ connected' : wizardCodexAvailable ? 'not connected' : 'not installed';
     codexChip.classList.toggle('ok', !!s.codex?.connected);
   }
-  $('#wizard-engine-codex')?.classList.toggle('is-unavailable', !wizardCodexAvailable);
-  const codexRadio = document.querySelector('input[name="wizard-engine"][value="codex"]');
-  if (codexRadio) codexRadio.disabled = !wizardCodexAvailable;
-  $('#wizard-codex-connect').hidden = !!s.codex?.connected;
+  // The Codex radio is always selectable (no dead-end grey): selecting it opens
+  // this engine's body, which shows the one-click install first when the provider
+  // isn't present, then the connect controls once it is. Next stays gated until
+  // it reaches ✓ connected (wizardEngineConnected + the readiness line below).
+  const codexInstallRow = $('#wizard-codex-install-row');
+  if (codexInstallRow && !codexInstallActive) codexInstallRow.hidden = wizardCodexAvailable;
+  $('#wizard-codex-connect').hidden = !wizardCodexAvailable || !!s.codex?.connected;
   $('#wizard-codex-connected').hidden = !s.codex?.connected;
   if (s.codex?.connected)
     $('#wizard-codex-connected-text').textContent = `Codex connected — ${credWord(s.codex.credType)}`;
 
   const ollamaChip = $('#wizard-chip-ollama');
   if (ollamaChip) {
-    ollamaChip.hidden = !s.defaultModelId;
-    ollamaChip.textContent = s.defaultModelName ? `✓ ${s.defaultModelName}` : '✓ default set';
+    ollamaChip.hidden = false;
+    ollamaChip.textContent = s.defaultModelId ? (s.defaultModelName ? `✓ ${s.defaultModelName}` : '✓ default set') : 'no model';
     ollamaChip.classList.toggle('ok', !!s.defaultModelId);
   }
 }
@@ -953,8 +1114,18 @@ async function wizardFollowPull(host, model) {
       wizardSetStatus('#wizard-ollama-dl-status', `${job.detail || 'downloading…'} (${pct}%)`, null);
       if (job.status === 'success') {
         bar.hidden = true;
-        wizardSetStatus('#wizard-ollama-dl-status', `${model} downloaded — probe to pick it.`, 'ok');
-        $('#wizard-ollama-probe')?.click();
+        wizardSetStatus('#wizard-ollama-dl-status', `${model} downloaded — setting it as the default…`, 'ok');
+        // A pull is a deliberate "I want this model" — probe, then set it as the
+        // workspace default so Next unlocks without a separate pick step.
+        const probed = await wizardProbeOllama();
+        if (probed && (probed.models || []).some((m) => String(m) === model)) {
+          const radio = [...document.querySelectorAll('input[name="wizard-ollama-model"]')].find((el) => el.value === model);
+          if (radio) radio.checked = true;
+          await wizardSelectOllamaModel(model);
+          wizardSetStatus('#wizard-ollama-dl-status', `${model} downloaded and set as the workspace default.`, 'ok');
+        } else {
+          wizardSetStatus('#wizard-ollama-dl-status', `${model} downloaded — pick it above to set the default.`, 'ok');
+        }
         return;
       }
       if (job.status === 'error') {
@@ -964,6 +1135,123 @@ async function wizardFollowPull(host, model) {
     }
   } finally {
     done();
+  }
+}
+
+// Probe the Ollama endpoint and render one radio per model. No pre-selection:
+// picking a radio IS choosing the workspace default (wizardSelectOllamaModel),
+// so an unselected list reads honestly as "no default yet". Returns the probe
+// body, or null on failure.
+async function wizardProbeOllama() {
+  const url = ($('#wizard-ollama-url')?.value || '').trim() || 'http://localhost:11434';
+  const btn = $('#wizard-ollama-probe');
+  const done = wizardBusy(btn, 'Probing…');
+  $('#wizard-ollama-status').hidden = true; // stale result out of the way while probing
+  try {
+    const r = await authFetch('/api/models/probe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      wizardSetStatus('#wizard-ollama-status', body.error || `Probe failed (${r.status}).`, 'err');
+      return null;
+    }
+    if (!body.kind || !(body.models || []).length) {
+      wizardSetStatus('#wizard-ollama-status', body.reason || 'No models found at that endpoint.', 'err');
+      return null;
+    }
+    wizardOllamaProbe = body;
+    const list = $('#wizard-ollama-list');
+    list.innerHTML = '';
+    body.models.forEach((m) => {
+      const value = String(m);
+      const li = document.createElement('li');
+      const label = document.createElement('label');
+      const radio = document.createElement('input');
+      radio.type = 'radio';
+      radio.name = 'wizard-ollama-model';
+      radio.value = value;
+      const span = document.createElement('span');
+      span.textContent = value;
+      label.appendChild(radio);
+      label.appendChild(span);
+      li.appendChild(label);
+      list.appendChild(li);
+    });
+    $('#wizard-ollama-results').hidden = false;
+    $('#wizard-ollama-dl-row').hidden = false;
+    void wizardLoadRecommendation();
+    wizardSetStatus('#wizard-ollama-status', `Found ${body.models.length} model(s) — pick one to set the default.`, 'ok');
+    return body;
+  } finally {
+    done();
+  }
+}
+
+// Register the chosen Ollama model and make it the WORKSPACE DEFAULT — the fallback
+// every agent without its own model runs on. Called when a model radio is picked:
+// selecting IS the action, no separate button. Reuses an existing roster row for
+// the same endpoint+model so repeated selection never spawns duplicates (the
+// roster has no uniqueness constraint). Other probed models stay unregistered —
+// Manage → Models covers the rest.
+async function wizardSelectOllamaModel(modelId) {
+  if (!wizardOllamaProbe || !modelId) return;
+  const endpoint = String(wizardOllamaProbe.endpoint || '').replace(/\/+$/, '');
+  const host = (() => {
+    try {
+      return new URL(wizardOllamaProbe.endpoint).host;
+    } catch {
+      return wizardOllamaProbe.endpoint;
+    }
+  })();
+  wizardSetStatus('#wizard-ollama-status', `Setting ${modelId} as the default…`, null);
+  try {
+    let id = null;
+    try {
+      const roster = await (await authFetch('/api/models')).json();
+      id =
+        (Array.isArray(roster) ? roster : []).find(
+          (m) =>
+            m.kind === 'ollama' &&
+            String(m.endpoint || '').replace(/\/+$/, '') === endpoint &&
+            m.model_id === modelId,
+        )?.id ?? null;
+    } catch {
+      /* no roster read — fall through to create */
+    }
+    if (!id) {
+      const r = await authFetch('/api/models/bulk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          models: [{ name: `${host} · ${modelId}`, kind: wizardOllamaProbe.kind, endpoint: wizardOllamaProbe.endpoint, model_id: modelId }],
+        }),
+      });
+      const out = await r.json().catch(() => ({}));
+      const created = out.created?.[0];
+      if (!r.ok || !created) {
+        wizardSetStatus('#wizard-ollama-status', out.error || out.failed?.[0]?.error || 'Add failed.', 'err');
+        return;
+      }
+      id = created.id;
+    }
+    const dr = await authFetch('/api/workspace-model', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ modelId: id }),
+    });
+    if (!dr.ok) {
+      const derr = await dr.json().catch(() => ({}));
+      wizardSetStatus('#wizard-ollama-status', 'Setting the default failed: ' + (derr.error || dr.statusText), 'err');
+      return;
+    }
+    wizardOllamaModelId = id;
+    await refreshWizardCredState(); // ollama chip + readiness line reflect the default
+    wizardSetStatus('#wizard-ollama-status', `${modelId} is the workspace default.`, 'ok');
+  } catch {
+    wizardSetStatus('#wizard-ollama-status', 'Setting the default failed.', 'err');
   }
 }
 
@@ -1014,12 +1302,23 @@ function syncWizardEngineBodies() {
     b.hidden = b.dataset.engine !== wizardEngine;
   });
 }
+// True once the engine picked in step 0 has a usable credential/default set, from
+// the last refreshWizardCredState snapshot. Gates the step-0 Next so the operator
+// can't advance with an engine that can't answer a message.
+function wizardEngineConnected() {
+  const s = wizardCred || {};
+  if (wizardEngine === 'codex') return !!s.codex?.connected;
+  if (wizardEngine === 'ollama') return !!s.defaultModelId;
+  return !!s.connected; // claude (default)
+}
 function showWizardStep(i) {
   wizardStep = Math.max(0, Math.min(WIZARD_STEPS - 1, i));
   document.querySelectorAll('.wizard-step').forEach((s) => {
     s.hidden = Number(s.dataset.step) !== wizardStep;
   });
   if (wizardStep === 0) syncWizardEngineBodies();
+  if (wizardStep === 1) void renderWizardAccess();
+  if (wizardStep === 2) void renderWizardFeatures();
   document.querySelectorAll('#wizard-dots .wizard-dot').forEach((d, idx) => {
     d.classList.toggle('active', idx === wizardStep);
     d.classList.toggle('done', idx < wizardStep);
@@ -1132,12 +1431,377 @@ async function wizardEnableHttps() {
     if (!btn.hidden) btn.textContent = restore;
   }
 }
+
+// Step 2 (Access): summarize how this instance is reached + secured, surface the
+// one-click Tailscale HTTPS when available, and offer to retire the bootstrap
+// bearer token once a stronger method (Tailscale/SSO) can authenticate. Owner-
+// only endpoint — a 403 just leaves the neutral "owner-only" line.
+// Show the body for the selected access radio (accordion, like step 0). When
+// Tailscale is picked, probe for the one-click HTTPS affordance.
+function syncWizardAccessBodies() {
+  const sel = document.querySelector('input[name="wizard-access"]:checked')?.value || 'bearer';
+  document.querySelectorAll('.wizard-engine-body[data-access]').forEach((b) => {
+    b.hidden = b.dataset.access !== sel;
+  });
+  if (sel === 'tailscale') void wizardProbeHttps();
+}
+
+// Step 1 "Features" — reflect the MCP + read-aloud toggles from state and surface
+// the TTS voice-model install (same /api/webchat/tts/install as Settings → Features,
+// via the shared runTtsInstall/pollTtsInstall with wizard element ids).
+let wizardTtsWired = false;
+const WIZARD_TTS_ELS = { btn: '#wizard-tts-install', log: '#wizard-tts-log', progress: '#wizard-tts-progress' };
+// Wizard voice-dictation control — mirrors Settings → Features → Voice dictation:
+// pick a backend (Local whisper.cpp / ElevenLabs cloud), install (local) or connect
+// a key (ElevenLabs). Drives the same /api/webchat/stt/install as Settings via the
+// shared run/pollSttInstall. Owner-only: the endpoint 403s → the whole block hides.
+let wizardSttWired = false;
+let wizardSttBackend = 'local';
+const WIZARD_STT_ELS = { btn: '#wizard-stt-install', log: '#wizard-stt-log', progress: '#wizard-stt-log' };
+async function renderWizardDictation() {
+  const group = $('#wizard-stt-group');
+  if (!group) return;
+  let st = null;
+  try {
+    const r = await authFetch('/api/webchat/stt/install');
+    if (r.ok) st = await r.json();
+  } catch {
+    st = null;
+  }
+  if (!st) {
+    group.hidden = true; // non-owner or unavailable — no dictation surface
+    return;
+  }
+  group.hidden = false;
+  if (!wizardSttWired) {
+    wizardSttWired = true;
+    document.querySelectorAll('#wizard-stt-backend .setting-option').forEach((b) => {
+      b.addEventListener('click', () => {
+        wizardSttBackend = b.dataset.value;
+        void renderWizardDictation();
+      });
+    });
+    $('#wizard-stt-install')?.addEventListener('click', () =>
+      runSttInstall({ provider: 'local' }, WIZARD_STT_ELS, renderWizardDictation),
+    );
+    $('#wizard-stt-connect')?.addEventListener('click', () => {
+      const key = ($('#wizard-stt-key')?.value || '').trim();
+      if (!key) {
+        showToast('Enter the ElevenLabs API key first', { kind: 'error' });
+        return;
+      }
+      runSttInstall({ provider: 'elevenlabs', apiKey: key }, WIZARD_STT_ELS, renderWizardDictation);
+      $('#wizard-stt-key').value = '';
+    });
+  }
+  const installed = !!st.installed;
+  // Once installed, reflect the live backend; otherwise the operator's pick.
+  const backend = installed ? st.provider || wizardSttBackend : wizardSttBackend;
+  document
+    .querySelectorAll('#wizard-stt-backend .setting-option')
+    .forEach((b) => b.classList.toggle('active', b.dataset.value === backend));
+  const local = backend === 'local';
+  const badge = $('#wizard-stt-installed');
+  if (badge) badge.hidden = !installed;
+  // Local + not installed + installer present → the install button; ElevenLabs +
+  // not installed → the API-key row. Installed → just the badge.
+  const installRow = $('#wizard-stt-install-row');
+  if (installRow) installRow.hidden = installed || !local || !st.installerPresent;
+  const keyRow = $('#wizard-stt-key-row');
+  if (keyRow) keyRow.hidden = installed || local;
+  if (st.running) pollSttInstall(WIZARD_STT_ELS, renderWizardDictation);
+}
+
+async function renderWizardFeatures() {
+  void renderWizardDictation(); // independent owner surface; renders alongside TTS
+  const mkt = $('#wizard-marketplace');
+  if (mkt) mkt.checked = marketplaceEnabled === true; // disabled by default — opt-in
+  const ttsDefault = $('#wizard-tts-default');
+  if (ttsDefault) ttsDefault.checked = ttsReadAloudEnabled;
+  if (!wizardTtsWired) {
+    wizardTtsWired = true;
+    ttsDefault?.addEventListener('change', async () => {
+      // Workspace-level (owner-set) — the wizard is an owner surface.
+      const on = ttsDefault.checked;
+      try {
+        const r = await authFetch('/api/tts/config', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ readAloud: on }),
+        });
+        if (!r.ok) throw new Error('save failed');
+        ttsReadAloudEnabled = on;
+        if (!on) stopTts();
+        renderWizardFeatures(); // reveal / hide the voice-model recommendation
+      } catch {
+        ttsDefault.checked = !on; // revert so the control never lies about saved state
+        showToast('Failed to save Read aloud', { kind: 'error' });
+      }
+    });
+    $('#wizard-tts-install')?.addEventListener('click', () => runTtsInstall(WIZARD_TTS_ELS));
+  }
+  const row = $('#wizard-tts-install-row');
+  const badge = $('#wizard-tts-installed');
+  const progress = $('#wizard-tts-progress');
+  const btn = $('#wizard-tts-install');
+  const ttsOn = !!ttsDefault?.checked;
+  let st = null;
+  try {
+    const res = await authFetch('/api/webchat/tts/install');
+    if (res.ok) st = await res.json();
+  } catch {
+    st = null;
+  }
+  // The voice-model surface only matters once Read Aloud is on — off = device
+  // voices, no model needed. Non-owner (no st) = no install surface either way.
+  if (!st || !ttsOn) {
+    if (row) row.hidden = true;
+    if (badge) badge.hidden = true;
+    if (progress) progress.hidden = !(st && st.running); // keep a live run visible
+    if (st && st.running) pollTtsInstall(WIZARD_TTS_ELS);
+    return;
+  }
+  if (st.installed) {
+    if (row) row.hidden = true;
+    if (badge) badge.hidden = false;
+    if (progress) progress.hidden = !st.running;
+    if (btn) btn.textContent = 'Install voice models…'; // clear any stale "Installing…"
+    if (st.running) pollTtsInstall(WIZARD_TTS_ELS);
+    return;
+  }
+  // Read Aloud on but no model yet → recommend the install.
+  if (badge) badge.hidden = true;
+  if (row) row.hidden = !st.installerPresent;
+  if (st.running) {
+    pollTtsInstall(WIZARD_TTS_ELS);
+  } else if (btn) {
+    btn.disabled = false;
+    btn.textContent = 'Install voice models…';
+  }
+}
+
+let wizardAuthInfo = null; // last /api/webchat/auth snapshot — gates the Access-step Next
+// True once the selected exposure method is actually live: Tailscale signed in,
+// or a reverse proxy configured. Bearer is the current method, always valid.
+// Re-fetches auth so a just-completed sign-in / restart is picked up immediately.
+async function wizardAccessReady() {
+  const sel = document.querySelector('input[name="wizard-access"]:checked')?.value || 'bearer';
+  if (sel === 'bearer') return true;
+  let info = wizardAuthInfo;
+  try {
+    const r = await authFetch('/api/webchat/auth');
+    if (r.ok) {
+      info = await r.json();
+      wizardAuthInfo = info;
+    }
+  } catch {
+    /* keep the last snapshot */
+  }
+  if (sel === 'tailscale') return !!(info && info.tailscale && info.tailscale.healthy);
+  if (sel === 'sso') return !!(info && info.proxy); // WEBCHAT_TRUSTED_PROXY_IPS configured
+  return true;
+}
+
+// One-click Tailscale install (wizard Access step). Runs the install + sign-in on
+// the host; `tailscale up` prints its auth URL into the log for the operator to
+// open. Same install-row + progress-log shape as the other wizard installers.
+let tailscaleInstallActive = false;
+async function runTailscaleInstall() {
+  const btn = $('#wizard-ts-install-btn');
+  const log = $('#wizard-ts-install-log');
+  if (log) {
+    log.hidden = false;
+    log.textContent = 'Starting…';
+  }
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Installing…';
+  }
+  try {
+    const res = await authFetch('/api/webchat/tailscale/install', { method: 'POST', headers: { 'X-Webchat-CSRF': '1' } });
+    if (!res.ok && res.status !== 202) {
+      const err = await res.json().catch(() => ({}));
+      if (log) log.textContent = err.error || 'Install failed to start.';
+      showToast(err.error || 'Tailscale install failed', { kind: 'error', timeout: 9000 });
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = 'Install Tailscale…';
+      }
+      return;
+    }
+    pollTailscaleInstall();
+  } catch (err) {
+    if (log) log.textContent = 'Install failed: ' + err.message;
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Install Tailscale…';
+    }
+  }
+}
+async function pollTailscaleInstall() {
+  if (tailscaleInstallActive) return;
+  tailscaleInstallActive = true;
+  const btn = $('#wizard-ts-install-btn');
+  const log = $('#wizard-ts-install-log');
+  if (log) log.hidden = false;
+  if (btn) btn.disabled = true;
+  try {
+    for (;;) {
+      const st = await (await authFetch('/api/webchat/tailscale/install')).json();
+      if (log) {
+        log.textContent = (st.lines || []).slice(-14).join('\n') || 'Starting…';
+        log.scrollTop = log.scrollHeight;
+      }
+      if (!st.running) {
+        if (st.exitCode === 0) showToast('Tailscale is up — first tailnet sign-in becomes owner', { kind: 'success' });
+        else showToast('Tailscale install/sign-in didn’t finish — see the log', { kind: 'error', timeout: 9000 });
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  } catch (err) {
+    showToast('Tailscale install error: ' + err.message, { kind: 'error' });
+  } finally {
+    tailscaleInstallActive = false;
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Install Tailscale…';
+    }
+    void renderWizardAccess(); // re-check health → flip to the connected note when up
+  }
+}
+
+async function renderWizardAccess() {
+  const stateEl = $('#wizard-access-state');
+  let info = null;
+  try {
+    const r = await authFetch('/api/webchat/auth');
+    if (r.ok) info = await r.json();
+  } catch {
+    info = null;
+  }
+  wizardAuthInfo = info;
+  const tsHealthy = !!(info && info.tailscale && info.tailscale.healthy);
+  const proxyOn = !!(info && info.proxy);
+  const bearerOn = !!(info && info.bearerActive);
+
+  // Per-method chip: active/available at a glance (mirrors step 0).
+  const chip = (id, text, ok) => {
+    const el = $(id);
+    if (!el) return;
+    el.hidden = !info;
+    el.textContent = text;
+    el.classList.toggle('ok', ok);
+  };
+  chip('#wizard-access-bearer-chip', bearerOn ? 'active' : 'off', bearerOn);
+  chip('#wizard-access-ts-chip', tsHealthy ? '✓ up' : 'not detected', tsHealthy);
+  chip('#wizard-access-sso-chip', proxyOn ? '✓ active' : 'not configured', proxyOn);
+
+  // Tailscale body: connected → ready/owner note; otherwise offer a one-click
+  // install when the host can bring it up (TUN + root), else the helper link.
+  const tsReady = $('#wizard-ts-ready');
+  if (tsReady) tsReady.hidden = !tsHealthy;
+  const tsHelper = $('#wizard-ts-helper');
+  const tsRow = $('#wizard-ts-install-row');
+  if (tsHealthy) {
+    if (tsHelper) tsHelper.hidden = true;
+    if (tsRow) tsRow.hidden = true;
+  } else {
+    let ts = null;
+    try {
+      const r = await authFetch('/api/webchat/tailscale/install');
+      if (r.ok) ts = await r.json();
+    } catch {
+      ts = null;
+    }
+    const canInstall = !!(ts && ts.canInstall);
+    if (tsHelper) tsHelper.hidden = canInstall; // link only when we can't install here
+    if (tsRow) tsRow.hidden = !canInstall; // button only when we can
+    if (canInstall && ts.running) pollTailscaleInstall();
+  }
+
+  // Retire the bearer only when it's safe: an alternative can authenticate AND
+  // this session didn't arrive over the bearer token (canDisableBearer).
+  const retireRow = $('#wizard-retire-row');
+  if (retireRow) retireRow.hidden = !(info && info.canDisableBearer);
+
+  if (stateEl) {
+    if (!info) {
+      stateEl.textContent = 'Access settings are available to the owner.';
+    } else {
+      const methods = [];
+      if (tsHealthy) methods.push('Tailscale identity');
+      if (proxyOn) methods.push('reverse-proxy SSO');
+      if (bearerOn) methods.push('a bearer token');
+      stateEl.textContent = methods.length
+        ? `Secured by ${methods.join(' + ')}.`
+        : 'Loopback-only — no network auth configured.';
+    }
+  }
+  syncWizardAccessBodies();
+}
+
+async function wizardRetireBearer() {
+  const btn = $('#wizard-retire-btn');
+  const done = wizardBusy(btn, 'Retiring…');
+  try {
+    const r = await authFetch('/api/webchat/auth/bearer', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+      body: JSON.stringify({ active: false }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (r.ok) {
+      showToast('Bearer token retired — access is via Tailscale/SSO', { kind: 'success' });
+      await renderWizardAccess(); // refresh the state line + hide the button
+    } else {
+      wizardSetStatus('#wizard-retire-status', data.error || 'Could not retire the token', 'err');
+    }
+  } catch {
+    wizardSetStatus('#wizard-retire-status', 'Connection failed.', 'err');
+  } finally {
+    done();
+  }
+}
 function wireWizard() {
   if (wizardWired) return;
   wizardWired = true;
-  $('#wizard-next')?.addEventListener('click', () => {
-    if (wizardStep === WIZARD_STEPS - 1) wizardCreateAndFinish();
-    else showWizardStep(wizardStep + 1);
+  $('#wizard-next')?.addEventListener('click', async () => {
+    // The Access step won't advance until the chosen exposure method is actually
+    // live — Tailscale signed in, or a reverse proxy configured. Bearer (the
+    // current method) is always valid; Skip bypasses. Detected by the step's own
+    // radios, so it holds wherever the Access step sits in the order.
+    const onAccessStep = !!document.querySelector(`.wizard-step[data-step="${wizardStep}"] input[name="wizard-access"]`);
+    if (onAccessStep && !(await wizardAccessReady())) {
+      const sel = document.querySelector('input[name="wizard-access"]:checked')?.value;
+      showToast(
+        sel === 'tailscale'
+          ? 'Connect Tailscale first — sign in over your tailnet (install it above if needed), then continue.'
+          : 'Configure the reverse proxy first — set WEBCHAT_TRUSTED_PROXY_IPS and restart, then continue.',
+        { kind: 'info', timeout: 8000 },
+      );
+      return;
+    }
+    if (wizardStep === WIZARD_STEPS - 1) {
+      wizardCreateAndFinish();
+      return;
+    }
+    // Step 0 can't advance until the chosen engine is actually connected — a
+    // selected-but-unconnected engine would leave the first agent unable to reply.
+    // The row's own chip + connect controls say what's needed; a brief toast is
+    // the only nudge on a blocked click (Skip bypasses, for operators wiring their
+    // credentials their own way).
+    if (wizardStep === 0 && !wizardEngineConnected()) {
+      const how =
+        wizardEngine === 'ollama'
+          ? 'set a default Ollama model'
+          : wizardEngine === 'codex' && !wizardCodexAvailable
+            ? 'install then connect Codex'
+            : `connect ${wizardEngine === 'codex' ? 'Codex' : 'Claude'}`;
+      showToast(`Finish this engine first — ${how} above.`, { kind: 'info', timeout: 6000 });
+      return;
+    }
+    showWizardStep(wizardStep + 1);
   });
   $('#wizard-back')?.addEventListener('click', () => showWizardStep(wizardStep - 1));
   $('#wizard-skip')?.addEventListener('click', () => {
@@ -1146,21 +1810,19 @@ function wireWizard() {
   });
   $('#wizard-close')?.addEventListener('click', () => finishWizard());
 
-  // Step 1 — reveal the Tailscale how-to note when the operator opts in, and
-  // (if tailscaled is already up on the host) surface a one-click Enable HTTPS.
-  $('#wizard-tailscale')?.addEventListener('change', (e) => {
-    const note = $('#wizard-tailscale-note');
-    if (note) note.hidden = !e.target.checked;
-    if (e.target.checked) void wizardProbeHttps();
-    else {
-      const row = $('#wizard-https-row');
-      if (row) row.hidden = true;
-    }
+  // Step 2 (Access) — one radio per method; selecting one opens its body (and,
+  // for Tailscale, surfaces one-click HTTPS when tailscaled is up).
+  document.querySelectorAll('input[name="wizard-access"]').forEach((radio) => {
+    radio.addEventListener('change', () => syncWizardAccessBodies());
   });
   $('#wizard-https-btn')?.addEventListener('click', () => wizardEnableHttps());
+  $('#wizard-ts-install-btn')?.addEventListener('click', () => runTailscaleInstall());
+  $('#wizard-retire-btn')?.addEventListener('click', () => wizardRetireBearer());
 
-  // Step 0 — default engine radios. Codex is greyed (not hidden) when its
-  // provider isn't installed, so a click can explain how to enable it.
+  // Step 0 — default engine radios. Every engine (incl. an uninstalled Codex) is
+  // selectable: picking it opens its body, whose progressive controls (install →
+  // connect → ✓) carry the operator to "connected". Next stays gated on that state
+  // (wizardEngineConnected) and the readiness line narrates what's still needed.
   document.querySelectorAll('input[name="wizard-engine"]').forEach((radio) => {
     radio.addEventListener('change', () => {
       wizardEngine = radio.value;
@@ -1168,17 +1830,11 @@ function wireWizard() {
       if (wizardEngine === 'ollama') void wizardCheckLocalOllama();
     });
   });
-  $('#wizard-engine-codex')?.addEventListener('click', () => {
-    if (!wizardCodexAvailable)
-      showToast('Codex isn’t installed yet — add it with /add-codex, then it appears here.', {
-        kind: 'info',
-        timeout: 9000,
-      });
-  });
 
   // Step 1 (claude panel) — browser mint for subscriptions, or paste either
   // credential shape (auto-detected).
   $('#wizard-claude-oauth')?.addEventListener('click', () => openOauthMintModal('workspace'));
+  $('#wizard-codex-install')?.addEventListener('click', () => runCodexInstall());
   $('#wizard-codex-oauth')?.addEventListener('click', () => openOauthMintModal('workspace-codex'));
   // Step 1 (codex panel) — paste an OpenAI API key as the workspace Codex default.
   $('#wizard-codex-save')?.addEventListener('click', async () => {
@@ -1244,104 +1900,12 @@ function wireWizard() {
     await refreshWizardCredState();
   });
 
-  // Step 1 — Ollama probe + bulk add.
-  $('#wizard-ollama-probe')?.addEventListener('click', async () => {
-    // Empty field = the placeholder's promise: probe the local instance.
-    const url = ($('#wizard-ollama-url')?.value || '').trim() || 'http://localhost:11434';
-    const btn = $('#wizard-ollama-probe');
-    const done = wizardBusy(btn, 'Probing…');
-    $('#wizard-ollama-status').hidden = true; // stale result out of the way while probing
-    try {
-      const r = await authFetch('/api/models/probe', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url }),
-      });
-      const body = await r.json().catch(() => ({}));
-      if (!r.ok) return wizardSetStatus('#wizard-ollama-status', body.error || `Probe failed (${r.status}).`, 'err');
-      if (!body.kind || !(body.models || []).length)
-        return wizardSetStatus('#wizard-ollama-status', body.reason || 'No models found at that endpoint.', 'err');
-      wizardOllamaProbe = body;
-      const list = $('#wizard-ollama-list');
-      list.innerHTML = '';
-      // probe returns models as plain id strings ("llama3.2:3b", …).
-      // One radio per model: pick THE workspace default. Just that model is
-      // registered; the roster picker in Manage → Models covers everything else.
-      body.models.forEach((m, i) => {
-        const value = String(m);
-        const li = document.createElement('li');
-        const label = document.createElement('label');
-        const radio = document.createElement('input');
-        radio.type = 'radio';
-        radio.name = 'wizard-ollama-model';
-        radio.value = value;
-        radio.checked = i === 0;
-        const span = document.createElement('span');
-        span.textContent = value;
-        label.appendChild(radio);
-        label.appendChild(span);
-        li.appendChild(label);
-        list.appendChild(li);
-      });
-      $('#wizard-ollama-results').hidden = false;
-      $('#wizard-ollama-dl-row').hidden = false;
-      void wizardLoadRecommendation();
-      wizardSetStatus('#wizard-ollama-status', `Found ${body.models.length} model(s) (${body.kind}).`, 'ok');
-    } finally {
-      done();
-    }
-  });
-  $('#wizard-ollama-add')?.addEventListener('click', async () => {
-    if (!wizardOllamaProbe) return;
-    const pickedModelId = document.querySelector('input[name="wizard-ollama-model"]:checked')?.value;
-    if (!pickedModelId) return wizardSetStatus('#wizard-ollama-status', 'Pick a model.', 'err');
-    const host = (() => {
-      try {
-        return new URL(wizardOllamaProbe.endpoint).host;
-      } catch {
-        return wizardOllamaProbe.endpoint;
-      }
-    })();
-    const btn = $('#wizard-ollama-add');
-    const done = wizardBusy(btn, 'Setting default…');
-    try {
-      // Register the picked model, then make it the WORKSPACE DEFAULT: every
-      // agent without its own assigned model runs on it — a true fallback,
-      // not a one-agent setting. Other probed models stay unregistered; the
-      // roster in Manage → Models covers those.
-      const r = await authFetch('/api/models/bulk', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          models: [
-            {
-              name: `${host} · ${pickedModelId}`,
-              kind: wizardOllamaProbe.kind,
-              endpoint: wizardOllamaProbe.endpoint,
-              model_id: pickedModelId,
-            },
-          ],
-        }),
-      });
-      const out = await r.json().catch(() => ({}));
-      const created = out.created?.[0];
-      if (!r.ok || !created)
-        return wizardSetStatus('#wizard-ollama-status', out.error || out.failed?.[0]?.error || 'Add failed.', 'err');
-      const dr = await authFetch('/api/workspace-model', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ modelId: created.id }),
-      });
-      if (!dr.ok) {
-        const derr = await dr.json().catch(() => ({}));
-        return wizardSetStatus('#wizard-ollama-status', 'Setting the default failed: ' + (derr.error || dr.statusText), 'err');
-      }
-      wizardOllamaModelId = created.id;
-      await refreshWizardCredState(); // ollama chip shows the default
-      wizardSetStatus('#wizard-ollama-status', `${created.model_id} is the workspace default.`, 'ok');
-    } finally {
-      done();
-    }
+  // Step 1 — Ollama probe; selecting a model radio sets it as the workspace
+  // default (wizardSelectOllamaModel), so there's no separate "set default" step.
+  $('#wizard-ollama-probe')?.addEventListener('click', () => void wizardProbeOllama());
+  $('#wizard-ollama-list')?.addEventListener('change', (e) => {
+    const t = e.target;
+    if (t && t.name === 'wizard-ollama-model' && t.value) void wizardSelectOllamaModel(t.value);
   });
 
 
@@ -1356,8 +1920,13 @@ function wireWizard() {
       const r = await authFetch('/api/ollama/install', { method: 'POST' });
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
-        log.textContent = err.error || 'Install failed to start.';
-        return;
+        // An install already in flight (e.g. after a reconnect) → follow it, don't
+        // restart. The server dedupes, and the download resumes on its own.
+        if (err.error !== 'already-running') {
+          log.textContent = err.error || 'Install failed to start.';
+          return;
+        }
+        log.textContent = 'Resuming the install already in progress…';
       }
       // Poll until the installer exits; the state carries its log tail.
       for (;;) {
@@ -1426,7 +1995,9 @@ async function wizardCreateAndFinish() {
     await authFetch('/api/webchat/tailscale-owner', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
-      body: JSON.stringify({ armed: $('#wizard-tailscale')?.checked === true }),
+      body: JSON.stringify({
+        armed: document.querySelector('input[name="wizard-access"]:checked')?.value === 'tailscale',
+      }),
     });
   } catch {
     /* non-fatal */
@@ -1585,10 +2156,11 @@ function openSettings() {
   renderSettingsWizardButton();
   renderCredentialsSettings();
   renderRoutingSetupSettings();
+  renderTtsSetupSettings();
+  renderSttSetupSettings();
   renderSkillSourcesSettings();
   void renderMcpSources();
   renderAccessSettings();
-  renderFeaturesSettings();
   $('#settings-overlay').hidden = false;
   // Focus trap
   const modal = $('#settings-overlay .modal');
@@ -1597,6 +2169,874 @@ function openSettings() {
 }
 function closeSettings() {
   $('#settings-overlay').hidden = true;
+}
+
+// ── Settings → Features → ⓘ info toggles ────────────────────────────────────
+// Each .feature-info-btn opens/closes the description named by aria-controls.
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('.feature-info-btn');
+  if (!btn) return;
+  const info = document.getElementById(btn.getAttribute('aria-controls'));
+  if (!info) return;
+  const open = info.hidden;
+  info.hidden = !open;
+  btn.setAttribute('aria-expanded', String(open));
+});
+
+// ── Settings → Features → Read aloud (one-click Kokoro install) ─────────────
+// Owner-only endpoint; non-owners still see the block (hidden install row —
+// the per-device toggle works for everyone via Web Speech). Same install-row
+// + progress-log pattern as Auto routing; the health-check phase covers the
+// ~330MB first-boot model download, and the final step activates the .env
+// flags in-process, so no host restart.
+let ttsInstallWired = false;
+let ttsInstallActive = false;
+
+// TTS install DOM sets — the Settings → Features section and the wizard's Features
+// step drive the SAME server install (/api/webchat/tts/install); each passes its
+// own element ids + a re-render callback so one poll loop serves both surfaces.
+const TTS_SETTINGS_ELS = { btn: '#tts-install-btn', log: '#tts-install-log', progress: '#tts-install-progress' };
+
+async function pollTtsInstall(els = TTS_SETTINGS_ELS) {
+  if (ttsInstallActive) return;
+  ttsInstallActive = true;
+  const btn = $(els.btn);
+  const log = $(els.log);
+  const progress = $(els.progress);
+  if (progress) progress.hidden = false;
+  if (btn) btn.disabled = true;
+  try {
+    while (true) {
+      const st = await (await authFetch('/api/webchat/tts/install')).json();
+      if (log) {
+        log.textContent = (st.lines || []).slice(-12).join('\n') || 'Starting…';
+        log.scrollTop = log.scrollHeight;
+      }
+      if (!st.running) {
+        if (st.exitCode === 0) {
+          showToast('Read aloud installed — Kokoro voices are live', { kind: 'success' });
+          await loadTtsConfig(); // pick up server-side synthesis immediately
+        } else {
+          showToast('Read aloud install failed — see log', { kind: 'error' });
+        }
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  } catch (err) {
+    showToast('Read aloud install error: ' + err.message, { kind: 'error' });
+  } finally {
+    ttsInstallActive = false;
+    // Re-render BOTH TTS surfaces (Settings + wizard) so whichever the operator is
+    // viewing flips Installing… → Installed. The shared active-guard means only one
+    // poll runs, so it can't rely on a single caller's re-render.
+    renderTtsSetupSettings();
+    renderWizardFeatures();
+  }
+}
+
+async function runTtsInstall(els = TTS_SETTINGS_ELS) {
+  const btn = $(els.btn);
+  const log = $(els.log);
+  const progress = $(els.progress);
+  if (progress) progress.hidden = false;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Installing…';
+  }
+  if (log) log.textContent = 'Starting…';
+  try {
+    const res = await authFetch('/api/webchat/tts/install', { method: 'POST' });
+    if (!res.ok && res.status !== 202) {
+      const err = await res.json().catch(() => ({}));
+      if (log) log.textContent = 'Install failed: ' + (err.error || res.status);
+      showToast('Read aloud install failed', { kind: 'error' });
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = 'Install';
+      }
+      return;
+    }
+    pollTtsInstall(els);
+  } catch (err) {
+    if (log) log.textContent = 'Install failed: ' + err.message;
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Install';
+    }
+  }
+}
+
+async function renderTtsSetupSettings() {
+  const section = $('#settings-tts');
+  if (!section) return;
+  const btn = $('#tts-install-btn');
+  const badge = $('#tts-installed-badge');
+  const progress = $('#tts-install-progress');
+  if (!ttsInstallWired) {
+    ttsInstallWired = true;
+    btn.addEventListener('click', () => runTtsInstall());
+    // Voice picker: save is workspace-wide (env-persisted, no restart), then a
+    // short sample plays so you hear what you picked.
+    $('#tts-voice-select')?.addEventListener('change', async () => {
+      const voice = $('#tts-voice-select').value;
+      const r = await authFetch('/api/tts/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ voice }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        showToast('Failed to save voice: ' + (err.error || r.statusText), { kind: 'error' });
+        renderTtsSetupSettings();
+        return;
+      }
+      showToast('Voice saved', { kind: 'success' });
+      try {
+        const sample = await authFetch('/api/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: 'This is how I sound.', voice }),
+        });
+        if (sample.ok) {
+          const blob = await sample.blob();
+          void new Audio(URL.createObjectURL(blob)).play();
+        }
+      } catch {
+        /* preview is best-effort */
+      }
+    });
+  }
+  let st = null;
+  try {
+    const res = await authFetch('/api/webchat/tts/install');
+    if (res.ok) st = await res.json();
+  } catch {
+    st = null;
+  }
+  if (!st) {
+    // Non-owner: the whole block is the owner's control surface now that the
+    // switch applies workspace-wide.
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+  // Switch shows the workspace truth (fetched at boot; re-fetch is cheap).
+  await loadTtsConfig();
+  document.querySelectorAll('#tts-default-mode .setting-option').forEach((b) => {
+    b.classList.toggle('active', b.dataset.value === (ttsReadAloudEnabled ? 'on' : 'off'));
+  });
+  const desc = $('#tts-setup-desc');
+  if (st.installed) {
+    btn.hidden = true;
+    badge.hidden = false;
+    if (desc) desc.hidden = true;
+    progress.hidden = !st.running;
+    if (st.running) pollTtsInstall();
+    // Voice picker — needs the backend up (voices proxy 502s otherwise).
+    try {
+      const [voicesRes, cfgRes] = await Promise.all([authFetch('/api/tts/voices'), authFetch('/api/tts/config')]);
+      if (voicesRes.ok) {
+        const { voices } = await voicesRes.json();
+        const cfg = cfgRes.ok ? await cfgRes.json() : {};
+        const select = $('#tts-voice-select');
+        if (select && Array.isArray(voices) && voices.length) {
+          select.innerHTML = '';
+          for (const v of voices) {
+            const opt = document.createElement('option');
+            opt.value = v;
+            opt.textContent = v;
+            select.appendChild(opt);
+          }
+          if (cfg.voice) select.value = cfg.voice;
+          if (cfg.model) {
+            const label = $('#tts-voice-label');
+            if (label) label.textContent = `Voice (${cfg.model.charAt(0).toUpperCase()}${cfg.model.slice(1)})`;
+          }
+          $('#tts-voice-group').hidden = false;
+        }
+      }
+    } catch {
+      /* picker stays hidden — the feature works regardless */
+    }
+    return;
+  }
+  badge.hidden = true;
+  $('#tts-voice-group').hidden = true;
+  btn.hidden = !st.installerPresent;
+  // Prereq hint (the only prose this block is allowed): explain the hidden
+  // Install button instead of leaving a silent dead row.
+  if (desc) {
+    desc.hidden = st.installerPresent;
+    if (!st.installerPresent) {
+      desc.textContent =
+        'Server voices need the add-webchat-tts skill, which isn\u2019t in this install — re-run install-webchat.sh to add it. Device voices still work.';
+    }
+  }
+  if (st.running) {
+    pollTtsInstall();
+  } else {
+    btn.disabled = false;
+    btn.textContent = 'Install';
+    btn.title = 'Run a local Kokoro voice model (~330MB, no cloud, no key). Without it the control uses your device voices.';
+  }
+}
+
+// ── Voice dictation (capture → /api/stt/transcribe → composer) ──────────────
+// mic → getUserMedia → AudioContext(16k) + pcm-worklet → PCM16 frames.
+// RMS silence detection cuts a segment (~700ms pause or 5s max) → WAV built
+// client-side → POST /api/stt/transcribe → committed text appends into the
+// composer as segments return. Tap the mic (or long trailing silence) to stop;
+// Esc cancels and discards. On stop, the dictated span is tidied via
+// /api/stt/cleanup (replaced with execCommand so Ctrl/Cmd+Z restores the raw
+// transcript). Sending is ALWAYS an explicit act — no path here submits.
+let sttConfig = null; // { enabled, cleanup, provider?, cleanupModelId?, canEdit? }
+let sttActive = false;
+let sttStopping = false;
+let sttAudioCtx = null;
+let sttStream = null;
+let sttWorkletNode = null;
+let sttSourceNode = null;
+let sttBeforeText = ''; // composer content that predates this dictation
+let sttCommitted = ''; // dictated text committed so far
+let sttPending = 0; // segments in flight
+let sttSegments = []; // Int16Array frames of the current segment
+let sttSegmentMs = 0;
+let sttSilenceMs = 0;
+let sttSpeechInSegment = false;
+let sttNoSpeechMs = 0; // total silence since last speech — drives auto-stop
+let sttInFlight = []; // promises of in-flight segment POSTs
+let sttToastShown = false;
+
+const STT_SAMPLE_RATE = 16000;
+const STT_SILENCE_CUT_MS = 700; // pause that closes a segment
+const STT_MAX_SEGMENT_MS = 5000; // hard cut so long speech still streams
+const STT_RMS_FLOOR = 0.012; // below this a frame counts as silence
+const STT_AUTOSTOP_MS = 12000; // this much continuous silence ends dictation
+
+let sttElapsedTimer = null;
+let sttStartedAt = 0;
+
+/** Recording chrome: mic ⇄ red pulsing stop square + elapsed chip (the
+ *  standard voice-recorder idiom, so state is unmistakable at a glance). */
+function sttSetRecordingChrome(on) {
+  const mic = $('#mic-btn');
+  const chip = $('#stt-elapsed');
+  const use = mic?.querySelector('use');
+  if (use) use.setAttribute('href', on ? '#i-square' : '#i-mic');
+  if (on) {
+    sttStartedAt = Date.now();
+    if (chip) {
+      chip.textContent = '0:00';
+      chip.hidden = false;
+    }
+    sttElapsedTimer = setInterval(() => {
+      const sec = Math.floor((Date.now() - sttStartedAt) / 1000);
+      const t = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+      if (chip) chip.textContent = t;
+      mic?.setAttribute('title', `Recording ${t} — tap to stop`);
+    }, 1000);
+  } else {
+    if (sttElapsedTimer) clearInterval(sttElapsedTimer);
+    sttElapsedTimer = null;
+    if (chip) chip.hidden = true;
+    mic?.setAttribute('title', 'Dictate');
+  }
+}
+
+function sttAnnounce(text) {
+  const el = $('#stt-status');
+  if (el) el.textContent = text;
+}
+
+/** Wrap accumulated PCM16 frames in a minimal 16 kHz mono WAV container. */
+function sttBuildWav(frames) {
+  let samples = 0;
+  for (const f of frames) samples += f.length;
+  const buf = new ArrayBuffer(44 + samples * 2);
+  const dv = new DataView(buf);
+  const writeStr = (off, s) => {
+    for (let i = 0; i < s.length; i++) dv.setUint8(off + i, s.charCodeAt(i));
+  };
+  writeStr(0, 'RIFF');
+  dv.setUint32(4, 36 + samples * 2, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  dv.setUint32(16, 16, true); // PCM chunk size
+  dv.setUint16(20, 1, true); // PCM format
+  dv.setUint16(22, 1, true); // mono
+  dv.setUint32(24, STT_SAMPLE_RATE, true);
+  dv.setUint32(28, STT_SAMPLE_RATE * 2, true); // byte rate
+  dv.setUint16(32, 2, true); // block align
+  dv.setUint16(34, 16, true); // bits per sample
+  writeStr(36, 'data');
+  dv.setUint32(40, samples * 2, true);
+  let off = 44;
+  for (const f of frames) {
+    for (let i = 0; i < f.length; i++, off += 2) dv.setInt16(off, f[i], true);
+  }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+function sttRenderInput() {
+  const input = $('#message-input');
+  if (!input) return;
+  const sep = sttBeforeText && sttCommitted ? ' ' : '';
+  input.value = sttBeforeText + sep + sttCommitted + (sttPending > 0 ? ' …' : '');
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+/** Close the current segment and ship it for transcription (if it held speech). */
+function sttCutSegment() {
+  const frames = sttSegments;
+  const hadSpeech = sttSpeechInSegment;
+  sttSegments = [];
+  sttSegmentMs = 0;
+  sttSilenceMs = 0;
+  sttSpeechInSegment = false;
+  if (!hadSpeech || frames.length === 0) return;
+  const wav = sttBuildWav(frames);
+  sttPending++;
+  sttRenderInput();
+  const p = authFetch('/api/stt/transcribe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'audio/wav' },
+    body: wav,
+  })
+    .then(async (r) => {
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.error || r.statusText);
+      const text = (body.text || '').trim();
+      if (text) {
+        sttCommitted = sttCommitted ? `${sttCommitted} ${text}` : text;
+      }
+    })
+    .catch((err) => {
+      if (!sttToastShown) {
+        sttToastShown = true;
+        showToast('Transcription failed: ' + err.message, { kind: 'error' });
+      }
+    })
+    .finally(() => {
+      sttPending--;
+      sttRenderInput();
+    });
+  sttInFlight.push(p);
+}
+
+/** Per-frame handler: RMS gate → segment bookkeeping → cut on pause/length. */
+function sttOnFrame(int16) {
+  if (!sttActive) return;
+  let sum = 0;
+  for (let i = 0; i < int16.length; i++) {
+    const s = int16[i] / 0x8000;
+    sum += s * s;
+  }
+  const rms = Math.sqrt(sum / int16.length);
+  const frameMs = (int16.length / STT_SAMPLE_RATE) * 1000;
+  sttSegments.push(int16);
+  sttSegmentMs += frameMs;
+  if (rms >= STT_RMS_FLOOR) {
+    sttSpeechInSegment = true;
+    sttSilenceMs = 0;
+    sttNoSpeechMs = 0;
+  } else {
+    sttSilenceMs += frameMs;
+    sttNoSpeechMs += frameMs;
+  }
+  if ((sttSpeechInSegment && sttSilenceMs >= STT_SILENCE_CUT_MS) || sttSegmentMs >= STT_MAX_SEGMENT_MS) {
+    sttCutSegment();
+  }
+  // Long total silence = the user walked away — stop as if the mic was tapped.
+  // Stopping only inserts text; it NEVER sends (F3).
+  if (sttNoSpeechMs >= STT_AUTOSTOP_MS && !sttStopping) {
+    stopDictation();
+  }
+}
+
+async function startDictation() {
+  if (sttActive) return;
+  const input = $('#message-input');
+  if (!input || input.disabled) return;
+  try {
+    sttStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    showToast('Microphone access denied — allow the mic for this site in browser settings.', { kind: 'error' });
+    return;
+  }
+  try {
+    sttAudioCtx = new AudioContext({ sampleRate: STT_SAMPLE_RATE });
+    await sttAudioCtx.audioWorklet.addModule('/pcm-worklet.js');
+    sttSourceNode = sttAudioCtx.createMediaStreamSource(sttStream);
+    sttWorkletNode = new AudioWorkletNode(sttAudioCtx, 'pcm-worklet');
+    sttWorkletNode.port.onmessage = (e) => sttOnFrame(new Int16Array(e.data));
+    sttSourceNode.connect(sttWorkletNode);
+  } catch (err) {
+    showToast('Could not start audio capture: ' + err.message, { kind: 'error' });
+    sttTeardownAudio();
+    return;
+  }
+  sttActive = true;
+  sttStopping = false;
+  sttToastShown = false;
+  sttBeforeText = input.value.trim();
+  sttCommitted = '';
+  sttPending = 0;
+  sttSegments = [];
+  sttSegmentMs = 0;
+  sttSilenceMs = 0;
+  sttSpeechInSegment = false;
+  sttNoSpeechMs = 0;
+  sttInFlight = [];
+  const mic = $('#mic-btn');
+  mic?.classList.add('recording');
+  mic?.setAttribute('aria-label', 'Stop dictation');
+  mic?.setAttribute('aria-pressed', 'true');
+  sttSetRecordingChrome(true);
+  sttAnnounce('Listening…');
+}
+
+function sttTeardownAudio() {
+  try {
+    sttSourceNode?.disconnect();
+    sttWorkletNode?.disconnect();
+  } catch {
+    /* already gone */
+  }
+  sttStream?.getTracks().forEach((t) => t.stop());
+  sttAudioCtx?.close().catch(() => {});
+  sttStream = null;
+  sttAudioCtx = null;
+  sttWorkletNode = null;
+  sttSourceNode = null;
+}
+
+function sttResetMicButton() {
+  const mic = $('#mic-btn');
+  mic?.classList.remove('recording');
+  mic?.setAttribute('aria-label', 'Start dictation');
+  mic?.setAttribute('aria-pressed', 'false');
+  sttSetRecordingChrome(false);
+}
+
+/** Stop capture, flush the tail segment, wait for transcripts, then tidy. */
+async function stopDictation() {
+  if (!sttActive || sttStopping) return;
+  sttStopping = true;
+  sttActive = false;
+  sttCutSegment(); // flush whatever's buffered
+  sttTeardownAudio();
+  sttResetMicButton();
+  sttAnnounce('Transcribing…');
+  await Promise.allSettled(sttInFlight);
+  sttRenderInput();
+  await sttCleanupPass();
+  sttStopping = false;
+  sttAnnounce('');
+}
+
+/** Esc = cancel: discard everything dictated, restore the prior composer text. */
+function cancelDictation() {
+  if (!sttActive) return;
+  sttActive = false;
+  sttStopping = false;
+  sttTeardownAudio();
+  sttResetMicButton();
+  sttCommitted = '';
+  sttPending = 0;
+  const input = $('#message-input');
+  if (input) {
+    input.value = sttBeforeText;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  sttAnnounce('Dictation cancelled');
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && sttActive) {
+    e.preventDefault();
+    cancelDictation();
+  }
+});
+
+/**
+ * Tidy the dictated span via the server's cleanup model. The replacement goes
+ * through execCommand('insertText') over a selection of just the dictated
+ * text, so the native undo stack (Ctrl/Cmd+Z) restores the raw transcript.
+ */
+async function sttCleanupPass() {
+  if (!sttConfig?.cleanup || !sttCommitted.trim()) return;
+  const input = $('#message-input');
+  if (!input) return;
+  const raw = sttCommitted;
+  const mic = $('#mic-btn');
+  mic?.classList.add('tidying');
+  try {
+    const r = await authFetch('/api/stt/cleanup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: raw }),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok || !body.cleaned || typeof body.text !== 'string') return;
+    // The composer may have been edited while we waited — only swap if the
+    // dictated span is still exactly where we left it.
+    const sep = sttBeforeText && raw ? ' ' : '';
+    const expected = sttBeforeText + sep + raw;
+    if (input.value !== expected) return;
+    const start = (sttBeforeText + sep).length;
+    input.focus();
+    input.setSelectionRange(start, input.value.length);
+    const before = input.value;
+    document.execCommand('insertText', false, body.text);
+    if (input.value === before) {
+      input.setRangeText(body.text, start, before.length, 'end');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    sttCommitted = body.text;
+  } catch {
+    /* raw transcript stays — cleanup is best-effort */
+  } finally {
+    mic?.classList.remove('tidying');
+  }
+}
+
+$('#mic-btn')?.addEventListener('click', () => {
+  if (sttActive) stopDictation();
+  else startDictation();
+});
+
+/** Post-auth: reveal the mic when the server has an STT backend configured. */
+async function initSttFeature() {
+  try {
+    const r = await authFetch('/api/stt/config');
+    if (!r.ok) return;
+    sttConfig = await r.json();
+    $('#mic-btn').hidden = !sttConfig.enabled;
+  } catch {
+    /* feature stays hidden */
+  }
+}
+
+// ── Settings → Features → Voice dictation (install + config, owner-only) ────
+// Backend segmented Local/ElevenLabs; Local shows the hardware-suggested model
+// select + Install, ElevenLabs swaps to key + Connect. Same install-row/log/
+// badge flow as Read aloud, through /api/webchat/stt/install.
+let sttInstallWired = false;
+let sttInstallActive = false;
+let sttChosenBackend = 'local';
+let sttLastState = null; // last /api/webchat/stt/install snapshot (render + change guard)
+
+// STT install DOM sets — Settings → Features and the wizard's Features step drive
+// the SAME /api/webchat/stt/install, each passing its own element ids so one
+// install/poll path serves both surfaces (mirrors the TTS pattern).
+const STT_SETTINGS_ELS = { btn: '#stt-install-btn', log: '#stt-install-log', progress: '#stt-install-progress' };
+
+async function pollSttInstall(els = STT_SETTINGS_ELS, onDone) {
+  if (sttInstallActive) return;
+  sttInstallActive = true;
+  const btn = $(els.btn);
+  const log = $(els.log);
+  const progress = $(els.progress);
+  if (progress) progress.hidden = false;
+  if (btn) btn.disabled = true;
+  try {
+    while (true) {
+      const st = await (await authFetch('/api/webchat/stt/install')).json();
+      if (log) {
+        log.textContent = (st.lines || []).slice(-12).join('\n') || 'Starting…';
+        log.scrollTop = log.scrollHeight;
+      }
+      if (!st.running) {
+        if (st.exitCode === 0) {
+          showToast('Voice dictation installed — the mic is live', { kind: 'success' });
+          await initSttFeature(); // reveal the composer mic immediately
+        } else {
+          showToast('Voice dictation install failed — see log', { kind: 'error' });
+        }
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  } catch (err) {
+    showToast('Voice dictation install error: ' + err.message, { kind: 'error' });
+  } finally {
+    sttInstallActive = false;
+    renderSttSetupSettings();
+    if (onDone) onDone();
+  }
+}
+
+async function runSttInstall(payload, els = STT_SETTINGS_ELS, onDone) {
+  const btn = $(els.btn);
+  const log = $(els.log);
+  const progress = $(els.progress);
+  if (progress) progress.hidden = false;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Installing…';
+  }
+  if (log) log.textContent = 'Starting…';
+  try {
+    const res = await authFetch('/api/webchat/stt/install', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok && res.status !== 202) {
+      const err = await res.json().catch(() => ({}));
+      if (log) log.textContent = 'Install failed: ' + (err.error || res.status);
+      showToast('Voice dictation install failed', { kind: 'error' });
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = 'Install';
+      }
+      return;
+    }
+    pollSttInstall(els, onDone);
+  } catch (err) {
+    if (log) log.textContent = 'Install failed: ' + err.message;
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Install';
+    }
+  }
+}
+
+function sttPopulateModelSelect(st) {
+  const select = $('#stt-model-select');
+  if (!select || !Array.isArray(st.models)) return;
+  if (select.options.length === 0) {
+    for (const m of st.models) {
+      const opt = document.createElement('option');
+      opt.value = m;
+      opt.textContent = m === st.suggestedModel ? `${m} (suggested)` : m;
+      select.appendChild(opt);
+    }
+  }
+  select.value = st.model || st.suggestedModel || st.models[0];
+}
+
+/** Show/hide the pre-install pickers for the chosen backend. */
+function sttRenderBackendChoice(st) {
+  document
+    .querySelectorAll('#stt-backend-mode .setting-option')
+    .forEach((b) => b.classList.toggle('active', b.dataset.value === sttChosenBackend));
+  const local = sttChosenBackend === 'local';
+  $('#stt-model-group').hidden = !local || !st.installerPresent;
+  $('#stt-install-btn').hidden = !local || !st.installerPresent;
+  $('#stt-key-group').hidden = local;
+  if (local) sttPopulateModelSelect(st);
+}
+
+/** Populate the cleanup select from the roster (owner path of /api/stt/config). */
+async function renderSttCleanupSelect(cfg) {
+  const group = $('#stt-cleanup-group');
+  const select = $('#stt-cleanup-select');
+  if (!group || !select) return;
+  group.hidden = false;
+  try {
+    const models = await (await authFetch('/api/models')).json();
+    select.innerHTML = '<option value="">None — raw transcript</option>';
+    for (const m of models) {
+      if ((m.kind !== 'ollama' && m.kind !== 'openai-compatible') || !m.endpoint) continue;
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = `${m.name} (${m.model_id})`;
+      select.appendChild(opt);
+    }
+    select.value = cfg.cleanupModelId || '';
+  } catch {
+    /* leave the None option */
+  }
+}
+
+async function renderSttSetupSettings() {
+  const section = $('#settings-stt');
+  if (!section) return;
+  let st = null;
+  try {
+    const res = await authFetch('/api/webchat/stt/install');
+    if (res.ok) st = await res.json();
+  } catch {
+    st = null;
+  }
+  if (!st) {
+    section.hidden = true; // non-owner: no install surface at all
+    return;
+  }
+  sttLastState = st;
+  section.hidden = false;
+  const btn = $('#stt-install-btn');
+  const badge = $('#stt-installed-badge');
+  const progress = $('#stt-install-progress');
+  const desc = $('#stt-setup-desc');
+  if (!sttInstallWired) {
+    sttInstallWired = true;
+    document.querySelectorAll('#stt-backend-mode .setting-option').forEach((b) => {
+      b.addEventListener('click', () => {
+        sttChosenBackend = b.dataset.value;
+        renderSttSetupSettings();
+      });
+    });
+    btn?.addEventListener('click', () => {
+      runSttInstall({ provider: 'local', model: $('#stt-model-select')?.value || undefined });
+    });
+    // Workspace Off/On — mirrors Read aloud: owner flips the mic for everyone.
+    document.querySelectorAll('#stt-enabled-mode .setting-option').forEach((b) => {
+      b.addEventListener('click', async () => {
+        const on = b.dataset.value === 'on';
+        const r = await authFetch('/api/stt/config', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: on }),
+        });
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          showToast('Failed to save: ' + (err.error || r.statusText), { kind: 'error' });
+          return;
+        }
+        document.querySelectorAll('#stt-enabled-mode .setting-option')
+          .forEach((x) => x.classList.toggle('active', x === b));
+        const mic = $('#mic-btn');
+        if (mic) mic.hidden = !on;
+        if (!on && sttActive) cancelDictation();
+        showToast(on ? 'Voice dictation on for everyone' : 'Voice dictation off for everyone');
+      });
+    });
+    // Installed + local: picking a different model re-runs the installer for it
+    // (downloads if new, restarts the container) with the usual progress log.
+    $('#stt-model-select')?.addEventListener('change', () => {
+      if (!sttLastState?.installed || sttLastState.provider !== 'local') return;
+      const model = $('#stt-model-select').value;
+      if (!model || model === sttLastState.model) return;
+      showToast(`Switching to ${model}…`, { kind: 'info' });
+      runSttInstall({ provider: 'local', model });
+    });
+    $('#stt-connect-btn')?.addEventListener('click', () => {
+      const key = ($('#stt-api-key')?.value || '').trim();
+      if (!key) {
+        showToast('Enter the ElevenLabs API key first', { kind: 'error' });
+        return;
+      }
+      runSttInstall({ provider: 'elevenlabs', apiKey: key });
+      $('#stt-api-key').value = '';
+    });
+    // Cleanup-prompt editor: Edit… disclosure → textarea + Save / Reset.
+    $('#stt-prompt-edit')?.addEventListener('click', () => {
+      const editor = $('#stt-prompt-editor');
+      const open = editor.hidden;
+      editor.hidden = !open;
+      $('#stt-prompt-edit').setAttribute('aria-expanded', String(open));
+      if (open) $('#stt-prompt-text').focus();
+    });
+    $('#stt-prompt-save')?.addEventListener('click', async () => {
+      const value = $('#stt-prompt-text').value.trim();
+      const r = await authFetch('/api/stt/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cleanupPrompt: value || null }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        showToast('Failed to save: ' + (body.error || r.statusText), { kind: 'error' });
+        return;
+      }
+      $('#stt-prompt-editor').hidden = true;
+      $('#stt-prompt-edit').setAttribute('aria-expanded', 'false');
+      showToast(body.cleanupPrompt ? 'Cleanup prompt saved' : 'Cleanup prompt reset to default', { kind: 'success' });
+      renderSttSetupSettings();
+    });
+    $('#stt-prompt-reset')?.addEventListener('click', async () => {
+      const r = await authFetch('/api/stt/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cleanupPrompt: null }),
+      });
+      if (!r.ok) {
+        showToast('Failed to reset', { kind: 'error' });
+        return;
+      }
+      $('#stt-prompt-editor').hidden = true;
+      $('#stt-prompt-edit').setAttribute('aria-expanded', 'false');
+      showToast('Cleanup prompt reset to default', { kind: 'success' });
+      renderSttSetupSettings();
+    });
+    $('#stt-cleanup-select')?.addEventListener('change', async () => {
+      const value = $('#stt-cleanup-select').value || null;
+      const r = await authFetch('/api/stt/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cleanupModelId: value }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        showToast('Failed to save: ' + (err.error || r.statusText), { kind: 'error' });
+        renderSttSetupSettings(); // resync to server truth
+        return;
+      }
+      sttConfig = { ...sttConfig, cleanup: value !== null, cleanupModelId: value };
+      showToast(value ? 'Cleanup model saved' : 'Cleanup turned off', { kind: 'success' });
+    });
+  }
+  if (st.installed) {
+    badge.hidden = false;
+    btn.hidden = true;
+    $('#stt-backend-group').hidden = true;
+    $('#stt-key-group').hidden = true;
+    $('#stt-enabled-group').hidden = false;
+    document.querySelectorAll('#stt-enabled-mode .setting-option').forEach((b) => {
+      b.classList.toggle('active', b.dataset.value === (st.enabled ? 'on' : 'off'));
+    });
+    // Local backend: the model stays visible and switchable after install.
+    const localModel = st.provider === 'local' && st.installerPresent;
+    $('#stt-model-group').hidden = !localModel;
+    if (localModel) {
+      sttPopulateModelSelect(st);
+      const label = $('#stt-model-label');
+      if (label) label.textContent = 'Model (Whisper)';
+    }
+    if (desc) desc.hidden = true;
+    progress.hidden = !st.running;
+    if (st.running) pollSttInstall();
+    // Cleanup model applies whichever backend transcribes.
+    try {
+      const cfg = await (await authFetch('/api/stt/config')).json();
+      if (cfg.canEdit) {
+        await renderSttCleanupSelect(cfg);
+        // Prompt editor: prefill with the effective prompt; Reset only shows
+        // when a custom prompt is stored.
+        $('#stt-prompt-row').hidden = false;
+        $('#stt-prompt-text').value = cfg.cleanupPrompt || cfg.defaultCleanupPrompt || '';
+        $('#stt-prompt-reset').hidden = !cfg.cleanupPrompt;
+      }
+    } catch {
+      /* cleanup select stays as-is */
+    }
+    return;
+  }
+  badge.hidden = true;
+  $('#stt-enabled-group').hidden = true;
+  $('#stt-cleanup-group').hidden = true;
+  $('#stt-prompt-row').hidden = true;
+  $('#stt-prompt-editor').hidden = true;
+  $('#stt-backend-group').hidden = false;
+  // Prereq hint (the only prose allowed here): explain a hidden Install button.
+  if (desc) {
+    desc.hidden = st.installerPresent || sttChosenBackend !== 'local';
+    if (!st.installerPresent) {
+      desc.textContent =
+        'The local backend needs the add-webchat-dictation skill, which isn’t in this install — re-run install-webchat.sh to add it, or use ElevenLabs.';
+    }
+  }
+  sttRenderBackendChoice(st);
+  if (st.running) {
+    pollSttInstall();
+  } else if (btn) {
+    btn.disabled = false;
+    btn.textContent = 'Install';
+    btn.title = 'Run whisper.cpp locally with the selected model — no cloud, no key. Model download sized to this machine.';
+  }
 }
 
 // ── Settings → "Set up routing" (one-click add-routing install) ─────────────
@@ -1662,6 +3102,41 @@ async function pollRoutingInstall() {
   }
 }
 
+// Phase-1 helper: install the LiteLLM router (routing's prerequisite) and
+// stream its log into the shared routing-install box, resolving true on
+// success. Automates what used to require running /add-litellm in a shell, so
+// the one-click Install flow no longer dead-ends on the missing prerequisite.
+async function installLitellmPhase(log) {
+  log.textContent = 'Installing the LiteLLM router…';
+  let res;
+  try {
+    res = await authFetch('/api/router/litellm-install', { method: 'POST' });
+  } catch (err) {
+    log.textContent = 'LiteLLM install failed: ' + err.message;
+    showToast('LiteLLM install failed', { kind: 'error' });
+    return false;
+  }
+  if (!res.ok && res.status !== 202) {
+    const err = await res.json().catch(() => ({}));
+    log.textContent = 'LiteLLM install failed: ' + (err.error || res.status);
+    showToast('LiteLLM install failed', { kind: 'error' });
+    return false;
+  }
+  while (true) {
+    const st = await (await authFetch('/api/router/litellm-install')).json();
+    if (Array.isArray(st.lines) && st.lines.length) log.textContent = st.lines.slice(-12).join('\n');
+    if (!st.running) {
+      if (st.exitCode === 0) {
+        showToast('LiteLLM router installed', { kind: 'success' });
+        return true;
+      }
+      showToast('LiteLLM install failed — see log', { kind: 'error' });
+      return false;
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+}
+
 async function runRoutingInstall() {
   const btn = $('#routing-install-btn');
   const log = $('#routing-install-log');
@@ -1670,16 +3145,23 @@ async function runRoutingInstall() {
   btn.textContent = 'Installing…';
   log.textContent = 'Starting…';
   try {
+    // Phase 1 — ensure the LiteLLM router is present. If it's missing, install
+    // it here and wait for it to finish before layering routing on top.
+    const pre = await (await authFetch('/api/router/install')).json().catch(() => ({}));
+    if (!pre.litellmReady) {
+      const ok = await installLitellmPhase(log);
+      if (!ok) {
+        btn.disabled = false;
+        btn.textContent = 'Install';
+        return;
+      }
+    }
+    // Phase 2 — install auto routing (shadow mode).
     const res = await authFetch('/api/router/install', { method: 'POST' });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      if (err.code === 'litellm-not-installed') {
-        log.textContent = 'LiteLLM is not installed. Run /add-litellm first, then retry.';
-        showToast('Install LiteLLM first (/add-litellm)', { kind: 'error' });
-      } else {
-        log.textContent = 'Install failed: ' + (err.error || res.status);
-        showToast('Auto routing setup failed', { kind: 'error' });
-      }
+      log.textContent = 'Install failed: ' + (err.error || res.status);
+      showToast('Auto routing setup failed', { kind: 'error' });
       btn.disabled = false;
       btn.textContent = 'Install';
       return;
@@ -1741,11 +3223,12 @@ async function renderRoutingSetupSettings() {
   btn.hidden = false;
   btn.textContent = busy ? 'Installing…' : 'Install';
   if (!st.litellmReady) {
-    // The one case that still needs a hint line: the prerequisite is missing,
-    // so a bare disabled button would be inexplicable.
-    btn.disabled = true;
+    // The LiteLLM router (routing's prerequisite) isn't installed — but the
+    // Install flow now sets it up first, so the button stays live. One
+    // explainer line since the click does more than the label implies.
+    btn.disabled = busy;
     desc.hidden = false;
-    desc.textContent = 'Install the LiteLLM router first (run /add-litellm), then install auto routing here.';
+    desc.textContent = 'Sets up the LiteLLM router, then installs auto routing (shadow mode).';
   } else {
     btn.disabled = busy;
     desc.hidden = true;
@@ -1774,6 +3257,9 @@ $('#overflow-btn')?.addEventListener('click', (e) => {
   const open = menu.hidden;
   menu.hidden = !open;
   $('#overflow-btn').setAttribute('aria-expanded', String(open));
+  // Re-probe on open so a routing install done elsewhere (in-app, CLI, another
+  // tab) reveals Auto routing here without a full reload.
+  if (open) void probeRoutingAvailability();
 });
 $('#overflow-menu')?.addEventListener('click', (e) => {
   const item = e.target.closest('.overflow-item');
@@ -2119,6 +3605,34 @@ document.querySelectorAll('#send-options .setting-option').forEach((btn) => {
     settings.sendKey = btn.dataset.value;
     saveSettings(settings);
     renderSettingsModal();
+  });
+});
+
+// Read aloud (Settings → Features) — WORKSPACE-level: the owner flips it for
+// everyone (PUT /api/tts/config, owner-gated server-side). Newly rendered
+// messages pick it up immediately; existing bubbles on next render; other
+// members see it after their next reload. Server voices when the
+// /add-webchat-tts backend is on, device voices otherwise.
+document.querySelectorAll('#tts-default-mode .setting-option').forEach((btn) => {
+  btn.addEventListener('click', async () => {
+    const on = btn.dataset.value === 'on';
+    const r = await authFetch('/api/tts/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ readAloud: on }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      showToast('Failed to save: ' + (err.error || r.statusText), { kind: 'error' });
+      return;
+    }
+    ttsReadAloudEnabled = on;
+    document.querySelectorAll('#tts-default-mode .setting-option')
+      .forEach((b) => b.classList.toggle('active', b === btn));
+    if (!on) stopTts();
+    showToast(on
+      ? 'Read aloud on for everyone — hover an agent reply for the speaker'
+      : 'Read aloud off for everyone');
   });
 });
 
@@ -4315,6 +5829,13 @@ function appendMessage(msg, statusText, beforeNode) {
   // Fold this turn's reasoning onto the reply as a collapsible disclosure.
   if (thoughtsForThisMsg && thoughtsForThisMsg.length > 0) {
     div.appendChild(buildThoughtsDisclosure(thoughtsForThisMsg));
+  }
+
+  // Read-aloud control for agent replies — overlaid on the bubble's corner
+  // (hover-revealed, standard chat-UI pattern) so it reserves no space.
+  if (isAgent && msg.content) {
+    const ttsBtn = buildTtsButton(() => ttsPlainText(msg.content));
+    if (ttsBtn) bubble.appendChild(ttsBtn);
   }
 
   // Timestamp
@@ -6831,12 +8352,15 @@ function labelHue(str) {
 // everywhere. Official (Anthropic) is green; every other collection gets its own
 // colour keyed off its label. Links out to the source.
 function originBadgeEl(origin) {
-  const el = document.createElement(origin.url ? 'a' : 'span');
+  const safeUrlEl = /^https?:\/\//i.test(origin.url || '') ? origin.url : null;
+  const el = document.createElement(safeUrlEl ? 'a' : 'span');
   el.className = 'skill-badge skill-badge-origin' + (origin.official ? ' skill-badge-official' : '');
   el.textContent = origin.label;
   if (!origin.official) el.style.setProperty('--badge-hue', String(labelHue(origin.label)));
-  if (origin.url) {
-    el.href = origin.url;
+  // Only http(s) — never let a javascript:/data: URL become a click-XSS sink
+  // (defense-in-depth; the source list is owner-gated config).
+  if (safeUrlEl) {
+    el.href = safeUrlEl;
     el.target = '_blank';
     el.rel = 'noopener noreferrer';
     el.title = `${origin.label} — open source ↗`;
@@ -8226,7 +9750,7 @@ let permsSelectedUserId = null;
 let myUserId = null; // populated by probeIsOwner via /api/auth/check
 let isOwnerView = false; // set by probeIsOwner — gates owner-only write controls (e.g. room assignment)
 let isAdminView = false; // set by probeIsOwner — true for any admin+ (gates the slash menu, MCP)
-let marketplaceEnabled = true; // MCP + skills marketplace toggle; set by probeIsOwner from /api/webchat/features
+let marketplaceEnabled = false; // MCP + skills catalog — disabled by default (opt-in); set by probeIsOwner from /api/webchat/features
 
 function openPermissions() {
   openFullView(() => {
@@ -8275,9 +9799,9 @@ async function probeIsOwner() {
       // both hold; the server 403s the endpoints when off, so this is just UX.
       try {
         const fr = await authFetch('/api/webchat/features');
-        marketplaceEnabled = fr.ok ? (await fr.json()).marketplaceEnabled !== false : true;
+        marketplaceEnabled = fr.ok ? (await fr.json()).marketplaceEnabled === true : false;
       } catch {
-        marketplaceEnabled = true;
+        marketplaceEnabled = false;
       }
       if (marketplaceEnabled) {
         $('#overflow-mcp')?.removeAttribute('hidden');
@@ -13118,7 +14642,7 @@ function modelDisplayParts(model) {
 
 function modelKindExplainer(kind) {
   if (kind === 'ollama') return 'Direct Ollama endpoint \u2014 runs on the default harness via its Anthropic-compatible API.';
-  if (kind === 'openai-compatible') return 'OpenAI-compatible endpoint \u2014 assigned agents run on the OpenCode harness.';
+  if (kind === 'openai-compatible') return 'OpenAI-compatible endpoint \u2014 runs on the default harness via LiteLLM\u2019s Anthropic-compatible surface.';
   if (kind === 'anthropic') return 'Anthropic model \u2014 credentials injected per request by the OneCLI gateway.';
   return '';
 }
@@ -13582,8 +15106,8 @@ bindDiscover(
 );
 bindDiscover(
   '#model-discover-btn',
-  // Raw kind from the data attribute — the visible value is the display label
-  // ('opencode'), which the discover API wouldn't recognize.
+  // Raw kind from the data attribute — the visible value is the display label,
+  // which the discover API wouldn't recognize.
   () => $('#model-kind').dataset.kind || $('#model-kind').value,
   () => $('#model-endpoint').value.trim(),
   '#model-model-id',
@@ -13782,52 +15306,50 @@ async function renderMcpSources() {
   section.hidden = false;
   list.innerHTML = '';
   for (const src of sources) {
-    mcpRegistryDisabled = !!src.disabled;
+    const off = !!(src.removed || src.disabled);
+    mcpRegistryDisabled = off;
+    // Same row idiom as the skill collections' built-in source: info column
+    // (name + meta), a built-in badge, and a reversible Remove/Add — no
+    // standing prose, no confirm (adding it back is one click).
     const li = document.createElement('li');
     li.className = 'skill-source-row';
+    if (off) li.classList.add('source-disabled');
 
-    const label = document.createElement('span');
-    label.className = 'skill-source-name';
-    label.textContent = src.name;
+    const info = document.createElement('div');
+    info.className = 'skill-info';
+    const head = document.createElement('div');
+    head.className = 'skill-head';
+    // Same compact origin pill the skill collections lead with — a long plain
+    // name breaks .skill-head's pill-sized layout.
+    head.appendChild(originBadgeEl({ label: 'MCP registry', url: src.url, official: false }));
+    const meta = document.createElement('span');
+    meta.className = 'skill-desc';
+    meta.textContent = off ? 'Removed from Add MCP server' : src.url.replace(/^https?:\/\//, '');
+    info.append(head, meta);
+    li.appendChild(info);
 
-    const link = document.createElement('a');
-    link.href = src.url;
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-    link.className = 'skill-source-url';
-    link.textContent = src.url.replace(/^https?:\/\//, '');
+    const tag = document.createElement('span');
+    tag.className = 'skill-badge';
+    tag.textContent = 'built-in';
+    li.appendChild(tag);
 
     const toggle = document.createElement('button');
     toggle.type = 'button';
-    toggle.className = src.disabled ? 'btn btn-secondary' : 'btn btn-danger';
-    toggle.textContent = src.disabled ? 'Enable' : 'Disable';
+    toggle.className = off ? 'btn btn-ghost' : 'skill-delete';
+    toggle.textContent = off ? 'Add' : 'Remove';
     toggle.addEventListener('click', async () => {
-      const turningOff = !src.disabled;
-      if (turningOff) {
-        const ok = await showConfirmModal({
-          title: 'Disable the MCP registry?',
-          body: 'The catalog disappears from Add MCP server. Servers you have already added keep working, and you can still add one by hand.',
-          confirmLabel: 'Disable',
-          destructive: true,
-        });
-        if (!ok) return;
-      }
       try {
         const res = await authFetch(`/api/mcp-sources/${encodeURIComponent(src.id)}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ disabled: turningOff }),
+          method: off ? 'POST' : 'DELETE',
         });
         if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Failed');
-        showToast(turningOff ? 'MCP registry disabled' : 'MCP registry enabled');
         void renderMcpSources();
         applyMcpCatalogVisibility();
       } catch (err) {
         showToast(err.message || 'Could not update the source', 'error');
       }
     });
-
-    li.append(label, link, toggle);
+    li.appendChild(toggle);
     list.appendChild(li);
   }
   applyMcpCatalogVisibility();

@@ -300,7 +300,7 @@ export function envForModel(model: WebchatModel | null): Record<string, string> 
 export function writeAgentSettingsForAssignedModel(agentGroupId: string): void {
   // Per-agent assignment wins; a claude-family group WITHOUT one falls back to
   // the workspace default model (wizard "default engine = Ollama"). Groups on
-  // a non-default provider (codex/opencode) never inherit the fallback — their
+  // a non-default provider (e.g. codex) never inherit the fallback — their
   // harness doesn't read the ANTHROPIC_* env this writes.
   let model = getAssignedModelForAgent(agentGroupId);
   if (!model) {
@@ -493,7 +493,7 @@ export async function validateModel(input: {
  *     gated OpenAI-compat endpoints; user can type the id manually)
  *   - requires_credential: true if /v1/models returned 401/403, hint to
  *     the operator that they need to wire OneCLI for this endpoint
- *   - notes: arbitrary advisory string ("requires /add-opencode" etc.)
+ *   - notes: arbitrary advisory string (e.g. how the endpoint is consumed)
  *   - kind=null + reason: nothing matched, with the reason for each probe
  */
 export interface ProbeResult {
@@ -645,7 +645,8 @@ async function probeOneScheme(rawUrl: string): Promise<ProbeResult> {
       if (Array.isArray(body?.data)) {
         result.kind = 'openai-compatible';
         result.models = body.data.map((m) => m.id).filter((n): n is string => typeof n === 'string');
-        result.notes = '⚠ Using OpenAI-compatible models requires the `/add-opencode` skill.';
+        result.notes =
+          'OpenAI-compatible endpoint. Agents consume these through the Anthropic-spec /v1/messages surface (LiteLLM serves it for every model it fronts).';
         return result;
       }
     }

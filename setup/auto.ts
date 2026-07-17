@@ -838,8 +838,8 @@ function sendChatMessage(message: string): Promise<void> {
 
 // Providers offered for install are hard-wired in trunk — an audited control
 // surface (no branch enumeration that anyone with write access could extend).
-// Codex is the only one offered here; opencode/ollama install via their own
-// /add-* skills. Each is installed by applying its `/add-<name>` SKILL.md
+// Codex is the only one offered here; ollama installs via its own
+// /add-* skill. Each is installed by applying its `/add-<name>` SKILL.md
 // in-process via the directive engine.
 const INSTALLABLE_PROVIDERS = [
   { value: 'codex', label: 'Codex', hint: 'OpenAI — ChatGPT subscription or API key' },

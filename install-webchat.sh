@@ -217,6 +217,12 @@ NEW_PATHS=(
   src/group-init.test.ts
   scripts/renew-webchat-cert.sh
   setup/webchat-tailscale-https.sh
+  # Read-aloud backend installer — Settings → Features → Read aloud's Install
+  # button runs this; without it the button hides and only device voices work.
+  .claude/skills/add-webchat-tts
+  # Voice-dictation backend installer — Settings → Features → Voice dictation's
+  # Install button runs this; without it only the ElevenLabs cloud path works.
+  .claude/skills/add-webchat-dictation
   container/agent-runner/src/mcp-tools/registration.test.ts
 )
 echo "→ Copying webchat-owned files …"

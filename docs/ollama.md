@@ -125,7 +125,7 @@ loginctl enable-linger "$USER"   # so it runs without an active login session
 
 On macOS use a `launchd` user agent (`~/Library/LaunchAgents/`) running the same script.
 
-**Scope.** This only affects the Claude-Code-CLI → Ollama path described here. Codex and OpenCode don't use the Claude Agent SDK, so they never emit the `cch` hash and get prompt caching for free.
+**Scope.** This only affects the Claude-Code-CLI → Ollama path described here. Codex doesn't use the Claude Agent SDK, so it never emits the `cch` hash and gets prompt caching for free.
 
 ## What Changes at the Code Level
 

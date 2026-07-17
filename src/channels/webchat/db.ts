@@ -755,6 +755,122 @@ export function setMarketplaceDisabled(disabled: boolean): void {
     );
 }
 
+/**
+ * Voice-dictation cleanup model (webchat_settings singleton). NULL = no cleanup —
+ * dictation delivers the raw Whisper transcript. Missing row/column reads as NULL
+ * so the feature degrades to raw rather than erroring.
+ */
+export function getSttCleanupModelId(): string | null {
+  try {
+    const row = getDb().prepare(`SELECT stt_cleanup_model_id FROM webchat_settings WHERE id = 1`).get() as
+      | { stt_cleanup_model_id: string | null }
+      | undefined;
+    return row?.stt_cleanup_model_id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Custom cleanup prompt (webchat_settings singleton). NULL = the built-in
+ * default in stt.ts. Same degrade-to-default read as the cleanup model.
+ */
+export function getSttCleanupPrompt(): string | null {
+  try {
+    const row = getDb().prepare(`SELECT stt_cleanup_prompt FROM webchat_settings WHERE id = 1`).get() as
+      | { stt_cleanup_prompt: string | null }
+      | undefined;
+    const p = row?.stt_cleanup_prompt;
+    return typeof p === 'string' && p.trim() ? p : null;
+  } catch {
+    return null;
+  }
+}
+
+export function setSttCleanupPrompt(prompt: string | null): void {
+  const cfg = getCredentialsConfig();
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_settings
+         (id, default_credential_mode, allow_anthropic_key, allow_claude_oauth, allow_openai_key, allow_codex_oauth, stt_cleanup_prompt, updated_at)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         stt_cleanup_prompt = excluded.stt_cleanup_prompt,
+         updated_at         = excluded.updated_at`,
+    )
+    .run(
+      cfg.defaultMode,
+      cfg.allowAnthropicKey ? 1 : 0,
+      cfg.allowClaudeOauth ? 1 : 0,
+      cfg.allowOpenaiKey ? 1 : 0,
+      cfg.allowCodexOauth ? 1 : 0,
+      prompt,
+      Date.now(),
+    );
+}
+
+export function setSttCleanupModelId(modelId: string | null): void {
+  // Seed the singleton from current config (NOT NULL columns) if absent, then
+  // flip only the STT column on conflict — same pattern as setOnboardingComplete.
+  const cfg = getCredentialsConfig();
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_settings
+         (id, default_credential_mode, allow_anthropic_key, allow_claude_oauth, allow_openai_key, allow_codex_oauth, stt_cleanup_model_id, updated_at)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         stt_cleanup_model_id = excluded.stt_cleanup_model_id,
+         updated_at           = excluded.updated_at`,
+    )
+    .run(
+      cfg.defaultMode,
+      cfg.allowAnthropicKey ? 1 : 0,
+      cfg.allowClaudeOauth ? 1 : 0,
+      cfg.allowOpenaiKey ? 1 : 0,
+      cfg.allowCodexOauth ? 1 : 0,
+      modelId,
+      Date.now(),
+    );
+}
+
+// Workspace-level Read aloud: true = every authed user gets the speaker
+// control on agent replies. Owner-set from Settings → Features (was a
+// per-device switch — confusing in shared rooms). See moduleWebchatReadAloud.
+export function getReadAloudEnabled(): boolean {
+  try {
+    const row = getDb().prepare(`SELECT read_aloud_enabled FROM webchat_settings WHERE id = 1`).get() as
+      | { read_aloud_enabled: number }
+      | undefined;
+    return row?.read_aloud_enabled === 1;
+  } catch {
+    return false;
+  }
+}
+
+export function setReadAloudEnabled(enabled: boolean): void {
+  // Seed the singleton from current config (NOT NULL columns) if absent, then
+  // flip only this column on conflict — same pattern as setBearerTokenDisabled.
+  const cfg = getCredentialsConfig();
+  getDb()
+    .prepare(
+      `INSERT INTO webchat_settings
+         (id, default_credential_mode, allow_anthropic_key, allow_claude_oauth, allow_openai_key, allow_codex_oauth, read_aloud_enabled, updated_at)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         read_aloud_enabled = excluded.read_aloud_enabled,
+         updated_at         = excluded.updated_at`,
+    )
+    .run(
+      cfg.defaultMode,
+      cfg.allowAnthropicKey ? 1 : 0,
+      cfg.allowClaudeOauth ? 1 : 0,
+      cfg.allowOpenaiKey ? 1 : 0,
+      cfg.allowCodexOauth ? 1 : 0,
+      enabled ? 1 : 0,
+      Date.now(),
+    );
+}
+
 // One-shot "first Tailscale login becomes owner" arm flag (wizard opt-in).
 // true = the next tailscale identity to authenticate is granted owner, then the
 // flag clears. See moduleWebchatTailscaleOwner + auth.ts finalize().
@@ -944,9 +1060,9 @@ export function storeWebchatSkillDraftCard(
  */
 export function skillDraftCardPosition(draftId: string): { roomId: string; newerMessages: number } | null {
   const id = `skill-draft-card-${draftId}`;
-  const row = getDb()
-    .prepare('SELECT room_id, created_at FROM webchat_messages WHERE id = ?')
-    .get(id) as { room_id: string; created_at: number } | undefined;
+  const row = getDb().prepare('SELECT room_id, created_at FROM webchat_messages WHERE id = ?').get(id) as
+    | { room_id: string; created_at: number }
+    | undefined;
   if (!row) return null;
   const n = getDb()
     .prepare('SELECT count(*) AS n FROM webchat_messages WHERE room_id = ? AND created_at > ? AND id != ?')
@@ -1630,11 +1746,9 @@ export function deleteWebchatPushSubscriptionByEndpoint(endpoint: string): void 
 // cascade-with-confirmation in JS.
 
 // 'openai-compatible' covers OpenRouter, LM Studio, vLLM, Llama.cpp, and any
-// /v1/{models,chat/completions} endpoint. Storing/registering works without
-// extra setup; *using* one as an agent's runtime model requires the
-// `/add-opencode` skill (the default Claude SDK doesn't speak OpenAI's
-// protocol). The PWA surfaces a "needs /add-opencode" warning when
-// assigning, but the row stays around for when the skill is installed.
+// /v1/{models,chat/completions} endpoint. Agents consume these through the
+// Anthropic-spec /v1/messages surface that LiteLLM fronts for every model it
+// serves, so they run on the default Claude harness — no extra provider needed.
 export type WebchatModelKind = 'anthropic' | 'ollama' | 'openai-compatible';
 
 export interface WebchatModel {

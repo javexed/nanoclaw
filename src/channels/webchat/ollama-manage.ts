@@ -30,9 +30,11 @@
  */
 import { spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import { safeFetch } from './models.js';
+import { getSystemdUnit, getLaunchdLabel } from '../../install-slug.js';
 
 // ── Host model listing ─────────────────────────────────────────────────────
 
@@ -261,8 +263,9 @@ interface InstallState {
   finishedAt: number | null;
 }
 
-/** A chain step: a spawned command, or an in-process callback (with a log label). */
-type InstallStep = { run: [string, string[]] } | { call: () => void; label: string };
+/** A chain step: a spawned command, or an in-process callback (with a log label).
+ *  Callbacks may be async — the chain awaits a returned promise. */
+export type InstallStep = { run: [string, string[]] } | { call: () => void | Promise<void>; label: string };
 
 /**
  * Run installer steps in sequence, streaming a capped rolling log into `state`.
@@ -270,13 +273,37 @@ type InstallStep = { run: [string, string[]] } | { call: () => void; label: stri
  * refresh and the routing install so the spawn/log boilerplate lives once.
  */
 function runInstallChain(state: InstallState, steps: InstallStep[], root: string): void {
+  // Line-buffered append. Chunks rarely align with lines: progress output
+  // (health-check dots, docker/ollama status) arrives newline-free or
+  // \r-separated. An unterminated tail is held as `partial` and rendered as a
+  // mutable last line — so a dot stream reads "....." growing in place instead
+  // of one single-dot line per chunk. \r counts as a line break so in-place
+  // progress rewrites surface as their latest state.
+  let partial = '';
+  let partialShown = false;
   const append = (chunk: Buffer | string): void => {
-    for (const l of String(chunk).split('\n')) {
+    const parts = (partial + String(chunk)).split(/\r\n|\n|\r/);
+    partial = parts.pop() ?? '';
+    if (partialShown) {
+      state.lines.pop();
+      partialShown = false;
+    }
+    for (const l of parts) {
       const line = l.trimEnd();
       if (!line) continue;
       state.lines.push(line);
-      if (state.lines.length > LINES_CAP) state.lines.shift();
     }
+    if (partial.trimEnd()) {
+      state.lines.push(partial.trimEnd());
+      partialShown = true;
+    }
+    while (state.lines.length > LINES_CAP) state.lines.shift();
+  };
+  // Finalize any partial at a step boundary so the next step's header can't
+  // pop-and-merge into real output from the previous one.
+  const flush = (): void => {
+    partial = '';
+    partialShown = false;
   };
   const fail = (code: number): void => {
     state.running = false;
@@ -292,21 +319,38 @@ function runInstallChain(state: InstallState, steps: InstallStep[], root: string
     }
     const step = steps[i];
     if ('call' in step) {
-      append(`→ ${step.label} …`);
-      try {
-        step.call();
-      } catch (err) {
-        append(`✗ ${err instanceof Error ? err.message : String(err)}`);
-        return fail(1);
-      }
-      return runStep(i + 1);
+      append(`→ ${step.label} …
+`);
+      Promise.resolve()
+        .then(() => step.call())
+        .then(() => runStep(i + 1))
+        .catch((err: unknown) => {
+          append(`✗ ${err instanceof Error ? err.message : String(err)}
+`);
+          fail(1);
+        });
+      return;
     }
     const [cmd, args] = step.run;
-    append(`→ ${args[0].split('/').slice(-1)[0]} …`);
+    append(`→ ${args[0].split('/').slice(-1)[0]} …\n`);
     const child = spawn(cmd, args, { cwd: root });
     child.stdout.on('data', append);
     child.stderr.on('data', append);
+    // A missing binary (ENOENT — e.g. node/pnpm not on the service PATH) emits
+    // 'error', not 'close'. Without this listener it becomes an uncaughtException
+    // → process.exit(1), taking down the whole host on one install click.
+    let closed = false;
+    child.on('error', (err) => {
+      if (closed) return;
+      closed = true;
+      append(`✗ ${err instanceof Error ? err.message : String(err)}\n`);
+      flush();
+      fail(1);
+    });
     child.on('close', (code) => {
+      if (closed) return; // 'error' already finalized this step
+      closed = true;
+      flush();
       if (code !== 0) return fail(code ?? 1);
       runStep(i + 1);
     });
@@ -405,7 +449,7 @@ function configureClassifierHost(root: string): void {
 
 export interface StartRoutingResult {
   started: boolean;
-  error?: 'already-running' | 'litellm-not-installed' | 'installer-missing';
+  error?: 'already-running' | 'litellm-not-installed' | 'installer-missing' | 'prereq-missing';
 }
 
 /**
@@ -445,6 +489,398 @@ export function startRoutingInstall(root = process.cwd()): StartRoutingResult {
   return { started: true };
 }
 
+// ── Read-aloud (Kokoro TTS) install — one-click from Settings ───────────────
+// Same chain machinery as routing: the /add-webchat-tts skill's installer does
+// the real work (pinned loopback-only container + .env flags + health check,
+// which covers the ~330MB first-boot model download). A final step loads the
+// written WEBCHAT_TTS_* keys into THIS process so the feature goes live with
+// no host restart.
+
+const ttsInstallState: InstallState = {
+  running: false,
+  lines: [],
+  exitCode: null,
+  startedAt: null,
+  finishedAt: null,
+};
+
+function ttsInstallerPath(root: string): string {
+  return path.join(root, '.claude/skills/add-webchat-tts/resources/install-kokoro.sh');
+}
+
+export interface TtsInstallState extends InstallState {
+  /** Server-side synthesis is configured and live in this process. */
+  installed: boolean;
+  /** The /add-webchat-tts installer is present in this checkout. */
+  installerPresent: boolean;
+}
+
+/**
+ * Is the TTS (Kokoro) backend actually answering? A plain loopback fetch — the
+ * endpoint is operator-configured and local, same as the synthesis proxy in
+ * tts.ts (no SSRF gate). Any HTTP response means it's up; a refused connection
+ * means it isn't. `installed` uses this instead of trusting WEBCHAT_TTS_ENABLED
+ * alone, which can be stale (a persisted .env, a stopped container) and would
+ * otherwise make the badge claim voice models that aren't there.
+ */
+async function ttsBackendUp(): Promise<boolean> {
+  const base = (process.env.WEBCHAT_TTS_ENDPOINT || 'http://127.0.0.1:8880').replace(/\/+$/, '');
+  try {
+    const r = await fetch(base, { signal: AbortSignal.timeout(1500) });
+    return r.status > 0;
+  } catch {
+    return false;
+  }
+}
+
+export async function getTtsInstallState(root = process.cwd()): Promise<TtsInstallState> {
+  const flagOn = process.env.WEBCHAT_TTS_ENABLED === 'true';
+  return {
+    ...ttsInstallState,
+    installed: flagOn && (await ttsBackendUp()),
+    installerPresent: fs.existsSync(ttsInstallerPath(root)),
+  };
+}
+
+/** Load the installer-written WEBCHAT_TTS_* keys into the running process. */
+function activateTtsEnv(root: string): void {
+  const envFile = path.join(root, '.env');
+  const raw = fs.existsSync(envFile) ? fs.readFileSync(envFile, 'utf8') : '';
+  for (const key of ['WEBCHAT_TTS_ENABLED', 'WEBCHAT_TTS_ENDPOINT', 'WEBCHAT_TTS_MODEL', 'WEBCHAT_TTS_VOICE']) {
+    const m = raw.match(new RegExp(`^${key}=(.*)$`, 'm'));
+    if (m) process.env[key] = m[1].trim();
+  }
+}
+
+export function startTtsInstall(root = process.cwd()): StartRoutingResult {
+  if (ttsInstallState.running) return { started: false, error: 'already-running' };
+  if (!fs.existsSync(ttsInstallerPath(root))) return { started: false, error: 'installer-missing' };
+
+  ttsInstallState.running = true;
+  ttsInstallState.lines = [];
+  ttsInstallState.exitCode = null;
+  ttsInstallState.startedAt = Date.now();
+  ttsInstallState.finishedAt = null;
+
+  const steps: InstallStep[] = [
+    { run: ['bash', [ttsInstallerPath(root)]] },
+    { call: () => activateTtsEnv(root), label: 'activate (no restart needed)' },
+  ];
+  runInstallChain(ttsInstallState, steps, root);
+  return { started: true };
+}
+
+// ── Voice-dictation (STT) install — Settings → Features → Voice dictation ──
+// Local (recommended): the /add-webchat-dictation skill's installer provisions
+// a pinned whisper.cpp container on loopback with a hardware-suggested, pinned
+// ggml model. Cloud (explicit opt-in): ElevenLabs — no container, just a key
+// probe + .env write. Either way a final step loads the WEBCHAT_STT_* keys
+// into THIS process so the mic goes live with no host restart.
+
+const sttInstallState: InstallState = {
+  running: false,
+  lines: [],
+  exitCode: null,
+  startedAt: null,
+  finishedAt: null,
+};
+
+function sttInstallerPath(root: string): string {
+  return path.join(root, '.claude/skills/add-webchat-dictation/resources/install-whisper.sh');
+}
+
+/** Whisper model sizes offered at install (multilingual + .en speed variants). */
+export const STT_MODELS = ['tiny', 'tiny.en', 'base', 'base.en', 'small', 'small.en', 'medium', 'medium.en'];
+
+/**
+ * Same rules as the Ollama install: probe hardware, suggest a size.
+ * GPU or a big box → small; mid → base; small → tiny. Multilingual by default.
+ */
+export function suggestSttModel(): string {
+  const cores = os.cpus().length;
+  const memGb = os.totalmem() / 1024 / 1024 / 1024;
+  let hasGpu = false;
+  try {
+    hasGpu = fs.existsSync('/dev/nvidia0');
+  } catch {
+    /* no GPU probe on this platform */
+  }
+  if (hasGpu || (cores >= 8 && memGb >= 15)) return 'small';
+  if (cores >= 4 && memGb >= 7) return 'base';
+  return 'tiny';
+}
+
+export interface SttInstallState extends InstallState {
+  /** A backend is provisioned (env config present) — independent of the toggle. */
+  installed: boolean;
+  /** Workspace toggle: the mic is on for everyone. */
+  enabled: boolean;
+  /** Which backend the env is configured for (meaningful when installed). */
+  provider: string;
+  /** Current transcription model (env truth; null before first install). */
+  model: string | null;
+  /** The /add-webchat-dictation installer is present in this checkout. */
+  installerPresent: boolean;
+  /** Hardware-suggested default for the model select. */
+  suggestedModel: string;
+  models: string[];
+}
+
+export function getSttInstallState(root = process.cwd()): SttInstallState {
+  return {
+    ...sttInstallState,
+    installed: Boolean(
+      process.env.WEBCHAT_STT_URL ||
+        (process.env.WEBCHAT_STT_PROVIDER === 'elevenlabs' && process.env.WEBCHAT_STT_API_KEY),
+    ),
+    enabled: process.env.WEBCHAT_STT_ENABLED === 'true',
+    provider: process.env.WEBCHAT_STT_PROVIDER || 'local',
+    model: process.env.WEBCHAT_STT_MODEL || null,
+    installerPresent: fs.existsSync(sttInstallerPath(root)),
+    suggestedModel: suggestSttModel(),
+    models: STT_MODELS,
+  };
+}
+
+const STT_ENV_KEYS = [
+  'WEBCHAT_STT_ENABLED',
+  'WEBCHAT_STT_PROVIDER',
+  'WEBCHAT_STT_URL',
+  'WEBCHAT_STT_MODEL',
+  'WEBCHAT_STT_LANG',
+  'WEBCHAT_STT_API_KEY',
+];
+
+/** Load the installer-written WEBCHAT_STT_* keys into the running process. */
+function activateSttEnv(root: string): void {
+  const envFile = path.join(root, '.env');
+  const raw = fs.existsSync(envFile) ? fs.readFileSync(envFile, 'utf8') : '';
+  for (const key of STT_ENV_KEYS) {
+    const m = raw.match(new RegExp(`^${key}=(.*)$`, 'm'));
+    if (m) process.env[key] = m[1].trim();
+  }
+}
+
+/** Idempotent KEY=VALUE upsert into .env (mirrors the installers' set_env). */
+export function upsertEnv(root: string, key: string, val: string): void {
+  const envFile = path.join(root, '.env');
+  // Strip CR/LF so a value can never inject an extra KEY=value line (e.g. a
+  // crafted ElevenLabs key rebinding WEBCHAT_HOST). Keys here are constants.
+  const safeVal = String(val).replace(/[\r\n]/g, '');
+  let raw = fs.existsSync(envFile) ? fs.readFileSync(envFile, 'utf8') : '';
+  raw = raw
+    .split('\n')
+    .filter((l) => !l.startsWith(`${key}=`))
+    .join('\n');
+  if (raw && !raw.endsWith('\n')) raw += '\n';
+  fs.writeFileSync(envFile, raw + `${key}=${safeVal}\n`, { mode: 0o600 });
+  // mode only applies on create; force 0600 on the (usual) pre-existing file so
+  // WEBCHAT_STT_API_KEY never lands in a group/world-readable .env.
+  try {
+    fs.chmodSync(envFile, 0o600);
+  } catch {
+    /* best-effort; non-fatal on platforms without chmod semantics */
+  }
+}
+
+export interface StartSttOptions {
+  provider: 'local' | 'elevenlabs';
+  /** local only — one of STT_MODELS; defaults to the hardware suggestion. */
+  model?: string;
+  /** elevenlabs only — validated against the provider before anything is written. */
+  apiKey?: string;
+}
+
+export interface StartSttResult {
+  started: boolean;
+  error?: 'already-running' | 'installer-missing' | 'bad-model' | 'missing-key';
+}
+
+export function startSttInstall(opts: StartSttOptions, root = process.cwd()): StartSttResult {
+  if (sttInstallState.running) return { started: false, error: 'already-running' };
+
+  let steps: InstallStep[];
+  if (opts.provider === 'elevenlabs') {
+    const apiKey = (opts.apiKey ?? '').trim();
+    if (!apiKey) return { started: false, error: 'missing-key' };
+    steps = [
+      {
+        label: 'validate the ElevenLabs key',
+        call: async () => {
+          // Hostname fixed — the key goes to ElevenLabs and nowhere else.
+          const res = await fetch('https://api.elevenlabs.io/v1/user', {
+            headers: { 'xi-api-key': apiKey },
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (res.status === 401) throw new Error('ElevenLabs rejected the key (401)');
+          if (!res.ok) throw new Error(`ElevenLabs answered ${res.status}`);
+        },
+      },
+      {
+        label: 'write WEBCHAT_STT_* to .env',
+        call: () => {
+          upsertEnv(root, 'WEBCHAT_STT_ENABLED', 'true');
+          upsertEnv(root, 'WEBCHAT_STT_PROVIDER', 'elevenlabs');
+          upsertEnv(root, 'WEBCHAT_STT_MODEL', 'scribe_v1');
+          upsertEnv(root, 'WEBCHAT_STT_LANG', 'auto');
+          upsertEnv(root, 'WEBCHAT_STT_API_KEY', apiKey);
+        },
+      },
+      { call: () => activateSttEnv(root), label: 'activate (no restart needed)' },
+    ];
+  } else {
+    if (!fs.existsSync(sttInstallerPath(root))) return { started: false, error: 'installer-missing' };
+    const model = opts.model ?? suggestSttModel();
+    if (!STT_MODELS.includes(model)) return { started: false, error: 'bad-model' };
+    steps = [
+      { run: ['bash', [sttInstallerPath(root), '--model', model]] },
+      { call: () => activateSttEnv(root), label: 'activate (no restart needed)' },
+    ];
+  }
+
+  sttInstallState.running = true;
+  sttInstallState.lines = [];
+  sttInstallState.exitCode = null;
+  sttInstallState.startedAt = Date.now();
+  sttInstallState.finishedAt = null;
+  runInstallChain(sttInstallState, steps, root);
+  return { started: true };
+}
+
+// ── Tailscale install (one-click from the wizard Access step) ───────────────
+// Only offered where it can actually succeed: tailscaled needs /dev/net/tun (an
+// unprivileged Proxmox LXC only has it if the host passes it through) and the
+// install + sign-in need root. When those don't hold, the UI points at the
+// Proxmox community helper (which does the host-side TUN setup) instead.
+const tailscaleInstallState: InstallState = {
+  running: false,
+  lines: [],
+  exitCode: null,
+  startedAt: null,
+  finishedAt: null,
+};
+
+export interface TailscaleInstallState extends InstallState {
+  /** /dev/net/tun is present — the kernel device tailscaled needs. */
+  tunPresent: boolean;
+  /** The host process is root — the installer + `tailscale up` require it. */
+  isRoot: boolean;
+  /** Both hold, so a one-click install can bring Tailscale up here. */
+  canInstall: boolean;
+}
+
+export function getTailscaleInstallState(): TailscaleInstallState {
+  const tunPresent = fs.existsSync('/dev/net/tun');
+  const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+  return { ...tailscaleInstallState, tunPresent, isRoot, canInstall: tunPresent && isRoot };
+}
+
+// Distro-aware, signed-repo Tailscale install (no curl|sh). Debian/Ubuntu via
+// apt with the GPG-verified keyring; RHEL/Fedora via dnf/yum repo. Everything
+// is apt/dnf-verified; the only network trust is the static signing key, after
+// which package signatures are checked. Refuses on unknown package managers.
+const TAILSCALE_PKG_INSTALL = [
+  'set -e',
+  'if command -v tailscale >/dev/null 2>&1; then echo "tailscale already installed"; exit 0; fi',
+  '. /etc/os-release',
+  'if command -v apt-get >/dev/null 2>&1; then',
+  '  install -m 0755 -d /usr/share/keyrings',
+  '  curl -fsSL "https://pkgs.tailscale.com/stable/${ID}/${VERSION_CODENAME}.noarmor.gpg" -o /usr/share/keyrings/tailscale-archive-keyring.gpg',
+  '  curl -fsSL "https://pkgs.tailscale.com/stable/${ID}/${VERSION_CODENAME}.tailscale-keyring.list" -o /etc/apt/sources.list.d/tailscale.list',
+  '  apt-get update',
+  '  apt-get install -y tailscale',
+  'elif command -v dnf >/dev/null 2>&1; then',
+  "  dnf install -y 'dnf-command(config-manager)'",
+  '  dnf config-manager --add-repo "https://pkgs.tailscale.com/stable/${ID}/${VERSION_ID}/tailscale.repo"',
+  '  dnf install -y tailscale',
+  '  systemctl enable --now tailscaled',
+  'elif command -v yum >/dev/null 2>&1; then',
+  '  yum install -y yum-utils',
+  '  yum-config-manager --add-repo "https://pkgs.tailscale.com/stable/${ID}/${VERSION_ID}/tailscale.repo"',
+  '  yum install -y tailscale',
+  '  systemctl enable --now tailscaled',
+  'else',
+  '  echo "No supported package manager (apt/dnf/yum). Install Tailscale manually (https://tailscale.com/download), then re-run." >&2',
+  '  exit 1',
+  'fi',
+].join('\n');
+
+export function startTailscaleInstall(root = process.cwd()): StartRoutingResult {
+  if (tailscaleInstallState.running) return { started: false, error: 'already-running' };
+  if (!getTailscaleInstallState().canInstall) return { started: false, error: 'prereq-missing' };
+  tailscaleInstallState.running = true;
+  tailscaleInstallState.lines = [];
+  tailscaleInstallState.exitCode = null;
+  tailscaleInstallState.startedAt = Date.now();
+  tailscaleInstallState.finishedAt = null;
+  const steps: InstallStep[] = [
+    // Install tailscaled from Tailscale's SIGNED package repo (apt/dnf/yum),
+    // not `curl … | sh`. apt/dnf verify the GPG-signed keyring + package, so a
+    // MITM'd or compromised endpoint can't inject arbitrary root code the way a
+    // piped install script can. Idempotent (no-ops if already present); refuses
+    // on distros without a known package manager rather than falling back to a
+    // pipe-to-shell. The keyring/repo URLs are the ones Tailscale's own
+    // installer configures.
+    { run: ['bash', ['-c', TAILSCALE_PKG_INSTALL]] },
+    // Bring it up; `tailscale up` prints the sign-in URL to the log for the operator
+    // to open, and returns once they authenticate. A 10-minute cap keeps a
+    // never-completed sign-in from hanging the chain forever.
+    { run: ['bash', ['-c', 'timeout 600 tailscale up --accept-dns=false']] },
+  ];
+  runInstallChain(tailscaleInstallState, steps, root);
+  return { started: true };
+}
+
+// ── LiteLLM install (routing's prerequisite, one-click from Settings) ───────
+
+const litellmInstallState: InstallState = {
+  running: false,
+  lines: [],
+  exitCode: null,
+  startedAt: null,
+  finishedAt: null,
+};
+
+export interface LitellmInstallState extends InstallState {
+  /** config.yaml exists — the LiteLLM router is installed. */
+  installed: boolean;
+  /** The add-litellm skill's installer is present in this checkout. */
+  installerPresent: boolean;
+}
+
+export function getLitellmInstallState(root = process.cwd()): LitellmInstallState {
+  return {
+    ...litellmInstallState,
+    installed: fs.existsSync(path.join(root, 'data/litellm/config.yaml')),
+    installerPresent: fs.existsSync(litellmInstallerPath(root)),
+  };
+}
+
+export interface StartLitellmResult {
+  started: boolean;
+  error?: 'already-running' | 'installer-missing';
+}
+
+/**
+ * One-click LiteLLM router install — routing's prerequisite, run from Settings
+ * so the operator never has to drop to a shell for `/add-litellm`. The
+ * installer is idempotent and defaults to the local Ollama host; the roster
+ * refresh path re-runs it later with the configured hosts. One install at a
+ * time; streams into its own state.
+ */
+export function startLitellmInstall(root = process.cwd(), hosts = 'http://localhost:11434'): StartLitellmResult {
+  if (litellmInstallState.running) return { started: false, error: 'already-running' };
+  const installer = litellmInstallerPath(root);
+  if (!fs.existsSync(installer)) return { started: false, error: 'installer-missing' };
+  litellmInstallState.running = true;
+  litellmInstallState.lines = [];
+  litellmInstallState.exitCode = null;
+  litellmInstallState.startedAt = Date.now();
+  litellmInstallState.finishedAt = null;
+  runInstallChain(litellmInstallState, [{ run: ['bash', [installer, '--hosts', hosts]] }], root);
+  return { started: true };
+}
+
 // ── Local Ollama install (wizard) ──────────────────────────────────────────
 // Rootless install: the host service runs unprivileged, so the official
 // `install.sh` (which sudo-installs to /usr/local + system systemd) is out.
@@ -469,12 +905,21 @@ case "$arch" in
 esac
 command -v zstd >/dev/null || { echo "zstd is required to unpack Ollama — install it (apt/pacman install zstd) and retry" >&2; exit 1; }
 url="https://github.com/ollama/ollama/releases/latest/download/$pkg"
+# Resolve HOME — a system-service/root context (an LXC, say) often runs with it
+# unset, which would otherwise install to /.local and break every unit path.
+[ -n "$HOME" ] || HOME=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)
+[ -n "$HOME" ] || HOME=/root
+export HOME
 mkdir -p "$HOME/.local"
-tmp=$(mktemp /tmp/ollama-dl-XXXXXX.tar.zst)
-trap 'rm -f "$tmp"' EXIT
+# STABLE path (not mktemp) + curl -C - so a reconnect / re-run RESUMES the
+# ~1.4GB download instead of restarting it. GitHub's CDN honours range requests;
+# du reports cumulative bytes so the progress line keeps counting up. No
+# delete-on-exit trap — a partial must survive to be resumed; it's removed only
+# after a successful extract below.
+tmp="/tmp/ollama-dl-$arch.tar.zst"
 total=$(curl -sIL --max-time 15 "$url" | tr -d "\r" | awk 'tolower($1)=="content-length:"{s=$2} END{print int(s/1048576)}')
-echo "downloading $url (~\${total:-?} MB) …"
-curl -fSL --no-progress-meter -o "$tmp" "$url" &
+echo "downloading $url (~\${total:-?} MB, resuming if partial) …"
+curl -fSL -C - --no-progress-meter -o "$tmp" "$url" &
 dl=$!
 while kill -0 "$dl" 2>/dev/null; do
   sleep 5
@@ -483,29 +928,50 @@ done
 wait "$dl"
 echo "extracting …"
 tar --zstd -xf "$tmp" -C "$HOME/.local"
-echo "installed to $HOME/.local/bin/ollama"
-mkdir -p "$HOME/.config/systemd/user"
-cat > "$HOME/.config/systemd/user/ollama.service" <<'UNIT'
-[Unit]
-Description=Ollama Service (rootless)
-After=network-online.target
-
-[Service]
-ExecStart=%h/.local/bin/ollama serve
-Restart=always
-Environment=OLLAMA_HOST=0.0.0.0
-
-[Install]
-WantedBy=default.target
-UNIT
-systemctl --user daemon-reload
-systemctl --user enable --now ollama.service
+rm -f "$tmp"
+bin="$HOME/.local/bin/ollama"
+echo "installed to $bin"
+# HOME is passed explicitly: a system unit runs with it unset, and \`ollama serve\`
+# resolves its model dir from $HOME/.ollama — unset would send it to /.ollama and
+# it can crash on start. (Same unset-HOME class as the host's own service unit.)
+write_unit() { printf '[Unit]\\nDescription=%s\\nAfter=network-online.target\\n\\n[Service]\\nExecStart=%s serve\\nRestart=always\\nEnvironment=OLLAMA_HOST=0.0.0.0\\nEnvironment=HOME=%s\\n\\n[Install]\\nWantedBy=%s\\n' "$1" "$2" "$HOME" "$3"; }
+# Register a service the way that actually works in THIS context:
+#   1) a user systemd session (rootless dev host)    -> systemctl --user
+#   2) system systemd as root (LXC / system service) -> /etc/systemd/system
+#   3) nothing reachable                             -> nohup fallback
+if [ -n "$XDG_RUNTIME_DIR" ] && systemctl --user show-environment >/dev/null 2>&1; then
+  echo "registering ollama as a user service …"
+  mkdir -p "$HOME/.config/systemd/user"
+  write_unit "Ollama Service (rootless)" "$bin" default.target > "$HOME/.config/systemd/user/ollama.service"
+  systemctl --user daemon-reload
+  systemctl --user enable --now ollama.service
+elif [ "$(id -u)" = 0 ] && command -v systemctl >/dev/null 2>&1; then
+  echo "registering ollama as a system service …"
+  write_unit "Ollama Service" "$bin" multi-user.target > /etc/systemd/system/ollama.service
+  systemctl daemon-reload
+  systemctl enable --now ollama.service
+else
+  echo "no systemd session — starting ollama with nohup …"
+  OLLAMA_HOST=0.0.0.0 nohup "$bin" serve >/tmp/ollama.log 2>&1 &
+fi
 echo "waiting for Ollama to come up …"
-for i in $(seq 1 20); do
+for i in $(seq 1 60); do
   curl -sf http://127.0.0.1:11434/api/tags >/dev/null && { echo "Ollama is running."; exit 0; }
   sleep 1
 done
-echo "Ollama did not answer on :11434 after 20s" >&2
+echo "Ollama did not answer on :11434 after 60s" >&2
+# Type=simple reports "started" the instant the binary is exec'd, so a crash a
+# moment later still looks like a clean start — surface the unit's own status and
+# recent log so the failure is diagnosable instead of a bare timeout.
+if [ -n "$XDG_RUNTIME_DIR" ] && systemctl --user show-environment >/dev/null 2>&1; then
+  systemctl --user status ollama.service --no-pager -l 2>&1 | tail -n 12 >&2 || true
+  journalctl --user -u ollama.service -n 20 --no-pager 2>&1 | tail -n 20 >&2 || true
+elif [ "$(id -u)" = 0 ] && command -v systemctl >/dev/null 2>&1; then
+  systemctl status ollama.service --no-pager -l 2>&1 | tail -n 12 >&2 || true
+  journalctl -u ollama.service -n 20 --no-pager 2>&1 | tail -n 20 >&2 || true
+else
+  tail -n 20 /tmp/ollama.log 2>/dev/null >&2 || true
+fi
 exit 1
 `;
 
@@ -546,6 +1012,101 @@ export function startOllamaInstall(): { started: boolean; error?: string } {
   ollamaInstallState.finishedAt = null;
   runInstallChain(ollamaInstallState, [{ run: ['sh', ['-c', OLLAMA_INSTALL_SCRIPT]] }], process.cwd());
   return { started: true };
+}
+
+// ── Codex provider install (wizard engine step) ─────────────────────────────
+// Installing a *provider* is heavier than Ollama/LiteLLM: it mutates the source
+// tree (copy payload from the providers branch, wire the 3 barrels, merge the
+// CLI manifest), rebuilds the host + agent image, then needs a HOST restart —
+// `codexAvailable()` only flips true once the process re-imports the provider
+// barrel at boot. The chain gates the restart on a fully-green build.
+
+const codexInstallState: InstallState = {
+  running: false,
+  lines: [],
+  exitCode: null,
+  startedAt: null,
+  finishedAt: null,
+};
+
+export function getCodexInstallProgress(): InstallState {
+  return { ...codexInstallState, lines: codexInstallState.lines.slice(-40) };
+}
+
+/**
+ * Restart the host so a freshly-installed provider barrel is loaded. Fired only
+ * after a green install+build. Detached + a short delay so the HTTP response
+ * flushes and the restart survives our own SIGTERM. Context-aware, same trap as
+ * the Ollama installer (user vs system systemd vs launchd).
+ */
+/**
+ * The service-restart command for the current runtime context — pure, so the
+ * per-context branching (the part that can't be live-exercised here) is unit
+ * tested. macOS uses launchd; Linux uses the user systemd session when one
+ * exists (rootless dev host), falling back to the system unit (LXC / root).
+ */
+export function providerRestartCommand(opts: {
+  platform: NodeJS.Platform;
+  hasUserSession: boolean;
+  unit: string;
+  label: string;
+}): string {
+  if (opts.platform === 'darwin') return `launchctl kickstart -k gui/$(id -u)/${opts.label}`;
+  if (opts.hasUserSession) return `systemctl --user restart ${opts.unit} 2>/dev/null || systemctl restart ${opts.unit}`;
+  return `systemctl restart ${opts.unit}`;
+}
+
+function restartHostForProvider(): void {
+  const cmd = providerRestartCommand({
+    platform: process.platform,
+    hasUserSession: Boolean(process.env.XDG_RUNTIME_DIR),
+    unit: getSystemdUnit(),
+    label: getLaunchdLabel(),
+  });
+  spawn('sh', ['-c', `sleep 2; ${cmd}`], { detached: true, stdio: 'ignore' }).unref();
+}
+
+export function startCodexInstall(root = process.cwd()): {
+  started: boolean;
+  error?: 'already-running' | 'skill-missing';
+} {
+  if (codexInstallState.running) return { started: false, error: 'already-running' };
+  if (!fs.existsSync(path.join(root, '.claude/skills/add-codex/SKILL.md'))) {
+    return { started: false, error: 'skill-missing' };
+  }
+  codexInstallState.running = true;
+  codexInstallState.lines = [];
+  codexInstallState.exitCode = null;
+  codexInstallState.startedAt = Date.now();
+  codexInstallState.finishedAt = null;
+  runInstallChain(codexInstallState, codexInstallSteps(root), root);
+  return { started: true };
+}
+
+/**
+ * The Codex install chain. Extracted + exported so the container-typecheck guard
+ * is a TESTED invariant, not a fragile inline hunk — #247 added it and a branch
+ * rebuild silently dropped it once already.
+ *
+ * runInstallChain stops on the first non-zero exit, so the restart step is reached
+ * ONLY when install + both builds are green — never restart into a broken tree.
+ * The agent-runner typecheck needs its Bun deps (bun-types) on the HOST; a deployed
+ * tarball install never runs `bun install` here (those deps live only inside the
+ * Docker image), so the check would die with "Cannot find type definition file for
+ * 'bun'". Run it only where the host has them (a dev checkout); container/build.sh
+ * compiles the same code inside the image anyway.
+ */
+export function codexInstallSteps(root: string): InstallStep[] {
+  const canTypecheckContainer = fs.existsSync(path.join(root, 'container/agent-runner/node_modules/bun-types'));
+  return [
+    { run: ['pnpm', ['exec', 'tsx', 'setup/index.ts', '--step', 'provider-install', 'codex']] },
+    { run: ['pnpm', ['run', 'build']] },
+    ...(canTypecheckContainer
+      ? [{ run: ['pnpm', ['exec', 'tsc', '-p', 'container/agent-runner/tsconfig.json', '--noEmit']] } as InstallStep]
+      : []),
+    { run: ['bash', ['container/build.sh']] },
+    { call: () => restartHostForProvider(), label: 'installed — restarting to load Codex' },
+  ];
 }
 
 // ── Router (LiteLLM) as a server card ─────────────────────────────────────

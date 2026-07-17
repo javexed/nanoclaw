@@ -20,8 +20,8 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import type { UserCredsCredType } from './db.js';
 import { writeFileSync, rmSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
+import { tmpdir, homedir } from 'os';
+import { join, delimiter } from 'path';
 import { randomBytes } from 'crypto';
 
 const pexec = promisify(execFile);
@@ -44,17 +44,41 @@ async function withSecretFile<T>(content: string, fn: (path: string) => Promise<
 }
 
 async function onecli(args: string[]): Promise<unknown> {
+  // A bare systemd service env (a Proxmox LXC / any `Environment=`-less unit)
+  // carries neither of the two things onecli needs:
+  //   • HOME — onecli reads its auth token from $HOME/.config; unset → every call
+  //     comes back "Unauthorized" (exit 2).
+  //   • ~/.local/bin on PATH — the onecli CLI installs there (setup/onecli.ts),
+  //     but systemd's default PATH omits it, so the binary isn't found (ENOENT).
+  // Resolve HOME from the OS passwd entry and prepend ~/.local/bin, same as the
+  // setup step's childEnv().
+  const home = process.env.HOME || homedir();
+  const localBin = join(home, '.local', 'bin');
+  const env = {
+    ...process.env,
+    HOME: home,
+    PATH: process.env.PATH ? `${localBin}${delimiter}${process.env.PATH}` : localBin,
+  };
   try {
-    const { stdout } = await pexec('onecli', args, { timeout: TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 });
+    const { stdout } = await pexec('onecli', args, { timeout: TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024, env });
     return stdout.trim() ? (JSON.parse(stdout) as unknown) : {};
   } catch (err) {
     // execFile rejections carry the full argv (incl. any `--value <secret>`) on
-    // `.message`/`.cmd`; those propagate to callers that log err.message and would
-    // leak a member's plaintext key into the persistent host log. Rethrow a scrubbed
-    // error that names only the resource+verb (args[0]/args[1] are never secrets) and
-    // the exit code — never the argv. See user-creds-adversarial-review (cred-storage).
-    const code = (err as { code?: unknown } | null)?.code;
-    throw new Error(`onecli ${args[0] ?? '?'} ${args[1] ?? ''}`.trim() + ` failed (exit ${code ?? '?'})`);
+    // `.message`/`.cmd`; NEVER surface those — they'd leak a member's plaintext key
+    // into the host log. But onecli's own `stderr` is its error REASON (gateway
+    // unreachable, secret already exists, bad type, …), not the value it received —
+    // surface a short slice of it so a failure is diagnosable instead of a bare
+    // exit code. Belt-and-braces: redact any value we passed via `--value`, in case
+    // onecli ever echoes it back. See user-creds-adversarial-review (cred-storage).
+    const e = err as { code?: unknown; stderr?: unknown } | null;
+    const code = e?.code;
+    const vi = args.indexOf('--value');
+    const secretValue = vi >= 0 ? args[vi + 1] : undefined;
+    let reason = (typeof e?.stderr === 'string' ? e.stderr : String(e?.stderr ?? '')).trim();
+    if (secretValue && reason) reason = reason.split(secretValue).join('***');
+    reason = reason.replace(/\s+/g, ' ').slice(0, 200);
+    const base = `onecli ${args[0] ?? '?'} ${args[1] ?? ''}`.trim() + ` failed (exit ${code ?? '?'})`;
+    throw new Error(reason ? `${base}: ${reason}` : base);
   }
 }
 

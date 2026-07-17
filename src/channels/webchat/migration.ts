@@ -922,7 +922,10 @@ export const moduleWebchatMarketplaceToggle: Migration = {
       (c) => c.name === 'marketplace_disabled',
     );
     if (!hasCol) {
-      db.exec(`ALTER TABLE webchat_settings ADD COLUMN marketplace_disabled INTEGER NOT NULL DEFAULT 0`);
+      // Disabled by default — the MCP & skills catalog is opt-in. The guard means
+      // installs that already added this column (at the old default 0) keep their
+      // state; only fresh DBs pick up the disabled default.
+      db.exec(`ALTER TABLE webchat_settings ADD COLUMN marketplace_disabled INTEGER NOT NULL DEFAULT 1`);
     }
   },
 };
@@ -943,6 +946,43 @@ export const moduleWebchatTailscaleOwner: Migration = {
     );
     if (!hasCol) {
       db.exec(`ALTER TABLE webchat_settings ADD COLUMN promote_first_tailscale_owner INTEGER NOT NULL DEFAULT 0`);
+    }
+  },
+};
+
+/**
+ * Workspace-level Read aloud. The speaker control on agent replies is enabled
+ * by the OWNER for the whole workspace — not per device (a per-device switch
+ * confused shared rooms: one member saw speakers, another didn't). 0 = off
+ * (default), 1 = on for every authed user.
+ */
+export const moduleWebchatReadAloud: Migration = {
+  version: 133,
+  name: 'webchat-read-aloud',
+  up(db: Database.Database) {
+    const hasCol = (db.prepare("PRAGMA table_info('webchat_settings')").all() as Array<{ name: string }>).some(
+      (c) => c.name === 'read_aloud_enabled',
+    );
+    if (!hasCol) {
+      db.exec(`ALTER TABLE webchat_settings ADD COLUMN read_aloud_enabled INTEGER NOT NULL DEFAULT 0`);
+    }
+  },
+};
+
+/**
+ * Custom transcript-cleanup prompt for voice dictation. NULL = the built-in
+ * default in stt.ts. Owner-edited from Settings → Features → Voice dictation —
+ * the place to teach the tidy pass domain words ("NanoClaw", not "Nano-clot").
+ */
+export const moduleWebchatSttPrompt: Migration = {
+  version: 134,
+  name: 'webchat-stt-prompt',
+  up(db: Database.Database) {
+    const hasCol = (db.prepare("PRAGMA table_info('webchat_settings')").all() as Array<{ name: string }>).some(
+      (c) => c.name === 'stt_cleanup_prompt',
+    );
+    if (!hasCol) {
+      db.exec(`ALTER TABLE webchat_settings ADD COLUMN stt_cleanup_prompt TEXT`);
     }
   },
 };

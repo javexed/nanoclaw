@@ -24,6 +24,7 @@ const STEPS: Record<
   onecli: () => import('./onecli.js'),
   auth: () => import('./auth.js'),
   'provider-auth': () => import('./provider-auth.js'),
+  'provider-install': () => import('./provider-install.js'),
   'cli-agent': () => import('./cli-agent.js'),
   // >>> nanoclaw:setup-steps
   // <<< nanoclaw:setup-steps

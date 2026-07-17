@@ -32,7 +32,7 @@ with extra mounts, superseding the base run.
 ## Install
 
 ```bash
-bash "/home/nanoclaw/nanoclaw-v2/.claude/skills/add-routing/resources/install-routing.sh" \
+bash .claude/skills/add-routing/resources/install-routing.sh \
   [--port 4000] [--name nanoclaw-litellm] [--image <litellm-image>]
 ```
 
@@ -115,8 +115,9 @@ deliberate: loud, not silently unrouted.
 To expose it in the webchat Models tab, register a model with kind
 **openai-compatible**, endpoint `http://host.docker.internal:4000/v1`, model
 id `auto` — assigning it to an agent group behaves like any other
-openai-compatible model (the group runs on OpenCode; each turn's model is
-picked per prompt).
+openai-compatible model (the group runs on the default Claude harness, which
+reaches the router through LiteLLM's Anthropic `/v1/messages` surface; each
+turn's model is picked per prompt).
 
 ## Multiple routers — reusable routing profiles
 

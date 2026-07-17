@@ -34,6 +34,11 @@
         <path d="m21 2-9.6 9.6" />
         <circle cx="7.5" cy="15.5" r="5.5" />
       </symbol>
+      <symbol id="i-mic" viewBox="0 0 24 24">
+        <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+        <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+        <line x1="12" x2="12" y1="19" y2="22" />
+      </symbol>
       <symbol id="i-triangle-alert" viewBox="0 0 24 24">
         <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3z" />
         <path d="M12 9v4" />
@@ -67,6 +72,14 @@
       <symbol id="i-rotate-cw" viewBox="0 0 24 24">
         <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
         <path d="M21 3v5h-5" />
+      </symbol>
+      <symbol id="i-volume-2" viewBox="0 0 24 24">
+        <path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z" />
+        <path d="M16 9a5 5 0 0 1 0 6" />
+        <path d="M19.364 18.364a9 9 0 0 0 0-12.728" />
+      </symbol>
+      <symbol id="i-square" viewBox="0 0 24 24">
+        <rect width="18" height="18" x="3" y="3" rx="2" />
       </symbol>
       <symbol id="i-bot" viewBox="0 0 24 24">
         <path d="M12 8V4H8" />
@@ -185,15 +198,9 @@
         <img class="logo logo-light" src="/logo-light.svg" alt="NanoClaw" style="height: 32px; margin-bottom: 16px" />
         <p class="login-subtitle">Enter your access token to continue</p>
         <form id="login-form" class="login-form">
-          <input id="login-token" type="password" placeholder="Access token" autocomplete="off" required />
+          <input id="login-token" type="password" placeholder="Access Token (paste here)" autocomplete="off" required />
           <button type="submit" class="btn btn-primary">Connect</button>
         </form>
-        <p class="login-help">
-          Don't have a token? Ask the workspace owner.
-          <span class="login-help-dim"
-            >Self-hosting? It's <code>WEBCHAT_TOKEN</code> in your server's <code>.env</code>.</span
-          >
-        </p>
         <p id="login-error" class="login-error" hidden></p>
       </div>
     </div>
@@ -227,6 +234,9 @@
                 <button class="overflow-item" data-action="agents" role="menuitem">
                   <svg class="icon" aria-hidden="true"><use href="#i-bot"></use></svg>&nbsp;&nbsp;Agents
                 </button>
+                <button class="overflow-item" data-action="routing" role="menuitem" hidden>
+                  <svg class="icon" aria-hidden="true"><use href="#i-route"></use></svg>&nbsp;&nbsp;Auto routing
+                </button>
                 <button class="overflow-item" data-action="models" role="menuitem">
                   <svg class="icon" aria-hidden="true"><use href="#i-cpu"></use></svg>&nbsp;&nbsp;Models
                 </button>
@@ -236,9 +246,6 @@
                 <button id="overflow-skills" class="overflow-item" data-action="skills" role="menuitem" hidden>
                   <svg class="icon" aria-hidden="true"><use href="#i-book-open"></use></svg>&nbsp;&nbsp;Skills
                   <span id="learn-drafts-count" class="menu-count" hidden></span>
-                </button>
-                <button class="overflow-item" data-action="routing" role="menuitem" hidden>
-                  <svg class="icon" aria-hidden="true"><use href="#i-route"></use></svg>&nbsp;&nbsp;Auto routing
                 </button>
                 <button class="overflow-item" data-action="topology" role="menuitem">
                   <svg class="icon" aria-hidden="true"><use href="#i-workflow"></use></svg>&nbsp;&nbsp;Topology
@@ -454,6 +461,12 @@
               <button type="button" id="camera-btn" class="file-picker-btn mobile-only" title="Take photo">
                 <svg class="icon" aria-hidden="true"><use href="#i-camera"></use></svg>
               </button>
+              <!-- Voice dictation — hidden unless the server reports STT configured. -->
+              <button type="button" id="mic-btn" class="file-picker-btn" title="Dictate" aria-label="Start dictation" aria-pressed="false" hidden>
+                <svg class="icon" aria-hidden="true"><use href="#i-mic"></use></svg>
+              </button>
+              <span id="stt-elapsed" class="stt-elapsed" hidden>0:00</span>
+              <span id="stt-status" class="visually-hidden" aria-live="polite"></span>
               <textarea id="message-input" rows="1" placeholder="Message…" autocomplete="off" disabled></textarea>
               <button
                 type="button"
@@ -963,7 +976,7 @@
                       <select id="model-create-kind">
                         <option value="anthropic">Anthropic (custom model id)</option>
                         <option value="ollama">Ollama (local endpoint)</option>
-                        <option value="openai-compatible">OpenCode endpoint (OpenAI-compatible, needs /add-opencode)</option>
+                        <option value="openai-compatible">OpenAI-compatible endpoint (via LiteLLM)</option>
                       </select>
                     </label>
                     <label id="model-create-endpoint-label" hidden>
@@ -1187,26 +1200,20 @@
             <svg class="icon" aria-hidden="true"><use href="#i-chevron-left"></use></svg>
           </button>
           <div class="manage-tabs" role="tablist" aria-label="Manage">
-            <button
-              class="manage-tab active"
-              data-mtab="agents"
-              role="tab"
-              aria-selected="true"
-              aria-controls="mtab-agents"
-            >
-              Agents
+            <button class="manage-tab active" data-mtab="agents" role="tab" aria-selected="true" aria-controls="mtab-agents" aria-label="Agents" title="Agents">
+              <svg class="icon" aria-hidden="true"><use href="#i-bot"></use></svg>
             </button>
-            <button class="manage-tab" data-mtab="models" role="tab" aria-selected="false" aria-controls="mtab-models">
-              Models
+            <button class="manage-tab" data-mtab="routing" role="tab" aria-selected="false" aria-controls="mtab-routing" aria-label="Auto routing" title="Auto routing" hidden>
+              <svg class="icon" aria-hidden="true"><use href="#i-route"></use></svg>
             </button>
-            <button id="mtab-mcp-btn" class="manage-tab" data-mtab="mcp" role="tab" aria-selected="false" aria-controls="mtab-mcp" hidden>
-              MCP
+            <button class="manage-tab" data-mtab="models" role="tab" aria-selected="false" aria-controls="mtab-models" aria-label="Models" title="Models">
+              <svg class="icon" aria-hidden="true"><use href="#i-cpu"></use></svg>
             </button>
-            <button id="mtab-skills-btn" class="manage-tab" data-mtab="skills" role="tab" aria-selected="false" aria-controls="mtab-skills" hidden>
-              Skills
+            <button id="mtab-mcp-btn" class="manage-tab" data-mtab="mcp" role="tab" aria-selected="false" aria-controls="mtab-mcp" aria-label="MCP" title="MCP" hidden>
+              <svg class="icon" aria-hidden="true"><use href="#i-plug"></use></svg>
             </button>
-            <button class="manage-tab" data-mtab="routing" role="tab" aria-selected="false" aria-controls="mtab-routing" hidden>
-              Auto routing
+            <button id="mtab-skills-btn" class="manage-tab" data-mtab="skills" role="tab" aria-selected="false" aria-controls="mtab-skills" aria-label="Skills" title="Skills" hidden>
+              <svg class="icon" aria-hidden="true"><use href="#i-book-open"></use></svg>
             </button>
           </div>
           <button id="manage-sort-az" class="sort-icon-btn" type="button" aria-pressed="false" title="Sort A–Z" aria-label="Sort A–Z">
@@ -1741,6 +1748,159 @@
             <!-- Access & security — owner/global-admin. The bearer-token opt-out
                  appears only once Tailscale or SSO (trusted proxy / EntraID) is
                  live; the server refuses to disable it otherwise. -->
+            <!-- Features — installable capabilities, one column per feature.
+                 Grid flows to one column in the drawer / on phones and can
+                 breathe wider if the pane ever grows. Each block follows the
+                 install-row pattern (label · Install → progress → ✓ badge). -->
+            <div class="settings-credentials" id="settings-features-col">
+              <h3 class="settings-section-title">Features</h3>
+              <div class="settings-features-grid">
+                <div id="settings-routing" class="settings-credentials" hidden>
+                  <!-- Install-row pattern: name left, action right — Install button →
+                       progress while running → green ✓ Installed badge. The hint line
+                       only appears when a prerequisite is missing. -->
+                  <div class="setting-group install-row">
+                    <span class="setting-label">Auto routing</span>
+                    <button class="feature-info-btn" type="button" aria-expanded="false"
+                      aria-controls="routing-feature-info" aria-label="About auto routing">
+                      <svg class="icon" aria-hidden="true"><use href="#i-info"></use></svg>
+                    </button>
+                    <button id="routing-install-btn" class="btn btn-secondary" type="button">Install</button>
+                    <span id="routing-installed-badge" class="install-badge" hidden
+                      title="Shadow mode — open ⋯ → Auto routing to review decisions and go live">
+                      <svg class="icon" aria-hidden="true"><use href="#i-check"></use></svg>&nbsp;Installed
+                    </span>
+                  </div>
+                  <p class="cred-hint feature-info" id="routing-feature-info" hidden>
+                    Sends each message to the model that fits it — quick turns go to a
+                    small local model, hard ones escalate to Claude. A local
+                    Arch-Router classifier (running on Ollama) reads the conversation
+                    and picks a route; a LiteLLM proxy carries the call to the chosen
+                    model, falling back to Claude whenever the local answer isn't good
+                    enough. A nightly job recalibrates the routes from real traffic.
+                    Runs fully on this machine — no extra cloud services.
+                  </p>
+                  <p class="cred-hint" id="routing-setup-desc" hidden></p>
+                  <div id="routing-install-progress" hidden>
+                    <div class="ollama-pull-bar" id="routing-pull-bar" hidden><span style="width:0%"></span></div>
+                    <div class="cred-hint" id="routing-pull-label" hidden></div>
+                    <pre id="routing-install-log" class="roster-refresh-log"></pre>
+                  </div>
+                </div>
+                <div id="settings-tts" class="settings-feature" hidden>
+                  <div class="setting-group install-row">
+                    <span class="setting-label">Read aloud</span>
+                    <button class="feature-info-btn" type="button" aria-expanded="false"
+                      aria-controls="tts-feature-info" aria-label="About read aloud">
+                      <svg class="icon" aria-hidden="true"><use href="#i-info"></use></svg>
+                    </button>
+                    <button id="tts-install-btn" class="btn btn-secondary" type="button">Install</button>
+                    <span id="tts-installed-badge" class="install-badge" hidden
+                      title="Kokoro voices are live — the switch below turns the control on for everyone">
+                      <svg class="icon" aria-hidden="true"><use href="#i-check"></use></svg>&nbsp;Installed
+                    </span>
+                  </div>
+                  <p class="cred-hint" id="tts-setup-desc" hidden></p>
+                  <p class="cred-hint feature-info" id="tts-feature-info" hidden>
+                    Adds a speaker control to agent replies — nothing plays until you
+                    tap it. Installing runs Kokoro — an open-source neural voice — in a
+                    local Docker container (kokoro-fastapi, ~330MB model, loopback
+                    only), so speech is generated on this machine and nothing leaves
+                    it. Without the install, the control falls back to each device's
+                    built-in voices. The switch below applies to everyone in the
+                    workspace.
+                  </p>
+                  <div class="setting-group">
+                    <!-- No label — the block's "Read aloud" heading says it all;
+                         the group keeps its aria-label for screen readers. -->
+                    <div class="setting-options" id="tts-default-mode" role="group" aria-label="Read agent replies aloud">
+                      <button class="setting-option" type="button" data-value="off">Off</button>
+                      <button class="setting-option" type="button" data-value="on">On</button>
+                    </div>
+                  </div>
+                  <!-- Voice — populated from the backend's list (Kokoro ships ~67);
+                       picking one plays a short sample. Hidden until installed. -->
+                  <div class="setting-group" id="tts-voice-group" hidden>
+                    <span class="setting-label" id="tts-voice-label">Voice</span>
+                    <select id="tts-voice-select" class="stt-cleanup-select" aria-label="Read aloud voice"></select>
+                  </div>
+                  <div id="tts-install-progress" hidden>
+                    <div class="cred-hint" id="tts-install-label" hidden></div>
+                    <pre id="tts-install-log" class="roster-refresh-log"></pre>
+                  </div>
+                </div>
+                <!-- Voice dictation — owner-only install surface (the /api/webchat/stt/install
+                     endpoint 403s for everyone else, hiding the whole block). -->
+                <div id="settings-stt" class="settings-feature" hidden>
+                  <div class="setting-group install-row">
+                    <span class="setting-label">Voice dictation</span>
+                    <button class="feature-info-btn" type="button" aria-expanded="false"
+                      aria-controls="stt-feature-info" aria-label="About voice dictation">
+                      <svg class="icon" aria-hidden="true"><use href="#i-info"></use></svg>
+                    </button>
+                    <button id="stt-install-btn" class="btn btn-secondary" type="button">Install</button>
+                    <span id="stt-installed-badge" class="install-badge" hidden
+                      title="Dictation is live — the mic appears next to the message box">
+                      <svg class="icon" aria-hidden="true"><use href="#i-check"></use></svg>&nbsp;Installed
+                    </span>
+                  </div>
+                  <p class="cred-hint" id="stt-setup-desc" hidden></p>
+                  <!-- Workspace toggle, same idiom as Read aloud (no label — the
+                       block heading says it; aria-label for screen readers). -->
+                  <div class="setting-group" id="stt-enabled-group" hidden>
+                    <div class="setting-options" id="stt-enabled-mode" role="group" aria-label="Voice dictation for everyone">
+                      <button class="setting-option" type="button" data-value="off">Off</button>
+                      <button class="setting-option" type="button" data-value="on">On</button>
+                    </div>
+                  </div>
+                  <p class="cred-hint feature-info" id="stt-feature-info" hidden>
+                    Adds a mic to the message box: tap, speak, and the transcript lands
+                    in the composer — sending stays your tap. Local (recommended) runs
+                    whisper.cpp in a Docker container with a Whisper model sized to
+                    this machine; audio never leaves it. ElevenLabs transcribes in the
+                    cloud with your API key — audio is sent to ElevenLabs. The cleanup
+                    model optionally tidies punctuation and fillers after you stop.
+                  </p>
+                  <div class="setting-group" id="stt-backend-group" hidden>
+                    <span class="setting-label">Backend</span>
+                    <div class="setting-options" id="stt-backend-mode" role="group" aria-label="Dictation backend">
+                      <button class="setting-option" type="button" data-value="local" title="whisper.cpp on this machine — recommended; audio never leaves it">Local</button>
+                      <button class="setting-option" type="button" data-value="elevenlabs" title="Cloud transcription — audio is sent to ElevenLabs">ElevenLabs</button>
+                    </div>
+                  </div>
+                  <div class="setting-group" id="stt-model-group" hidden>
+                    <span class="setting-label" id="stt-model-label">Model</span>
+                    <select id="stt-model-select" class="stt-cleanup-select" aria-label="Whisper model"></select>
+                  </div>
+                  <div class="setting-group" id="stt-key-group" hidden>
+                    <input id="stt-api-key" type="password" placeholder="ElevenLabs API key" autocomplete="off" spellcheck="false" />
+                    <button id="stt-connect-btn" class="btn btn-secondary" type="button">Connect</button>
+                  </div>
+                  <div class="setting-group" id="stt-cleanup-group" hidden>
+                    <span class="setting-label">Cleanup model</span>
+                    <select id="stt-cleanup-select" class="stt-cleanup-select" aria-label="Transcript cleanup model">
+                      <option value="">None — raw transcript</option>
+                    </select>
+                  </div>
+                  <div class="setting-group install-row" id="stt-prompt-row" hidden>
+                    <span class="setting-label">Cleanup prompt</span>
+                    <button id="stt-prompt-edit" class="btn btn-ghost" type="button"
+                      aria-expanded="false" aria-controls="stt-prompt-editor">Edit…</button>
+                  </div>
+                  <div id="stt-prompt-editor" hidden>
+                    <textarea id="stt-prompt-text" rows="6" spellcheck="false"
+                      aria-label="Transcript cleanup prompt"></textarea>
+                    <div class="setting-group install-row">
+                      <button id="stt-prompt-reset" class="btn btn-ghost" type="button" hidden>Reset to default</button>
+                      <button id="stt-prompt-save" class="btn btn-secondary" type="button">Save</button>
+                    </div>
+                  </div>
+                  <div id="stt-install-progress" hidden>
+                    <pre id="stt-install-log" class="roster-refresh-log"></pre>
+                  </div>
+                </div>
+              </div>
+            </div>
             <div id="settings-access" class="settings-credentials" hidden>
               <h3 class="settings-section-title">Access</h3>
               <div class="setting-group install-row">
@@ -1748,7 +1908,7 @@
                 <button id="access-bearer-btn" class="btn btn-secondary" type="button" hidden></button>
                 <span id="access-bearer-badge" class="install-badge" hidden></span>
               </div>
-              <p class="cred-hint" id="access-bearer-hint"></p>
+              <p class="cred-hint" id="access-bearer-hint" hidden></p>
               <!-- HTTPS over Tailscale — runs `tailscale serve` so webchat is
                    reachable at https://<node>.ts.net with a real cert (secure
                    context → PWA install / push / voice). Shown only when
@@ -1756,19 +1916,11 @@
               <div id="access-https-row" class="setting-group install-row" hidden>
                 <span class="setting-label">HTTPS over Tailscale</span>
                 <button id="access-https-btn" class="btn btn-secondary" type="button"></button>
+                <span id="access-https-badge" class="install-badge" hidden>
+                  <svg class="icon" aria-hidden="true"><use href="#i-check"></use></svg>&nbsp;On
+                </span>
               </div>
               <p class="cred-hint" id="access-https-hint" hidden></p>
-            </div>
-            <!-- Feature toggles — owner/global-admin. MCP + skills marketplace are
-                 code-execution surfaces: on by default, disable for a locked-down
-                 deployment (hides the tabs + 403s the endpoints). -->
-            <div id="settings-features" class="settings-credentials" hidden>
-              <h3 class="settings-section-title">Features</h3>
-              <div class="setting-group install-row">
-                <span class="setting-label">MCP &amp; skills marketplace</span>
-                <button id="features-marketplace-btn" class="btn btn-secondary" type="button"></button>
-              </div>
-              <p class="cred-hint" id="features-marketplace-hint"></p>
             </div>
             <!-- Skill collections registry — the Skills tab's catalog sources.
                  Shown to owners/global admins (server enforces global admin). -->
@@ -1800,25 +1952,6 @@
                 <span class="setting-label">Restore from backup</span>
                 <button id="system-import-btn" class="btn btn-danger" type="button">Restore…</button>
                 <input id="system-import-file" type="file" accept=".tgz,.gz,application/gzip" hidden />
-              </div>
-            </div>
-            <div id="settings-routing" class="settings-credentials" hidden>
-              <!-- Install-row pattern: name left, action right — Install button →
-                   progress while running → green ✓ Installed badge. The hint line
-                   only appears when a prerequisite is missing. -->
-              <div class="setting-group install-row">
-                <span class="setting-label">Auto routing</span>
-                <button id="routing-install-btn" class="btn btn-secondary" type="button">Install</button>
-                <span id="routing-installed-badge" class="install-badge" hidden
-                  title="Shadow mode — open ⋯ → Auto routing to review decisions and go live">
-                  <svg class="icon" aria-hidden="true"><use href="#i-check"></use></svg>&nbsp;Installed
-                </span>
-              </div>
-              <p class="cred-hint" id="routing-setup-desc" hidden></p>
-              <div id="routing-install-progress" hidden>
-                <div class="ollama-pull-bar" id="routing-pull-bar" hidden><span style="width:0%"></span></div>
-                <div class="cred-hint" id="routing-pull-label" hidden></div>
-                <pre id="routing-install-log" class="roster-refresh-log"></pre>
               </div>
             </div>
           </div>
@@ -1884,6 +2017,12 @@
                   <span class="wizard-engine-chip" id="wizard-chip-codex" hidden></span>
                 </label>
                 <div class="wizard-engine-body" data-engine="codex" hidden>
+                  <!-- Shown by app.js when the Codex provider isn't installed. One-click
+                       install: copies the payload, rebuilds the agent image, restarts. -->
+                  <div class="setting-group install-row" id="wizard-codex-install-row" hidden>
+                    <button id="wizard-codex-install" class="btn btn-primary" type="button">Install Codex…</button>
+                  </div>
+                  <pre id="wizard-codex-install-log" class="wizard-code" hidden></pre>
                   <div id="wizard-codex-connect">
                     <div class="setting-group">
                       <button id="wizard-codex-oauth" class="btn btn-primary" type="button">
@@ -1928,9 +2067,10 @@
                   </div>
                   <pre id="wizard-ollama-install-log" class="wizard-code" hidden></pre>
                   <p class="cred-hint" id="wizard-ollama-status" hidden></p>
+                  <!-- Pick a model here and it becomes the workspace default —
+                       selecting the radio is the action, no separate button. -->
                   <div id="wizard-ollama-results" hidden>
                     <ul id="wizard-ollama-list" class="wizard-list"></ul>
-                    <button id="wizard-ollama-add" class="btn btn-primary" type="button">Set as default</button>
                   </div>
                   <!-- Pull a model onto the probed host (progress polled from /api/ollama/pulls). -->
                   <div class="setting-group" id="wizard-ollama-dl-row" hidden>
@@ -1944,42 +2084,142 @@
               </div>
             </div>
           </section>
-          <!-- Step 1: Create first agent + room -->
-          <section class="wizard-step" data-step="1" hidden>
+          <!-- Step 2 (last): create first agent + room — named after access is set. -->
+          <section class="wizard-step" data-step="2" hidden>
             <h3 class="settings-section-title">Your first agent</h3>
             <div class="setting-group">
+              <label class="setting-label" for="wizard-room-name">Room</label>
               <input id="wizard-room-name" type="text" value="General" placeholder="Room name" autocomplete="off" />
             </div>
             <div class="setting-group">
+              <label class="setting-label" for="wizard-agent-name">Agent</label>
               <input id="wizard-agent-name" type="text" value="Assistant" placeholder="Agent name" autocomplete="off" />
             </div>
+            <h3 class="settings-section-title">Features</h3>
             <div class="setting-group">
               <label class="setting-toggle">
-                <span>Enable MCP &amp; skills marketplace <span class="cred-hint">(recommended)</span></span>
-                <input id="wizard-marketplace" type="checkbox" checked />
+                <span>Enable MCP &amp; skills catalog</span>
+                <input id="wizard-marketplace" type="checkbox" />
               </label>
             </div>
             <div class="setting-group">
               <label class="setting-toggle">
-                <span>I'll access this over Tailscale <span class="cred-hint">(recommended)</span></span>
-                <input id="wizard-tailscale" type="checkbox" />
+                <span>Enable Read Aloud (TTS)</span>
+                <input id="wizard-tts-default" type="checkbox" />
               </label>
             </div>
-            <p class="cred-hint" id="wizard-tailscale-note" hidden>
-              You're secured by a bearer token today. For a stronger, tokenless
-              setup, add <a href="https://tailscale.com/kb/1130/lxc-unprivileged" target="_blank" rel="noopener">Tailscale</a>
-              (Proxmox LXC: the community Tailscale addon), then reach this over your
-              tailnet — the first Tailscale login here becomes an owner. For real
-              HTTPS (PWA install, push, voice), front it with <code>tailscale serve</code>.
-              You can then retire the token in Settings → Access.
-            </p>
-            <!-- Revealed by app.js only when tailscaled is detected up and serve
-                 isn't already on — lets the operator flip on HTTPS right here. -->
-            <div id="wizard-https-row" class="setting-group install-row" hidden>
-              <button id="wizard-https-btn" class="btn btn-secondary" type="button">Enable HTTPS now</button>
-              <span id="wizard-https-status" class="cred-hint"></span>
+            <!-- Voice models: on-device neural voices (Kokoro). Recommended once
+                 Read Aloud is on; without it, read-aloud uses the browser's voices. -->
+            <div class="setting-group install-row" id="wizard-tts-install-row" hidden>
+              <button id="wizard-tts-install" class="btn btn-secondary" type="button">Install voice models…</button>
+              <span class="cred-hint" id="wizard-tts-hint">Recommended — on-device neural voices (Kokoro, ~330MB). Without it, read-aloud uses your device's built-in voices.</span>
+            </div>
+            <span class="install-badge" id="wizard-tts-installed" hidden>
+              <svg class="icon" aria-hidden="true"><use href="#i-check"></use></svg>&nbsp;Voice models installed
+            </span>
+            <div id="wizard-tts-progress" hidden>
+              <pre id="wizard-tts-log" class="wizard-code"></pre>
+            </div>
+            <!-- Voice dictation (STT) — owner-only surface (the install endpoint 403s
+                 otherwise, keeping this hidden). Local whisper.cpp (private) or
+                 ElevenLabs (cloud key). Mirrors Settings → Features → Voice dictation. -->
+            <div id="wizard-stt-group" hidden>
+              <div class="setting-group">
+                <span class="setting-label">Voice dictation</span>
+                <div class="setting-options" id="wizard-stt-backend" role="group" aria-label="Dictation backend">
+                  <button class="setting-option" type="button" data-value="local" title="whisper.cpp on this machine — audio never leaves it">Local</button>
+                  <button class="setting-option" type="button" data-value="elevenlabs" title="Cloud transcription — audio is sent to ElevenLabs">ElevenLabs</button>
+                </div>
+                <span class="install-badge" id="wizard-stt-installed" hidden>
+                  <svg class="icon" aria-hidden="true"><use href="#i-check"></use></svg>&nbsp;Dictation installed
+                </span>
+              </div>
+              <div class="setting-group install-row" id="wizard-stt-install-row" hidden>
+                <button id="wizard-stt-install" class="btn btn-secondary" type="button">Install dictation model…</button>
+                <span class="cred-hint">Local whisper.cpp in Docker — audio stays on this machine.</span>
+              </div>
+              <div class="setting-group" id="wizard-stt-key-row" hidden>
+                <input id="wizard-stt-key" type="password" placeholder="ElevenLabs API key" autocomplete="off" spellcheck="false" />
+                <button id="wizard-stt-connect" class="btn btn-secondary" type="button">Connect</button>
+              </div>
+              <pre id="wizard-stt-log" class="wizard-code" hidden></pre>
             </div>
             <p class="cred-hint" id="wizard-room-status" hidden></p>
+          </section>
+          <!-- Step 1: Access & security — how you reach NanoClaw and how it's secured.
+               Consolidates the exposure choices: Tailscale identity + one-click HTTPS,
+               reverse-proxy SSO, and retiring the bootstrap bearer token. -->
+          <section class="wizard-step" data-step="1" hidden>
+            <h3 class="settings-section-title">Access &amp; security</h3>
+            <!-- One radio per access method (accordion, like step 0). Selecting one
+                 reveals its detail; picking Tailscale arms first-login owner at Finish. -->
+            <div class="wizard-engines" role="radiogroup" aria-label="Access method">
+              <div class="wizard-engine">
+                <label class="wizard-engine-head">
+                  <input type="radio" name="wizard-access" value="bearer" checked />
+                  <span>Bearer token</span>
+                  <span class="wizard-engine-chip" id="wizard-access-bearer-chip" hidden></span>
+                </label>
+                <div class="wizard-engine-body" data-access="bearer">
+                  <!-- Revealed only when it's safe to drop the token (an alternative can
+                       authenticate and this session didn't arrive over the bearer). -->
+                  <div id="wizard-retire-row" class="setting-group install-row" hidden>
+                    <button id="wizard-retire-btn" class="btn btn-secondary" type="button">Retire the bearer token</button>
+                    <span id="wizard-retire-status" class="cred-hint"></span>
+                  </div>
+                </div>
+              </div>
+              <div class="wizard-engine">
+                <label class="wizard-engine-head">
+                  <input type="radio" name="wizard-access" value="tailscale" />
+                  <span>Tailscale</span>
+                  <span class="wizard-engine-rec">Recommended</span>
+                  <span class="wizard-engine-chip" id="wizard-access-ts-chip" hidden></span>
+                </label>
+                <div class="wizard-engine-body" data-access="tailscale">
+                  <!-- Shown only when the host can't bring Tailscale up itself (no
+                       /dev/net/tun or not root) — the community helper does the
+                       host-side setup NanoClaw can't from inside the container. -->
+                  <p class="cred-hint" id="wizard-ts-helper" hidden>
+                    Not detected on this host. Add it with the
+                    <a href="https://community-scripts.github.io/ProxmoxVE/scripts?id=tailscale" target="_blank" rel="noopener">Proxmox community Tailscale helper</a>,
+                    then reach this over your tailnet.
+                  </p>
+                  <!-- Shown when the host CAN install (TUN + root): one-click install
+                       + sign-in; the auth link prints into the log below. -->
+                  <div class="setting-group install-row" id="wizard-ts-install-row" hidden>
+                    <button id="wizard-ts-install-btn" class="btn btn-primary" type="button">Install Tailscale…</button>
+                    <span class="cred-hint">Installs tailscaled and starts sign-in — the auth link appears below.</span>
+                  </div>
+                  <pre id="wizard-ts-install-log" class="wizard-code" hidden></pre>
+                  <p class="cred-hint" id="wizard-ts-ready" hidden>
+                    Tailscale is up. The first person to sign in over your tailnet becomes an owner (one-shot) — so your real identity owns this, not just the setup token.
+                  </p>
+                  <!-- Revealed only when tailscaled is up and serve isn't already on. -->
+                  <div id="wizard-https-row" class="setting-group install-row" hidden>
+                    <button id="wizard-https-btn" class="btn btn-secondary" type="button">Enable HTTPS now</button>
+                    <span id="wizard-https-status" class="cred-hint"></span>
+                  </div>
+                </div>
+              </div>
+              <div class="wizard-engine">
+                <label class="wizard-engine-head">
+                  <input type="radio" name="wizard-access" value="sso" />
+                  <span>Cloudflare / Entra ID</span>
+                  <span class="wizard-engine-chip" id="wizard-access-sso-chip" hidden></span>
+                </label>
+                <div class="wizard-engine-body" data-access="sso">
+                  <p class="cred-hint">
+                    Front this with
+                    <a href="https://developers.cloudflare.com/cloudflare-one/applications/" target="_blank" rel="noopener">Cloudflare Access</a>
+                    or
+                    <a href="https://learn.microsoft.com/azure/app-service/overview-authentication-authorization" target="_blank" rel="noopener">Microsoft Entra ID</a>,
+                    set <code>WEBCHAT_TRUSTED_PROXY_IPS</code> in .env, and restart — your proxy's signed-in user becomes the identity.
+                  </p>
+                </div>
+              </div>
+            </div>
+            <p class="cred-hint" id="wizard-access-state">Checking how this instance is secured…</p>
           </section>
         </div>
         <div class="wizard-footer">

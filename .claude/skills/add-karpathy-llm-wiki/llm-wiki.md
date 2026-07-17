@@ -4,7 +4,7 @@
 
 A pattern for building personal knowledge bases using LLMs.
 
-This is an idea file, designed to be copied to your own LLM Agent (e.g. OpenAI Codex, Claude Code, OpenCode / Pi, etc.). Its goal is to communicate the high-level idea, with your agent building out specifics through collaboration with you.
+This is an idea file, designed to be copied to your own LLM Agent (e.g. Claude Code, OpenAI Codex, etc.). Its goal is to communicate the high-level idea, with your agent building out specifics through collaboration with you.
 
 ## The Core Idea
 

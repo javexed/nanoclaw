@@ -439,7 +439,7 @@ export function buildMounts(
     mounts.push(...validated);
   }
 
-  // Provider-contributed mounts (e.g. opencode-xdg)
+  // Provider-contributed mounts (e.g. a provider's XDG data dir)
   if (providerContribution.mounts) {
     mounts.push(...providerContribution.mounts);
   }
@@ -594,12 +594,18 @@ export function containerHardeningArgs(env: NodeJS.ProcessEnv = process.env): st
   if (env.NANOCLAW_CONTAINER_NO_HARDEN === '1') return [];
   const pids = env.NANOCLAW_CONTAINER_PIDS_LIMIT || '512';
   return [
-    '--cap-drop', 'ALL',
-    '--cap-add', 'CHOWN',
-    '--cap-add', 'DAC_OVERRIDE',
-    '--cap-add', 'FOWNER',
-    '--security-opt', 'no-new-privileges',
-    '--pids-limit', pids,
+    '--cap-drop',
+    'ALL',
+    '--cap-add',
+    'CHOWN',
+    '--cap-add',
+    'DAC_OVERRIDE',
+    '--cap-add',
+    'FOWNER',
+    '--security-opt',
+    'no-new-privileges',
+    '--pids-limit',
+    pids,
   ];
 }
 
@@ -631,12 +637,12 @@ async function buildContainerArgs(
 
   // Raise the SDK's 32000 output-token cap to the model's real ceiling. Claude
   // provider only — the var is read by the Claude Agent SDK and means nothing to
-  // opencode/ollama, whose own limits are configured elsewhere.
+  // other providers (e.g. codex/ollama), whose own limits are configured elsewhere.
   if (provider === 'claude') {
     args.push('-e', `CLAUDE_CODE_MAX_OUTPUT_TOKENS=${maxOutputTokensFor(containerConfig.model)}`);
   }
 
-  // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
+  // Provider-contributed env vars (e.g. XDG_DATA_HOME, NO_PROXY).
   if (providerContribution.env) {
     for (const [key, value] of Object.entries(providerContribution.env)) {
       args.push('-e', `${key}=${value}`);

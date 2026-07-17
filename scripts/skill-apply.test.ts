@@ -123,6 +123,7 @@ describe('from-branch copy apply path', () => {
     writeFileSync(join(fskill, 'SKILL.md'), FROM_BRANCH_SKILL);
     writeFileSync(join(froot, '.env'), '');
     writeFileSync(join(froot, 'package.json'), '{"name":"scratch"}');
+    mkdirSync(join(froot, '.git'), { recursive: true }); // a git checkout → fetch from the resolved remote
     // container/skills/demo-formatting/ deliberately absent from root
 
     const { cmds, exec } = recordingExec();
@@ -133,6 +134,35 @@ describe('from-branch copy apply path', () => {
     expect(existsSync(join(froot, 'container/skills/demo-formatting'))).toBe(true);
     expect(cmds).toContain('git fetch origin channels');
     expect(cmds.some((c) => /^git show origin\/channels:container\/skills\/demo-formatting\/SKILL\.md > container\/skills\/demo-formatting\/SKILL\.md$/.test(c))).toBe(true);
+    expect(res.journal).toContainEqual({ op: 'wrote', path: 'container/skills/demo-formatting/SKILL.md' });
+
+    rmSync(fskill, { recursive: true, force: true });
+    rmSync(froot, { recursive: true, force: true });
+  });
+
+  it('gitless deploy (no .git): shallow-fetches the branch into a temp repo and extracts', async () => {
+    const fskill = mkdtempSync(join(tmpdir(), 'nc-skill-fb-'));
+    const froot = mkdtempSync(join(tmpdir(), 'nc-proj-fb-'));
+    writeFileSync(join(fskill, 'SKILL.md'), FROM_BRANCH_SKILL);
+    writeFileSync(join(froot, '.env'), '');
+    writeFileSync(join(froot, 'package.json'), '{"name":"scratch"}');
+    // No .git in froot — a tarball extract. resolveRemote must NOT be used.
+
+    const prev = process.env.NANOCLAW_CHANNELS_REMOTE_URL;
+    process.env.NANOCLAW_CHANNELS_REMOTE_URL = 'https://example.test/nano.git';
+    const { cmds, exec } = recordingExec();
+    const res = await applySkill(fskill, froot, {
+      exec,
+      resolveRemote: () => {
+        throw new Error('resolveRemote must not run without .git');
+      },
+    });
+    process.env.NANOCLAW_CHANNELS_REMOTE_URL = prev;
+
+    expect(existsSync(join(froot, 'container/skills/demo-formatting'))).toBe(true); // parent dir made
+    expect(cmds.some((c) => /^git init -q /.test(c))).toBe(true);
+    expect(cmds.some((c) => /git -C .* fetch --depth 1 "https:\/\/example\.test\/nano\.git" channels$/.test(c))).toBe(true);
+    expect(cmds.some((c) => /git -C .* show FETCH_HEAD:container\/skills\/demo-formatting\/SKILL\.md > container\/skills\/demo-formatting\/SKILL\.md$/.test(c))).toBe(true);
     expect(res.journal).toContainEqual({ op: 'wrote', path: 'container/skills/demo-formatting/SKILL.md' });
 
     rmSync(fskill, { recursive: true, force: true });

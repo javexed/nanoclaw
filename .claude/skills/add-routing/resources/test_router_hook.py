@@ -208,3 +208,56 @@ class RoutersNormalize(unittest.TestCase):
         cfg = {}  # no live.model_name
         m = {"auto-vision": {"routes": []}, "auto": {"routes": []}}
         self.assertEqual(_primary_router_name(cfg, m), "auto-vision")  # first defined
+
+
+class AnthropicMessagesRouting(unittest.IsolatedAsyncioTestCase):
+    """The default Claude harness points ANTHROPIC_BASE_URL at LiteLLM and hits
+    its Anthropic-spec /v1/messages surface — LiteLLM raises call_type
+    'anthropic_messages' for it. This is the path that REPLACED the OpenCode
+    hop, so live routing must fire on it exactly like the OpenAI 'acompletion'
+    path (LiveRouting above). Classifier mocked — no network."""
+
+    async def _call(self, cfg, data, classify, call_type="anthropic_messages"):
+        with mock.patch.object(router_hook, "_load_routes", return_value=cfg), \
+             mock.patch.object(router_hook, "_classify", classify), \
+             mock.patch.object(router_hook, "_append_log") as logged:
+            out = await router_hook.proxy_handler_instance.async_pre_call_hook(
+                {}, None, data, call_type
+            )
+            for _ in range(3):
+                await asyncio.sleep(0)
+        return out, logged
+
+    async def test_anthropic_messages_rewrites_auto(self):
+        out, logged = await self._call(LIVE_CFG, _req(), mock.AsyncMock(return_value="code"))
+        self.assertEqual(out["model"], "qwen3-coder:30b")
+        entry = logged.call_args[0][0]
+        self.assertEqual(entry["mode"], "live")
+        self.assertEqual(entry["final_model"], "qwen3-coder:30b")
+
+    async def test_anthropic_content_blocks_classify_on_text(self):
+        # /v1/messages carries content as a list of typed blocks, not a string.
+        data = {
+            "model": "auto",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "write a function"}]}],
+        }
+        out, _ = await self._call(LIVE_CFG, data, mock.AsyncMock(return_value="code"))
+        self.assertEqual(out["model"], "qwen3-coder:30b")
+
+    async def test_anthropic_messages_concrete_model_untouched(self):
+        out, _ = await self._call(
+            LIVE_CFG, _req(model="qwen3-coder:30b"), mock.AsyncMock(return_value="general")
+        )
+        self.assertEqual(out["model"], "qwen3-coder:30b")
+
+    async def test_anthropic_messages_escalate_raises(self):
+        from fastapi import HTTPException
+
+        with self.assertRaises(HTTPException) as ctx:
+            await self._call(LIVE_CFG, _req(), mock.AsyncMock(return_value="escalate"))
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("no_adequate_model", str(ctx.exception.detail))
+
+    async def test_anthropic_messages_classifier_error_falls_back(self):
+        out, _ = await self._call(LIVE_CFG, _req(), mock.AsyncMock(side_effect=RuntimeError("down")))
+        self.assertEqual(out["model"], "gemma4:latest")

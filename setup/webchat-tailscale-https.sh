@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 #
-# webchat-tailscale-https.sh — upgrade a webchat install to HTTPS on its
+# webchat-tailscale-https.sh — the NO-PROXY ALTERNATIVE for HTTPS.
+#
+# The default HTTPS path is `tailscale serve` (one click in the setup wizard
+# or Settings → Access): tailscaled terminates TLS and renews certificates
+# automatically, nothing to maintain. Use THIS script only when you
+# specifically want the webchat to terminate TLS itself (no proxy hop,
+# socket-level whois identity). It upgrades the install to HTTPS on its
 # tailnet name, with certificate auto-renewal. One atomic run:
 #
 #   1. tailscale present + logged in (offers install / `tailscale up`)
@@ -36,11 +42,48 @@ env_set() {
   echo "→ ${k}=${v}"
 }
 
+# ── 0. refuse when tailscale serve already fronts this app ────────────────
+# serve proxies PLAIN HTTP to the backend. Turning on native TLS underneath
+# it makes the proxy speak HTTP to a TLS listener and kills the 443 origin.
+# One flavor at a time: disable serve first (tailscale serve --https=443 off)
+# if you deliberately want to switch to native TLS.
+if command -v tailscale >/dev/null 2>&1 && tailscale serve status 2>/dev/null | grep -q 'proxy http'; then
+  echo "✗ tailscale serve is already serving this machine over HTTPS:" >&2
+  tailscale serve status 2>/dev/null | sed 's/^/    /' >&2
+  echo "  Native TLS underneath serve breaks the proxy (it speaks plain HTTP" >&2
+  echo "  to the backend). Keep serve — it auto-renews and needs no timer —" >&2
+  echo "  or disable it first: tailscale serve --https=443 off" >&2
+  exit 1
+fi
+
 # ── 1. tailscale installed + up ───────────────────────────────────────────
 if ! command -v tailscale >/dev/null 2>&1; then
   echo "Tailscale is not installed."
-  if [ "$(ask "Install it now via the official installer (needs sudo)? (y/n)" "y")" = "y" ]; then
-    curl -fsSL https://tailscale.com/install.sh | sh
+  if [ "$(ask "Install it now from Tailscale's signed package repo (needs sudo)? (y/n)" "y")" = "y" ]; then
+    # Signed apt/dnf/yum repo — GPG-verified package, NOT curl|sh. Matches the
+    # one-click Settings install (TAILSCALE_PKG_INSTALL in ollama-manage.ts).
+    . /etc/os-release
+    if command -v apt-get >/dev/null 2>&1; then
+      sudo install -m 0755 -d /usr/share/keyrings
+      sudo curl -fsSL "https://pkgs.tailscale.com/stable/${ID}/${VERSION_CODENAME}.noarmor.gpg" -o /usr/share/keyrings/tailscale-archive-keyring.gpg
+      sudo curl -fsSL "https://pkgs.tailscale.com/stable/${ID}/${VERSION_CODENAME}.tailscale-keyring.list" -o /etc/apt/sources.list.d/tailscale.list
+      sudo apt-get update
+      sudo apt-get install -y tailscale
+    elif command -v dnf >/dev/null 2>&1; then
+      sudo dnf install -y 'dnf-command(config-manager)'
+      sudo dnf config-manager --add-repo "https://pkgs.tailscale.com/stable/${ID}/${VERSION_ID}/tailscale.repo"
+      sudo dnf install -y tailscale
+      sudo systemctl enable --now tailscaled
+    elif command -v yum >/dev/null 2>&1; then
+      sudo yum install -y yum-utils
+      sudo yum-config-manager --add-repo "https://pkgs.tailscale.com/stable/${ID}/${VERSION_ID}/tailscale.repo"
+      sudo yum install -y tailscale
+      sudo systemctl enable --now tailscaled
+    else
+      echo "No supported package manager (apt/dnf/yum). Install Tailscale manually" >&2
+      echo "(https://tailscale.com/download), then re-run." >&2
+      exit 1
+    fi
   else
     echo "Aborted — install tailscale and re-run." >&2
     exit 1
