@@ -75,7 +75,7 @@ function generateId(): string {
 export interface PollLoopConfig {
   provider: AgentProvider;
   /**
-   * Name of the provider (e.g. "claude", "codex", "opencode"). Used to key
+   * Name of the provider (e.g. "claude", "codex"). Used to key
    * the stored continuation per-provider so flipping providers doesn't
    * resurrect a stale id from a different backend.
    */

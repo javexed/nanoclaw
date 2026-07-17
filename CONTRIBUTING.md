@@ -44,7 +44,7 @@ Add a messaging channel or an agent provider. The SKILL.md contains the install 
 
 **Location:** `.claude/skills/` on `main` (instructions only), code on the `channels` or `providers` branch
 
-**Examples:** `/add-telegram`, `/add-slack`, `/add-discord`, `/add-opencode`
+**Examples:** `/add-telegram`, `/add-slack`, `/add-discord`, `/add-codex`
 
 **How they work:**
 1. User runs `/add-telegram`
@@ -96,7 +96,7 @@ Skills that run inside the agent container, not on the host. These teach the Nan
 
 **Examples:** `agent-browser` (web browsing), `frontend-engineer`, `onecli-gateway` (OneCLI proxy usage), `self-customize`, `vercel-cli`, `welcome`; channel-specific: `slack-formatting` (Slack mrkdwn syntax) and `whatsapp-formatting` (channels branch; installed by `/add-slack` / `/add-whatsapp`)
 
-**Key difference:** You never invoke these from a coding-agent session on the host, the way you run `/setup` or `/update-nanoclaw` in Claude Code/Codex/OpenCode. They're mounted into the sandbox and loaded by the NanoClaw agent itself, shaping how it behaves when you chat with it.
+**Key difference:** You never invoke these from a coding-agent session on the host, the way you run `/setup` or `/update-nanoclaw` in Claude Code/Codex. They're mounted into the sandbox and loaded by the NanoClaw agent itself, shaping how it behaves when you chat with it.
 
 **Guidelines:**
 - Follow the same SKILL.md + frontmatter format

@@ -74,7 +74,6 @@ import os from 'os';
 import path from 'path';
 
 import { DATA_DIR, GROUPS_DIR } from '../../config.js';
-import { readEnvFile } from '../../env.js';
 import { getDb, hasTable } from '../../db/connection.js';
 import { log } from '../../log.js';
 import {
@@ -150,6 +149,8 @@ import {
   getPullsSnapshot,
   getOllamaLocalState,
   startOllamaInstall,
+  getCodexInstallProgress,
+  startCodexInstall,
   getRosterRefreshState,
   dryClassify,
   getRouteSuggestions,
@@ -171,7 +172,16 @@ import {
   startPull,
   startRosterRefresh,
   getRoutingInstallState,
+  getTtsInstallState,
+  startTtsInstall,
+  getTailscaleInstallState,
+  startTailscaleInstall,
+  getSttInstallState,
+  startSttInstall,
   startRoutingInstall,
+  getLitellmInstallState,
+  startLitellmInstall,
+  upsertEnv,
 } from './ollama-manage.js';
 import {
   approvalInboxForUser,
@@ -248,6 +258,11 @@ import {
   type WebchatModelKind,
   type WebchatRoomAgent,
   type WebchatSkillSource,
+  getSttCleanupModelId,
+  setSttCleanupModelId,
+  getSttCleanupPrompt,
+  setSttCleanupPrompt,
+  setReadAloudEnabled,
 } from './db.js';
 import { DraftError, draftAgent } from './drafter.js';
 import { recommendForHost } from './model-recommend.js';
@@ -263,6 +278,17 @@ import { handleChunkedUpload, handleFileServe, handleMultipartUpload } from './f
 import { initWebPush, isValidPushEndpoint } from './push.js';
 import { redactSensitiveData } from './redact.js';
 import { hasAdminPrivilege, isAnyAdmin, isGlobalAdmin, isOwner, warnIfNoPermissionsModule } from './roles.js';
+import { maybeHandleTts, ttsEndpoint } from './tts.js';
+import {
+  DEFAULT_CLEANUP_PROMPT,
+  MAX_CLEANUP_CHARS,
+  MAX_SEGMENT_BYTES,
+  MIN_SEGMENT_BYTES,
+  cleanupTranscript,
+  sttEnabled,
+  sttProvider,
+  transcribeSegment,
+} from './stt.js';
 import { canAccessRoom, canArchiveRoom, filterRoomsForUser } from './access.js';
 import {
   getRoomOauthAllowed,
@@ -597,6 +623,10 @@ async function handleHttp(
       // probes the connection-lost banner uses to tell "Tailscale is off on
       // this device" apart from "no internet" (no-cors, response never read).
       "img-src 'self' data: blob:; connect-src 'self' https://derp1.tailscale.com https://www.gstatic.com; font-src 'self'; " +
+      // media-src covers <audio>/Audio() playback of the blob: URL the TTS
+      // feature builds from /api/tts's response (default-src 'self' alone would
+      // block blob:, mirroring the img-src carve-out above).
+      "media-src 'self' blob:; " +
       "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
   );
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -643,6 +673,11 @@ async function handleHttp(
   if (url.pathname === '/api/auth/check' && method === 'GET') {
     return json(res, 200, { ok: true, userId, identity: senderIdentity });
   }
+
+  // ── Text-to-speech (config probe + synthesis proxy) ───────────────────
+  // Authenticated like every other /api/* route; the module owns its own
+  // enabled-gating and backend proxying. See tts.ts + /add-webchat-tts skill.
+  if (await maybeHandleTts(req, res, url, method)) return;
 
   // ── Your @-mention handle (the slug others type to @-mention you) ──────
   if (url.pathname === '/api/me/handle' && method === 'GET') {
@@ -1335,6 +1370,13 @@ async function handleHttp(
       return json(res, 400, { error: 'marketplaceEnabled must be a boolean' });
     }
     setMarketplaceDisabled(!body.marketplaceEnabled);
+    // The choice cascades to the individual sources (wizard ask): a
+    // "no marketplace" install starts with the skill marketplace and the MCP
+    // registry REMOVED — not just hidden behind the flag. Re-enabling restores
+    // both; Settings then manages them per-source.
+    setSourceDisabled(MARKETPLACE_ID, !body.marketplaceEnabled);
+    setSourceDisabled(mcpRegistryRemovedKey(), !body.marketplaceEnabled);
+    if (body.marketplaceEnabled) setSourceDisabled(MCP_REGISTRY_ID, false);
     return json(res, 200, { marketplaceEnabled: !getMarketplaceDisabled() });
   }
 
@@ -1370,10 +1412,32 @@ async function handleHttp(
   // (tailscaleServeIdentity maps Serve's header back to the whois id).
   if (url.pathname === '/api/webchat/tailscale-https' && (method === 'GET' || method === 'POST')) {
     if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
+    // This endpoint reports HTTPS status in BOTH flavors: `tailscale serve`
+    // (what the enable button sets up) and native TLS (WEBCHAT_TLS_CERT/KEY —
+    // an install like the tailscale-https setup script produces). Without the
+    // native check, an already-HTTPS install is offered "Enable HTTPS" on a
+    // page it is literally serving over HTTPS.
+    const nativeTls = !!(process.env.WEBCHAT_TLS_CERT && process.env.WEBCHAT_TLS_KEY);
     if (method === 'GET') {
-      return json(res, 200, await getTailscaleServeState());
+      const state = await getTailscaleServeState();
+      if (nativeTls && !state.active) {
+        const port = Number(process.env.WEBCHAT_PORT || DEFAULT_PORT);
+        return json(res, 200, {
+          ...state,
+          active: true,
+          mode: 'native-tls',
+          url: state.url ? `${state.url}${port === 443 ? '' : `:${port}`}` : null,
+        });
+      }
+      return json(res, 200, { ...state, mode: state.active ? 'serve' : null });
     }
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (nativeTls) {
+      return json(res, 400, {
+        ok: false,
+        error: 'HTTPS is already enabled (native TLS certificate) — nothing to set up.',
+      });
+    }
     const port = Number(process.env.WEBCHAT_PORT || DEFAULT_PORT);
     const result = await enableTailscaleServe(port);
     return json(res, result.ok ? 200 : 400, result);
@@ -2035,7 +2099,13 @@ async function handleHttp(
   if (url.pathname === '/api/mcp-sources' && method === 'GET') {
     if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
     return json(res, 200, {
-      sources: [{ ...MCP_REGISTRY_SOURCE, disabled: isSourceDisabled(MCP_REGISTRY_ID) }],
+      sources: [
+        {
+          ...MCP_REGISTRY_SOURCE,
+          disabled: isSourceDisabled(MCP_REGISTRY_ID),
+          removed: isSourceDisabled(mcpRegistryRemovedKey()),
+        },
+      ],
     });
   }
   const mcpSourceMatch = url.pathname.match(/^\/api\/mcp-sources\/([^/]+)$/);
@@ -2054,6 +2124,26 @@ async function handleHttp(
     }
     setSourceDisabled(MCP_REGISTRY_ID, disabled);
     return json(res, 200, { ok: true, disabled });
+  }
+  // Full removal (parity with skill sources' Remove). Stronger than disable:
+  // the row leaves Settings save for a one-line restore, and the catalog is
+  // gone server-side. Restore = POST on the same path.
+  if (mcpSourceMatch && method === 'DELETE') {
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (decodeURIComponent(mcpSourceMatch[1]) !== MCP_REGISTRY_ID) return json(res, 404, { error: 'Unknown source' });
+    setSourceDisabled(mcpRegistryRemovedKey(), true);
+    return json(res, 200, { ok: true, removed: true });
+  }
+  if (mcpSourceMatch && method === 'POST') {
+    // Restore a removed source (clears the disabled flag too — a restore
+    // should come back usable, not resurrect half-off).
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (decodeURIComponent(mcpSourceMatch[1]) !== MCP_REGISTRY_ID) return json(res, 404, { error: 'Unknown source' });
+    setSourceDisabled(mcpRegistryRemovedKey(), false);
+    setSourceDisabled(MCP_REGISTRY_ID, false);
+    return json(res, 200, { ok: true, removed: false });
   }
   if (url.pathname === '/api/mcp-catalog' && method === 'GET') {
     if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
@@ -2415,8 +2505,8 @@ async function handleHttp(
     const room = getRoomLearning(mg.id);
     const agentFallback = wired.length > 0 ? parseAgentLearning(wired[0].id) : {};
     const effective = {
-      autoTrigger: room.autoTrigger ?? (agentFallback.autoTrigger !== false),
-      autoKeep: room.autoKeep ?? (agentFallback.autoKeep === true),
+      autoTrigger: room.autoTrigger ?? agentFallback.autoTrigger !== false,
+      autoKeep: room.autoKeep ?? agentFallback.autoKeep === true,
     };
     if (method === 'GET') {
       return json(res, 200, { ...effective, canManage, roomOverride: room });
@@ -2447,8 +2537,8 @@ async function handleHttp(
     let restarted = 0;
     for (const a of wired) restarted += restartAgentGroupContainers(a.id, 'Room learning settings changed');
     return json(res, 200, {
-      autoTrigger: next.autoTrigger ?? (agentFallback.autoTrigger !== false),
-      autoKeep: next.autoKeep ?? (agentFallback.autoKeep === true),
+      autoTrigger: next.autoTrigger ?? agentFallback.autoTrigger !== false,
+      autoKeep: next.autoKeep ?? agentFallback.autoKeep === true,
       canManage,
       roomOverride: next,
       restarted,
@@ -3009,6 +3099,23 @@ async function handleHttp(
     const result = startOllamaInstall();
     return json(res, result.started ? 200 : 409, result);
   }
+  if (url.pathname === '/api/codex/install' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    return json(res, 200, { ...getCodexInstallProgress(), installed: codexAvailable() });
+  }
+  if (url.pathname === '/api/codex/install' && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    if (codexAvailable()) return json(res, 409, { error: 'Codex is already installed', code: 'already-installed' });
+    const r = startCodexInstall();
+    if (r.error === 'skill-missing')
+      return json(res, 409, { error: 'The add-codex skill is not present in this checkout.', code: 'skill-missing' });
+    return json(res, r.started ? 202 : 409, {
+      ...getCodexInstallProgress(),
+      installed: codexAvailable(),
+      started: r.started,
+    });
+  }
   if (url.pathname === '/api/ollama/pull' && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
@@ -3039,6 +3146,222 @@ async function handleHttp(
     const started = startRosterRefresh();
     return json(res, started ? 202 : 409, { ...getRosterRefreshState(), started });
   }
+  if (url.pathname === '/api/webchat/tts/install' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    return json(res, 200, await getTtsInstallState());
+  }
+  if (url.pathname === '/api/webchat/tts/install' && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const r = startTtsInstall();
+    if (!r.started && r.error === 'installer-missing') {
+      return json(res, 409, { error: 'The /add-webchat-tts installer is missing from this checkout.' });
+    }
+    return json(res, r.started ? 202 : 409, { ...(await getTtsInstallState()), started: r.started });
+  }
+  if (url.pathname === '/api/webchat/tailscale/install' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    return json(res, 200, getTailscaleInstallState());
+  }
+  if (url.pathname === '/api/webchat/tailscale/install' && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const r = startTailscaleInstall();
+    if (!r.started && r.error === 'prereq-missing') {
+      return json(res, 409, {
+        error: "Can't install Tailscale here — /dev/net/tun or root is missing. Use the Proxmox community helper.",
+      });
+    }
+    return json(res, r.started ? 202 : 409, { ...getTailscaleInstallState(), started: r.started });
+  }
+  if (url.pathname === '/api/webchat/stt/install' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    return json(res, 200, getSttInstallState());
+  }
+  if (url.pathname === '/api/webchat/stt/install' && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { provider?: unknown; model?: unknown; apiKey?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    const provider = body.provider === 'elevenlabs' ? 'elevenlabs' : 'local';
+    const r = startSttInstall({
+      provider,
+      model: typeof body.model === 'string' ? body.model : undefined,
+      apiKey: typeof body.apiKey === 'string' ? body.apiKey : undefined,
+    });
+    if (!r.started) {
+      const msg =
+        r.error === 'installer-missing'
+          ? 'The add-webchat-dictation installer is missing from this checkout.'
+          : r.error === 'missing-key'
+            ? 'An ElevenLabs API key is required.'
+            : r.error === 'bad-model'
+              ? 'Unknown model.'
+              : 'An install is already running.';
+      return json(res, 409, { error: msg });
+    }
+    return json(res, 202, { ...getSttInstallState(), started: true });
+  }
+  // Voice list, proxied from the TTS backend (Kokoro serves ~67). Owner-only —
+  // it's the voice-picker's data source, not a runtime need.
+  if (url.pathname === '/api/tts/voices' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    try {
+      const upstream = await fetch(`${ttsEndpoint()}/v1/audio/voices`, { signal: AbortSignal.timeout(5000) });
+      if (!upstream.ok) return json(res, 502, { error: `TTS backend answered ${upstream.status}` });
+      const body = (await upstream.json()) as { voices?: unknown };
+      const voices = Array.isArray(body.voices) ? body.voices.filter((v) => typeof v === 'string') : [];
+      return json(res, 200, { voices });
+    } catch {
+      return json(res, 502, { error: 'TTS backend unreachable' });
+    }
+  }
+  // Read aloud is workspace-level: the owner flips it for everyone (the GET
+  // half lives in tts.ts's public config probe).
+  if (url.pathname === '/api/tts/config' && method === 'PUT') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { readAloud?: unknown; voice?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    // Voice change — persisted to .env and activated in-process (no restart).
+    // Strict shape: Kokoro voice ids / blends only, since this lands in .env.
+    if ('voice' in body) {
+      if (typeof body.voice !== 'string' || !/^[a-z0-9_]+(\+[a-z0-9_]+)*$/.test(body.voice) || body.voice.length > 120)
+        return json(res, 400, { error: 'voice must be a voice id (letters/digits/underscore, + for blends)' });
+      upsertEnv(process.cwd(), 'WEBCHAT_TTS_VOICE', body.voice);
+      process.env.WEBCHAT_TTS_VOICE = body.voice;
+      return json(res, 200, { ok: true, voice: body.voice });
+    }
+    if (typeof body.readAloud !== 'boolean') return json(res, 400, { error: 'readAloud must be a boolean' });
+    setReadAloudEnabled(body.readAloud);
+    return json(res, 200, { ok: true, readAloud: body.readAloud });
+  }
+  // Dictation runtime config. GET is for every authed user (the mic gates on
+  // `enabled`); provider/cleanup details only for owners/global admins.
+  if (url.pathname === '/api/stt/config' && (method === 'GET' || method === 'PUT')) {
+    const canEdit = isOwner(userId) || isGlobalAdmin(userId);
+    if (method === 'GET') {
+      const base = { enabled: sttEnabled(), cleanup: getSttCleanupModelId() !== null };
+      return json(
+        res,
+        200,
+        canEdit
+          ? {
+              ...base,
+              provider: sttProvider(),
+              cleanupModelId: getSttCleanupModelId(),
+              cleanupPrompt: getSttCleanupPrompt(),
+              defaultCleanupPrompt: DEFAULT_CLEANUP_PROMPT,
+              canEdit: true,
+            }
+          : base,
+      );
+    }
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!canEdit) return json(res, 403, { error: 'Forbidden' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { cleanupModelId?: unknown; cleanupPrompt?: unknown; enabled?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    // Workspace toggle — mirrors Read aloud: the owner flips the mic for
+    // everyone. Env-backed (WEBCHAT_STT_ENABLED already gates every STT
+    // surface), persisted + activated in-process.
+    if ('enabled' in body) {
+      if (typeof body.enabled !== 'boolean') return json(res, 400, { error: 'enabled must be a boolean' });
+      upsertEnv(process.cwd(), 'WEBCHAT_STT_ENABLED', body.enabled ? 'true' : 'false');
+      process.env.WEBCHAT_STT_ENABLED = body.enabled ? 'true' : 'false';
+      return json(res, 200, { ok: true, enabled: body.enabled });
+    }
+    // Prompt edit — its own PUT shape; null/empty resets to the built-in default.
+    if ('cleanupPrompt' in body) {
+      if (body.cleanupPrompt !== null && typeof body.cleanupPrompt !== 'string')
+        return json(res, 400, { error: 'cleanupPrompt must be a string or null' });
+      const trimmed = typeof body.cleanupPrompt === 'string' ? body.cleanupPrompt.trim() : '';
+      if (trimmed.length > 4000) return json(res, 413, { error: 'Prompt too long (4000 chars max)' });
+      const stored = trimmed && trimmed !== DEFAULT_CLEANUP_PROMPT ? trimmed : null;
+      setSttCleanupPrompt(stored);
+      return json(res, 200, { ok: true, cleanupPrompt: stored });
+    }
+    if (body.cleanupModelId === null) {
+      setSttCleanupModelId(null);
+      return json(res, 200, { ok: true, cleanupModelId: null });
+    }
+    if (typeof body.cleanupModelId !== 'string' || !body.cleanupModelId.trim())
+      return json(res, 400, { error: 'cleanupModelId must be a string or null' });
+    const model = getWebchatModel(body.cleanupModelId.trim());
+    if (!model) return json(res, 404, { error: 'Model not found' });
+    if (model.kind !== 'ollama' && model.kind !== 'openai-compatible')
+      return json(res, 400, { error: 'Cleanup model must be an ollama or openai-compatible roster model' });
+    if (!model.endpoint) return json(res, 400, { error: 'That model has no endpoint to call' });
+    setSttCleanupModelId(model.id);
+    return json(res, 200, { ok: true, cleanupModelId: model.id });
+  }
+  if (url.pathname === '/api/stt/transcribe' && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!sttEnabled()) return json(res, 404, { error: 'Voice dictation not configured' });
+    const declared = Number(req.headers['content-length'] ?? 0);
+    if (declared > MAX_SEGMENT_BYTES) return json(res, 413, { error: 'Segment too large' });
+    const chunks: Buffer[] = [];
+    let received = 0;
+    let aborted = false;
+    req.on('data', (c: Buffer) => {
+      received += c.length;
+      if (received > MAX_SEGMENT_BYTES) {
+        aborted = true;
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    await new Promise<void>((resolve) => {
+      req.on('end', resolve);
+      req.on('close', resolve);
+      req.on('error', resolve);
+    });
+    if (aborted) return json(res, 413, { error: 'Segment too large' });
+    const wav = Buffer.concat(chunks);
+    // Below ~1 kB it's a click or an empty buffer, not speech — don't bill a
+    // transcription round-trip for it.
+    if (wav.length < MIN_SEGMENT_BYTES) return json(res, 200, { text: '' });
+    try {
+      const text = await transcribeSegment(wav);
+      return json(res, 200, { text });
+    } catch (err) {
+      log.warn('Webchat STT: transcription failed', { err: err instanceof Error ? err.message : err });
+      return json(res, 502, { error: 'Transcription failed — check the dictation backend.' });
+    }
+  }
+  if (url.pathname === '/api/stt/cleanup' && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { text?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    if (typeof body.text !== 'string') return json(res, 400, { error: 'text required' });
+    if (body.text.length > MAX_CLEANUP_CHARS) return json(res, 413, { error: 'Text too long to clean up' });
+    const result = await cleanupTranscript(body.text);
+    return json(res, 200, result);
+  }
   if (url.pathname === '/api/router/install' && method === 'GET') {
     if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
     return json(res, 200, getRoutingInstallState());
@@ -3060,6 +3383,22 @@ async function handleHttp(
       });
     }
     return json(res, r.started ? 202 : 409, { ...getRoutingInstallState(), started: r.started });
+  }
+  if (url.pathname === '/api/router/litellm-install' && method === 'GET') {
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    return json(res, 200, getLitellmInstallState());
+  }
+  if (url.pathname === '/api/router/litellm-install' && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+    const r = startLitellmInstall();
+    if (r.error === 'installer-missing') {
+      return json(res, 409, {
+        error: 'The add-litellm skill is not present in this checkout.',
+        code: 'installer-missing',
+      });
+    }
+    return json(res, r.started ? 202 : 409, { ...getLitellmInstallState(), started: r.started });
   }
   if (url.pathname === '/api/models' && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') {
@@ -4080,30 +4419,10 @@ interface AgentForUI extends AgentGroup {
 /**
  * Derive a display label for an agent with NO assigned webchat model, from its
  * runtime provider. Returns null for the built-in Claude path (caller shows the
- * Anthropic default). Best-effort: the specific model is read from the agent's
- * settings.json env stub when present (webchat's own openai-compatible
- * assignment writes OPENAI_MODEL there); an install-wide `.env` OPENCODE_MODEL
- * isn't per-agent so it's not surfaced here — the provider alone is accurate.
+ * Anthropic default). Only a non-Claude harness (Codex) gets an explicit label.
  */
 function deriveEffectiveModelLabel(agentGroupId: string): string | null {
   const provider = getContainerConfig(agentGroupId)?.provider ?? 'claude';
-  if (provider === 'opencode') {
-    let model: string | undefined;
-    try {
-      const p = path.join(DATA_DIR, 'v2-sessions', agentGroupId, '.claude-shared', 'settings.json');
-      const env = (JSON.parse(fs.readFileSync(p, 'utf-8')).env ?? {}) as Record<string, string>;
-      model = env.OPENAI_MODEL || env.OPENCODE_MODEL;
-    } catch {
-      // no per-agent stub — fall through to the install-wide default
-    }
-    // Install-wide fallback: this host keeps .env out of process.env, so read
-    // the file. Not per-agent, but for an install-wide opencode setup it's the
-    // model every such agent runs on.
-    if (!model) model = readEnvFile(['OPENCODE_MODEL']).OPENCODE_MODEL;
-    // Strip a leading "<provider>/" (e.g. "openai/llama3.2:3b" → "llama3.2:3b").
-    if (model) model = model.replace(/^[^/]+\//, '');
-    return model || 'OpenCode';
-  }
   if (provider === 'codex') return 'Codex';
   // Claude family with no assignment: the group may still run on the WORKSPACE
   // DEFAULT model (the wizard's Ollama engine). Label it honestly — showing
@@ -4603,16 +4922,23 @@ async function importSystemUploadHandler(req: IncomingMessage, res: ServerRespon
       let err = '';
       p.stdout?.on('data', (d: Buffer) => (out += d));
       p.stderr?.on('data', (d: Buffer) => (err += d));
-      p.on('close', (code: number) => (code === 0 ? resolve(out) : reject(new Error(`tar -t failed: ${err.slice(0, 200)}`))));
+      p.on('close', (code: number) =>
+        code === 0 ? resolve(out) : reject(new Error(`tar -t failed: ${err.slice(0, 200)}`)),
+      );
     });
-    const bad = listing.split('\n').filter(Boolean).filter((e) => !isSafeSystemEntry(e));
+    const bad = listing
+      .split('\n')
+      .filter(Boolean)
+      .filter((e) => !isSafeSystemEntry(e));
     if (bad.length > 0) throw new Error(`Bundle contains unsafe paths: ${bad.slice(0, 3).join(', ')}`);
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-sysimport-'));
     await new Promise<void>((resolve, reject) => {
       const p = spawnTar(['-xzf', tmpFile!, '-C', dir, '--no-same-owner']);
       let err = '';
       p.stderr?.on('data', (d: Buffer) => (err += d));
-      p.on('close', (code: number) => (code === 0 ? resolve() : reject(new Error(`tar -x failed: ${err.slice(0, 200)}`))));
+      p.on('close', (code: number) =>
+        code === 0 ? resolve() : reject(new Error(`tar -x failed: ${err.slice(0, 200)}`)),
+      );
     });
     const preview = previewSystemImport(dir);
     const token = randomUUID();
@@ -4665,16 +4991,23 @@ async function importRoomUploadHandler(req: IncomingMessage, res: ServerResponse
       let err = '';
       p.stdout?.on('data', (d: Buffer) => (out += d));
       p.stderr?.on('data', (d: Buffer) => (err += d));
-      p.on('close', (code: number) => (code === 0 ? resolve(out) : reject(new Error(`tar -t failed: ${err.slice(0, 200)}`))));
+      p.on('close', (code: number) =>
+        code === 0 ? resolve(out) : reject(new Error(`tar -t failed: ${err.slice(0, 200)}`)),
+      );
     });
-    const bad = listing.split('\n').filter(Boolean).filter((e) => !isSafeRoomEntry(e));
+    const bad = listing
+      .split('\n')
+      .filter(Boolean)
+      .filter((e) => !isSafeRoomEntry(e));
     if (bad.length > 0) throw new Error(`Bundle contains unsafe paths: ${bad.slice(0, 3).join(', ')}`);
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-roomimport-'));
     await new Promise<void>((resolve, reject) => {
       const p = spawnTar(['-xzf', tmpFile!, '-C', dir, '--no-same-owner']);
       let err = '';
       p.stderr?.on('data', (d: Buffer) => (err += d));
-      p.on('close', (code: number) => (code === 0 ? resolve() : reject(new Error(`tar -x failed: ${err.slice(0, 200)}`))));
+      p.on('close', (code: number) =>
+        code === 0 ? resolve() : reject(new Error(`tar -x failed: ${err.slice(0, 200)}`)),
+      );
     });
     const preview = previewRoomImport(dir);
     const token = randomUUID();
@@ -4888,8 +5221,7 @@ function parseAgentRef(raw: unknown): AgentRef | { error: string } {
   if (r.kind === 'new') {
     if (typeof r.name !== 'string' || !r.name.trim()) return { error: 'agent.name required for kind=new' };
     // Optional non-default provider for the new agent (wizard "default engine"
-    // = Codex). Only 'codex' is accepted — 'claude' is the implicit default,
-    // and opencode groups are wired by their own installer, not room-create.
+    // = Codex). Only 'codex' is accepted — 'claude' is the implicit default.
     if (r.provider !== undefined) {
       if (r.provider !== 'codex') return { error: "agent.provider must be 'codex' when set" };
       if (!codexAvailable()) return { error: 'Codex support isn’t installed yet — add it with /add-codex first.' };
@@ -5596,9 +5928,10 @@ function reloadAgentModelEnv(agentGroupId: string, reason: string): void {
     log.warn('Webchat: settings.json write after model change failed', { agentGroupId, reason, err });
   }
   try {
-    // Provider follows the assigned model's kind (openai-compatible ->
-    // opencode, everything else -> default). Same next-spawn timing as the
-    // env write; the restart below applies both.
+    // Provider follows the assigned model's kind. Every kind now runs on the
+    // default harness, so this always syncs back to the default provider (it
+    // still runs to un-wedge any group a legacy install left on a non-default
+    // provider). Same next-spawn timing as the env write; the restart applies both.
     syncAgentProviderForAssignedModel(agentGroupId);
   } catch (err) {
     log.warn('Webchat: provider sync after model change failed', { agentGroupId, reason, err });
@@ -5664,8 +5997,8 @@ function afterWorkspaceCredentialSet(provider: 'claude' | 'codex', priorOauth: b
 /**
  * Re-materialize settings.json + respawn for every claude-family group WITHOUT
  * its own model assignment — the population the workspace default model serves.
- * Assigned groups are untouched (their assignment wins), as are codex/opencode
- * groups (their harness ignores the ANTHROPIC_* env this writes).
+ * Assigned groups are untouched (their assignment wins), as are non-Claude
+ * (Codex) groups (their harness ignores the ANTHROPIC_* env this writes).
  */
 function refreshUnassignedGroupsForDefaultModel(reason: string): void {
   for (const g of getAllAgentGroups()) {
@@ -5900,6 +6233,9 @@ const MCP_REGISTRY_URL = 'https://registry.modelcontextprotocol.io/v0/servers';
  * Same id space, same helpers, no new table.
  */
 const MCP_REGISTRY_ID = 'mcp-registry';
+// "Fully removed" is a stronger, separately-persisted state than disabled —
+// same webchat_disabled_sources table, namespaced id, no schema change.
+const mcpRegistryRemovedKey = () => `removed:${MCP_REGISTRY_ID}`;
 const MCP_REGISTRY_SOURCE = {
   id: MCP_REGISTRY_ID,
   name: 'Model Context Protocol registry',
@@ -5929,8 +6265,12 @@ const MCP_CATALOG_TTL_MS = 5 * 60_000;
 
 /** Compare dotted versions numerically so 1.10.0 beats 1.9.0 (string sort doesn't). */
 function versionGreater(a: string, b: string): boolean {
-  const pa = String(a).split('.').map((n) => parseInt(n, 10) || 0);
-  const pb = String(b).split('.').map((n) => parseInt(n, 10) || 0);
+  const pa = String(a)
+    .split('.')
+    .map((n) => parseInt(n, 10) || 0);
+  const pb = String(b)
+    .split('.')
+    .map((n) => parseInt(n, 10) || 0);
   for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
     const x = pa[i] ?? 0;
     const y = pb[i] ?? 0;
@@ -5980,8 +6320,7 @@ export function normalizeMcpRegistry(payload: unknown): McpCatalogRow[] {
     if (prev && !versionGreater(version, prev.version)) continue;
 
     const remotes = (s.remotes as { type?: string; url?: string }[] | undefined) || [];
-    const packages =
-      (s.packages as { registryType?: string; identifier?: string }[] | undefined) || [];
+    const packages = (s.packages as { registryType?: string; identifier?: string }[] | undefined) || [];
 
     const repo = s.repository as { url?: string } | undefined;
     const base = {
@@ -6022,7 +6361,8 @@ export function normalizeMcpRegistry(payload: unknown): McpCatalogRow[] {
 async function mcpCatalogHandler(res: ServerResponse, q: string): Promise<void> {
   // Switched off in Settings → the catalog is gone, server-side too. Not just
   // hidden in the UI: no request is made to the registry at all.
-  if (isSourceDisabled(MCP_REGISTRY_ID)) return json(res, 200, { servers: [], disabled: true });
+  if (isSourceDisabled(MCP_REGISTRY_ID) || isSourceDisabled(mcpRegistryRemovedKey()))
+    return json(res, 200, { servers: [], disabled: true });
   const key = q.trim().toLowerCase();
   const hit = mcpCatalogCache.get(key);
   if (hit && Date.now() - hit.at < MCP_CATALOG_TTL_MS) return json(res, 200, { servers: hit.rows });
@@ -6153,7 +6493,11 @@ function draftSourceRoom(sessionId: string | null): string | null {
   }
 }
 
-function parseAgentLearning(agentGroupId: string): { autoTrigger?: boolean; autoKeep?: boolean; cooldownMinutes?: number } {
+function parseAgentLearning(agentGroupId: string): {
+  autoTrigger?: boolean;
+  autoKeep?: boolean;
+  cooldownMinutes?: number;
+} {
   try {
     const raw = getContainerConfig(agentGroupId)?.learning;
     return raw ? (JSON.parse(raw) as ReturnType<typeof parseAgentLearning>) : {};
@@ -6238,7 +6582,13 @@ function listScopedSkills(
   agentGroupId: string,
 ): Array<{ name: string; description: string; origin: SkillOrigin | null; invocations: number; hasHistory: boolean }> {
   const dir = scopedSkillsDir(agentGroupId);
-  const out: Array<{ name: string; description: string; origin: SkillOrigin | null; invocations: number; hasHistory: boolean }> = [];
+  const out: Array<{
+    name: string;
+    description: string;
+    origin: SkillOrigin | null;
+    invocations: number;
+    hasHistory: boolean;
+  }> = [];
   let entries: string[];
   try {
     entries = fs.readdirSync(dir);
@@ -7254,11 +7604,19 @@ async function keepSkillDraftHandler(
   }
   // The write itself lives in modules/learning/apply.ts — ONE implementation
   // shared with auto-keep, so the two paths cannot drift.
-  const r = applySkillDraft({ ...draft, agent_group_id: group.id } as Parameters<typeof applySkillDraft>[0],
-    draft.kind === 'patch' ? 'Webchat skill revision applied' : 'Webchat learned skill kept');
+  const r = applySkillDraft(
+    { ...draft, agent_group_id: group.id } as Parameters<typeof applySkillDraft>[0],
+    draft.kind === 'patch' ? 'Webchat skill revision applied' : 'Webchat learned skill kept',
+  );
   if (!r.ok) return json(res, r.status, { error: r.error });
   resolveDraftCard(draft.id, 'kept', userId);
-  return json(res, 200, { ok: true, name: r.name, patched: r.patched, forkedFromPool: r.forkedFromPool, restarted: r.restarted });
+  return json(res, 200, {
+    ok: true,
+    name: r.name,
+    patched: r.patched,
+    forkedFromPool: r.forkedFromPool,
+    restarted: r.restarted,
+  });
 }
 
 function listAgentMcpHandler(res: ServerResponse, agentGroupId: string): void {

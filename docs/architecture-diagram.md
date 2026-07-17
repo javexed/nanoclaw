@@ -31,7 +31,7 @@ flowchart TB
   subgraph Session["Per-Session Container (Docker)"]
     direction TB
     PollLoop["Poll Loop<br/>(container/agent-runner)"]
-    Provider["Agent providers<br/>(claude — the only one registered in trunk;<br/>opencode ships via the /add-opencode skill)"]
+    Provider["Agent providers<br/>(claude — the only one registered in trunk;<br/>codex ships via the /add-codex skill)"]
     MCP["MCP Tools<br/>send_message, send_file, edit_message,<br/>add_reaction, send_card, ask_user_question,<br/>create_agent, install_packages, add_mcp_server<br/>CLI: ncl tasks"]
     Skills["Container Skills<br/>(container/skills/)"]
     InDB[("inbound.db<br/>host writes<br/>even seq<br/>messages_in<br/>delivered<br/>destinations<br/>session_routing")]

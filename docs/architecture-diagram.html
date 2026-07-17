@@ -181,7 +181,7 @@ flowchart TB
   subgraph Session["Per-Session Container"]
     direction TB
     PollLoop["Poll Loop<br/>container/agent-runner"]
-    Provider["Claude Agent SDK<br/>(codex / opencode planned)"]
+    Provider["Claude Agent SDK<br/>(codex via /add-codex)"]
     MCP["MCP Tools<br/>send_message · send_file · edit_message<br/>send_card · ask_user_question · schedule_task<br/>create_agent · install_packages · add_mcp_server<br/>request_rebuild"]
     InDB[("inbound.db<br/>host writes · even seq")]
     OutDB[("outbound.db<br/>container writes · odd seq")]

@@ -15,7 +15,7 @@ mnemon hooks fire only under `--target claude-code`. Use this skill on agent gro
 grep -H '"provider"' groups/*/container.json 2>/dev/null   # no match, or "provider": "claude" = Claude
 ```
 
-If a group sets a different provider (e.g. `"provider": "opencode"`), it spawns its own process and never invokes the `claude` CLI, so the hooks registered by `mnemon setup` do not run for that group.
+If a group sets a different provider (e.g. `"provider": "codex"`), it spawns its own process and never invokes the `claude` CLI, so the hooks registered by `mnemon setup` do not run for that group.
 
 ## Phase 1: Pre-flight
 

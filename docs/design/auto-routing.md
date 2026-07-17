@@ -16,7 +16,7 @@ deployment is chosen. An agent opts in by being assigned the virtual model
 
 | Piece | What it is | Where |
 |---|---|---|
-| **LiteLLM proxy** | OpenAI-compatible router on `:4000`; every OpenCode turn goes through it | external container; `data/litellm/config.yaml` |
+| **LiteLLM proxy** | OpenAI-compatible router on `:4000`; every routed turn goes through it | external container; `data/litellm/config.yaml` |
 | **Arch-Router (~1.5B)** | the route classifier, self-hosted on a LAN Ollama | `classifier.url` in `routes.json` |
 | **The hook** | LiteLLM pre-call callback that classifies + rewrites the model | `router_hook.py` → mounted at the import root `/app/router_hook.py` (config + log live under `/app/routing/`); `config.yaml: callbacks: router_hook.proxy_handler_instance` |
 | **`routes.json`** | the route catalog + classifier endpoint + live flag + router profiles | `data/litellm/routing/routes.json` (operator-owned) |
@@ -32,8 +32,8 @@ model is never touched.
 ## 2. Runtime flow (the request path)
 
 ```
-agent (provider=opencode, model="auto", endpoint host.docker.internal:4000/v1)
-      │  OpenCode issues an OpenAI chat-completion to LiteLLM
+agent (model="auto", ANTHROPIC_BASE_URL host.docker.internal:4000)
+      │  the Claude harness issues a request to LiteLLM's Anthropic /v1/messages
       ▼
 LiteLLM :4000 ── async_pre_call_hook(data)  [router_hook.py: class ShadowRouter]
       │
@@ -97,9 +97,8 @@ route `{name, description}` list + the conversation and demands
 `router_hook.py`). Notes:
 
 - **System-wrapper strip** — the agent-runner prepends `<system>…</system>`
-  inside the *user* message (OpenCode has no separate system channel); the hook
-  strips it so classification runs on the user's actual words, not the preamble
-  (`_strip_system_wrapper`).
+  inside the *user* message; the hook strips it so classification runs on the
+  user's actual words, not the preamble (`_strip_system_wrapper`).
 - **`keep_alive`** pins the ~1 GB classifier in GPU memory (a cold load adds
   seconds per classify).
 - The **exact same prompt contract** is duplicated in the host for the tab's

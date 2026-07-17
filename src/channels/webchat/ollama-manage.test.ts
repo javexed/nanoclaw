@@ -1,3 +1,7 @@
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('./models.js', () => ({
@@ -8,11 +12,19 @@ import { safeFetch } from './models.js';
 import {
   _resetPullsForTest,
   getPullsSnapshot,
+  getCodexInstallProgress,
+  providerRestartCommand,
+  getLitellmInstallState,
   getRosterRefreshState,
   listHostModels,
   parseConfiguredHosts,
   removeRouteFromConfig,
+  startCodexInstall,
+  codexInstallSteps,
+  startLitellmInstall,
   startPull,
+  getTailscaleInstallState,
+  startTailscaleInstall,
 } from './ollama-manage.js';
 
 const mockFetch = vi.mocked(safeFetch);
@@ -134,6 +146,117 @@ describe('parseConfiguredHosts', () => {
 describe('getRosterRefreshState', () => {
   it('reports unavailable when the litellm skill is not installed', () => {
     expect(getRosterRefreshState('/nonexistent-root').available).toBe(false);
+  });
+});
+
+describe('LiteLLM install (routing prerequisite)', () => {
+  it('getLitellmInstallState: no installer + no config under a bogus root', () => {
+    const st = getLitellmInstallState('/nonexistent-root');
+    expect(st.installerPresent).toBe(false);
+    expect(st.installed).toBe(false);
+    expect(st.running).toBe(false);
+  });
+
+  it('getLitellmInstallState: installer present, no config → gated; config present → installed', () => {
+    // Hermetic root — never depends on whether LiteLLM happens to be installed
+    // on the dev machine (data/litellm/config.yaml is runtime state).
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'litellm-state-'));
+    try {
+      const resources = path.join(root, '.claude/skills/add-litellm/resources');
+      fs.mkdirSync(resources, { recursive: true });
+      fs.writeFileSync(path.join(resources, 'install-litellm.sh'), '#!/usr/bin/env bash\n');
+
+      // Installer present, no config yet — the exact state that gates the UI button.
+      let st = getLitellmInstallState(root);
+      expect(st.installerPresent).toBe(true);
+      expect(st.installed).toBe(false);
+
+      // A written config flips it to installed.
+      fs.mkdirSync(path.join(root, 'data/litellm'), { recursive: true });
+      fs.writeFileSync(path.join(root, 'data/litellm/config.yaml'), 'model_list: []\n');
+      st = getLitellmInstallState(root);
+      expect(st.installed).toBe(true);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('startLitellmInstall: refuses (no spawn) when the skill is absent', () => {
+    expect(startLitellmInstall('/nonexistent-root')).toEqual({
+      started: false,
+      error: 'installer-missing',
+    });
+  });
+});
+
+describe('Codex provider install', () => {
+  it('getCodexInstallProgress reports an idle state before any install', () => {
+    const st = getCodexInstallProgress();
+    expect(st.running).toBe(false);
+    expect(Array.isArray(st.lines)).toBe(true);
+  });
+
+  it('codexInstallSteps omits the container typecheck on a gitless/deployed host (no bun-types)', () => {
+    // Regression guard: #247 added this skip and a branch rebuild silently dropped
+    // it, so Codex install died with "Cannot find type definition file for 'bun'".
+    // A deployed tarball has no container/agent-runner/node_modules/bun-types.
+    const cmds = codexInstallSteps('/nonexistent-root')
+      .filter((s): s is { run: [string, string[]] } => 'run' in s)
+      .map((s) => s.run[1].join(' '));
+    expect(cmds.some((c) => c.includes('container/agent-runner/tsconfig.json'))).toBe(false);
+    // …but the real work is still there.
+    expect(cmds.some((c) => c.includes('provider-install codex'))).toBe(true);
+    expect(cmds.some((c) => c.includes('container/build.sh'))).toBe(true);
+  });
+
+  it('codexInstallSteps includes the container typecheck on a dev checkout (bun-types present)', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-steps-'));
+    try {
+      fs.mkdirSync(path.join(root, 'container/agent-runner/node_modules/bun-types'), { recursive: true });
+      const cmds = codexInstallSteps(root)
+        .filter((s): s is { run: [string, string[]] } => 'run' in s)
+        .map((s) => s.run[1].join(' '));
+      expect(cmds.some((c) => c.includes('container/agent-runner/tsconfig.json'))).toBe(true);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('startCodexInstall: refuses (no spawn / no build) when the add-codex skill is absent', () => {
+    // A bogus root has no .claude/skills/add-codex/SKILL.md — so it must bail
+    // out BEFORE spawning the source-mutating, image-rebuilding chain.
+    expect(startCodexInstall('/nonexistent-root')).toEqual({
+      started: false,
+      error: 'skill-missing',
+    });
+  });
+
+  it('tailscale install: state reports tun/root/canInstall; install gated on canInstall', () => {
+    const st = getTailscaleInstallState();
+    expect(typeof st.tunPresent).toBe('boolean');
+    expect(typeof st.isRoot).toBe('boolean');
+    expect(st.canInstall).toBe(st.tunPresent && st.isRoot); // both prereqs, or no install offer
+    // The test runner isn't root, so the guard must refuse before spawning the
+    // curl|sh installer + `tailscale up` (the one path that mutates the host).
+    if (!st.canInstall) {
+      expect(startTailscaleInstall()).toEqual({ started: false, error: 'prereq-missing' });
+    }
+  });
+
+  it('providerRestartCommand picks the right restarter per context', () => {
+    const base = { unit: 'nanoclaw-v2-abc', label: 'com.nanoclaw-v2-abc' };
+    // macOS → launchd kickstart.
+    expect(providerRestartCommand({ ...base, platform: 'darwin', hasUserSession: true })).toBe(
+      'launchctl kickstart -k gui/$(id -u)/com.nanoclaw-v2-abc',
+    );
+    // Linux rootless dev host (a user session exists) → --user, with a system fallback.
+    expect(providerRestartCommand({ ...base, platform: 'linux', hasUserSession: true })).toBe(
+      'systemctl --user restart nanoclaw-v2-abc 2>/dev/null || systemctl restart nanoclaw-v2-abc',
+    );
+    // Linux system service / LXC (no user session) → plain system restart.
+    expect(providerRestartCommand({ ...base, platform: 'linux', hasUserSession: false })).toBe(
+      'systemctl restart nanoclaw-v2-abc',
+    );
   });
 });
 

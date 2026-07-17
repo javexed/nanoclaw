@@ -159,16 +159,16 @@ Media is not downloaded by the host. Instead:
 
 The agent-runner detects file types and passes supported types as native content blocks where the provider supports it:
 
-| Type | Claude | Codex | OpenCode |
-|------|--------|-------|----------|
-| Images (JPEG, PNG, GIF, WebP) | Native image content block | Save to disk, reference in prompt | Save to disk, reference in prompt |
-| PDFs | Native document content block | Save to disk | Save to disk |
-| Audio | Native audio content block | Save to disk | Save to disk |
-| Other files (code, data, video, archives) | Save to disk | Save to disk | Save to disk |
+| Type | Claude | Codex |
+|------|--------|-------|
+| Images (JPEG, PNG, GIF, WebP) | Native image content block | Save to disk, reference in prompt |
+| PDFs | Native document content block | Save to disk |
+| Audio | Native audio content block | Save to disk |
+| Other files (code, data, video, archives) | Save to disk | Save to disk |
 
 "Save to disk" means downloaded to `/workspace/downloads/{messageId}/` and referenced in the prompt text as an available file path. The agent can use tools (Read, Bash) to access it.
 
-The agent-runner builds the prompt differently per provider. For Claude, it constructs multi-part `MessageParam` content with image/document blocks. For Codex/OpenCode, everything is text with file path references.
+The agent-runner builds the prompt differently per provider. For Claude, it constructs multi-part `MessageParam` content with image/document blocks. For Codex, everything is text with file path references.
 
 ### Outbound
 
@@ -961,7 +961,7 @@ Pre-scripts: if a task message has a `script` field, run it first. If `wakeAgent
 
 ### Agent-Runner Properties
 
-- AgentProvider interface wraps SDK-specific query logic (trunk ships the `claude` provider; additional providers like OpenCode install via `/add-<provider>` skills)
+- AgentProvider interface wraps SDK-specific query logic (trunk ships the `claude` provider; additional providers like Codex install via `/add-<provider>` skills)
 - Session resume via provider-specific mechanisms
 - System prompt loading from CLAUDE.md files
 - PreCompact hook for transcript archiving (Claude provider)

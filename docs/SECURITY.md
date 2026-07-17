@@ -54,7 +54,7 @@ The config mounts (`container.json`, `CLAUDE.md`, `.claude-fragments`) are
 **nested read-only mounts on top of the read-write group dir** — the agent can
 read its config but cannot modify it. The project root is **never mounted**: the
 container only ever sees the paths above plus any provider-contributed mounts
-(e.g. an OpenCode XDG dir). Host application source (`src/`, `dist/`,
+(e.g. a provider's XDG config dir). Host application source (`src/`, `dist/`,
 `package.json`) is not reachable.
 
 **Additional-mount allowlist** — extra mounts from a group's container config

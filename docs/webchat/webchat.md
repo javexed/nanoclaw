@@ -165,7 +165,7 @@ preserved by fan-out (sender `trigger:1`, others `trigger:0`).
   discover / probe (races http/https + Ollama, classifies the provider); bulk
   register; per-agent assignment writes an env override into the group's
   `settings.json` (containers read it on their next spawn). `openai-compatible`
-  requires `/add-opencode`.
+  requires `/add-litellm` (fronts them on the default Claude harness).
 - **Ollama host management** — list hosts, stream model **pulls** with progress,
   refresh the router roster.
 - **Local-model routing** — a console over a LiteLLM + Arch-Router classifier stack.

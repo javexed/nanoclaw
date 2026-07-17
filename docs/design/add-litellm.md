@@ -83,8 +83,9 @@ agent container ──► LiteLLM (:4000, keyless, local-only) ──┬─► O
 ## NanoClaw integration: config, not code
 
 Zero core-code edits. The router is a standard OpenAI-compatible endpoint,
-so any consumer works: the OpenCode provider's custom-endpoint env, any
-OpenAI-compat client, or — on installs with the webchat channel — the
+so any consumer works: any OpenAI-compat client, LiteLLM's own
+Anthropic-spec `/v1/messages` surface consumed by the default Claude harness,
+or — on installs with the webchat channel — the
 **existing** webchat model kind **`openai-compatible`** (`endpoint` =
 `http://host.docker.internal:<port>/v1`, `model_id` = any tag from the
 `model_list`), assigned per agent group like any other model. The SSRF policy

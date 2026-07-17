@@ -10,7 +10,7 @@ describe('resolveProviderName', () => {
   });
 
   it('falls back to container config when session is null', () => {
-    expect(resolveProviderName(null, 'opencode')).toBe('opencode');
+    expect(resolveProviderName(null, 'codex')).toBe('codex');
   });
 
   it('defaults to claude when nothing is set', () => {
@@ -23,7 +23,7 @@ describe('resolveProviderName', () => {
   });
 
   it('treats empty string as unset (falls through)', () => {
-    expect(resolveProviderName('', 'opencode')).toBe('opencode');
+    expect(resolveProviderName('', 'codex')).toBe('codex');
     expect(resolveProviderName(null, '')).toBe('claude');
   });
 });

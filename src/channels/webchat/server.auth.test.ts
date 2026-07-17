@@ -205,7 +205,7 @@ describe('startWebchatServer — boot gate', () => {
     }
   });
 
-  it('marketplace toggle gates MCP + skills endpoints (default on, owner disables)', async () => {
+  it('marketplace toggle gates MCP + skills endpoints (default off, owner enables)', async () => {
     const TOKEN = 'a'.repeat(32);
     const server = await loadServerWithEnv({ WEBCHAT_HOST: '0.0.0.0', WEBCHAT_PORT: '0', WEBCHAT_TOKEN: TOKEN });
     const wc = await server.startWebchatServer(noopHooks);
@@ -213,30 +213,32 @@ describe('startWebchatServer — boot gate', () => {
       const port = portOf(wc);
       const auth = { Authorization: `Bearer ${TOKEN}` };
       const csrf = { ...auth, 'X-Webchat-CSRF': '1', 'Content-Type': 'application/json' };
-      // Default: enabled, owner can edit.
+      // Default: DISABLED (opt-in), owner can edit — both surfaces 403.
       const f0 = await httpRequest(port, 'GET', '/api/webchat/features', auth);
       expect(f0.status).toBe(200);
-      expect(JSON.parse(f0.body)).toMatchObject({ marketplaceEnabled: true, canEdit: true });
-      // Owner disables it.
+      expect(JSON.parse(f0.body)).toMatchObject({ marketplaceEnabled: false, canEdit: true });
+      const skills0 = await httpRequest(port, 'GET', '/api/skills', auth);
+      expect(skills0.status).toBe(403);
+      expect(JSON.parse(skills0.body).error).toMatch(/marketplace/i);
+      const mcp0 = await httpRequest(port, 'GET', '/api/mcp-servers', auth);
+      expect(mcp0.status).toBe(403);
+      // Owner enables it → the marketplace gate clears.
       const put = await httpRequest(
         port,
         'PUT',
         '/api/webchat/features',
         csrf,
-        JSON.stringify({ marketplaceEnabled: false }),
+        JSON.stringify({ marketplaceEnabled: true }),
       );
       expect(put.status).toBe(200);
-      expect(JSON.parse(put.body).marketplaceEnabled).toBe(false);
-      // Both surfaces now 403 with the marketplace message.
+      expect(JSON.parse(put.body).marketplaceEnabled).toBe(true);
       const skills = await httpRequest(port, 'GET', '/api/skills', auth);
-      expect(skills.status).toBe(403);
-      expect(JSON.parse(skills.body).error).toMatch(/marketplace/i);
-      const mcp = await httpRequest(port, 'GET', '/api/mcp-servers', auth);
-      expect(mcp.status).toBe(403);
-      // Re-enable → the marketplace gate clears.
-      await httpRequest(port, 'PUT', '/api/webchat/features', csrf, JSON.stringify({ marketplaceEnabled: true }));
+      expect(skills.status).not.toBe(403);
+      // Owner disables again → 403 returns with the marketplace message.
+      await httpRequest(port, 'PUT', '/api/webchat/features', csrf, JSON.stringify({ marketplaceEnabled: false }));
       const skills2 = await httpRequest(port, 'GET', '/api/skills', auth);
-      expect(skills2.status).not.toBe(403);
+      expect(skills2.status).toBe(403);
+      expect(JSON.parse(skills2.body).error).toMatch(/marketplace/i);
     } finally {
       await server.stopWebchatServer(wc);
     }

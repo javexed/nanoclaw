@@ -100,7 +100,7 @@ def _primary_router_name(cfg, routers):
 
 def _strip_system_wrapper(text):
     """NanoClaw's agent-runner prepends '<system>…</system>' inside the USER
-    message (OpenCode has no separate system channel there). Classify on the
+    message (no separate system channel is used there). Classify on the
     user's actual words, not the agent preamble — otherwise every
     first-of-session prompt routes on boilerplate."""
     if text.lstrip().startswith("<system>"):
@@ -271,7 +271,7 @@ class ShadowRouter(CustomLogger):
         try:
             # anthropic_messages = LiteLLM's Anthropic-spec /v1/messages route —
             # the call type the Claude Agent SDK produces when pointed at this
-            # proxy (nanoclaw -> LiteLLM direct, no OpenCode hop). Same message
+            # proxy (nanoclaw -> LiteLLM direct, no provider hop). Same message
             # shapes (_last_user_text handles text-block lists), same rewrite.
             if call_type not in ("completion", "acompletion", "text_completion", "anthropic_messages"):
                 return data

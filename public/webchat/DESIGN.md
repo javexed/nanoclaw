@@ -320,6 +320,20 @@ thread row), not a footer "+ New thread" row.
 
 ---
 
+### Shared row classes travel with their structure
+
+A row class like `.skill-source-row` is a **contract, not just a coat of
+paint**: it assumes the companion structure its first user built — an info
+wrapper with `flex: 1; min-width: 0` so unbreakable content (URLs, ids)
+shrinks and ellipsizes instead of shoving the row's control off-screen, and
+row children that expect the wrapper's column layout. Reusing the class bare
+has produced off-screen buttons twice (MCP drawer tool rows; the Settings MCP
+registry row). The rule: **copy the whole row recipe (wrapper included) or
+mint your own class** — never borrow just the class name. The same applies to
+form containers: `.agent-detail-form label` styles every `<label>` inside it
+(column layout, and its `display: flex` beats the `hidden` attribute), so
+labels that need different behavior must out-specify it explicitly.
+
 ## 8. Views
 
 The PWA has one chat surface plus a set of **full-views** — full-screen sections
@@ -394,8 +408,9 @@ line: **name left, action right**, three states —
 
 No explainer paragraph — the feature's own surface is the explanation; a
 tooltip on the badge may point at it. The **only** standing hint is the
-missing-prerequisite case, where a bare disabled button would be inexplicable
-("Install the LiteLLM router first…").
+missing-prerequisite case: the Install flow sets up the LiteLLM router first
+(no shell, no `/add-litellm`), so the button stays live and the hint explains
+the extra step ("Sets up the LiteLLM router, then installs auto routing…").
 
 Trap: `.btn`'s `display: inline-flex` (author origin) beats the UA `[hidden]`
 rule, so a hidden Install button still renders — `.install-row [hidden]`

@@ -20,9 +20,10 @@ rm -rf data/litellm
     only in `data/litellm/env`, already removed above.
 
 3. Remove any consumer-side wiring that points at the router (endpoint
-   `http://host.docker.internal:<port>/v1`) — a webchat model registration,
-   an agent group's `OPENCODE_*` env, or any other OpenAI-compatible client
-   config — and reassign the agent groups that used it.
+   `http://host.docker.internal:<port>/v1`, or `http://host.docker.internal:<port>`
+   for the Anthropic `/v1/messages` surface) — a webchat model registration,
+   an agent group's `ANTHROPIC_BASE_URL` override, or any other
+   OpenAI-compatible client config — and reassign the agent groups that used it.
 
 4. Dependent skills (classifier routing, etc.) stop working without this base
    — remove them first, or accept their broken state.

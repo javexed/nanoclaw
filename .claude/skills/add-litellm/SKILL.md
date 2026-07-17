@@ -72,9 +72,12 @@ way; pick whichever your install has:
   model — kind **`openai-compatible`**, `endpoint` as above, `model_id` = a
   name from the roster — and assign it to an agent group. The SSRF policy
   and host-gateway alias already permit the address.
-- **OpenCode provider** (if `/add-opencode` is installed): point the agent
-  group's `OPENCODE_*` env at the endpoint with a roster model — see that
-  skill's custom-endpoint examples.
+- **Default Claude harness** (no extra provider needed): LiteLLM serves the
+  Anthropic `/v1/messages` surface, so the Claude Agent SDK can talk to it
+  natively. Either assign an `openai-compatible` model to the group in webchat
+  (above), or point the agent group's `ANTHROPIC_BASE_URL` at the LiteLLM
+  endpoint (`http://host.docker.internal:4000`) with a roster model — the SDK
+  routes through it with no provider hop.
 - **Any other OpenAI-compatible client**: base URL + a model name from the
   roster.
 

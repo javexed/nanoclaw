@@ -39,7 +39,7 @@ embraces that rather than fighting it.
 Every agent config is **harness × model-source** — two independent choices:
 
 - **Harness / provider** — *who runs the agentic loop* (turns, tool calls):
-  `claude` (Claude Agent SDK), `opencode`, `codex`, `mock`.
+  `claude` (Claude Agent SDK), `codex`, `mock`.
 - **Model source** — *where tokens come from*: Anthropic API key, Claude
   subscription (OAuth), ChatGPT subscription (OAuth), an Ollama/vLLM endpoint, or a
   **LiteLLM endpoint** (a meta-source that itself fans out to many).
@@ -48,15 +48,17 @@ Every agent config is **harness × model-source** — two independent choices:
               HARNESS            ×   MODEL SOURCE
 Plane B   Claude Agent SDK       ×   Claude subscription (OAuth)
           Codex (separate track) ×   ChatGPT subscription (OAuth)
-Plane A   OpenCode               ×   LiteLLM ──┬─ Ollama (localhost)
-                                               ├─ vLLM (GPU)
+Plane A   Claude Agent SDK       ×   LiteLLM ──┬─ Ollama (localhost)
+          (Anthropic /v1/messages)             ├─ vLLM (GPU)
                                                ├─ LAN / Tailscale models
                                                └─ cloud models (API key)
 ```
 
 **LiteLLM is a model source, not a harness.** It occupies the same slot the
-Anthropic API endpoint occupies for the `claude` provider; `OpenCode` is the
-harness that consumes it. They compose, they are not alternatives.
+Anthropic API endpoint occupies for the `claude` provider: the default Claude
+harness points `ANTHROPIC_BASE_URL` at LiteLLM's **Anthropic-spec `/v1/messages`
+surface** and consumes it natively — no separate harness, no OpenAI-shaping hop.
+Harness and model source compose; they are not alternatives.
 
 ## 4. Architecture
 
@@ -65,12 +67,12 @@ NanoClaw's real top-level router is **per-agent-group provider+model selection**
 
 ```
                        ┌─────────────────────────── NanoClaw host ──────────────────────────┐
-  agent group "claude" │  provider=claude   ───────────────►  Claude subscription (OAuth)    │  Plane B
-  agent group "codex"  │  provider=codex    ───────────────►  ChatGPT subscription (OAuth)    │  Plane B (sep. track)
-  agent group "local"  │  provider=opencode ──► LiteLLM ──┬─► Ollama (host localhost)         │  Plane A
-                       │                                  ├─► vLLM (GPU box)                  │
-                       │                                  ├─► LAN / Tailscale model server    │
-                       │                                  └─► cloud API (key)                 │
+  agent group "claude" │  provider=claude ─────────────────►  Claude subscription (OAuth)    │  Plane B
+  agent group "codex"  │  provider=codex  ─────────────────►  ChatGPT subscription (OAuth)    │  Plane B (sep. track)
+  agent group "local"  │  provider=claude ──► LiteLLM ──┬─► Ollama (host localhost)           │  Plane A
+                       │  (ANTHROPIC_BASE_URL →         ├─► vLLM (GPU box)                    │
+                       │   LiteLLM /v1/messages)        ├─► LAN / Tailscale model server      │
+                       │                                └─► cloud API (key)                   │
                        └────────────────────────────────────────────────────────────────────┘
    credentials: OneCLI vault injects per-agent (OAuth tokens for Plane B; the single
    LiteLLM virtual key for Plane A). No secrets in chat or baked env.
@@ -89,14 +91,15 @@ Most of Plane A already exists:
 
 | Need | Already in NanoClaw |
 |------|---------------------|
-| Point an agent at a custom model endpoint | model kinds **`ollama`** / **`openai-compat`** with an `endpoint`; injects `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL`/`OPENAI_MODEL` into the container (`src/channels/webchat/models.ts`) |
+| Point an agent at a custom model endpoint | model kinds **`ollama`** / **`openai-compat`** with an `endpoint`; injects `ANTHROPIC_BASE_URL` (the Claude harness's Anthropic-spec surface) into the container (`src/channels/webchat/models.ts`) |
 | Reach a model server on the **host's localhost** | agent containers get `--add-host=host.docker.internal:host-gateway` on Linux (`container-runtime.ts:111`) |
 | Reach **LAN / Tailscale** model servers | model-endpoint SSRF policy already allows loopback, RFC1918, CGNAT/Tailscale (`models.ts`) |
 | Per-agent provider+model | `container_configs` (`provider`, `model`, endpoint) |
 | Subscription OAuth (Plane B) | `CLAUDE_CODE_OAUTH_TOKEN` "OAuth mode" (`container-runner.ts:215`) + OneCLI BYOK-OAuth |
 
 So registering LiteLLM is mostly **"add one `openai-compat` model whose `endpoint`
-is the LiteLLM container"**, then pick a harness to drive it.
+is the LiteLLM container"** — the default Claude harness then drives it via
+LiteLLM's Anthropic `/v1/messages` surface, no extra harness to install.
 
 ## 6. Networking
 
@@ -120,9 +123,9 @@ key, and nothing reaches a model provider outside the gateway:
 
 - Containers spawn with OneCLI's `HTTPS_PROXY` + certs (`container-runner.ts:550`);
   provider keys are injected on the wire by host-pattern, never via `.env` or the
-  container environment. The `claude`, `opencode`, and `codex` providers all
-  already honor this (OpenCode registers provider keys in OneCLI; Codex/Claude use
-  vault-served OAuth / sentinel stubs).
+  container environment. The `claude` and `codex` providers both already honor
+  this (Claude/Codex use vault-served OAuth / sentinel stubs; the LiteLLM virtual
+  key is injected the same way for routed Plane-A models).
 - **LiteLLM does NOT bypass this.** The router is just another upstream behind the
   proxy: the agent → LiteLLM hop carries a **single LiteLLM virtual key injected by
   OneCLI** (host-pattern matched, stored in the OneCLI vault). LiteLLM then holds the
@@ -146,8 +149,8 @@ Division of labor, given the invariant:
 The **router barely affects this** — agentic capability is the **harness + model**:
 
 - **Harness**: NanoClaw's per-session containers are already long-lived (no
-  host-side idle timeout — `container-runner.ts:258`). `claude`, `codex`, and
-  `opencode` are all agentic loops.
+  host-side idle timeout — `container-runner.ts:258`). `claude` and `codex` are
+  both agentic loops.
 - **Model**: the dominant factor. Subscription Claude/Codex rank highest; among
   local, only strong tool-callers (Qwen-Coder, Llama 3.3, DeepSeek, etc.) do real
   agentic work.
@@ -157,38 +160,30 @@ The **router barely affects this** — agentic capability is the **harness + mod
 
 ## 9. Requirements & install
 
-### 9a. OpenCode — the Plane-A harness (installed *into* NanoClaw)
+### 9a. The Plane-A harness — the default Claude harness (already baked in)
 
-Installed via `/add-opencode` (copies the payload from the `providers` branch,
-wires the barrels, rebuilds the image — idempotent). Requirements:
+There is **nothing to install for the harness**. Plane-A agents run on the
+**default Claude harness** (Claude Agent SDK, baked into trunk), pointed at an
+OpenAI-compatible/Ollama backend through **LiteLLM's Anthropic-spec `/v1/messages`
+surface** via `ANTHROPIC_BASE_URL`. The SDK speaks that surface natively — there
+is no separate harness to add, no barrel wiring, no per-group overlay
+propagation, and no OpenAI-shaping hop.
 
-- **Source**: `providers`-branch access (`git fetch origin providers`); additive,
-  never merged.
-- **Build toolchain**: Docker + ability to rebuild the agent image
-  (`./container/build.sh`; `docker builder prune -f` first if the COPY cache is
-  stale). **Bun** on the host — the agent-runner is a Bun package (`bun add`, not
-  pnpm).
-- **Two pinned versions, lock-step** (the sharp edge): `@opencode-ai/sdk@1.4.17`
-  (bun dep) **and** `opencode-ai@1.4.17` CLI (Dockerfile `ARG` + a pnpm-global
-  layer — *not* `bun install -g`, to respect the supply-chain policy). SDK and CLI
-  **must match**; `latest`/1.14.x has a breaking session-API change and won't work.
-- **3-barrel wiring** + registration-guard tests (host `src/providers/index.ts` and
-  container `container/agent-runner/src/providers/index.ts`).
-- **Existing-group overlay propagation**: copy the provider files into each
-  `data/v2-sessions/<group>/agent-runner-src/providers/` overlay — it overrides the
-  image, so old groups won't see OpenCode otherwise.
-- **To use** (config, not install): `agent_provider=opencode` + the
-  `OPENCODE_PROVIDER`/`OPENCODE_MODEL`/`OPENCODE_SMALL_MODEL`/`ANTHROPIC_BASE_URL`
-  env + the provider key in **OneCLI** by host-pattern.
-
-OpenCode connects to cloud (Anthropic, OpenAI, Google, DeepSeek, OpenRouter, Zen)
-**and** any endpoint (Ollama/vLLM/LiteLLM) directly — so it is required for a
-Plane-A agent at all, but does **not** itself require LiteLLM.
+- **To use** (config, not install): register the LiteLLM endpoint as an
+  `openai-compat`/`ollama` model (webchat Models UI or a `webchat_models` row);
+  assigning it sets `ANTHROPIC_BASE_URL` at the LiteLLM endpoint for the group,
+  with the LiteLLM virtual key injected by **OneCLI** by host-pattern.
+- **Cloud backends** (Anthropic, OpenAI, Google, DeepSeek, OpenRouter, …) reach
+  the same default harness the same way — declared as LiteLLM backends behind the
+  router, consumed over its Anthropic surface. LiteLLM does the protocol
+  translation; the harness only ever sees `/v1/messages`.
+- **Codex** stays a separate track (`/add-codex`) for the ChatGPT subscription
+  plane; it is a distinct harness, not part of Plane A.
 
 ### 9b. LiteLLM — the router (external container, optional)
 
 Only needed for the fleet-management tier (fallback/budgets/one-key/observability);
-OpenCode runs direct-to-provider without it. Requirements:
+a single local endpoint can be consumed direct-to-provider without it. Requirements:
 
 - **Docker**; **no GPU** (it's a proxy, not an inference server).
 - **Pinned image** (e.g. `ghcr.io/berriai/litellm:<tag>`) — a separate container,
@@ -210,21 +205,22 @@ OpenCode runs direct-to-provider without it. Requirements:
 
 ### 9c. Dependency order
 
-OneCLI (present) → **`/add-opencode`** (harness) → *optionally* stand up LiteLLM and
-point the harness at it. Stop after OpenCode for direct-to-provider; add the router
-only when the management benefits (fallback / budgets / observability) are
-worth a container (+ Postgres).
+OneCLI (present) + the default Claude harness (baked in) → **`/add-litellm`**
+(stand up the router and point `ANTHROPIC_BASE_URL` at it). A single local
+endpoint can be consumed direct-to-provider; add the router when the management
+benefits (fallback / budgets / observability) are worth a container (+ Postgres).
 
 ## 10. Registering LiteLLM (concrete)
 
 1. Run LiteLLM as a container with a `config.yaml` `model_list` covering 1–2 local
    models (Ollama/vLLM) + ≥1 cloud model, a master/virtual key, and
    `stream: true` + a long `request_timeout`.
-2. Add a NanoClaw model: kind **`openai-compat`**, `endpoint` = LiteLLM `/v1`,
-   `model_id` = a name from the `model_list`; virtual key via OneCLI.
-3. Install the harness: **`/add-opencode`** (OpenAI-native, multi-provider).
-4. Wire an agent group: `provider=opencode` + that model. Prove a plain turn, then
-   a tool-using (agentic) turn with a capable model.
+2. Add a NanoClaw model: kind **`openai-compat`**, `endpoint` = LiteLLM's
+   Anthropic surface, `model_id` = a name from the `model_list`; virtual key via
+   OneCLI.
+3. Wire an agent group: assign that model (the default Claude harness, with
+   `ANTHROPIC_BASE_URL` pointed at LiteLLM). Prove a plain turn, then a
+   tool-using (agentic) turn with a capable model.
 
 ## 11. Build sequence (each phase ends provably green)
 
@@ -232,11 +228,11 @@ worth a container (+ Postgres).
    chat completion (incl. a streamed, tool-calling request) from the host.
 1. **Reachable + registered** — reach LiteLLM from inside an agent container
    (networking); register it as a NanoClaw `openai-compat` model.
-2. **Harness** — `/add-opencode`; wire an agent group → LiteLLM; prove a turn.
+2. **Harness** — assign that model to an agent group (default Claude harness →
+   LiteLLM via `ANTHROPIC_BASE_URL`); prove a turn.
 3. **Agentic** — prove a multi-step tool-using turn with a strong model.
 4. **Install skill** — `/add-litellm` (config.yaml, same-host container, OneCLI
-   virtual key, optional Postgres), surfaced by the webchat install when OpenCode is
-   detected (§15).
+   virtual key, optional Postgres), surfaced by the webchat install (§15).
 5. **Management UX** — webchat **v1** link to LiteLLM `/ui`; **v2** passthrough to
    `/model/new` etc. (§14).
 6. **Hardening** — fallbacks, budgets, observability; virtual key in OneCLI vault.
@@ -247,16 +243,17 @@ worth a container (+ Postgres).
 - **Not** pushing subscription OAuth (Claude Code / Codex) through LiteLLM.
 - **Not** replacing OneCLI — LiteLLM routes Plane-A models; OneCLI keeps brokering
   credentials (and is the *only* path for Plane B).
-- **Not** OpenRouter — a hosted cloud SaaS that can't see localhost/LAN models
-  (fails reqs 1–2).
+- **Not** OpenRouter (the SaaS) — a hosted cloud router that can't see
+  localhost/LAN models (fails reqs 1–2). (OpenRouter *as a cloud backend behind
+  LiteLLM* is fine.)
 
 ## 13. Open decisions
 
 - **Hardware / where models run** — GPU on this host (vLLM), CPU Ollama, and/or a
   separate LAN/GPU box. Drives backend choice.
-- **Plane-A harness** — OpenCode (recommended, OpenAI-native) vs the Claude SDK
-  pointed at a LiteLLM **Anthropic-compatible** endpoint. (OpenCode keeps Plane A
-  cleanly OpenAI-shaped.)
+- **Plane-A harness** — **decided: the default Claude harness (Claude Agent SDK)
+  pointed at LiteLLM's Anthropic-compatible `/v1/messages` endpoint** — no extra
+  harness to install, no OpenAI-shaping hop.
 - **Selection granularity** — per-agent-group model (today) vs per-user/per-room
   model picking (the webchat already has a models UI to build on).
 - **Routing approach** — **decided: N-way capability routing (Arch-Router) + Claude
@@ -268,7 +265,7 @@ worth a container (+ Postgres).
 - **Model-management UX** — **decided: both v1 (link) and v2 (passthrough), phased**
   (§14).
 - **Install integration** — **decided: a `/add-litellm` skill, offered by the
-  webchat install when OpenCode is detected** (§15).
+  webchat install** (§15).
 
 ## 14. Model-management UX (decision)
 
@@ -300,25 +297,21 @@ agent's endpoint and manages the router behind it.
 ## 15. Install integration (decision)
 
 LiteLLM installs as its **own skill** (`/add-litellm`), *surfaced* by the webchat
-install when OpenCode is detected — **not** baked into the webchat installer.
-Rationale: LiteLLM's real dependency is **OpenCode (the harness)**, not webchat (the
-channel); webchat is just where it's *managed* (§14), so a sensible place to *offer*
-it.
+install — **not** baked into the webchat installer. Rationale: LiteLLM's harness
+(the default Claude harness) is always present, so LiteLLM has no separate harness
+dependency; webchat is just where it's *managed* (§14), so a sensible place to
+*offer* it.
 
-- **`/add-litellm` (new skill)** — idempotent installer: writes a starter
+- **`/add-litellm` (skill)** — idempotent installer: writes a starter
   `config.yaml`, runs the LiteLLM container **same-host** on a port (e.g. `:4000`),
   registers the LiteLLM **virtual/master key in OneCLI** by host-pattern, optionally
   stands up **Postgres** (for the v2 keys/budgets tier), and writes the webchat
   wiring (LiteLLM endpoint + admin-key secret id) so the v1 link and v2 passthrough
   work. Independently runnable anytime.
-- **Detection-gated prompt** — the webchat install (`add-webchat` /
-  `install-webchat.sh`, which already has a `provider_connected()` detection gate)
-  checks for OpenCode (`src/providers/opencode.ts` + barrel import, or any group with
-  `provider=opencode`); if present and LiteLLM isn't installed, it offers
-  `/add-litellm`.
-- **Install-order robustness** — mirror the same offer in `/add-opencode` (detect
-  webchat), so it fires whether OpenCode is added before or after webchat. The skill
-  is the single source of truth; both entry points just call it.
+- **Webchat-surfaced prompt** — the webchat install (`add-webchat` /
+  `install-webchat.sh`) offers `/add-litellm` when it isn't already installed, so
+  an operator can stand up the router as part of getting a model fleet behind the
+  default harness.
 
 **Same-host networking** (placement decision, §13): LiteLLM listens on the host;
 agent containers reach it at `host.docker.internal:<port>` (the `--add-host` alias is
@@ -374,8 +367,9 @@ binary strong/weak (RouteLLM is rejected for being binary).
   model in the webchat Models UI ("Anthropic (custom model id)") → it sets
   `ANTHROPIC_MODEL` for the group. Caveats: validated against `KNOWN_ANTHROPIC_MODELS`
   (a new model needs a one-line add); the model must be on the credential's plan.
-- Mechanics: **fresh Claude session** (OpenCode's continuation can't transfer;
-  optionally seed context via `syncSessionContext`); **one-shot guard** (no ping-pong);
+- Mechanics: **fresh Claude session** (the routed turn's continuation can't
+  transfer; optionally seed context via `syncSessionContext`); **one-shot guard**
+  (no ping-pong);
   double-latency + Claude-quota cost on escalation — a **backstop, not a routine path**.
   Trigger on **hard failure / below-threshold only**, never on a content-quality
   judgment (that's §16d).

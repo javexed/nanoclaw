@@ -12,12 +12,12 @@ whether the model is good enough to *drive* one.
 ## The idea
 
 A NanoClaw agent group has a `provider` (default `claude`, via the Claude Agent
-SDK). Assigning an agent group an **openai-compatible** model switches it to the
-**OpenCode** provider, which runs the same agent loop against any OpenAI-style
-endpoint. Point that endpoint at **LiteLLM**, and LiteLLM at a local **Ollama**
-model, and the agent now runs entirely on local inference — no Anthropic call in
-the turn. This path already exists; this doc is about *using* it deliberately
-and evaluating the result.
+SDK). Assigning an agent group an **openai-compatible** model points the default
+Claude harness at **LiteLLM's Anthropic-spec `/v1/messages` surface** (via
+`ANTHROPIC_BASE_URL`), and LiteLLM at a local **Ollama** model, so the agent now
+runs entirely on local inference — no Anthropic call in the turn, and no separate
+harness hop: the Claude SDK talks to LiteLLM natively. This path already exists;
+this doc is about *using* it deliberately and evaluating the result.
 
 Because it's per-agent, it's additive and reversible:
 
@@ -30,13 +30,10 @@ Because it's per-agent, it's additive and reversible:
 
 ## Prerequisites
 
-1. **OpenCode provider installed** — `/add-opencode` (from the `providers`
-   branch). Confirm with `ncl groups config get --id <group>` showing
-   `provider: opencode` is accepted.
-2. **A local model served + reachable through LiteLLM.** Easiest is Ollama +
+1. **A local model served + reachable through LiteLLM.** Easiest is Ollama +
    `/add-litellm`, which stands up the proxy on `:4000`. Verify the model shows
    in the roster: `curl -s http://127.0.0.1:4000/v1/models`.
-3. **The model registered as an assignable openai-compatible model.** In the
+2. **The model registered as an assignable openai-compatible model.** In the
    webchat **Models** tab, add a model: kind **openai-compatible**, endpoint
    `http://host.docker.internal:4000/v1` (the container's view of the host's
    LiteLLM), model id = the Ollama model name (e.g. `ornith:latest`). Or insert
@@ -50,12 +47,12 @@ one for a first run. Either:
 
 - **Webchat:** the agent's settings panel → model picker → the registered local
   model.
-- **CLI:** `ncl groups config update --id <group> --provider opencode --model <model-id>`
+- **CLI:** `ncl groups config update --id <group> --model <model-id>`
   then restart so the container respawns on the new config:
   `ncl groups restart --id <group>`.
 
-The next turn runs on OpenCode + the local model. Revert by clearing the model
-(back to `claude`) and restarting.
+The next turn runs on the default Claude harness pointed at LiteLLM + the local
+model. Revert by clearing the model (back to Anthropic) and restarting.
 
 ## What to expect at small model sizes
 
@@ -76,7 +73,7 @@ wiring — is the whole question.
   format, narrating instead of acting).
 - **The common failure mode isn't a wrong answer — it's losing the plot on a
   long chain** (derailing around step 3–4, repeating a tool call, forgetting the
-  task mid-way). OpenCode's harness structures the tool-calls and softens this,
+  task mid-way). The Claude harness structures the tool-calls and softens this,
   but doesn't erase it.
 
 Treat anything below ~30B as "good for simple-to-moderate agent tasks, shaky on

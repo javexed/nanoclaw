@@ -23,8 +23,9 @@
 // Usage: pnpm exec tsx scripts/skill-apply.ts <skillDir>     # plan (no writes)
 
 import { execSync } from 'node:child_process';
-import { readFileSync, existsSync, writeFileSync, appendFileSync, copyFileSync, mkdirSync, rmSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, appendFileSync, copyFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { tmpdir } from 'node:os';
 import { parseDirectives, promptVar, type Directive } from './skill-directives.js';
 
 // What an `nc:prompt` DECLARES about the value it needs — the core seam's input
@@ -551,14 +552,45 @@ async function applyOne(
     case 'copy':
       if (d.attrs['from-branch']) {
         const b = String(d.attrs['from-branch']);
-        const remote = ctx.resolveRemote(b);
-        await exec(`git fetch ${remote} ${b}`);
-        for (const l of d.body) {
-          // The shell redirect can't create parent directories, and the dest
-          // may not exist on trunk (e.g. container skills that live only on
-          // the channels branch). Mirror the local-copy path's mkdir.
-          mkdirSync(dirname(join(root, destOf(l))), { recursive: true });
-          await exec(`git show ${remote}/${b}:${srcOf(l)} > ${destOf(l)}`);
+        if (existsSync(join(root, '.git'))) {
+          const remote = ctx.resolveRemote(b);
+          await exec(`git fetch ${remote} ${b}`);
+          for (const l of d.body) {
+            // The shell redirect can't create parent directories, and the dest
+            // may not exist on trunk (e.g. container skills that live only on
+            // the channels branch). Mirror the local-copy path's mkdir.
+            mkdirSync(dirname(join(root, destOf(l))), { recursive: true });
+            await exec(`git show ${remote}/${b}:${srcOf(l)} > ${destOf(l)}`);
+          }
+        } else {
+          // Gitless deploy (a release / tarball extract has no .git, so
+          // `git fetch <remote>` fails with "not a git repository"). git itself
+          // IS present, so shallow-fetch the branch into a throwaway repo from a
+          // source URL, extract the listed files, then discard it — no repo state
+          // is added to the deploy. Override the source with
+          // NANOCLAW_CHANNELS_REMOTE_URL (e.g. a fork or a local forgejo).
+          const url = process.env.NANOCLAW_CHANNELS_REMOTE_URL || 'https://github.com/nanocoai/nanoclaw.git';
+          const tmp = mkdtempSync(join(tmpdir(), 'nc-frombranch-'));
+          try {
+            await exec(`git init -q "${tmp}"`);
+            await exec(`git -C "${tmp}" fetch --depth 1 "${url}" ${b}`);
+            for (const l of d.body) {
+              mkdirSync(dirname(join(root, destOf(l))), { recursive: true });
+              try {
+                await exec(`git -C "${tmp}" show FETCH_HEAD:${srcOf(l)} > ${destOf(l)}`);
+              } catch {
+                // Name the source so a wrong remote is obvious (e.g. a dev remote
+                // whose `providers` branch carries a different provider). Otherwise
+                // the bare git error ("path … does not exist in FETCH_HEAD") hides
+                // WHICH repo was fetched.
+                throw new Error(
+                  `${srcOf(l)} is not on branch '${b}' at ${url} — set NANOCLAW_CHANNELS_REMOTE_URL to a repo that carries this payload`,
+                );
+              }
+            }
+          } finally {
+            rmSync(tmp, { recursive: true, force: true });
+          }
         }
       } else {
         for (const l of d.body) {

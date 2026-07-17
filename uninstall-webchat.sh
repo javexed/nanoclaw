@@ -167,6 +167,8 @@ rm -rf \
   src/db/migrations/023-byok-user-credentials.ts \
   src/db/migrations/024-rename-user-credentials.ts \
   setup/get-oauth-token.sh \
+  .claude/skills/add-webchat-tts \
+  .claude/skills/add-webchat-dictation \
   docs/webchat/user-credentials.md \
   docs/webchat/user-credentials-oauth.md \
   docs/webchat/threads.md \
