@@ -49,6 +49,13 @@ const WEBCHAT_ENV_KEYS = [
   'WEBCHAT_STT_API_KEY',
   'OLLAMA_HOST',
   'AGENT_DISPLAY_NAME',
+  // Not webchat-specific, but the webchat Settings "install <channel/provider>"
+  // flow runs the skill engine IN THIS HOST PROCESS, and the engine reads
+  // NANOCLAW_CHANNELS_REMOTE_URL from process.env to resolve a `from-branch`
+  // payload's source repo (e.g. a fork/forgejo carrying `providers-codex`). A
+  // service-managed host never inherits .env, so without loading it here the
+  // engine falls back to the nanocoai default and can't find fork-only branches.
+  'NANOCLAW_CHANNELS_REMOTE_URL',
 ];
 
 const fromFile = readEnvFile(WEBCHAT_ENV_KEYS);

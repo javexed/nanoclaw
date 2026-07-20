@@ -3,7 +3,9 @@
  * All runtime-specific logic lives here so swapping runtimes means changing one file.
  */
 import { execSync } from 'child_process';
+import fs from 'fs';
 import os from 'os';
+import path from 'path';
 
 import { CONTAINER_INSTALL_LABEL } from './config.js';
 import { log } from './log.js';
@@ -81,6 +83,28 @@ export function resolveContainerConfigAugmentation(agentGroupId: string): Record
 }
 
 /**
+ * Learning-classifier resolver contributed by an installed module (webchat). The
+ * classifier gates the learning review with a small model; a module that knows
+ * the agent's model wiring can auto-default it to the agent's OWN model when that
+ * runs on a local endpoint (Ollama / OpenAI-compatible). Returns null when there's
+ * no local endpoint to call (e.g. a Claude agent), so the runner keeps the
+ * busy-turn heuristic. Used only as a FALLBACK — an explicit Settings override
+ * wins. Core ships with none.
+ */
+type LearningClassifierResolver = (agentGroupId: string) => { url: string; model: string } | null;
+let learningClassifierResolver: LearningClassifierResolver | null = null;
+export function registerLearningClassifierResolver(fn: LearningClassifierResolver): void {
+  learningClassifierResolver = fn;
+}
+export function resolveLearningClassifier(agentGroupId: string): { url: string; model: string } | null {
+  try {
+    return learningClassifierResolver?.(agentGroupId) ?? null;
+  } catch {
+    return null; // a resolver bug must never break spawning
+  }
+}
+
+/**
  * Async pre-spawn hooks contributed by an installed module, run once just before
  * a session's container is spawned. UserCreds uses this for lazy / just-in-time
  * enrollment: the first time a connected member uses a room, the hook creates
@@ -101,6 +125,63 @@ export async function runSessionPrepareHooks(agentGroupId: string, threadId: str
     } catch (err) {
       log.warn('session prepare hook failed', { agentGroupId, threadId, err: String(err) });
     }
+  }
+}
+
+/**
+ * The UID/GID the agent container runs its agent-runner as (Dockerfile: `USER
+ * node` → 1000). Overridable via env for a non-standard image.
+ */
+const CONTAINER_UID = Number(process.env.NANOCLAW_CONTAINER_UID ?? 1000);
+
+/**
+ * Make a host directory that's bind-mounted RW into the agent container writable
+ * by the container's non-root user.
+ *
+ * Only matters when the HOST process runs as root (e.g. a Proxmox LXC where the
+ * systemd unit has no `User=`): it creates group/session dirs owned `root:root`,
+ * and the container's UID-1000 `node` user then can't write them — the agent
+ * dies with `EACCES: mkdir '/workspace/agent/memory'` and never replies. Chown
+ * the tree to the container UID so root-running hosts work, without weakening the
+ * container's non-root user. No-op when the host isn't root (UIDs already match,
+ * and a non-root host can't chown to another owner anyway). Best-effort — a
+ * chown failure must never break spawning.
+ */
+export function makeContainerWritable(target: string, recursive = false): void {
+  if (typeof process.getuid !== 'function' || process.getuid() !== 0) return;
+  // SECURITY: these trees are RW-mounted into the container, so the agent can
+  // plant symlinks in them. NEVER follow a symlink here — `fs.chownSync`
+  // dereferences (chown(2) follows), so a `ln -s / .claude/x` would turn the
+  // next root spawn into `chown -R 1000 /` (container→host takeover). Use
+  // `fs.lchownSync` (chowns the link itself) and NEVER recurse into a symlink,
+  // so the walk can never leave the target tree.
+  const chownTree = (p: string, dirent?: fs.Dirent): void => {
+    try {
+      fs.lchownSync(p, CONTAINER_UID, CONTAINER_UID);
+    } catch {
+      return; // unreadable/gone — nothing more to do down this path
+    }
+    if (!recursive) return;
+    // Only descend into a REAL directory. A symlink (even one pointing at a
+    // directory) is chowned above but never traversed.
+    if (dirent ? !dirent.isDirectory() : symlinkOrNonDir(p)) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(p, { withFileTypes: true });
+    } catch {
+      return; // not a directory (or unreadable) — the lchown above was enough
+    }
+    for (const e of entries) chownTree(path.join(p, e.name), e);
+  };
+  chownTree(target);
+}
+
+/** True when `p` is a symlink or not a real directory — i.e. must not be recursed into. */
+function symlinkOrNonDir(p: string): boolean {
+  try {
+    return !fs.lstatSync(p).isDirectory();
+  } catch {
+    return true;
   }
 }
 

@@ -42,7 +42,8 @@ import { randomUUID } from 'crypto';
 import { log } from '../../log.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { createMessagingGroup, getMessagingGroup, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
-import { registerContainerConfigAugmentor } from '../../container-runtime.js';
+import { registerContainerConfigAugmentor, registerLearningClassifierResolver } from '../../container-runtime.js';
+import { classifierParamsForModel } from './models.js';
 import { registerChannelAdapter } from '../channel-registry.js';
 import type { AgentActivityStatus, ChannelAdapter, ChannelSetup, OutboundMessage } from '../adapter.js';
 import { redactSensitiveData } from './redact.js';
@@ -442,6 +443,14 @@ registerChannelAdapter('webchat', {
 // instead. Claude/anthropic groups are unaffected (strict protocol preserved).
 registerContainerConfigAugmentor((agentGroupId) =>
   getEffectiveModelForAgent(agentGroupId)?.kind === 'ollama' ? { lenientOutput: true } : {},
+);
+
+// Auto-default the learning classifier to the agent's OWN model when it runs on
+// a local endpoint (ollama/openai-compatible) — zero setup. Claude agents have
+// no local endpoint, so this returns null and the runner keeps the busy-turn
+// heuristic. An explicit Settings override still wins (see container-config.ts).
+registerLearningClassifierResolver((agentGroupId) =>
+  classifierParamsForModel(getEffectiveModelForAgent(agentGroupId)),
 );
 
 // Fan-out cleanup: when an approval resolves (first responder approves/rejects),

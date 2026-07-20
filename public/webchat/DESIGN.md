@@ -132,6 +132,28 @@ is `.btn-ghost`.
 
 ---
 
+## 2b. Controls — pick by data shape
+
+Never reach for a bare checkbox or a bespoke widget. Match the control to the
+data:
+
+- **Binary on/off** → a **toggle switch** (`.setting-toggle`) or a **segmented
+  Off/On** (`.setting-options`). Use the segmented Off/On when the setting sits
+  in a column of other segmented controls (visual consistency — e.g. the
+  Features column); use the switch for a standalone inline setting. **Never a
+  raw `<input type="checkbox">` on its own** — it reads as a form field, not a
+  setting.
+- **One of a few (2–4) mutually-exclusive options** → a **segmented control**
+  (`.setting-options`) or a **radio group** (`.setting-radios`). Not a dropdown
+  for small N, not checkboxes.
+- **One of many (long/dynamic list)** → a `<select>` dropdown (e.g. the model
+  pickers).
+- **Several independent flags at once** → the only place a checkbox *list* is
+  right; even then prefer a short stack of toggles if there are only a few.
+
+The default for a settings surface is a switch or a segmented Off/On. If you're
+about to write `type="checkbox"`, stop and use one of the above.
+
 ## 3. Surfaces, cards & icons
 
 ### Surface cards
@@ -270,6 +292,20 @@ at all 8 destructive sites).
   ("Stored once, never shown again"); or it's the **empty state**. Everything
   else moves to tooltips (`title`), placeholders, outcome toasts, or Help —
   e.g. "toggle, then save" is what a Save button already says; delete it.
+  - **Default posture: label only.** A new control ships with *nothing but its
+    label*. Adding any hint, description, or ⓘ paragraph is a deliberate
+    exception you must justify against the three gates above before writing it —
+    not the default you trim back later. When in doubt, ship the label alone;
+    prose can always be added if it's genuinely missed, but the burden is on
+    adding it, not removing it.
+  - **The ⓘ paragraph is the *only* home for "what/how/why" copy**, it's
+    hidden by default, and it is at most 2–3 sentences. If a control has an ⓘ,
+    it does **not** also get a standing hint saying the same thing — one or the
+    other, never both.
+  - **Before committing any UI change, audit every user-facing string you
+    added.** For each, name which gate lets it stay; if none does, delete it or
+    move it to a `title`/placeholder. A control's own label + a result toast
+    almost always covers it.
 
 ---
 
@@ -397,14 +433,28 @@ modal it opens must be deferred past the triggering keypress
 
 ---
 
-## Install-row — installable features in Settings
+## Install-row — installable features (Settings + wizard)
 
-An installable feature (auto routing today) is one `.setting-group.install-row`
-line: **name left, action right**, three states —
+An installable feature (auto routing, TTS voice models, Whisper dictation, Codex)
+is one `.setting-group.install-row` line: **name left, action right**, three
+states —
 
 1. `Install` (secondary button)
-2. `Installing…` (disabled; progress bar/log appears below)
+2. `Installing…` — disabled **with a spinner** via `wizardBusy(btn, 'Installing…')`,
+   the SAME busy affordance the step-0 provider installs use; a progress `<pre>`
+   log (`.wizard-code`) appears below. Do **not** just set `textContent =
+   'Installing…'` — plain text reads as a lesser affordance than the spinner
+   elsewhere. Keep install "Installing…" states spinner-consistent.
 3. green `✓ Installed` badge (`.install-badge`, `--success`, no button)
+
+**The wizard Features step reuses this exact pattern**, and each optional feature
+leads with a `.setting-toggle` enable switch — MCP & skills catalog, Read Aloud
+(TTS), Voice Dictation (STT) all start with the toggle; their install-row + `✓`
+badge appear only once the feature is toggled on. When adding a feature to the
+wizard: **toggle first, then the install-row, then the badge**, and share one
+install/poll path with the Settings surface (element-id sets + a re-render
+callback) so both stay in lockstep. An "installed" badge must reflect *reality*
+(probe the backend, not an env flag) — a stale flag lies (see `ttsBackendUp`).
 
 No explainer paragraph — the feature's own surface is the explanation; a
 tooltip on the badge may point at it. The **only** standing hint is the
@@ -412,9 +462,13 @@ missing-prerequisite case: the Install flow sets up the LiteLLM router first
 (no shell, no `/add-litellm`), so the button stays live and the hint explains
 the extra step ("Sets up the LiteLLM router, then installs auto routing…").
 
-Trap: `.btn`'s `display: inline-flex` (author origin) beats the UA `[hidden]`
-rule, so a hidden Install button still renders — `.install-row [hidden]`
-re-asserts `display: none`. Keep that rule when reusing the pattern.
+Trap: `.btn` and `.install-badge` set `display: inline-flex` (author origin),
+which beats the UA `[hidden]{display:none}` — so `el.hidden = true` does nothing
+and a hidden button/badge still renders. `.install-row [hidden]` re-asserts it for
+elements inside a row, and `.install-badge[hidden]` for standalone badges (the
+wizard puts badges outside a row). Keep both rules — a missing one shows
+"…installed" on a fresh install. Any new `display:`-carrying element you toggle
+via `hidden` needs its own `[hidden]{display:none}` restate.
 
 ---
 

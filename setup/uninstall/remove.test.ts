@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -139,14 +139,19 @@ describe('executePlan', () => {
   it('keeps .env when the backup fails', () => {
     const envPath = path.join(tempDir, '.env');
     fs.writeFileSync(envPath, 'KEY=secret');
-    fs.chmodSync(tempDir, 0o555); // backup destination unwritable
+    // Force the copy to throw directly instead of relying on chmod 0o555 — root
+    // (as in CI containers) bypasses permission bits, so a chmod-based failure
+    // silently succeeds there and the deletion runs. Spying is uid-independent.
+    const spy = vi.spyOn(fs, 'copyFileSync').mockImplementation(() => {
+      throw new Error('EACCES: permission denied');
+    });
 
     try {
       const { notes } = executePlan([{ kind: 'backup-env', envPath }], deps());
       expect(fs.existsSync(envPath)).toBe(true);
       expect(notes.some((n) => n.includes('backup-env'))).toBe(true);
     } finally {
-      fs.chmodSync(tempDir, 0o755);
+      spy.mockRestore();
     }
   });
 

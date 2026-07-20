@@ -17,6 +17,7 @@
  * encrypted regardless); the token gates every request.
  */
 import http from 'http';
+import os from 'os';
 import { Readable } from 'stream';
 
 import { log } from '../../log.js';
@@ -125,9 +126,25 @@ export function startMcpRelay(): void {
     });
   });
   relayServer.on('error', (err) => log.error('MCP relay listener error', { err: String(err) }));
-  relayServer.listen(MCP_RELAY_PORT, '0.0.0.0', () => {
-    log.info('MCP auth relay listening', { port: MCP_RELAY_PORT });
+  // Bind the docker-bridge IP, not 0.0.0.0 — the only legitimate clients are
+  // agent containers reaching `host.docker.internal` (→ the default-bridge
+  // gateway, e.g. 172.17.0.1 on Linux). 0.0.0.0 additionally exposed the
+  // token-gated relay on the tailnet interface. Fall back to 0.0.0.0 when no
+  // docker0 IP is discoverable (macOS Docker Desktop, custom nets); override
+  // with WEBCHAT_MCP_RELAY_HOST for a non-default container network.
+  const bindHost = process.env.WEBCHAT_MCP_RELAY_HOST || dockerBridgeHost() || '0.0.0.0';
+  relayServer.listen(MCP_RELAY_PORT, bindHost, () => {
+    log.info('MCP auth relay listening', { port: MCP_RELAY_PORT, host: bindHost });
   });
+}
+
+/** IPv4 of the default docker bridge (`docker0`), which `host.docker.internal`
+ *  resolves to for agent containers — or null if there's no such interface. */
+function dockerBridgeHost(): string | null {
+  for (const a of os.networkInterfaces().docker0 ?? []) {
+    if (a.family === 'IPv4' && !a.internal) return a.address;
+  }
+  return null;
 }
 
 export function stopMcpRelay(): void {

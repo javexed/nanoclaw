@@ -11,6 +11,11 @@ on:
 
 jobs:
   label:
+    # GitHub-only: actions/github-script isn't on Forgejo's action registry
+    # (data.forgejo.org 404s it), so this job can only run on the GitHub mirror
+    # — where the labels + core-team roster actually apply. Skips cleanly on
+    # Forgejo instead of failing red on every PR.
+    if: ${{ github.server_url == 'https://github.com' }}
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write

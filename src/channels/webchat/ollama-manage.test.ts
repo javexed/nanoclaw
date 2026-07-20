@@ -14,6 +14,7 @@ import {
   getPullsSnapshot,
   getCodexInstallProgress,
   providerRestartCommand,
+  parseSystemdUnitFromCgroup,
   getLitellmInstallState,
   getRosterRefreshState,
   listHostModels,
@@ -25,6 +26,10 @@ import {
   startPull,
   getTailscaleInstallState,
   startTailscaleInstall,
+  getCloudflaredInstallState,
+  startCloudflaredInstall,
+  startCloudflaredConnect,
+  looksLikeTunnelToken,
 } from './ollama-manage.js';
 
 const mockFetch = vi.mocked(safeFetch);
@@ -61,14 +66,14 @@ describe('listHostModels', () => {
         }),
       )
       .mockResolvedValueOnce(jsonRes({ models: [{ name: 'gemma4:latest', size_vram: 2_500_000_000 }] }));
-    const models = await listHostModels('http://192.168.1.90:11434/');
+    const models = await listHostModels('http://192.0.2.90:11434/');
     expect(models).toHaveLength(2);
     const gemma = models.find((m) => m.name === 'gemma4:latest')!;
     expect(gemma.loaded).toBe(true);
     expect(gemma.size_vram).toBe(2_500_000_000);
     expect(models.find((m) => m.name === 'qwen3.5:4b')!.loaded).toBe(false);
     // trailing slash stripped before path append
-    expect(mockFetch.mock.calls[0][0]).toBe('http://192.168.1.90:11434/api/tags');
+    expect(mockFetch.mock.calls[0][0]).toBe('http://192.0.2.90:11434/api/tags');
   });
 
   it('tolerates a host without /api/ps', async () => {
@@ -243,20 +248,68 @@ describe('Codex provider install', () => {
     }
   });
 
+  it('cloudflared install: state reports install/service/root; install gated + token-validated', () => {
+    const st = getCloudflaredInstallState();
+    expect(typeof st.installed).toBe('boolean');
+    expect(typeof st.serviceInstalled).toBe('boolean');
+    expect(typeof st.isRoot).toBe('boolean');
+    expect(typeof st.hasSystemd).toBe('boolean');
+    // cloudflared needs no TUN (unlike tailscaled) — gate is linux + root + systemd,
+    // so an unprivileged LXC with systemd + container-root still qualifies.
+    expect(st.canInstall).toBe(process.platform === 'linux' && st.isRoot && st.hasSystemd);
+    // Not root in CI → both steps must refuse before spawning the host-mutating
+    // apt install / `cloudflared service install`. Connect refuses on prereqs
+    // before it even reaches the token check.
+    if (!st.canInstall) {
+      expect(startCloudflaredInstall()).toEqual({ started: false, error: 'prereq-missing' });
+      expect(startCloudflaredConnect('a'.repeat(120))).toEqual({ started: false, error: 'prereq-missing' });
+    }
+  });
+
+  it('looksLikeTunnelToken accepts long base64url blobs, rejects junk', () => {
+    expect(looksLikeTunnelToken('eyJ' + 'A1b2C3d4_-='.repeat(6))).toBe(true); // ~66 base64url chars
+    expect(looksLikeTunnelToken('')).toBe(false);
+    expect(looksLikeTunnelToken('   ')).toBe(false);
+    expect(looksLikeTunnelToken('short')).toBe(false);
+    expect(looksLikeTunnelToken('has spaces in it ' + 'x'.repeat(60))).toBe(false);
+  });
+
   it('providerRestartCommand picks the right restarter per context', () => {
     const base = { unit: 'nanoclaw-v2-abc', label: 'com.nanoclaw-v2-abc' };
     // macOS → launchd kickstart.
     expect(providerRestartCommand({ ...base, platform: 'darwin', hasUserSession: true })).toBe(
       'launchctl kickstart -k gui/$(id -u)/com.nanoclaw-v2-abc',
     );
-    // Linux rootless dev host (a user session exists) → --user, with a system fallback.
+    // Linux rootless dev host (a user session exists) → transient --user unit,
+    // then transient system unit, then bare user/system restarts as fallbacks.
     expect(providerRestartCommand({ ...base, platform: 'linux', hasUserSession: true })).toBe(
-      'systemctl --user restart nanoclaw-v2-abc 2>/dev/null || systemctl restart nanoclaw-v2-abc',
+      'systemd-run --user --quiet --collect systemctl --user restart nanoclaw-v2-abc 2>/dev/null || ' +
+        'systemd-run --quiet --collect systemctl restart nanoclaw-v2-abc 2>/dev/null || ' +
+        'systemctl --user restart nanoclaw-v2-abc 2>/dev/null || systemctl restart nanoclaw-v2-abc',
     );
-    // Linux system service / LXC (no user session) → plain system restart.
+    // Linux system service / LXC (no user session) → transient system unit, then
+    // a bare restart. The transient unit escapes the service's own cgroup so a
+    // self-restart can't be SIGKILLed before it's enqueued.
     expect(providerRestartCommand({ ...base, platform: 'linux', hasUserSession: false })).toBe(
-      'systemctl restart nanoclaw-v2-abc',
+      'systemd-run --quiet --collect systemctl restart nanoclaw-v2-abc 2>/dev/null || systemctl restart nanoclaw-v2-abc',
     );
+  });
+
+  it('parseSystemdUnitFromCgroup finds the leaf unit whatever the installer named it', () => {
+    // Proxmox/deploy names it plainly — the bug: restart targeted nanoclaw-v2-<slug>
+    // (from getSystemdUnit) while the process actually ran under nanoclaw.service.
+    expect(parseSystemdUnitFromCgroup('0::/system.slice/nanoclaw.service\n')).toBe('nanoclaw.service');
+    // Fresh-setup slug name is picked up just the same.
+    expect(parseSystemdUnitFromCgroup('0::/system.slice/nanoclaw-v2-3282970f.service')).toBe(
+      'nanoclaw-v2-3282970f.service',
+    );
+    // A --user service nests under user@UID.service — the LEAF is ours, not the slice.
+    expect(
+      parseSystemdUnitFromCgroup('0::/user.slice/user-1000.slice/user@1000.service/app.slice/nanoclaw.service'),
+    ).toBe('nanoclaw.service');
+    // No unit (bare process / no systemd) → null so the caller falls back.
+    expect(parseSystemdUnitFromCgroup('0::/\n')).toBeNull();
+    expect(parseSystemdUnitFromCgroup('')).toBeNull();
   });
 });
 

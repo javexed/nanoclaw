@@ -259,13 +259,17 @@ async function reuseFromEnv(
  * appended there (level 3, like runner.ts's per-step raw logs) so the silenced
  * noise stays inspectable.
  */
-export function hostExec(projectRoot: string, rawLog?: string): (cmd: string) => Promise<string> {
-  const tee = (cmd: string, stdout: string, stderr: string): void => {
+export function hostExec(projectRoot: string, rawLog?: string): (cmd: string, logCmd?: string) => Promise<string> {
+  const tee = (displayCmd: string, stdout: string, stderr: string): void => {
     if (!rawLog) return;
     const body = [stdout, stderr].filter(Boolean).join('');
-    appendFileSync(rawLog, `$ ${cmd}\n${body}${body && !body.endsWith('\n') ? '\n' : ''}\n`);
+    appendFileSync(rawLog, `$ ${displayCmd}\n${body}${body && !body.endsWith('\n') ? '\n' : ''}\n`);
   };
-  return (cmd) =>
+  // `logCmd` is the safe-to-log rendering of `cmd`: the engine passes it with
+  // prompted secrets masked, so a run that interpolates a bot token into a curl
+  // never persists that token to the raw log. Falls back to `cmd` for callers
+  // that don't pass one (their commands carry no secrets).
+  return (cmd, logCmd) =>
     new Promise((resolve, reject) => {
       const child = spawn('bash', ['-c', cmd], {
         cwd: projectRoot,
@@ -278,7 +282,7 @@ export function hostExec(projectRoot: string, rawLog?: string): (cmd: string) =>
       child.stderr.on('data', (c: Buffer) => { err += c.toString('utf8'); });
       child.on('error', reject);
       child.on('close', (code) => {
-        tee(cmd, out, err);
+        tee(logCmd ?? cmd, out, err);
         if (code === 0) return resolve(out);
         const stderr = err.trim();
         const head = stderr.split('\n').map((l) => l.trim()).find(Boolean) ?? 'command failed';

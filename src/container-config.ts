@@ -13,7 +13,8 @@ import path from 'path';
 
 import { GROUPS_DIR } from './config.js';
 import { roomLearningMapForAgent } from './modules/learning/room-settings.js';
-import { resolveContainerConfigAugmentation } from './container-runtime.js';
+import { getLearningMasterEnabled, getLearningClassifier } from './modules/learning/master.js';
+import { resolveContainerConfigAugmentation, resolveLearningClassifier } from './container-runtime.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import type { AgentGroup, ContainerConfigRow } from './types.js';
@@ -93,6 +94,8 @@ export interface ContainerConfig {
      * time from learning_room_settings; room keys win over the top level.
      */
     rooms?: Record<string, { autoTrigger?: boolean; autoKeep?: boolean }>;
+    /** Classifier gate — small local model consulted before a review. */
+    classifier?: { url: string; model: string };
   };
 }
 
@@ -146,13 +149,32 @@ export function materializeContainerJson(agentGroupId: string): ContainerConfig 
   // can't clobber core config; spread last so an explicit contribution wins.
   const config = { ...configFromDb(row, group), ...resolveContainerConfigAugmentation(agentGroupId) };
 
-  // Per-room learning overrides (auto-distill / auto-keep set from a room's
-  // 🎓 menu) ride the same learning blob, keyed by the routing pair the
-  // runner already knows. Rooms win over the agent level; see
-  // src/modules/learning/room-settings.ts for the precedence contract.
-  const roomLearning = roomLearningMapForAgent(agentGroupId);
-  if (Object.keys(roomLearning).length > 0) {
-    config.learning = { ...(config.learning ?? {}), rooms: roomLearning };
+  // Workspace MASTER switch (Settings → Features → Auto-learn). Off overrides
+  // agent AND room settings: the runner sees learning fully off, so no busy
+  // turn ever auto-reviews and no draft auto-keeps. On → per-room overrides
+  // ride the same learning blob (rooms win over the agent level; see
+  // src/modules/learning/room-settings.ts for the precedence contract).
+  if (getLearningMasterEnabled()) {
+    const roomLearning = roomLearningMapForAgent(agentGroupId);
+    if (Object.keys(roomLearning).length > 0) {
+      config.learning = { ...(config.learning ?? {}), rooms: roomLearning };
+    }
+    // Classifier gate (docs/learning-loop.md): a small local model the runner
+    // consults before an expensive review. Precedence:
+    //   1. An explicit Settings override (Auto-learn → Classifier model), resolved
+    //      to a container-reachable url at pick time.
+    //   2. Else auto-default to the agent's OWN model when it runs on a local
+    //      endpoint (resolver contributed by the webchat module) — zero setup.
+    //   3. Else none → the runner uses the busy-turn heuristic (Claude agents,
+    //      which have no local endpoint to call, land here).
+    const clf = getLearningClassifier();
+    const classifier =
+      clf.url && clf.model ? { url: clf.url, model: clf.model } : resolveLearningClassifier(agentGroupId);
+    if (classifier) {
+      config.learning = { ...(config.learning ?? {}), classifier };
+    }
+  } else {
+    config.learning = { autoTrigger: false, autoKeep: false };
   }
 
   const p = path.join(GROUPS_DIR, group.folder, 'container.json');

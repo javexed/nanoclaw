@@ -26,7 +26,11 @@ set -euo pipefail
 # Repo root is derived from THIS SCRIPT's location, not the invoker's cwd —
 # running the installer from another checkout must not write data/ there.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$(git -C "$HERE" rev-parse --show-toplevel)"
+# Repo root: prefer git, but fall back to the known depth (resources → add-litellm
+# → skills → .claude → root) so a non-git checkout doesn't spew "fatal: not a git
+# repository" and mis-target data/.
+TOPLEVEL="$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null || true)"
+cd "${TOPLEVEL:-$(cd "$HERE/../../../.." && pwd)}"
 
 PORT=4000
 # Pinned per docs/skill-guidelines.md ("pin the version; reject latest").

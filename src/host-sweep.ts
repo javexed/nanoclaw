@@ -70,6 +70,11 @@ export const ABSOLUTE_CEILING_MS = 30 * 60 * 1000;
 export const CLAIM_STUCK_MS = 60 * 1000;
 const MAX_TRIES = 5;
 const BACKOFF_BASE_MS = 5000;
+// After this many consecutive absolute-ceiling kills that produced NO new output,
+// treat the session as stuck resuming a continuation too large to process within
+// the ceiling (context bloat — every turn just recompacts and dies) and clear the
+// continuation so the next turn starts fresh. See selfHealBloatedContinuation.
+const CEILING_HEAL_STREAK = 2;
 
 export type StuckDecision =
   | { action: 'ok' }
@@ -324,6 +329,7 @@ function enforceRunningContainerSla(
     });
     killContainer(session.id, 'absolute-ceiling');
     resetStuckProcessingRows(inDb, outDb, session, 'absolute-ceiling');
+    selfHealBloatedContinuation(session);
     return;
   }
 
@@ -415,5 +421,68 @@ function resetStuckProcessingRows(
     log.warn('Failed to clear orphan processing claims', { sessionId: session.id, err });
   } finally {
     if (ownsDb) useDb?.close();
+  }
+}
+
+/**
+ * Self-heal a session stuck on a too-large continuation.
+ *
+ * When a container is killed at the absolute ceiling WITHOUT producing any new
+ * output, and it does so repeatedly, the session is almost certainly resuming a
+ * Claude/Codex continuation too large to process within the 30-min ceiling —
+ * every turn just recompacts the bloated context and dies, forever. The
+ * agent-runner's own dead-continuation self-heal can't help: the container is
+ * killed externally before it can retry. So the host clears the continuation
+ * here, forcing the NEXT turn to start a fresh conversation (the archived
+ * transcript stays on disk; only the resume pointer is dropped).
+ *
+ * "No new output" is detected by the max `messages_out` seq not advancing
+ * between consecutive ceiling kills. A kill that follows a real reply resets the
+ * streak, so a merely-slow-but-productive session is never cleared. Writes to
+ * outbound.db are safe here: the container was just killed, so nothing else
+ * writes it (same window resetStuckProcessingRows already writes in).
+ */
+export function selfHealBloatedContinuation(session: Session, writableOutDb?: Database.Database): boolean {
+  const ownsDb = !writableOutDb;
+  let db: Database.Database | null = writableOutDb ?? null;
+  try {
+    if (!db) db = openOutboundDbRw(session.agent_group_id, session.id);
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS session_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+    );
+    const maxOut = (db.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_out').get() as { m: number }).m;
+    const prevRaw = (
+      db.prepare("SELECT value FROM session_state WHERE key = '_ceiling_heal'").get() as { value: string } | undefined
+    )?.value;
+    let prev: { lastMaxOut: number; streak: number } | null = null;
+    try {
+      prev = prevRaw ? (JSON.parse(prevRaw) as { lastMaxOut: number; streak: number }) : null;
+    } catch {
+      prev = null;
+    }
+    // Output advanced since the last kill (or this is the first kill) → the
+    // streak restarts at 1; otherwise it's another no-output kill in a row.
+    const streak = prev && maxOut <= prev.lastMaxOut ? prev.streak + 1 : 1;
+
+    if (streak >= CEILING_HEAL_STREAK) {
+      const cleared = db.prepare("DELETE FROM session_state WHERE key LIKE 'continuation:%'").run().changes;
+      db.prepare("DELETE FROM session_state WHERE key = '_ceiling_heal'").run();
+      log.warn('Self-heal: cleared bloated continuation after repeated no-output ceiling kills', {
+        sessionId: session.id,
+        streak,
+        continuationsCleared: cleared,
+      });
+      return true;
+    }
+    db.prepare("INSERT OR REPLACE INTO session_state (key, value, updated_at) VALUES ('_ceiling_heal', ?, ?)").run(
+      JSON.stringify({ lastMaxOut: maxOut, streak }),
+      new Date().toISOString(),
+    );
+    return false;
+  } catch (err) {
+    log.warn('Self-heal continuation check failed', { sessionId: session.id, err });
+    return false;
+  } finally {
+    if (ownsDb) db?.close();
   }
 }

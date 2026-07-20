@@ -40,6 +40,8 @@ export interface RunnerConfig {
     cooldownMinutes?: number;
     /** Per-room overrides keyed "<channel_type>:<platform_id>"; room wins. */
     rooms?: Record<string, { autoTrigger?: boolean; autoKeep?: boolean }>;
+    /** Classifier gate — {url, model}: consulted before an auto-review. */
+    classifier?: { url: string; model: string };
   };
 }
 

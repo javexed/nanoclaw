@@ -41,6 +41,9 @@ function fakeAdmin() {
     async findAgentId(identifier) {
       return agents.get(identifier)?.uuid ?? null;
     },
+    async listAgents() {
+      return [...agents].map(([identifier, a]) => ({ id: a.uuid, identifier, secretMode: a.mode }));
+    },
     async ensureAgent(_name, identifier) {
       if (!agents.get(identifier))
         agents.set(identifier, { uuid: `uuid-${identifier}`, secretIds: [], mode: 'selective' });
@@ -79,8 +82,8 @@ function fakeAdmin() {
     },
   };
   /** Seed a group agent with pre-assigned secrets (id→type) for mirror tests. */
-  function seedGroupAgent(identifier: string, secs: { id: string; type: string }[]) {
-    agents.set(identifier, { uuid: `uuid-${identifier}`, secretIds: secs.map((s) => s.id), mode: 'all' });
+  function seedGroupAgent(identifier: string, secs: { id: string; type: string }[], mode: 'all' | 'selective' = 'all') {
+    agents.set(identifier, { uuid: `uuid-${identifier}`, secretIds: secs.map((s) => s.id), mode });
     for (const s of secs) secrets.set(s.id, { value: 'x', type: s.type });
   }
   return { admin, secrets, agents, seedGroupAgent };
@@ -286,6 +289,46 @@ describe('setWorkspaceDefaultAnthropic (owner default → single unassigned all-
     // plus the member's (which will be pinned to a selective agent on enrollment).
     const anthropicIds = (await admin.listAllSecrets()).filter((s) => s.type === 'anthropic').map((s) => s.id);
     expect(anthropicIds.sort()).toEqual([memberSecret, wsSecret].sort());
+  });
+
+  it('re-points a selective agent pinned to the legacy secret onto the new default (no stranding)', async () => {
+    const { admin, secrets, seedGroupAgent } = fakeAdmin();
+    // A base group agent left in SELECTIVE mode (e.g. leftover from an earlier
+    // per-agent BYOK setup) pinned to a legacy untracked anthropic secret plus a
+    // tool secret. This is the agent that would 401 after the reconcile.
+    seedGroupAgent('ag-construction', [
+      { id: 'legacy-anthropic', type: 'anthropic' },
+      { id: 'grp-gmail', type: 'generic' },
+    ], 'selective');
+
+    await setWorkspaceDefaultAnthropic(admin, 'sk-ant-default', 'api_key');
+
+    const wsSecret = getUserCredential(WORKSPACE_DEFAULT_USER_ID, 'claude')!.secret_id!;
+    expect(secrets.has('legacy-anthropic')).toBe(false); // legacy still reconciled away
+    // The stranded agent was re-pointed: legacy id swapped for the new default,
+    // tool secret preserved.
+    const assigned = await admin.listAgentSecretIds('uuid-ag-construction');
+    expect(assigned).toContain(wsSecret);
+    expect(assigned).not.toContain('legacy-anthropic');
+    expect(assigned).toContain('grp-gmail');
+  });
+
+  it('does not re-point a member (UserCreds) agent — it holds a tracked secret', async () => {
+    const { admin, secrets } = fakeAdmin();
+    // A legacy untracked anthropic secret that WILL be reconciled away.
+    secrets.set('legacy-anthropic', { value: 'sk-ant-legacy', type: 'anthropic' });
+    // A member connects + is lazily enrolled → a selective per-member agent
+    // pinned to the member's OWN tracked secret (never the legacy one).
+    await storeUserCredential(admin, 'webchat:alice', 'claude', 'sk-ant-alice', 'api_key');
+    const memberSecret = getUserSecretId('webchat:alice')!;
+    await ensureGroupEnrollment(admin, 'webchat:alice', 'ag-1');
+    const before = await admin.listAgentSecretIds(`uuid-${userCredsAgentIdentifier('ag-1', 'webchat:alice')}`);
+
+    await setWorkspaceDefaultAnthropic(admin, 'sk-ant-default', 'api_key');
+
+    const after = await admin.listAgentSecretIds(`uuid-${userCredsAgentIdentifier('ag-1', 'webchat:alice')}`);
+    expect(after).toEqual(before); // untouched — still pinned to the member's tracked secret
+    expect(after).toContain(memberSecret);
   });
 
   it('rotates in place on re-set (old default secret deleted, new one created)', async () => {

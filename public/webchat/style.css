@@ -3722,6 +3722,29 @@ a.lightbox-btn {
   border-color: var(--accent);
   font-weight: 600;
 }
+/* Native radios for a mutually-exclusive pick (e.g. dictation backend). */
+.setting-radios {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 18px;
+  font-size: var(--fs-sm);
+}
+.setting-radio {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  color: var(--text-dim);
+}
+.setting-radio:has(input:checked) {
+  color: var(--text);
+}
+.setting-radio input[type='radio'] {
+  flex: none;
+  margin: 0;
+  accent-color: var(--accent);
+}
 .setting-toggle {
   display: flex;
   align-items: center;
@@ -6195,11 +6218,39 @@ a.skill-badge-origin:hover {
    The user enters this at OpenAI's sign-in page (no code is pasted back). */
 .user-creds-oauth-codex-code {
   margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: var(--fs-base);
   font-weight: 600;
   letter-spacing: 0.04em;
   color: var(--accent-strong, var(--accent));
+}
+/* Inline copy affordance next to the pairing code — the operator retypes this at
+   ChatGPT, so one-click copy helps. Flips to a check for 1.5s on success. */
+.codex-code-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--text-dim);
+  border-radius: var(--radius-sm);
+  transition: var(--transition);
+}
+.codex-code-copy:hover {
+  color: var(--text);
+  background: var(--surface2);
+}
+.codex-code-copy .icon {
+  width: 1rem;
+  height: 1rem;
+}
+.codex-code-copy.copied {
+  color: var(--success, var(--accent));
 }
 
 /* @handle popover → user-credentials shortcut (discoverability for the
@@ -7476,6 +7527,14 @@ body {
   font-size: var(--fs-sm);
   font-weight: 600;
 }
+/* `display: inline-flex` above beats the UA `[hidden]{display:none}`, so a hidden
+   badge still renders. `.install-row [hidden]` re-asserts it for badges inside a
+   row, but the wizard's badges are standalone — restate it on the class itself so
+   `badge.hidden = true` actually hides them (else "…installed" shows on a fresh
+   install). Same trap as `.btn`/`.install-row`. */
+.install-badge[hidden] {
+  display: none !important;
+}
 .install-badge .icon {
   stroke: var(--success);
 }
@@ -8255,4 +8314,51 @@ body {
 #stt-prompt-editor textarea:focus {
   outline: none;
   border-color: var(--accent);
+}
+
+/* ── Composer overflow: responsive "+" ────────────────────────────────────
+   Wide enough → the tools (attach / camera / learn) flow inline in the
+   composer row (`display: contents` makes the wrapper transparent to flex).
+   Too narrow → they collapse behind a single "+" that opens them as a
+   popover, so the input keeps its width and the bar never grows taller.
+   Breakpoint is generous (covers phones incl. the Large font scale). */
+.composer-tools {
+  display: contents;
+}
+#composer-more {
+  display: none;
+}
+@media (max-width: 520px) {
+  #composer-more {
+    display: inline-flex;
+    align-items: center;
+  }
+  #composer-more[aria-expanded='true'] {
+    color: var(--accent);
+  }
+  .composer-tools {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 8px;
+    z-index: 20;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  }
+  .composer-tools:not(.open) {
+    display: none;
+  }
+  .composer-tools.open {
+    display: flex;
+  }
+  /* Bigger tap targets inside the popover. */
+  .composer-tools .file-picker-btn {
+    width: 40px;
+    height: 40px;
+    justify-content: center;
+  }
 }

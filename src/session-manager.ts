@@ -19,6 +19,7 @@ import { isSafeAttachmentName } from './attachment-safety.js';
 import type { OutboundFile } from './channels/adapter.js';
 import { DATA_DIR } from './config.js';
 import { ensureContainedInboxDir, isPathInside } from './inbox-safety.js';
+import { makeContainerWritable } from './container-runtime.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import {
   createSession,
@@ -198,6 +199,12 @@ export function initSessionFolder(agentGroupId: string, sessionId: string): void
 
   ensureSchema(inboundDbPath(agentGroupId, sessionId), 'inbound');
   ensureSchema(outboundDbPath(agentGroupId, sessionId), 'outbound');
+
+  // Chown AFTER the DBs are created: a root-running host makes this dir (and
+  // outbound.db, which the container WRITES) owned root:root, unwritable by the
+  // container's non-root user. Recursive so outbound.db + outbox/ are covered.
+  // No-op unless the host is root.
+  makeContainerWritable(dir, true);
 }
 
 /**

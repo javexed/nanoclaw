@@ -207,9 +207,33 @@ export async function setWorkspaceDefaultCredential(
   const secretType = secretTypeFor(provider);
   const tracked = new Set(listAllTrackedSecretIds());
   const stale = (await admin.listAllSecrets()).filter((s) => s.type === secretType && !tracked.has(s.id));
+  if (!stale.length) return;
+
+  // Before deleting the legacy secrets, re-point any `selective` agent that was
+  // pinned to one onto the new workspace-default. Otherwise a base group agent
+  // stuck in selective mode (e.g. a leftover from an earlier per-agent BYOK
+  // setup) silently loses its model credential the moment the legacy secret is
+  // deleted — surfacing later as a 401 disguised as "issue with the selected
+  // model". `all`-mode agents auto-inject the new secret and need no fixup; and
+  // per-member UserCreds agents hold TRACKED secrets, so they never reference a
+  // stale id and are naturally excluded from the re-point set.
+  const newSecretId = getUserCredential(WORKSPACE_DEFAULT_USER_ID, provider)?.secret_id ?? null;
+  const staleIds = new Set(stale.map((s) => s.id));
+  if (newSecretId) {
+    for (const agent of await admin.listAgents()) {
+      const assigned = await admin.listAgentSecretIds(agent.id);
+      if (!assigned.some((id) => staleIds.has(id))) continue;
+      const rebuilt = Array.from(new Set(assigned.map((id) => (staleIds.has(id) ? newSecretId : id))));
+      await admin.setSecrets(agent.id, rebuilt);
+      log.info('Workspace default: re-pointed agent off legacy secret', {
+        provider,
+        agent: agent.identifier ?? agent.id,
+      });
+    }
+  }
+
   for (const s of stale) await admin.deleteSecret(s.id).catch(() => {}); // best-effort; leftover is only a duplicate
-  if (stale.length)
-    log.info('Workspace default: reconciled legacy secrets', { provider, type: secretType, removed: stale.length });
+  log.info('Workspace default: reconciled legacy secrets', { provider, type: secretType, removed: stale.length });
 }
 
 /** Back-compat alias for the Claude path. */

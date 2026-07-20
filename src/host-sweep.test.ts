@@ -13,6 +13,7 @@ import {
   _resetStuckProcessingRowsForTesting,
   decideStuckAction,
   parseSqliteUtc,
+  selfHealBloatedContinuation,
   shouldCloseTaskSession,
 } from './host-sweep.js';
 import type { Session } from './types.js';
@@ -234,6 +235,51 @@ describe('deleteOrphanProcessingClaims', () => {
   it('returns 0 when nothing to clear', () => {
     const { outDb } = makeSessionDbs();
     expect(deleteOrphanProcessingClaims(outDb)).toBe(0);
+  });
+});
+
+describe('selfHealBloatedContinuation', () => {
+  function outDbWith(maxOutSeq: number | null): Database.Database {
+    const db = new Database(':memory:');
+    db.exec(`
+      CREATE TABLE messages_out (seq INTEGER);
+      CREATE TABLE session_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+    `);
+    if (maxOutSeq !== null) db.prepare('INSERT INTO messages_out (seq) VALUES (?)').run(maxOutSeq);
+    db.prepare("INSERT INTO session_state VALUES ('continuation:claude', 'sess-abc', ?)").run(new Date().toISOString());
+    return db;
+  }
+  const healRow = (db: Database.Database) => {
+    const r = db.prepare("SELECT value FROM session_state WHERE key = '_ceiling_heal'").get() as
+      | { value: string }
+      | undefined;
+    return r ? (JSON.parse(r.value) as { lastMaxOut: number; streak: number }) : undefined;
+  };
+  const hasContinuation = (db: Database.Database) =>
+    db.prepare("SELECT 1 FROM session_state WHERE key = 'continuation:claude'").get() !== undefined;
+
+  it('does not clear on the first no-output ceiling kill — just records streak=1', () => {
+    const db = outDbWith(2409);
+    expect(selfHealBloatedContinuation(fakeSession(), db)).toBe(false);
+    expect(hasContinuation(db)).toBe(true);
+    expect(healRow(db)).toEqual({ lastMaxOut: 2409, streak: 1 });
+  });
+
+  it('clears the continuation on the SECOND consecutive no-output ceiling kill', () => {
+    const db = outDbWith(2409);
+    expect(selfHealBloatedContinuation(fakeSession(), db)).toBe(false); // 1st
+    expect(selfHealBloatedContinuation(fakeSession(), db)).toBe(true); // 2nd, no new output
+    expect(hasContinuation(db)).toBe(false);
+    expect(healRow(db)).toBeUndefined(); // heal state reset
+  });
+
+  it('resets the streak when a reply landed between kills — never clears a productive session', () => {
+    const db = outDbWith(2409);
+    expect(selfHealBloatedContinuation(fakeSession(), db)).toBe(false);
+    db.prepare('INSERT INTO messages_out (seq) VALUES (2411)').run(); // a real reply advanced the seq
+    expect(selfHealBloatedContinuation(fakeSession(), db)).toBe(false); // output advanced → streak restarts
+    expect(hasContinuation(db)).toBe(true);
+    expect(healRow(db)).toEqual({ lastMaxOut: 2411, streak: 1 });
   });
 });
 

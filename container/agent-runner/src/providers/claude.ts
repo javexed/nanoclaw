@@ -5,6 +5,7 @@ import path from 'path';
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { appendStatusEvent, clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
+import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
 import { registerProvider } from './provider-registry.js';
 import type {
@@ -401,8 +402,52 @@ function transcriptRotateAgeMs(): number {
 }
 
 function claudeProjectsDir(): string {
-  const base = process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME || os.homedir(), '.claude');
-  return path.join(base, 'projects');
+  return path.join(claudeConfigDir(), 'projects');
+}
+
+function claudeConfigDir(): string {
+  return process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME || os.homedir(), '.claude');
+}
+
+function writeMemorySessionHook(hook: MemorySessionHookRegistration): void {
+  const configDir = claudeConfigDir();
+  const settingsFile = path.join(configDir, 'settings.json');
+  fs.mkdirSync(configDir, { recursive: true });
+
+  const parsed: unknown = fs.existsSync(settingsFile) ? JSON.parse(fs.readFileSync(settingsFile, 'utf-8')) : {};
+  if (!isRecord(parsed)) throw new Error(`${settingsFile} must contain a JSON object`);
+
+  const hooks = parsed.hooks === undefined ? {} : parsed.hooks;
+  if (!isRecord(hooks)) throw new Error(`${settingsFile} hooks must be a JSON object`);
+
+  const sessionStart = hooks.SessionStart === undefined ? [] : hooks.SessionStart;
+  if (!Array.isArray(sessionStart)) throw new Error(`${settingsFile} hooks.SessionStart must be an array`);
+
+  const memoryCommands = new Set([hook.command, ...hook.legacyCommands]);
+  const nextSessionStart = sessionStart
+    .map((entry) => removeMemoryCommands(entry, memoryCommands))
+    .filter((entry) => entry !== undefined);
+  nextSessionStart.push({
+    matcher: hook.sources.join('|'),
+    hooks: [{ type: 'command', command: hook.command, timeout: 10 }],
+  });
+
+  hooks.SessionStart = nextSessionStart;
+  parsed.hooks = hooks;
+  fs.writeFileSync(settingsFile, JSON.stringify(parsed, null, 2) + '\n');
+}
+
+function removeMemoryCommands(value: unknown, commands: ReadonlySet<string>): unknown {
+  if (!isRecord(value) || !Array.isArray(value.hooks)) return value;
+  const hooks = value.hooks.filter((hook) => {
+    if (!isRecord(hook)) return true;
+    return typeof hook.command !== 'string' || !commands.has(hook.command);
+  });
+  return hooks.length > 0 ? { ...value, hooks } : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 /**
@@ -564,6 +609,7 @@ export class ClaudeProvider implements AgentProvider {
   private additionalDirectories?: string[];
   private model?: string;
   private effort?: string;
+  private memorySessionHook?: MemorySessionHookRegistration;
 
   constructor(options: ProviderOptions = {}) {
     this.assistantName = options.assistantName;
@@ -574,8 +620,14 @@ export class ClaudeProvider implements AgentProvider {
     this.env = {
       ...(options.env ?? {}),
       CLAUDE_CODE_AUTO_COMPACT_WINDOW,
+      CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
     };
     this.settingSources = options.settingSources ?? ['project', 'user', 'local'];
+  }
+
+  registerMemorySessionHook(hook: MemorySessionHookRegistration): void {
+    writeMemorySessionHook(hook);
+    this.memorySessionHook = hook;
   }
 
   isSessionInvalid(err: unknown): boolean {
@@ -619,6 +671,7 @@ export class ClaudeProvider implements AgentProvider {
   }
 
   query(input: QueryInput): AgentQuery {
+    if (!this.memorySessionHook) throw new Error('Claude memory session hook was not registered');
     const stream = new MessageStream();
     stream.push(input.prompt);
 
