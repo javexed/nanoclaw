@@ -6,7 +6,7 @@ import { DATA_DIR, GROUPS_DIR } from '../config.js';
 import { createAgentGroup } from '../db/agent-groups.js';
 import { ensureContainerConfig, updateContainerConfigJson } from '../db/container-configs.js';
 import { assertValidGroupFolder, resolveGroupFolderPath } from '../group-folder.js';
-import { PERSONA_PREPEND_FILE } from '../group-persona.js';
+import { stageGroupPersona } from '../group-persona.js';
 import { normalizeName } from '../modules/agent-to-agent/db/agent-destinations.js';
 import { createScheduledTask, prepareScheduledTask } from '../modules/scheduling/create.js';
 import type { AgentGroup } from '../types.js';
@@ -66,7 +66,7 @@ export function createAgentFromTemplate(ref: string, opts?: CreateAgentOptions):
 
   // Persona → provider-neutral prepend, inlined at the top of the group's
   // CLAUDE.md/AGENTS.md every spawn (system-prompt tier on any provider).
-  fs.writeFileSync(path.join(groupDir, PERSONA_PREPEND_FILE), tpl.instructions + '\n');
+  stageGroupPersona(groupDir, tpl.instructions);
 
   // Context extras keep their template-relative layout, placed next to the doc
   // the persona is inlined into — so a reference written in instructions.md

@@ -1,0 +1,19 @@
+# Block pushing a stale feature branch to forgejo. A branch that will be PR'd
+# into channels-webchat must already contain the current forgejo/channels-webchat
+# tip (see scripts/pr-preflight.sh). Scoped to the forgejo remote; the base
+# branches themselves are never gated; SKIP_PR_PREFLIGHT=1 bypasses for WIP backups.
+[ "$1" = "forgejo" ] || exit 0
+[ "${SKIP_PR_PREFLIGHT:-}" = "1" ] && exit 0
+
+base="${PR_PREFLIGHT_BASE:-channels-webchat}"
+
+# git feeds pre-push:  <local ref> <local sha> <remote ref> <remote sha>
+while read -r local_ref local_sha _remote_ref _remote_sha; do
+  # skip branch deletions (all-zero local sha)
+  case "$local_sha" in *[!0]*) : ;; *) continue ;; esac
+  case "$local_ref" in refs/heads/*) branch="${local_ref#refs/heads/}" ;; *) continue ;; esac
+  if [ "$branch" = "$base" ] || [ "$branch" = "main" ]; then
+    continue
+  fi
+  sh scripts/pr-preflight.sh "$base" "$local_sha" || exit 1
+done

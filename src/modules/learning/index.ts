@@ -11,3 +11,4 @@ registerDeliveryAction(
   handleProposeSkill,
   unguarded('stages a draft for human review only — nothing executes or lands in agent context until an admin keeps it'),
 );
+export * from './master.js';

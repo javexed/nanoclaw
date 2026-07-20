@@ -74,3 +74,37 @@ A separate [community-scripts](https://github.com/community-scripts/ProxmoxVE)
 (Proxmox VE Helper-Scripts) version — a `ct/` + `install/` rewrite on their
 `build.func` framework — is maintained independently (root system service,
 `setup_docker`, no `install.sh`) and isn't kept here.
+
+### Updating a tarball (community-scripts) install
+
+That install extracts a release tarball — there's no `.git`, so the git-based
+`/update-nanoclaw` flow above doesn't apply. To pull the latest code, re-run the
+same fetch + shared deploy the installer uses. The tarball contains only tracked
+source, so `data/`, `.env`, `groups/`, `logs/`, and `node_modules/` are left
+untouched — it's a safe overlay:
+
+```bash
+cd /opt/nanoclaw
+# $NANOCLAW_ARCHIVE = the same release-tarball URL the installer fetched
+curl -fsSL "$NANOCLAW_ARCHIVE" | tar xz -C /opt/nanoclaw --strip-components=1
+bash deploy/webchat-deploy.sh --dir /opt/nanoclaw --port 3100
+systemctl restart nanoclaw
+```
+
+`webchat-deploy.sh` preserves the existing `WEBCHAT_TOKEN`/`.env` (it only adds
+missing keys), runs `pnpm install --frozen-lockfile` + `pnpm run build`, and
+rewrites the (unchanged) unit. DB migrations run at startup, so the restart
+applies them.
+
+**Root-service note.** The community-scripts unit runs as **root** (no `User=`).
+The agent container runs its agent-runner as the non-root `node` user (UID 1000),
+so a root-owned host would otherwise fail every spawn with
+`EACCES: mkdir '/workspace/agent/memory'`. NanoClaw handles this: when the host is
+root it chowns the bind-mounted group/session dirs to the container UID at spawn
+(override via `NANOCLAW_CONTAINER_UID` for a non-standard image). An
+already-broken install self-heals on the next spawn after updating; to fix it
+immediately without waiting: `chown -R 1000:1000 /opt/nanoclaw/groups /opt/nanoclaw/data`.
+
+**Escalation seam.** If auto-routing is installed, the overlay reverts its
+`core-escalation` patches to tracked files — re-apply them after updating:
+`bash .claude/skills/add-routing/resources/core-escalation/install-core-escalation.sh`.

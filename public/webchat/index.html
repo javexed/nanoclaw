@@ -114,6 +114,7 @@
       <symbol id="i-check" viewBox="0 0 24 24">
         <path d="M20 6 9 17l-5-5" />
       </symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
       <symbol id="i-ellipsis" viewBox="0 0 24 24">
         <circle cx="12" cy="12" r="1" />
         <circle cx="19" cy="12" r="1" />
@@ -147,6 +148,10 @@
         <path d="M10 9H8" />
         <path d="M16 13H8" />
         <path d="M16 17H8" />
+      </symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24">
+        <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+        <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
       </symbol>
       <symbol id="i-user" viewBox="0 0 24 24">
         <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" />
@@ -455,12 +460,30 @@
             <form id="message-form">
               <div id="slash-menu" class="slash-menu" role="listbox" aria-label="Commands" hidden></div>
                 <div id="learn-menu" class="learn-menu" role="menu" aria-label="Learning" hidden></div>
-              <button type="button" id="file-picker" class="file-picker-btn" title="Upload file">
-                <svg class="icon" aria-hidden="true"><use href="#i-paperclip"></use></svg>
+              <!-- Overflow "+" — shown only when the composer is too narrow to
+                   hold every tool inline (see the composer breakpoint in the CSS).
+                   Toggles .composer-tools between an inline row and a popover. -->
+              <button type="button" id="composer-more" class="file-picker-btn" title="More"
+                aria-label="More actions" aria-haspopup="true" aria-expanded="false" hidden>
+                <svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>
               </button>
-              <button type="button" id="camera-btn" class="file-picker-btn mobile-only" title="Take photo">
-                <svg class="icon" aria-hidden="true"><use href="#i-camera"></use></svg>
-              </button>
+              <div id="composer-tools" class="composer-tools" role="group" aria-label="Composer tools">
+                <button type="button" id="file-picker" class="file-picker-btn" title="Upload file">
+                  <svg class="icon" aria-hidden="true"><use href="#i-paperclip"></use></svg>
+                </button>
+                <button type="button" id="camera-btn" class="file-picker-btn mobile-only" title="Take photo">
+                  <svg class="icon" aria-hidden="true"><use href="#i-camera"></use></svg>
+                </button>
+                <button
+                  type="button"
+                  id="learn-btn"
+                  class="file-picker-btn"
+                  title="Distill a skill from this session"
+                  disabled
+                >
+                  <svg class="icon" aria-hidden="true"><use href="#i-graduation-cap"></use></svg>
+                </button>
+              </div>
               <!-- Voice dictation — hidden unless the server reports STT configured. -->
               <button type="button" id="mic-btn" class="file-picker-btn" title="Dictate" aria-label="Start dictation" aria-pressed="false" hidden>
                 <svg class="icon" aria-hidden="true"><use href="#i-mic"></use></svg>
@@ -468,15 +491,6 @@
               <span id="stt-elapsed" class="stt-elapsed" hidden>0:00</span>
               <span id="stt-status" class="visually-hidden" aria-live="polite"></span>
               <textarea id="message-input" rows="1" placeholder="Message…" autocomplete="off" disabled></textarea>
-              <button
-                type="button"
-                id="learn-btn"
-                class="file-picker-btn"
-                title="Distill a skill from this session"
-                disabled
-              >
-                <svg class="icon" aria-hidden="true"><use href="#i-graduation-cap"></use></svg>
-              </button>
               <button type="submit" id="send-btn" disabled aria-label="Send message">
                 <svg
                   viewBox="0 0 24 24"
@@ -1744,6 +1758,20 @@
                   <button class="setting-option" data-provider="codex">Codex</button>
                 </div>
               </div>
+              <!-- Codex provider install — Install button when Codex isn't in the
+                   agent image yet, green ✓ badge once it is. Runs the SAME two-phase
+                   (build → host restart) flow the wizard uses (shared runCodexInstall);
+                   on success codexAvailable flips and the Codex pill above enables. -->
+              <div class="setting-group install-row" id="settings-codex-install" hidden>
+                <span class="setting-label">Codex (ChatGPT)</span>
+                <button id="codex-install-btn" class="btn btn-secondary" type="button">Install Codex…</button>
+                <span id="codex-installed-badge" class="install-badge" hidden>
+                  <svg class="icon" aria-hidden="true"><use href="#i-check"></use></svg>&nbsp;Installed
+                </span>
+              </div>
+              <div id="codex-install-progress" hidden>
+                <pre id="codex-install-log" class="roster-refresh-log"></pre>
+              </div>
             </div>
             <!-- Access & security — owner/global-admin. The bearer-token opt-out
                  appears only once Tailscale or SSO (trusted proxy / EntraID) is
@@ -1897,6 +1925,38 @@
                   </div>
                   <div id="stt-install-progress" hidden>
                     <pre id="stt-install-log" class="roster-refresh-log"></pre>
+                  </div>
+                </div>
+                <!-- Auto-learn — workspace MASTER switch (owner-only). Off disables
+                     the learning loop everywhere and hides the per-agent / per-room
+                     learning controls. -->
+                <div id="settings-autolearn" class="settings-feature" hidden>
+                  <div class="setting-group install-row">
+                    <span class="setting-label">Auto-learn</span>
+                    <button class="feature-info-btn" type="button" aria-expanded="false"
+                      aria-controls="autolearn-feature-info" aria-label="About auto-learn">
+                      <svg class="icon" aria-hidden="true"><use href="#i-info"></use></svg>
+                    </button>
+                  </div>
+                  <p class="cred-hint feature-info" id="autolearn-feature-info" hidden>
+                    The master switch for skill learning. When on, agents can
+                    auto-distill a skill draft from a busy turn (a human still keeps
+                    it), tunable per agent and per room. Turn this off to disable
+                    learning across the whole workspace — the per-agent and per-room
+                    learning controls disappear, and no turn ever auto-reviews.
+                    Applies to each agent on its next start.
+                  </p>
+                  <div class="setting-group">
+                    <div class="setting-options" id="autolearn-mode" role="group" aria-label="Auto-learn">
+                      <button class="setting-option" type="button" data-value="off">Off</button>
+                      <button class="setting-option" type="button" data-value="on">On</button>
+                    </div>
+                  </div>
+                  <div class="setting-group" id="autolearn-classifier-group" hidden>
+                    <span class="setting-label">Classifier model</span>
+                    <select id="autolearn-classifier-select" class="stt-cleanup-select" aria-label="Learning classifier model">
+                      <option value="">None — busy-turn heuristic</option>
+                    </select>
                   </div>
                 </div>
               </div>
@@ -2055,6 +2115,14 @@
                   <span class="wizard-engine-chip" id="wizard-chip-ollama" hidden></span>
                 </label>
                 <div class="wizard-engine-body" data-engine="ollama" hidden>
+                  <!-- Set-default state, mirroring the Claude/Codex connected card:
+                       shown by app.js only when an Ollama model is the real default. -->
+                  <div class="wizard-connected" id="wizard-ollama-connected" hidden>
+                    <span class="wizard-connected-check" aria-hidden="true">✓</span>
+                    <span id="wizard-ollama-connected-text">Model set as default</span>
+                    <button id="wizard-ollama-change" class="btn btn-secondary" type="button">Change</button>
+                  </div>
+                  <div id="wizard-ollama-setup">
                   <div class="setting-group">
                     <input id="wizard-ollama-url" type="url" placeholder="http://localhost:11434" autocomplete="off" spellcheck="false" />
                     <button id="wizard-ollama-probe" class="btn btn-secondary" type="button">Probe</button>
@@ -2080,6 +2148,7 @@
                   <p class="cred-hint" id="wizard-ollama-rec" hidden></p>
                   <div class="ollama-pull-bar" id="wizard-ollama-pull-bar" hidden><span style="width:0%"></span></div>
                   <p class="cred-hint" id="wizard-ollama-dl-status" hidden></p>
+                  </div>
                 </div>
               </div>
             </div>
@@ -2104,15 +2173,20 @@
             </div>
             <div class="setting-group">
               <label class="setting-toggle">
-                <span>Enable Read Aloud (TTS)</span>
+                <span>Enable skill learning (auto-learn)</span>
+                <input id="wizard-autolearn" type="checkbox" />
+              </label>
+            </div>
+            <div class="setting-group">
+              <label class="setting-toggle">
+                <span>Enable read aloud (TTS)</span>
                 <input id="wizard-tts-default" type="checkbox" />
               </label>
             </div>
             <!-- Voice models: on-device neural voices (Kokoro). Recommended once
                  Read Aloud is on; without it, read-aloud uses the browser's voices. -->
             <div class="setting-group install-row" id="wizard-tts-install-row" hidden>
-              <button id="wizard-tts-install" class="btn btn-secondary" type="button">Install voice models…</button>
-              <span class="cred-hint" id="wizard-tts-hint">Recommended — on-device neural voices (Kokoro, ~330MB). Without it, read-aloud uses your device's built-in voices.</span>
+              <button id="wizard-tts-install" class="btn btn-secondary" type="button">Install Kokoro…</button>
             </div>
             <span class="install-badge" id="wizard-tts-installed" hidden>
               <svg class="icon" aria-hidden="true"><use href="#i-check"></use></svg>&nbsp;Voice models installed
@@ -2121,28 +2195,43 @@
               <pre id="wizard-tts-log" class="wizard-code"></pre>
             </div>
             <!-- Voice dictation (STT) — owner-only surface (the install endpoint 403s
-                 otherwise, keeping this hidden). Local whisper.cpp (private) or
-                 ElevenLabs (cloud key). Mirrors Settings → Features → Voice dictation. -->
-            <div id="wizard-stt-group" hidden>
+                 otherwise, keeping this hidden). Enable toggle like Read Aloud; when
+                 on, pick a backend — Local whisper.cpp (private) or ElevenLabs (cloud
+                 key). Mirrors Settings → Features → Voice dictation. -->
+            <div id="wizard-stt-section" hidden>
               <div class="setting-group">
-                <span class="setting-label">Voice dictation</span>
-                <div class="setting-options" id="wizard-stt-backend" role="group" aria-label="Dictation backend">
-                  <button class="setting-option" type="button" data-value="local" title="whisper.cpp on this machine — audio never leaves it">Local</button>
-                  <button class="setting-option" type="button" data-value="elevenlabs" title="Cloud transcription — audio is sent to ElevenLabs">ElevenLabs</button>
+                <label class="setting-toggle">
+                  <span>Enable voice dictation (STT)</span>
+                  <input id="wizard-stt-enable" type="checkbox" />
+                </label>
+              </div>
+              <!-- Backend setup — shown once dictation is on. -->
+              <div id="wizard-stt-group" hidden>
+                <div class="setting-group">
+                  <span class="setting-label">Backend</span>
+                  <div class="setting-radios" id="wizard-stt-backend" role="radiogroup" aria-label="Dictation backend">
+                    <label class="setting-radio" title="whisper.cpp on this machine — audio never leaves it">
+                      <input type="radio" name="wizard-stt-backend" value="local" />
+                      <span>Local</span>
+                    </label>
+                    <label class="setting-radio" title="Cloud transcription — audio is sent to ElevenLabs">
+                      <input type="radio" name="wizard-stt-backend" value="elevenlabs" />
+                      <span>ElevenLabs</span>
+                    </label>
+                  </div>
+                  <span class="install-badge" id="wizard-stt-installed" hidden>
+                    <svg class="icon" aria-hidden="true"><use href="#i-check"></use></svg>&nbsp;<span id="wizard-stt-installed-text">Whisper installed</span>
+                  </span>
                 </div>
-                <span class="install-badge" id="wizard-stt-installed" hidden>
-                  <svg class="icon" aria-hidden="true"><use href="#i-check"></use></svg>&nbsp;Dictation installed
-                </span>
+                <div class="setting-group install-row" id="wizard-stt-install-row" hidden>
+                  <button id="wizard-stt-install" class="btn btn-secondary" type="button">Install dictation model…</button>
+                </div>
+                <div class="setting-group" id="wizard-stt-key-row" hidden>
+                  <input id="wizard-stt-key" type="password" placeholder="ElevenLabs API key" autocomplete="off" spellcheck="false" />
+                  <button id="wizard-stt-connect" class="btn btn-secondary" type="button">Connect</button>
+                </div>
+                <pre id="wizard-stt-log" class="wizard-code" hidden></pre>
               </div>
-              <div class="setting-group install-row" id="wizard-stt-install-row" hidden>
-                <button id="wizard-stt-install" class="btn btn-secondary" type="button">Install dictation model…</button>
-                <span class="cred-hint">Local whisper.cpp in Docker — audio stays on this machine.</span>
-              </div>
-              <div class="setting-group" id="wizard-stt-key-row" hidden>
-                <input id="wizard-stt-key" type="password" placeholder="ElevenLabs API key" autocomplete="off" spellcheck="false" />
-                <button id="wizard-stt-connect" class="btn btn-secondary" type="button">Connect</button>
-              </div>
-              <pre id="wizard-stt-log" class="wizard-code" hidden></pre>
             </div>
             <p class="cred-hint" id="wizard-room-status" hidden></p>
           </section>
@@ -2204,17 +2293,53 @@
               </div>
               <div class="wizard-engine">
                 <label class="wizard-engine-head">
+                  <input type="radio" name="wizard-access" value="cloudflare" />
+                  <span>Cloudflare Tunnel</span>
+                  <span class="wizard-engine-chip" id="wizard-access-cf-chip" hidden></span>
+                </label>
+                <div class="wizard-engine-body" data-access="cloudflare">
+                  <!-- Shown when a one-click install can't run here (no root/systemd). -->
+                  <p class="cred-hint" id="wizard-cf-helper" hidden>
+                    Needs root + systemd. Install
+                    <a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/" target="_blank" rel="noopener">cloudflared</a>
+                    yourself, then paste the token.
+                  </p>
+                  <!-- Step 1: install the cloudflared binary (no token yet). -->
+                  <div class="setting-group install-row" id="wizard-cf-install-row" hidden>
+                    <button id="wizard-cf-install-btn" class="btn btn-primary" type="button">Install cloudflared…</button>
+                  </div>
+                  <!-- Step 2: paste the connector token from a managed tunnel, then connect. -->
+                  <div id="wizard-cf-connect" hidden>
+                    <p class="cred-hint" id="wizard-cf-installed-note">✓ cloudflared installed.</p>
+                    <div class="setting-group">
+                      <input id="wizard-cf-token" type="password" placeholder="tunnel token" autocomplete="off" spellcheck="false" />
+                      <button id="wizard-cf-connect-btn" class="btn btn-primary" type="button">Connect</button>
+                    </div>
+                    <p class="cred-hint">
+                      Create a
+                      <a href="https://one.dash.cloudflare.com/?to=/:account/networks/tunnels" target="_blank" rel="noopener">tunnel</a>,
+                      point it at <code>localhost</code>, add an
+                      <a href="https://developers.cloudflare.com/cloudflare-one/policies/access/" target="_blank" rel="noopener">Access policy</a>,
+                      then paste its token.
+                    </p>
+                  </div>
+                  <pre id="wizard-cf-install-log" class="wizard-code" hidden></pre>
+                  <p class="cred-hint" id="wizard-cf-ready" hidden>Tunnel connector installed and running.</p>
+                </div>
+              </div>
+              <div class="wizard-engine">
+                <label class="wizard-engine-head">
                   <input type="radio" name="wizard-access" value="sso" />
                   <span>Cloudflare / Entra ID</span>
                   <span class="wizard-engine-chip" id="wizard-access-sso-chip" hidden></span>
                 </label>
                 <div class="wizard-engine-body" data-access="sso">
                   <p class="cred-hint">
-                    Front this with
+                    Front with
                     <a href="https://developers.cloudflare.com/cloudflare-one/applications/" target="_blank" rel="noopener">Cloudflare Access</a>
                     or
-                    <a href="https://learn.microsoft.com/azure/app-service/overview-authentication-authorization" target="_blank" rel="noopener">Microsoft Entra ID</a>,
-                    set <code>WEBCHAT_TRUSTED_PROXY_IPS</code> in .env, and restart — your proxy's signed-in user becomes the identity.
+                    <a href="https://learn.microsoft.com/azure/app-service/overview-authentication-authorization" target="_blank" rel="noopener">Entra ID</a>,
+                    set <code>WEBCHAT_TRUSTED_PROXY_IPS</code>, restart.
                   </p>
                 </div>
               </div>

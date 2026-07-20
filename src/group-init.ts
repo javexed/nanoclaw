@@ -3,16 +3,20 @@ import path from 'path';
 
 import { DATA_DIR, DEFAULT_AGENT_PROVIDER, GROUPS_DIR } from './config.js';
 import { ensureContainerConfig } from './db/container-configs.js';
+import { stageGroupPersona } from './group-persona.js';
 import { log } from './log.js';
+import { migrateClaudeMemorySettings } from './migrate-claude-memory-settings.js';
 import { providerProvidesAgentSurfaces } from './providers/provider-container-registry.js';
+import { makeContainerWritable } from './container-runtime.js';
 import type { AgentGroup } from './types.js';
 
 export const DEFAULT_SETTINGS_JSON =
   JSON.stringify(
     {
+      autoMemoryEnabled: false,
       env: {
         CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-        CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
+        CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
       },
       hooks: {
         PreCompact: [
@@ -56,9 +60,8 @@ export const DEFAULT_SETTINGS_JSON =
  * Source code and skills are shared RO mounts — not copied per-group.
  * Skill symlinks are synced at spawn time by container-runner.ts.
  *
- * The composed `CLAUDE.md` is NOT written here — it's regenerated on every
- * spawn by `composeGroupClaudeMd()` (see `claude-md-compose.ts`). Initial
- * per-group instructions (if provided) seed `CLAUDE.local.md`.
+ * The provider project document is regenerated on every spawn. Initial
+ * standing instructions are staged once in the provider-neutral prepend file.
  */
 export function initGroupFilesystem(
   group: AgentGroup,
@@ -86,43 +89,8 @@ export function initGroupFilesystem(
     initialized.push('groupDir');
   }
 
-  // Seed instructions land in the provider's OWN memory surface. Default
-  // (Claude) surfaces auto-load CLAUDE.local.md natively. A surfaces-owning
-  // provider must never see stale CLAUDE.* files in its workspace — its seed
-  // goes into the memory scaffold's conventional landing file instead
-  // (memory/memories/imported-agent-memory.md): the container-side scaffold
-  // preserves pre-existing files, and the doctrine tells the agent to read
-  // that file on its first turn.
-  //
-  // Creation stays provider-agnostic: a DM-agent creator drops the seed in a
-  // neutral `.seed.md`, and placement is deferred to here (the first spawn,
-  // where the DB-resolved provider is known). Once placed it's consumed.
-  // `opts.instructions` still wins for any caller that passes it inline.
-  const neutralSeedFile = path.join(groupDir, '.seed.md');
-  const seed =
-    opts?.instructions ??
-    (fs.existsSync(neutralSeedFile) ? fs.readFileSync(neutralSeedFile, 'utf-8').trimEnd() : undefined);
-
-  if (defaultSurfaces) {
-    const claudeLocalFile = path.join(groupDir, 'CLAUDE.local.md');
-    if (!fs.existsSync(claudeLocalFile)) {
-      fs.writeFileSync(claudeLocalFile, seed ? seed + '\n' : '');
-      initialized.push('CLAUDE.local.md');
-    }
-  } else if (seed) {
-    const seedFile = path.join(groupDir, 'memory', 'memories', 'imported-agent-memory.md');
-    if (!fs.existsSync(seedFile)) {
-      fs.mkdirSync(path.dirname(seedFile), { recursive: true });
-      fs.writeFileSync(seedFile, seed + '\n');
-      initialized.push('memory/memories/imported-agent-memory.md');
-    }
-  }
-
-  // The neutral seed is single-use — drop it once the surface it belonged in
-  // has been resolved, so it can't re-seed after the operator edits theirs.
-  if (fs.existsSync(neutralSeedFile)) {
-    fs.rmSync(neutralSeedFile);
-    initialized.push('.seed.md consumed');
+  if (opts?.instructions && stageGroupPersona(groupDir, opts.instructions)) {
+    initialized.push('instructions.prepend.md');
   }
 
   // Ensure container_configs row exists in the DB. Idempotent — no-op if
@@ -147,6 +115,11 @@ export function initGroupFilesystem(
     } else {
       ensurePreCompactHook(settingsFile, initialized);
       ensureRtkHook(settingsFile, initialized);
+      // Upstream's provider-agnostic memory reconcile — runs alongside our hooks
+      // (each re-reads settings.json, so the order is independent).
+      if (migrateClaudeMemorySettings(settingsFile)) {
+        initialized.push('settings.json (reconciled Claude settings)');
+      }
     }
 
     // Skills directory — created empty here; symlinks are synced at spawn
@@ -157,6 +130,11 @@ export function initGroupFilesystem(
       initialized.push('skills/');
     }
   }
+
+  // A root-running host creates this tree root:root, but the agent container's
+  // non-root user must write into it (memory/, conversations/, working files).
+  // No-op unless the host is root; see makeContainerWritable.
+  makeContainerWritable(groupDir);
 
   if (initialized.length > 0) {
     log.info('Initialized group filesystem', {

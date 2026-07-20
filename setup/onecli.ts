@@ -169,6 +169,46 @@ function installOnecli(): { stdout: string; ok: boolean } {
   return { stdout, ok: true };
 }
 
+/**
+ * Persist ONECLI_BIND_HOST in ~/.onecli/.env so the gateway keeps binding to the
+ * same host across every `docker compose up` (upgrade, reboot, manual recreate).
+ *
+ * The upstream installer's compose binds `${ONECLI_BIND_HOST:-127.0.0.1}` and
+ * passes the real host only as a shell env at the FIRST `up`, never writing it to
+ * .env. So a later recreate defaults to loopback — and the gateway becomes
+ * unreachable from the host process (ONECLI_URL) AND from every agent container
+ * (host.docker.internal → docker bridge), surfacing as "credential path"
+ * failures / HTTP 000 at the bridge IP. We pin the host the installer just bound
+ * to (parsed from the emitted gateway URL). Idempotent + non-destructive: skips
+ * loopback (nothing to protect) and never overwrites an existing operator value.
+ */
+export function persistOnecliBindHost(
+  gatewayUrl: string,
+  envPath: string = path.join(os.homedir(), '.onecli', '.env'),
+): void {
+  let host: string;
+  try {
+    host = new URL(gatewayUrl).hostname;
+  } catch {
+    return;
+  }
+  if (!host || host === 'localhost' || host === '127.0.0.1' || host === '::1') return;
+  try {
+    let content = '';
+    try {
+      content = fs.readFileSync(envPath, 'utf-8');
+    } catch {
+      /* .env may not exist yet — we'll create it */
+    }
+    if (/^ONECLI_BIND_HOST=/m.test(content)) return; // respect an existing value
+    const prefix = content && !content.endsWith('\n') ? content + '\n' : content;
+    fs.writeFileSync(envPath, `${prefix}ONECLI_BIND_HOST=${host}\n`);
+    log.info('Persisted ONECLI_BIND_HOST to ~/.onecli/.env', { host });
+  } catch (err) {
+    log.warn('Could not persist ONECLI_BIND_HOST', { err });
+  }
+}
+
 function runInstall(cmd: string): { stdout: string; stderr?: string; ok: boolean } {
   try {
     const stdout = execSync(cmd, {
@@ -439,6 +479,7 @@ export async function run(args: string[]): Promise<void> {
 
   writeEnvOnecliUrl(url);
   log.info('Wrote ONECLI_URL to .env', { url });
+  persistOnecliBindHost(url);
 
   const healthy = await pollHealth(url, 15000);
   const v1Hint = healthy ? gatewayV1Hint(await verifyGatewayV1(url)) : null;

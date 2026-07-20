@@ -195,9 +195,25 @@ export function hostReachableUrl(url: string): string {
  * save-validation just work.
  */
 export async function safeFetch(url: string, init?: RequestInit): Promise<Response> {
-  const hostUrl = hostReachableUrl(url);
-  await assertSafeOutboundUrl(hostUrl);
-  return fetch(hostUrl, init);
+  const MAX_HOPS = 5;
+  let target = hostReachableUrl(url);
+  let reqInit: RequestInit = { ...init };
+  for (let hop = 0; hop <= MAX_HOPS; hop++) {
+    // Re-run the SSRF gate on EVERY hop. `redirect: 'manual'` stops fetch from
+    // silently following a 3xx to 169.254.169.254 / a private host without a
+    // check — the whole point of the gate. (Node/undici exposes the redirect
+    // status + Location header under 'manual'.)
+    await assertSafeOutboundUrl(target);
+    const res = await fetch(target, { ...reqInit, redirect: 'manual' });
+    if (res.status < 300 || res.status >= 400) return res; // not a redirect → done
+    const location = res.headers.get('location');
+    if (!location) throw new Error(`safeFetch: refusing an un-inspectable redirect from ${target}`);
+    target = new URL(location, target).toString();
+    // 307/308 preserve method + body; 301/302/303 downgrade to a bodyless GET
+    // (standard redirect semantics) so a POST body isn't replayed to a new host.
+    if (res.status !== 307 && res.status !== 308) reqInit = { ...reqInit, method: 'GET', body: undefined };
+  }
+  throw new Error(`safeFetch: too many redirects starting at ${url}`);
 }
 
 // Curated list of currently-supported Anthropic model ids — used both as a
@@ -223,6 +239,24 @@ export const KNOWN_ANTHROPIC_MODELS = [
  *   Ollama serves the Anthropic API at <endpoint>/v1/messages; the SDK
  *   reads ANTHROPIC_BASE_URL and uses it as the API root.
  */
+/**
+ * Container-reachable learning-classifier params for a roster model, or null if
+ * the model can't serve one (anthropic kind, or no endpoint). The classifier
+ * runner makes an OpenAI-format `/v1/chat/completions` call, so 127.0.0.1/
+ * localhost is rewritten to the docker host-gateway. Shared by the Settings
+ * override (explicit pick) and the auto-default resolver (agent's own model).
+ */
+export function classifierParamsForModel(model: WebchatModel | null): { url: string; model: string } | null {
+  if (!model || (model.kind !== 'ollama' && model.kind !== 'openai-compatible') || !model.endpoint) return null;
+  const reachable = model.endpoint
+    .replace(/\/+$/, '')
+    .replace(/\/\/(127\.0\.0\.1|localhost)(:|\/|$)/, '//host.docker.internal$2');
+  const url = /\/v1(\/|$)/.test(reachable)
+    ? `${reachable.replace(/\/v1.*$/, '')}/v1/chat/completions`
+    : `${reachable}/v1/chat/completions`;
+  return { url, model: model.model_id };
+}
+
 export function envForModel(model: WebchatModel | null): Record<string, string> {
   if (!model) return {};
   if (model.kind === 'anthropic') {

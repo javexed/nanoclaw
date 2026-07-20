@@ -25,7 +25,9 @@ import {
   cleanupOrphans,
   registerContainerConfigAugmentor,
   resolveContainerConfigAugmentation,
+  makeContainerWritable,
 } from './container-runtime.js';
+import fs from 'fs';
 import { CONTAINER_INSTALL_LABEL } from './config.js';
 import { log } from './log.js';
 
@@ -180,5 +182,63 @@ describe('cleanupOrphans', () => {
       count: 2,
       names: ['nanoclaw-a-1', 'nanoclaw-b-2'],
     });
+  });
+});
+
+describe('makeContainerWritable', () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  // Dirent-like stub — the walk keys off isDirectory()/isSymbolicLink().
+  const dirent = (name: string, kind: 'dir' | 'file' | 'link') =>
+    ({ name, isDirectory: () => kind === 'dir', isSymbolicLink: () => kind === 'link' }) as fs.Dirent;
+
+  it('no-ops when the host is not root (UIDs already match the container)', () => {
+    vi.spyOn(process, 'getuid').mockReturnValue(1000);
+    const chown = vi.spyOn(fs, 'lchownSync').mockImplementation(() => {});
+    makeContainerWritable('/opt/nanoclaw/groups/x', true);
+    expect(chown).not.toHaveBeenCalled();
+  });
+
+  it('chowns just the top dir to UID 1000 when root and not recursive', () => {
+    vi.spyOn(process, 'getuid').mockReturnValue(0);
+    const chown = vi.spyOn(fs, 'lchownSync').mockImplementation(() => {});
+    const readdir = vi.spyOn(fs, 'readdirSync').mockImplementation(() => [] as never);
+    makeContainerWritable('/g');
+    expect(chown).toHaveBeenCalledTimes(1);
+    expect(chown).toHaveBeenCalledWith('/g', 1000, 1000);
+    expect(readdir).not.toHaveBeenCalled(); // non-recursive: no descent
+  });
+
+  it('recursively lchowns the whole tree when root + recursive (covers outbound.db)', () => {
+    vi.spyOn(process, 'getuid').mockReturnValue(0);
+    const chown = vi.spyOn(fs, 'lchownSync').mockImplementation(() => {});
+    vi.spyOn(fs, 'lstatSync').mockReturnValue({ isDirectory: () => true } as fs.Stats); // top target
+    vi.spyOn(fs, 'readdirSync').mockImplementation(((p: fs.PathLike) => {
+      if (String(p) === '/s') return [dirent('outbound.db', 'file'), dirent('outbox', 'dir')] as never;
+      if (String(p) === '/s/outbox') return [dirent('file.png', 'file')] as never;
+      return [] as never; // files → no children
+    }) as typeof fs.readdirSync);
+    makeContainerWritable('/s', true);
+    const targets = chown.mock.calls.map((c) => c[0]);
+    expect(targets).toEqual(expect.arrayContaining(['/s', '/s/outbound.db', '/s/outbox', '/s/outbox/file.png']));
+    expect(chown).toHaveBeenCalledWith('/s/outbound.db', 1000, 1000);
+  });
+
+  it('SECURITY: lchowns a planted symlink but never follows or recurses through it', () => {
+    // The agent controls .claude-shared/session contents and could `ln -s / evil`.
+    // The walk must lchown the link itself (harmless) and NEVER descend into its
+    // target — otherwise a root host would chown the whole filesystem.
+    vi.spyOn(process, 'getuid').mockReturnValue(0);
+    const chown = vi.spyOn(fs, 'lchownSync').mockImplementation(() => {});
+    vi.spyOn(fs, 'lstatSync').mockReturnValue({ isDirectory: () => true } as fs.Stats); // top target is a real dir
+    const readdir = vi.spyOn(fs, 'readdirSync').mockImplementation(((p: fs.PathLike) => {
+      if (String(p) === '/s') return [dirent('evil', 'link')] as never; // `ln -s / evil`
+      return [dirent('etc', 'dir'), dirent('root', 'dir')] as never; // would appear IF the link were followed
+    }) as typeof fs.readdirSync);
+    makeContainerWritable('/s', true);
+    const targets = chown.mock.calls.map((c) => c[0]);
+    expect(targets).toEqual(['/s', '/s/evil']); // link chowned, target NOT
+    expect(readdir).not.toHaveBeenCalledWith('/s/evil', expect.anything()); // never traversed
+    expect(targets).not.toContain('/s/evil/etc'); // nothing under the link target touched
   });
 });

@@ -23,10 +23,7 @@ import path from 'path';
 // Registration-only: makes the in-tree cli adapter's declared defaults
 // (pattern '.', no threads, 'public') resolvable below.
 import '../src/channels/index.js';
-import {
-  resolveUnknownSenderPolicy,
-  resolveWiringDefaults,
-} from '../src/channels/channel-defaults.js';
+import { resolveUnknownSenderPolicy, resolveWiringDefaults } from '../src/channels/channel-defaults.js';
 import { DATA_DIR } from '../src/config.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
 import { initDb } from '../src/db/connection.js';
@@ -179,9 +176,7 @@ async function main(): Promise<void> {
 
   console.log('');
   console.log('Init complete.');
-  console.log(
-    `  owner:   ${CLI_SYNTHETIC_USER_ID}${promotedToOwner ? ' (promoted on first owner)' : ''}`,
-  );
+  console.log(`  owner:   ${CLI_SYNTHETIC_USER_ID}${promotedToOwner ? ' (promoted on first owner)' : ''}`);
   console.log(`  agent:   ${ag.name} [${ag.id}] @ groups/${folder}`);
   console.log(`  channel: cli/${CLI_PLATFORM_ID}`);
   console.log('');

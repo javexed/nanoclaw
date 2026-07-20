@@ -11,15 +11,15 @@ describe('envForModel — ollama base URL', () => {
   it('points ANTHROPIC_BASE_URL at the bare endpoint (no /v1 append)', () => {
     const env = envForModel({
       kind: 'ollama',
-      endpoint: 'http://192.168.1.127:11434',
+      endpoint: 'http://192.0.2.127:11434',
       model_id: 'llama3.2:3b',
     } as never);
-    expect(env.ANTHROPIC_BASE_URL).toBe('http://192.168.1.127:11434');
+    expect(env.ANTHROPIC_BASE_URL).toBe('http://192.0.2.127:11434');
     expect(env.ANTHROPIC_MODEL).toBe('llama3.2:3b');
     // Must bypass the OneCLI credential proxy — it only fronts known providers
     // and RESETs redirected Ollama calls (docs/ollama.md). Regression guard.
-    expect(env.NO_PROXY).toBe('192.168.1.127');
-    expect(env.no_proxy).toBe('192.168.1.127');
+    expect(env.NO_PROXY).toBe('192.0.2.127');
+    expect(env.no_proxy).toBe('192.0.2.127');
   });
 
   it('strips a trailing slash but still does not append /v1', () => {
@@ -56,8 +56,8 @@ describe('envForModel — container-facing URL rewrite', () => {
       envForModel({ kind: 'ollama', endpoint: 'http://localhost:11434', model_id: 'm' } as never).ANTHROPIC_BASE_URL,
     ).toBe('http://host.docker.internal:11434');
     expect(
-      envForModel({ kind: 'ollama', endpoint: 'http://192.168.1.90:11434', model_id: 'm' } as never).ANTHROPIC_BASE_URL,
-    ).toBe('http://192.168.1.90:11434');
+      envForModel({ kind: 'ollama', endpoint: 'http://192.0.2.90:11434', model_id: 'm' } as never).ANTHROPIC_BASE_URL,
+    ).toBe('http://192.0.2.90:11434');
   });
 
   it('is anchored — a hostname merely containing localhost is untouched', () => {
@@ -69,6 +69,6 @@ describe('hostReachableUrl', () => {
   it('maps the container-only alias to loopback and leaves everything else', () => {
     expect(hostReachableUrl('http://host.docker.internal:4000/v1')).toBe('http://127.0.0.1:4000/v1');
     expect(hostReachableUrl('http://host.docker.internal.evil.com')).toBe('http://host.docker.internal.evil.com');
-    expect(hostReachableUrl('http://192.168.1.90:11434')).toBe('http://192.168.1.90:11434');
+    expect(hostReachableUrl('http://192.0.2.90:11434')).toBe('http://192.0.2.90:11434');
   });
 });

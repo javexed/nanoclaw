@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { applySkill, removeSkill, planSkill, fullyApplied, firstFailureHint, referenceProse, stepLabel, type ApplyEvent, type InputMeta } from './skill-apply.js';
+import { applySkill, removeSkill, planSkill, fullyApplied, firstFailureHint, referenceProse, stepLabel, substituteForLog, type ApplyEvent, type InputMeta } from './skill-apply.js';
 import { parseDirectives, validate } from './skill-directives.js';
 
 // A synthetic skill exercising the fs handlers for real (no network), plus one
@@ -1524,5 +1524,22 @@ describe('referenceProse (reference-floor slice)', () => {
     expect(res.referenceProse).toContain('## Troubleshooting');
     expect(res.referenceProse).toContain('## Alternatives');
     expect(res.referenceProse).not.toContain('## Apply');
+  });
+});
+
+describe('substituteForLog — secrets never reach the raw setup log', () => {
+  const vars = new Map([
+    ['bot_token', { value: 'xoxb-REAL-SECRET', secret: true }],
+    ['workspace', { value: 'acme', secret: false }],
+  ]);
+
+  it('masks secret vars but substitutes non-secret ones', () => {
+    const out = substituteForLog('curl -H "auth: {{bot_token}}" https://{{workspace}}.example', vars);
+    expect(out).toBe('curl -H "auth: ***" https://acme.example');
+    expect(out).not.toContain('xoxb-REAL-SECRET');
+  });
+
+  it('keeps unresolved refs as placeholders (does not throw, unlike substitute)', () => {
+    expect(substituteForLog('run {{not_set}}', vars)).toBe('run {{not_set}}');
   });
 });

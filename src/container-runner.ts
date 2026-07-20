@@ -28,6 +28,7 @@ import { updateContainerConfigScalars, updateContainerConfigJson } from './db/co
 import {
   CONTAINER_RUNTIME_BIN,
   hostGatewayArgs,
+  makeContainerWritable,
   readonlyMountArgs,
   resolveAgentIdentity,
   resolveContainerEnv,
@@ -371,7 +372,7 @@ export function buildMounts(
   // Session folder at /workspace (contains inbound.db, outbound.db, outbox/, .claude/)
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false });
 
-  // Agent group folder at /workspace/agent (RW for working files + CLAUDE.local.md)
+  // Agent group folder at /workspace/agent (RW for working files + shared memory)
   mounts.push({ hostPath: groupDir, containerPath: '/workspace/agent', readonly: false });
 
   // container.json — nested RO mount on top of RW group dir so the agent
@@ -383,8 +384,8 @@ export function buildMounts(
 
   // Composer-managed CLAUDE.md artifacts — nested RO mounts. These are
   // regenerated from the shared base + fragments on every spawn; any
-  // agent-side writes would be clobbered, so enforce read-only. Only
-  // CLAUDE.local.md (per-group memory) remains RW via the group-dir mount.
+  // agent-side writes would be clobbered, so enforce read-only. The shared
+  // memory tree and standing-instructions source remain RW via the group mount.
   // `.claude-shared.md` is a symlink whose target (`/app/CLAUDE.md`) is
   // already RO-mounted, so writes through it fail regardless — no need for
   // a nested mount there.
@@ -407,6 +408,12 @@ export function buildMounts(
   // Per-group .claude-shared at /home/node/.claude (Claude state, settings,
   // skill symlinks)
   if (defaultSurfaces) {
+    // On a root host this dir is created root:root, but it's mounted RW into a
+    // UID-1000 container which must write /home/node/.claude/settings.json —
+    // otherwise the agent-runner dies with EACCES. Chown it to the container UID
+    // (no-op off-root), closing the gap left by the group/session-dir chowns.
+    fs.mkdirSync(claudeDir, { recursive: true });
+    makeContainerWritable(claudeDir, true);
     mounts.push({ hostPath: claudeDir, containerPath: '/home/node/.claude', readonly: false });
   }
 

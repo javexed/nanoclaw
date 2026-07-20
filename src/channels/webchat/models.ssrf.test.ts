@@ -4,8 +4,8 @@
  * These tests don't hit real endpoints — they confirm assertSafeOutboundUrl
  * rejects the URL classes we care about before fetch() is ever called.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { assertSafeOutboundUrl } from './models.js';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { assertSafeOutboundUrl, safeFetch } from './models.js';
 
 describe('assertSafeOutboundUrl', () => {
   const originalEnv = process.env.WEBCHAT_BLOCK_PRIVATE_IPS;
@@ -101,5 +101,34 @@ describe('assertSafeOutboundUrl', () => {
 
   it('does not throw on unresolvable hostnames (lets fetch fail naturally)', async () => {
     await expect(assertSafeOutboundUrl('http://this-host-does-not-exist.invalid.example/')).resolves.toBeUndefined();
+  });
+});
+
+describe('safeFetch — redirect re-validation', () => {
+  afterEach(() => vi.restoreAllMocks());
+  const resp = (status: number, headers: Record<string, string> = {}) =>
+    ({ status, headers: { get: (k: string) => headers[k.toLowerCase()] ?? null } }) as unknown as Response;
+
+  it('re-runs the SSRF gate on a 3xx target and blocks a redirect to cloud metadata', async () => {
+    // First hop is a public IP (allowed); it 302s to the metadata IP, which the
+    // pre-fix code would have followed unchecked.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      resp(302, { location: 'http://169.254.169.254/latest/meta-data/' }),
+    );
+    await expect(safeFetch('http://8.8.8.8/')).rejects.toThrow(/169\.254/);
+  });
+
+  it('passes a non-redirect response straight through', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(resp(200));
+    const r = await safeFetch('http://8.8.8.8/');
+    expect(r.status).toBe(200);
+    // redirect:'manual' must be set so fetch never auto-follows behind our back.
+    expect((fetchMock.mock.calls[0][1] as RequestInit).redirect).toBe('manual');
+  });
+
+  it('caps redirect chains instead of looping forever', async () => {
+    // A self-redirect to an allowed host would loop; the hop cap must break it.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(resp(302, { location: 'http://8.8.8.8/next' }));
+    await expect(safeFetch('http://8.8.8.8/')).rejects.toThrow(/too many redirects/);
   });
 });

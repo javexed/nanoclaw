@@ -87,3 +87,19 @@ describe('onecli() wrapper scrubs credentials from errors', () => {
     expect(errorSurface(caught)).not.toContain(SECRET);
   });
 });
+
+describe('agent listing paginates the full fleet (--max)', () => {
+  // Regression: `agents list` returns only ~20 rows by default, so findAgentId /
+  // listAgents silently missed agents past row 20 — the reconcile re-point skipped
+  // most of the fleet and findAgentId could re-create duplicates.
+  it('findAgentId passes --max so it sees every agent', async () => {
+    await realOnecliAdmin.findAgentId('whatever').catch(() => {});
+    const args = mockExecFile.mock.calls.at(-1)?.[1] as string[];
+    expect(args).toEqual(['agents', 'list', '--max', '1000']);
+  });
+  it('listAgents passes --max so it sees every agent', async () => {
+    await realOnecliAdmin.listAgents().catch(() => {});
+    const args = mockExecFile.mock.calls.at(-1)?.[1] as string[];
+    expect(args).toEqual(['agents', 'list', '--max', '1000']);
+  });
+});

@@ -22,6 +22,8 @@ import { migration024 } from './024-rename-user-credentials.js';
 import { moduleApprovalsPendingApprovals } from './module-approvals-pending-approvals.js';
 import { moduleLearningSkillDrafts } from './module-learning-skill-drafts.js';
 import { moduleLearningConfig } from './module-learning-config.js';
+import { moduleLearningMaster } from './module-learning-master.js';
+import { moduleLearningClassifier } from './module-learning-classifier.js';
 import { moduleMcpHardening } from './module-mcp-hardening.js';
 import { moduleLearningRoomSettings } from './module-learning-room-settings.js';
 import { moduleContainerEgress } from './module-container-egress.js';
@@ -139,6 +141,8 @@ export const migrations: Migration[] = [
   moduleWebchatDisabledBuiltins,
   // ALTERs container_configs — must run after migration014 creates it. Keep at the end.
   moduleLearningConfig,
+  moduleLearningMaster,
+  moduleLearningClassifier,
   // ALTERs webchat_mcp_servers — must run after moduleWebchatMcpServers creates it. Keep at the end.
   moduleMcpHardening,
   moduleLearningRoomSettings,

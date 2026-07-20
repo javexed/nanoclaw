@@ -483,6 +483,20 @@ function substitute(value: string, vars: Map<string, { value: string; secret: bo
   });
 }
 
+/**
+ * Render a command for LOGGING: non-secret {{vars}} are substituted (so the log
+ * is still useful), but secret ones are masked to `***` and unresolved refs kept
+ * as placeholders. Passed as the log form so a prompted secret interpolated into
+ * a run (e.g. a bot token in a curl) never lands in the raw setup log.
+ */
+export function substituteForLog(value: string, vars: Map<string, { value: string; secret: boolean }>): string {
+  return value.replace(VAR_REF, (_, name) => {
+    const v = vars.get(name);
+    if (!v) return `{{${name}}}`;
+    return v.secret ? '***' : v.value;
+  });
+}
+
 // A `when:<var>=<value>` guard: the directive applies only when an earlier
 // prompt/capture bound <var> to exactly <value>. Unmet — including the var still
 // unresolved (a deferred prompt) — skips the directive, so a guarded prompt is
@@ -545,7 +559,7 @@ function bindCapture(
 // is derivable. Throws on failure → caught and bounced to an agent.
 async function applyOne(
   d: Directive,
-  ctx: { root: string; skillDir: string; exec: (c: string) => string | void | Promise<string | void>; execStream?: (c: string) => Promise<StepOutcome>; resolveRemote: (b: string) => string; vars: Map<string, { value: string; secret: boolean }>; journal: JournalEntry[] },
+  ctx: { root: string; skillDir: string; exec: (c: string, logCmd?: string) => string | void | Promise<string | void>; execStream?: (c: string) => Promise<StepOutcome>; resolveRemote: (b: string) => string; vars: Map<string, { value: string; secret: boolean }>; journal: JournalEntry[] },
 ): Promise<void> {
   const { root, skillDir, exec, vars, journal } = ctx;
   switch (d.kind) {
@@ -678,7 +692,7 @@ async function applyOne(
         // call `ncl ... {{owner_email}}` to wire from collected input. A command
         // with no {{...}} (build/test) is returned unchanged; an unresolved var
         // throws → caught → deferred (the prompt hasn't been answered yet).
-        const out = await exec(substitute(cmd, vars));
+        const out = await exec(substitute(cmd, vars), substituteForLog(cmd, vars));
         // Last command wins for capture (a capture run should be a single command).
         // bindCapture binds stdout-as-is OR a multi-field JSON spec, and enforces
         // validate:<re> — a mismatch / unparseable JSON throws → bounced to an agent.

@@ -101,9 +101,18 @@ export interface SecretRow {
   hostPattern?: string;
 }
 
+export interface AgentRow {
+  id: string;
+  identifier?: string;
+  secretMode?: string;
+}
+
 export interface OnecliAdmin {
   /** OneCLI internal agent id (uuid) for a given identifier, or null. */
   findAgentId(identifier: string): Promise<string | null>;
+  /** Every agent (uuid + identifier + secretMode) — used to find agents pinned
+   *  to a secret about to be deleted so they can be re-pointed. */
+  listAgents(): Promise<AgentRow[]>;
   /** Idempotently ensure an agent exists for the identifier; returns its uuid. */
   ensureAgent(name: string, identifier: string): Promise<string>;
   /**
@@ -132,10 +141,24 @@ export interface OnecliAdmin {
   setSecrets(agentId: string, secretIds: string[]): Promise<void>;
 }
 
+// `agents list` returns only the first ~20 rows by default. Every caller here
+// needs the FULL fleet — a lookup that misses an agent past row 20 makes
+// findAgentId re-create a duplicate, and makes the workspace-default reconcile
+// (setWorkspaceDefaultCredential → listAgents) silently skip most agents. Pass a
+// high --max so one call covers any realistic fleet.
+const AGENTS_LIST = ['agents', 'list', '--max', '1000'];
+
 export const realOnecliAdmin: OnecliAdmin = {
   async findAgentId(identifier) {
-    const rows = dataArray(await onecli(['agents', 'list']));
+    const rows = dataArray(await onecli(AGENTS_LIST));
     return (rows.find((a) => a.identifier === identifier)?.id as string | undefined) ?? null;
+  },
+  async listAgents() {
+    return dataArray(await onecli(AGENTS_LIST)).map((a) => ({
+      id: a.id as string,
+      identifier: a.identifier as string | undefined,
+      secretMode: a.secretMode as string | undefined,
+    }));
   },
   async ensureAgent(name, identifier) {
     const existing = await this.findAgentId(identifier);

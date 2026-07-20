@@ -1,5 +1,13 @@
-staged=$(git diff --cached --name-only --diff-filter=ACM -- 'src/**/*.ts')
-pnpm run format:fix
+# Format only the staged src TS files, then re-stage them. Running the tree-wide
+# `format:fix` here rewrote every non-conformant src file into the working tree on
+# each commit (~21 predate the Prettier standard) — scattered unstaged drift the
+# author had to keep stashing. Scoping to the staged list keeps commits clean and
+# touches nothing the user didn't stage.
+#
+# Pathspec is the `src` dir + a .ts filter, not `src/**/*.ts`: that glob silently
+# skipped top-level src/*.ts files, so they were never re-formatted or re-staged.
+staged=$(git diff --cached --name-only --diff-filter=ACM -- src | grep -E '\.ts$' || true)
 if [ -n "$staged" ]; then
+  echo "$staged" | xargs pnpm exec prettier --write
   echo "$staged" | xargs git add
 fi

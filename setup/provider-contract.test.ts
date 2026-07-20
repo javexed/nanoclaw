@@ -68,6 +68,16 @@ describe('setup carries the picked provider to creation via a setup-run env var'
   }
 });
 
+describe('bootstrap can restore missing provider-neutral persona files', () => {
+  for (const file of ['scripts/init-first-agent.ts', 'scripts/init-cli-agent.ts']) {
+    it(`${file} attempts create-only persona staging when reusing a group`, () => {
+      const src = read(file);
+      expect(src).not.toContain('createdGroup');
+      expect(src).toContain(file.includes('first') ? 'stageGroupPersona(' : 'initGroupFilesystem(ag, {');
+    });
+  }
+});
+
 describe('codex installs from its hard-wired /add-codex skill in-process', () => {
   // The provider picker no longer enumerates a remote manifest branch (an
   // unaudited control surface). Codex is offered in trunk and installed by

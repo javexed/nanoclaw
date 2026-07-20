@@ -1,8 +1,8 @@
 diff --git a/container/agent-runner/src/index.ts b/container/agent-runner/src/index.ts
-index 33679d23..f6c389ea 100644
+index b3b4e9f5..996f2056 100644
 --- a/container/agent-runner/src/index.ts
 +++ b/container/agent-runner/src/index.ts
-@@ -32,7 +32,7 @@ import { ensureMemoryScaffold } from './memory-scaffold.js';
+@@ -34,7 +34,7 @@ import { MEMORY_SESSION_HOOK } from './memory/session-hook.js';
  // Provider skills append imports to providers/index.ts.
  import './providers/index.js';
  import { createProvider, type ProviderName } from './providers/factory.js';
@@ -11,9 +11,9 @@ index 33679d23..f6c389ea 100644
  import { runPollLoop } from './poll-loop.js';
  
  function log(msg: string): void {
-@@ -104,6 +104,33 @@ async function main(): Promise<void> {
-   // and keeps its native memory untouched.
-   if (provider.usesMemoryScaffold) ensureMemoryScaffold();
+@@ -109,6 +109,30 @@ async function main(): Promise<void> {
+   });
+   provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
  
 +  // Escalation provider (§16c) — same options as the primary so MCP tools and
 +  // identity carry over, EXCEPT user settings: the group's settings.json env
@@ -23,9 +23,6 @@ index 33679d23..f6c389ea 100644
 +  let fallbackProvider: AgentProvider | undefined;
 +  let fallbackProviderName: string | undefined;
 +  const fallbackName = config.fallbackProvider?.toLowerCase();
-+  // Same-name fallback is legitimate under the direct-router path: primary
-+  // claude points at the local router via the group's settings.json env, the
-+  // fallback is claude WITHOUT that scope — same provider, different backend.
 +  if (fallbackName) {
 +    try {
 +      fallbackProvider = createProvider(fallbackName as ProviderName, {
@@ -45,7 +42,7 @@ index 33679d23..f6c389ea 100644
    await runPollLoop({
      provider,
      providerName,
-@@ -111,6 +138,8 @@ async function main(): Promise<void> {
+@@ -116,6 +140,8 @@ async function main(): Promise<void> {
      systemContext: { instructions },
      lenientOutput: config.lenientOutput,
      learning: config.learning,

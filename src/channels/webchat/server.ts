@@ -176,11 +176,15 @@ import {
   startTtsInstall,
   getTailscaleInstallState,
   startTailscaleInstall,
+  getCloudflaredInstallState,
+  startCloudflaredInstall,
+  startCloudflaredConnect,
   getSttInstallState,
   startSttInstall,
   startRoutingInstall,
   getLitellmInstallState,
   startLitellmInstall,
+  deriveModelServerHosts,
   upsertEnv,
 } from './ollama-manage.js';
 import {
@@ -273,11 +277,13 @@ import {
   validateModel,
   writeAgentSettingsForAssignedModel,
   syncAgentProviderForAssignedModel,
+  classifierParamsForModel,
 } from './models.js';
 import { handleChunkedUpload, handleFileServe, handleMultipartUpload } from './files.js';
 import { initWebPush, isValidPushEndpoint } from './push.js';
 import { redactSensitiveData } from './redact.js';
 import { hasAdminPrivilege, isAnyAdmin, isGlobalAdmin, isOwner, warnIfNoPermissionsModule } from './roles.js';
+import { getLearningMasterEnabled, setLearningMasterEnabled, getLearningClassifier, setLearningClassifier } from '../../modules/learning/master.js';
 import { maybeHandleTts, ttsEndpoint } from './tts.js';
 import {
   DEFAULT_CLEANUP_PROMPT,
@@ -351,6 +357,7 @@ import {
   userHasConnectedCredential,
   getUserCredential,
   listEnrolledGroups,
+  listAllTrackedSecretIds,
 } from '../../modules/user-credentials/db.js';
 import {
   getContainerConfig,
@@ -1111,10 +1118,33 @@ async function handleHttp(
   // UIs can see accepted types).
   if (url.pathname === '/api/workspace-credential' && (method === 'GET' || method === 'PUT' || method === 'DELETE')) {
     if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
-    const credState = (provider: 'claude' | 'codex') => {
+    // The OneCLI vault, loaded lazily + once per request: only the GET path needs
+    // it (to detect a pre-existing credential), and only when there's no webchat
+    // row to short-circuit on.
+    let vaultSecrets: { id: string; type?: string }[] | null = null;
+    const loadVault = async () => {
+      if (vaultSecrets === null) {
+        try {
+          vaultSecrets = await realOnecliAdmin.listAllSecrets();
+        } catch {
+          vaultSecrets = []; // vault unreachable — fall back to "not connected"
+        }
+      }
+      return vaultSecrets;
+    };
+    const trackedSecretIds = new Set(listAllTrackedSecretIds());
+    // `connected` is true when the webchat manages a workspace-default credential
+    // (`external:false`) OR when a usable provider credential already lives in the
+    // OneCLI vault from `/setup` or a legacy path (`external:true`) — the latter is
+    // what base `all`-mode agents already authenticate with, so the wizard must
+    // not nag the operator to "connect" an engine that already works. An external
+    // credential is webchat-unmanaged: no cred_type to show, and not disconnectable.
+    const credState = async (provider: 'claude' | 'codex') => {
       const row = getUserCredential(WORKSPACE_DEFAULT_USER_ID, provider);
-      const connected = row?.status === 'active';
-      return { connected, credType: connected ? (row?.cred_type ?? null) : null };
+      if (row?.status === 'active') return { connected: true, credType: row.cred_type ?? null, external: false };
+      const secType = provider === 'codex' ? 'openai' : 'anthropic';
+      const external = (await loadVault()).some((s) => s.type === secType && !trackedSecretIds.has(s.id));
+      return { connected: external, credType: null, external };
     };
     if (method === 'GET') {
       // Flat claude fields (the original shape) + a codex block + the workspace
@@ -1122,12 +1152,16 @@ async function handleHttp(
       const defaultModelId = getDefaultModelId();
       const defaultModel = defaultModelId ? getWebchatModel(defaultModelId) : undefined;
       return json(res, 200, {
-        ...credState('claude'),
+        ...(await credState('claude')),
         provider: 'claude',
-        codex: credState('codex'),
+        codex: await credState('codex'),
         codexAvailable: codexAvailable(),
         defaultModelId: defaultModel?.id ?? null,
         defaultModelName: defaultModel ? `${defaultModel.name} (${defaultModel.model_id})` : null,
+        // Real fields so the wizard's Ollama card only claims "set" when an Ollama
+        // model is actually the default — kind is authoritative, not inferred.
+        defaultModelKind: defaultModel?.kind ?? null,
+        defaultModelModelId: defaultModel?.model_id ?? null,
       });
     }
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
@@ -1137,7 +1171,7 @@ async function handleHttp(
     try {
       if (method === 'DELETE') {
         const provider = url.searchParams.get('provider') === 'codex' ? 'codex' : 'claude';
-        const priorOauth = credState(provider).credType === 'oauth_token';
+        const priorOauth = getUserCredential(WORKSPACE_DEFAULT_USER_ID, provider)?.cred_type === 'oauth_token';
         await revokeUserCredential(realOnecliAdmin, WORKSPACE_DEFAULT_USER_ID, provider);
         restartGroupsForWorkspaceCredChange(provider, priorOauth, false);
         return json(res, 200, { ok: true });
@@ -1153,7 +1187,7 @@ async function handleHttp(
       const provider = body.provider === 'codex' ? 'codex' : 'claude';
       if (provider === 'codex' && !codexAvailable())
         return json(res, 400, { error: 'Codex support isn’t installed yet — add it with /add-codex first.' });
-      const priorOauth = credState(provider).credType === 'oauth_token';
+      const priorOauth = getUserCredential(WORKSPACE_DEFAULT_USER_ID, provider)?.cred_type === 'oauth_token';
       if (body.type === 'oauth_token') {
         const token = typeof body.token === 'string' ? body.token.trim() : '';
         if (provider === 'codex') {
@@ -1441,6 +1475,44 @@ async function handleHttp(
     const port = Number(process.env.WEBCHAT_PORT || DEFAULT_PORT);
     const result = await enableTailscaleServe(port);
     return json(res, result.ok ? 200 : 400, result);
+  }
+
+  // ── Access & security: install a Cloudflare Tunnel (token-driven) ───────────
+  // Owner/global-admin only, two explicit steps. GET reports install/service
+  // state + whether a one-click install can run here (Linux + root + systemd).
+  // POST /install installs just the cloudflared binary; POST /connect registers
+  // the managed-tunnel connector service from the operator's token — auth is
+  // enforced by the Cloudflare Access policy on the tunnel, dashboard-side.
+  if (url.pathname === '/api/webchat/cloudflared' && method === 'GET') {
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
+    return json(res, 200, getCloudflaredInstallState());
+  }
+  if (url.pathname === '/api/webchat/cloudflared/install' && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
+    const r = startCloudflaredInstall();
+    if (r.error === 'prereq-missing')
+      return json(res, 409, { error: 'Needs root + systemd — install cloudflared manually instead.' });
+    return json(res, r.started ? 202 : 409, { ...getCloudflaredInstallState(), started: r.started });
+  }
+  if (url.pathname === '/api/webchat/cloudflared/connect' && method === 'POST') {
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { token?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    if (typeof body.token !== 'string' || !body.token.trim()) return json(res, 400, { error: 'token required' });
+    const r = startCloudflaredConnect(body.token);
+    if (r.error === 'prereq-missing')
+      return json(res, 409, { error: 'Needs root + systemd — install cloudflared manually instead.' });
+    if (r.error === 'not-installed') return json(res, 409, { error: 'Install cloudflared first.' });
+    if (r.error === 'bad-token') return json(res, 400, { error: 'That doesn’t look like a tunnel token.' });
+    return json(res, r.started ? 202 : 409, { ...getCloudflaredInstallState(), started: r.started });
   }
 
   // ── Access & security: retire the bearer token ──────────────────────────────
@@ -3084,9 +3156,26 @@ async function handleHttp(
     return json(res, 200, { pulls: getPullsSnapshot() });
   }
   // Wizard: hardware profile + a recommended local model to prefill the download.
+  // Also report whether a REMOTE Ollama is already in the roster — if so, local
+  // RAM isn't the constraint (models run on that box), so the client softens the
+  // "tight fit" warning.
   if (url.pathname === '/api/ollama/recommend' && method === 'GET') {
     if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return json(res, 200, recommendForHost());
+    const remote = listWebchatModels().find((m) => {
+      if (m.kind !== 'ollama' || !m.endpoint) return false;
+      const host = (() => {
+        try {
+          return new URL(m.endpoint).hostname;
+        } catch {
+          return '';
+        }
+      })();
+      return host && !['127.0.0.1', 'localhost', '::1', 'host.docker.internal'].includes(host);
+    });
+    return json(res, 200, {
+      ...recommendForHost(),
+      remoteOllama: remote ? { present: true, endpoint: remote.endpoint } : { present: false },
+    });
   }
   // Local Ollama for the wizard: status probe + one-click rootless install.
   if (url.pathname === '/api/ollama/local' && method === 'GET') {
@@ -3221,6 +3310,50 @@ async function handleHttp(
     } catch {
       return json(res, 502, { error: 'TTS backend unreachable' });
     }
+  }
+  // Auto-learn MASTER switch (Settings → Features). GET for every authed user
+  // (the client hides the per-agent / per-room learning controls when off);
+  // PUT is owner-only. Enforced at spawn in materializeContainerJson.
+  if (url.pathname === '/api/learning/config' && (method === 'GET' || method === 'PUT')) {
+    const canEdit = isOwner(userId) || isGlobalAdmin(userId);
+    if (method === 'GET') {
+      const base = { enabled: getLearningMasterEnabled() };
+      return json(
+        res,
+        canEdit ? 200 : 200,
+        canEdit ? { ...base, canEdit: true, classifierModelId: getLearningClassifier().modelId } : { ...base, canEdit: false },
+      );
+    }
+    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+    if (!canEdit) return json(res, 403, { error: 'Owner only' });
+    const raw = await readJsonBody(req, res);
+    if (raw === null) return;
+    let body: { enabled?: unknown; classifierModelId?: unknown };
+    try {
+      body = JSON.parse(raw) as typeof body;
+    } catch {
+      return json(res, 400, { error: 'Invalid JSON' });
+    }
+    // Classifier model pick — resolve the roster model to CONTAINER-REACHABLE
+    // call params so the agent-runner (a Docker container) can reach it.
+    if ('classifierModelId' in body) {
+      if (body.classifierModelId === null) {
+        setLearningClassifier(null, null, null);
+        return json(res, 200, { ok: true, classifierModelId: null });
+      }
+      if (typeof body.classifierModelId !== 'string' || !body.classifierModelId.trim())
+        return json(res, 400, { error: 'classifierModelId must be a string or null' });
+      const model = getWebchatModel(body.classifierModelId.trim());
+      if (!model) return json(res, 404, { error: 'Model not found' });
+      const clf = classifierParamsForModel(model);
+      if (!clf)
+        return json(res, 400, { error: 'Classifier must be an ollama or openai-compatible roster model with an endpoint' });
+      setLearningClassifier(model.id, clf.url, clf.model);
+      return json(res, 200, { ok: true, classifierModelId: model.id });
+    }
+    if (typeof body.enabled !== 'boolean') return json(res, 400, { error: 'enabled must be a boolean' });
+    setLearningMasterEnabled(body.enabled);
+    return json(res, 200, { ok: true, enabled: body.enabled });
   }
   // Read aloud is workspace-level: the owner flips it for everyone (the GET
   // half lives in tts.ts's public config probe).
@@ -3391,7 +3524,11 @@ async function handleHttp(
   if (url.pathname === '/api/router/litellm-install' && method === 'POST') {
     if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const r = startLitellmInstall();
+    // Point LiteLLM at the operator's real model servers (a remote/LAN Ollama in
+    // the roster, or the hosts an existing config already declares) — not a
+    // localhost Ollama that may not exist. Falls back to the localhost default
+    // only when the roster is empty.
+    const r = startLitellmInstall(process.cwd(), deriveModelServerHosts() ?? undefined);
     if (r.error === 'installer-missing') {
       return json(res, 409, {
         error: 'The add-litellm skill is not present in this checkout.',
@@ -7588,8 +7725,14 @@ async function keepSkillDraftHandler(
   // skills, its OTHER pending drafts, and the pool. Advisory, not a wall —
   // the human overrides with force=1 ("Keep anyway"). Detects the twins the
   // exact-name supersede can't (the reviewer names skills freely).
-  const force = new URL(req.url || '', 'http://x').searchParams.get('force') === '1';
-  if (!force) {
+  const params = new URL(req.url || '', 'http://x').searchParams;
+  const force = params.get('force') === '1';
+  // `updateTarget` = the operator chose "Update <existing skill>" in the overlap
+  // review: apply THIS draft as a revision of that skill (snapshots the old
+  // version) instead of creating a duplicate. An explicit decision, so it skips
+  // the overlap review. sanitizeSkillName in apply.ts guards the path.
+  const updateTarget = (params.get('updateTarget') || '').trim();
+  if (!force && !updateTarget) {
     try {
       const overlaps = await findKeepOverlaps(getSkillDraft(draft.id)!);
       if (overlaps.length > 0) {
@@ -7603,10 +7746,14 @@ async function keepSkillDraftHandler(
     }
   }
   // The write itself lives in modules/learning/apply.ts — ONE implementation
-  // shared with auto-keep, so the two paths cannot drift.
+  // shared with auto-keep, so the two paths cannot drift. An "update existing"
+  // choice re-types the draft as a patch of the chosen skill.
+  const toApply = updateTarget
+    ? { ...draft, agent_group_id: group.id, kind: 'patch' as const, target_skill: updateTarget }
+    : { ...draft, agent_group_id: group.id };
   const r = applySkillDraft(
-    { ...draft, agent_group_id: group.id } as Parameters<typeof applySkillDraft>[0],
-    draft.kind === 'patch' ? 'Webchat skill revision applied' : 'Webchat learned skill kept',
+    toApply as Parameters<typeof applySkillDraft>[0],
+    updateTarget || draft.kind === 'patch' ? 'Webchat skill revision applied' : 'Webchat learned skill kept',
   );
   if (!r.ok) return json(res, r.status, { error: r.error });
   resolveDraftCard(draft.id, 'kept', userId);
@@ -7614,6 +7761,7 @@ async function keepSkillDraftHandler(
     ok: true,
     name: r.name,
     patched: r.patched,
+    updated: !!updateTarget,
     forkedFromPool: r.forkedFromPool,
     restarted: r.restarted,
   });

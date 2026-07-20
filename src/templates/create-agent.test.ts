@@ -26,6 +26,12 @@ import { PERSONA_PREPEND_FILE } from '../group-persona.js';
 import { inboundDbPath } from '../session-manager.js';
 import { createAgentFromTemplate } from './create-agent.js';
 
+// This suite drives real better-sqlite3 + fs + migrations per test. Uncontended
+// it runs in ~2s, but under the full CI suite (150+ parallel test files) the
+// default 5s timeout is occasionally starved and flakes a green build. Give it
+// headroom — correctness is unaffected, only the wall-clock ceiling.
+vi.setConfig({ testTimeout: 30_000 });
+
 function writeTemplate(): void {
   const t = path.join(TEMPLATES_DIR, 'sales', 'sdr');
   fs.mkdirSync(path.join(t, 'context', 'additional_context'), { recursive: true });

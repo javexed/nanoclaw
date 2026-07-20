@@ -34,6 +34,7 @@ import os from 'os';
 import path from 'path';
 
 import { safeFetch } from './models.js';
+import { listWebchatModels } from './db.js';
 import { getSystemdUnit, getLaunchdLabel } from '../../install-slug.js';
 
 // ── Host model listing ─────────────────────────────────────────────────────
@@ -248,6 +249,36 @@ export function parseConfiguredHosts(configText: string): string | null {
   return hosts.length > 0 ? hosts.join(',') : null;
 }
 
+/**
+ * Model-server hosts for `install-litellm --hosts`, so a fresh routing install
+ * points LiteLLM at the operator's ACTUAL model servers (often a remote/LAN
+ * Ollama) instead of defaulting to a non-existent localhost. Priority:
+ *   1. An existing config.yaml `# hosts:` header — reuse what's already wired.
+ *   2. The roster's Ollama endpoints (distinct) — the servers the operator
+ *      registered. LiteLLM's own proxy (an openai-compatible row) is never a
+ *      model server, so those are skipped (they'd be circular).
+ * Returns null when nothing is known; the caller then keeps install-litellm's
+ * localhost default (which yields its clear "no model server reachable" hint).
+ */
+export function deriveModelServerHosts(root = process.cwd()): string | null {
+  const configPath = path.join(root, 'data/litellm/config.yaml');
+  if (fs.existsSync(configPath)) {
+    const fromConfig = parseConfiguredHosts(fs.readFileSync(configPath, 'utf8'));
+    if (fromConfig) return fromConfig;
+  }
+  try {
+    const seen = new Set<string>();
+    for (const m of listWebchatModels()) {
+      if (m.kind !== 'ollama' || !m.endpoint) continue;
+      const host = m.endpoint.replace(/\/+$/, '');
+      if (host) seen.add(host);
+    }
+    return seen.size > 0 ? [...seen].join(',') : null;
+  } catch {
+    return null;
+  }
+}
+
 export function getRosterRefreshState(root = process.cwd()): RosterRefreshState {
   refreshState.available =
     fs.existsSync(litellmInstallerPath(root)) && fs.existsSync(path.join(root, 'data/litellm/config.yaml'));
@@ -265,7 +296,25 @@ interface InstallState {
 
 /** A chain step: a spawned command, or an in-process callback (with a log label).
  *  Callbacks may be async — the chain awaits a returned promise. */
-export type InstallStep = { run: [string, string[]] } | { call: () => void | Promise<void>; label: string };
+export type InstallStep =
+  | { run: [string, string[]]; env?: Record<string, string> }
+  | { call: () => void | Promise<void>; label: string };
+
+/**
+ * Child env for a chain step. The service PATH frequently omits the directory of
+ * the node that's running us — mise/nvm/asdf/Volta install node (and its bundled
+ * pnpm/corepack) under a versioned dir that systemd's own PATH never lists — so a
+ * bare `spawn('pnpm', …)` dies with `spawn pnpm ENOENT`. pnpm ships alongside that
+ * node, so splice its dir onto PATH for every step and its own children (e.g.
+ * `container/build.sh`'s pnpm/node calls). Step-specific env still layers on top.
+ */
+function installChainEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
+  const nodeDir = path.dirname(process.execPath);
+  const parts = (env.PATH ?? '').split(path.delimiter).filter(Boolean);
+  if (!parts.includes(nodeDir)) env.PATH = [nodeDir, ...parts].join(path.delimiter);
+  return env;
+}
 
 /**
  * Run installer steps in sequence, streaming a capped rolling log into `state`.
@@ -333,7 +382,9 @@ function runInstallChain(state: InstallState, steps: InstallStep[], root: string
     }
     const [cmd, args] = step.run;
     append(`→ ${args[0].split('/').slice(-1)[0]} …\n`);
-    const child = spawn(cmd, args, { cwd: root });
+    // A step may carry extra env (e.g. a secret token) — merged over the parent
+    // so it reaches the child WITHOUT ever appearing in the streamed log or args.
+    const child = spawn(cmd, args, { cwd: root, env: installChainEnv(step.env) });
     child.stdout.on('data', append);
     child.stderr.on('data', append);
     // A missing binary (ENOENT — e.g. node/pnpm not on the service PATH) emits
@@ -631,7 +682,7 @@ export function getSttInstallState(root = process.cwd()): SttInstallState {
     ...sttInstallState,
     installed: Boolean(
       process.env.WEBCHAT_STT_URL ||
-        (process.env.WEBCHAT_STT_PROVIDER === 'elevenlabs' && process.env.WEBCHAT_STT_API_KEY),
+      (process.env.WEBCHAT_STT_PROVIDER === 'elevenlabs' && process.env.WEBCHAT_STT_API_KEY),
     ),
     enabled: process.env.WEBCHAT_STT_ENABLED === 'true',
     provider: process.env.WEBCHAT_STT_PROVIDER || 'local',
@@ -828,6 +879,143 @@ export function startTailscaleInstall(root = process.cwd()): StartRoutingResult 
     { run: ['bash', ['-c', 'timeout 600 tailscale up --accept-dns=false']] },
   ];
   runInstallChain(tailscaleInstallState, steps, root);
+  return { started: true };
+}
+
+// ── Cloudflare Tunnel install (one-click from the wizard Access step) ────────
+// Token-driven, remotely-MANAGED tunnel: the operator creates the tunnel + its
+// public hostname + an Access policy in the Cloudflare Zero Trust dashboard,
+// copies the connector token, and pastes it here. We install cloudflared from
+// Cloudflare's SIGNED apt repo (no curl|sh) and `cloudflared service install
+// <token>`, which registers + starts the systemd service running the connector.
+// Auth is enforced Cloudflare-side by the Access policy — never public-no-auth.
+// The token reaches the child via env (TUNNEL_TOKEN), so it never lands in the
+// streamed install log; it does persist in the service unit at rest, as the
+// managed-tunnel model requires.
+const cloudflaredInstallState: InstallState = {
+  running: false,
+  lines: [],
+  exitCode: null,
+  startedAt: null,
+  finishedAt: null,
+};
+
+function cloudflaredPresent(): boolean {
+  return ['/usr/bin/cloudflared', '/usr/local/bin/cloudflared', '/bin/cloudflared'].some((p) => fs.existsSync(p));
+}
+function cloudflaredServicePresent(): boolean {
+  return (
+    fs.existsSync('/etc/systemd/system/cloudflared.service') ||
+    fs.existsSync('/etc/systemd/system/multi-user.target.wants/cloudflared.service')
+  );
+}
+
+export interface CloudflaredInstallState extends InstallState {
+  /** cloudflared binary present. */
+  installed: boolean;
+  /** The systemd connector service is registered (token-mode configured). */
+  serviceInstalled: boolean;
+  /** Host process is root — the install + service registration need it. */
+  isRoot: boolean;
+  /** systemd is PID 1 here — `cloudflared service install` registers a unit. */
+  hasSystemd: boolean;
+  /** Linux + root + systemd, so a one-click install can run here. cloudflared
+   *  itself needs no TUN/caps (unlike tailscaled), so an unprivileged LXC with
+   *  systemd + container-root qualifies — the common Proxmox case. */
+  canInstall: boolean;
+}
+
+// `/run/systemd/system` exists iff the box booted with systemd as init — the
+// canonical check. `cloudflared service install` needs a reachable systemd; a
+// non-systemd container (Docker / minimal LXC) gets the manual-link fallback
+// instead of a failing install, matching the Tailscale card's UX.
+function systemdBooted(): boolean {
+  return fs.existsSync('/run/systemd/system');
+}
+
+export function getCloudflaredInstallState(): CloudflaredInstallState {
+  const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+  const hasSystemd = systemdBooted();
+  return {
+    ...cloudflaredInstallState,
+    installed: cloudflaredPresent(),
+    serviceInstalled: cloudflaredServicePresent(),
+    isRoot,
+    hasSystemd,
+    canInstall: process.platform === 'linux' && isRoot && hasSystemd,
+  };
+}
+
+// Signed apt repo (Debian/Ubuntu — the LXC/Proxmox target). Fetches only the GPG
+// key file (piped to a file, not a shell), then apt verifies the package
+// signature. Idempotent; refuses on non-apt distros rather than curl|sh.
+const CLOUDFLARED_PKG_INSTALL = [
+  'set -e',
+  'if command -v cloudflared >/dev/null 2>&1; then echo "cloudflared already installed"; exit 0; fi',
+  'if command -v apt-get >/dev/null 2>&1; then',
+  '  install -m 0755 -d /usr/share/keyrings',
+  '  curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg -o /usr/share/keyrings/cloudflare-main.gpg',
+  '  echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main" > /etc/apt/sources.list.d/cloudflared.list',
+  '  apt-get update',
+  '  apt-get install -y cloudflared',
+  'else',
+  '  echo "No apt-get. Install cloudflared manually (https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/), then re-run." >&2',
+  '  exit 1',
+  'fi',
+].join('\n');
+
+export interface StartCloudflaredResult {
+  started: boolean;
+  error?: 'already-running' | 'prereq-missing' | 'bad-token' | 'not-installed';
+}
+
+// A connector token is a long base64url blob (a base64-encoded JSON). Reject
+// empties / obviously-wrong values before spawning anything as root — not full
+// validation (only Cloudflare can confirm), just a shape guard.
+export function looksLikeTunnelToken(t: string): boolean {
+  return /^[A-Za-z0-9+/=_-]{40,}$/.test((t || '').trim());
+}
+
+function beginCloudflared(): void {
+  cloudflaredInstallState.running = true;
+  cloudflaredInstallState.lines = [];
+  cloudflaredInstallState.exitCode = null;
+  cloudflaredInstallState.startedAt = Date.now();
+  cloudflaredInstallState.finishedAt = null;
+}
+
+// Step 1 — install just the cloudflared binary (signed apt repo). No token, so
+// the operator can install first, then create the tunnel + paste its token to
+// connect. Idempotent (no-ops if already present).
+export function startCloudflaredInstall(root = process.cwd()): StartCloudflaredResult {
+  if (cloudflaredInstallState.running) return { started: false, error: 'already-running' };
+  if (!getCloudflaredInstallState().canInstall) return { started: false, error: 'prereq-missing' };
+  beginCloudflared();
+  runInstallChain(cloudflaredInstallState, [{ run: ['bash', ['-c', CLOUDFLARED_PKG_INSTALL]] }], root);
+  return { started: true };
+}
+
+// Step 2 — register + start the managed-tunnel connector from the operator's
+// token. Requires cloudflared already present (step 1). The token arrives via env
+// so it never reaches the streamed log; `service install` reads it as its arg.
+// Reinstall-safe: drop any prior unit first (ignore failure).
+export function startCloudflaredConnect(token: string, root = process.cwd()): StartCloudflaredResult {
+  if (cloudflaredInstallState.running) return { started: false, error: 'already-running' };
+  if (!getCloudflaredInstallState().canInstall) return { started: false, error: 'prereq-missing' };
+  if (!cloudflaredPresent()) return { started: false, error: 'not-installed' };
+  const tok = (token || '').trim();
+  if (!looksLikeTunnelToken(tok)) return { started: false, error: 'bad-token' };
+  beginCloudflared();
+  const steps: InstallStep[] = [
+    {
+      run: [
+        'bash',
+        ['-c', 'cloudflared service uninstall >/dev/null 2>&1 || true; cloudflared service install "$TUNNEL_TOKEN"'],
+      ],
+      env: { TUNNEL_TOKEN: tok },
+    },
+  ];
+  runInstallChain(cloudflaredInstallState, steps, root);
   return { started: true };
 }
 
@@ -1044,6 +1232,16 @@ export function getCodexInstallProgress(): InstallState {
  * per-context branching (the part that can't be live-exercised here) is unit
  * tested. macOS uses launchd; Linux uses the user systemd session when one
  * exists (rootless dev host), falling back to the system unit (LXC / root).
+ *
+ * Linux uses `systemd-run` so the restart runs as a transient unit owned by the
+ * systemd MANAGER, not as a child of this process. A service restarting ITSELF
+ * with a plain `systemctl restart` is fragile: the child issuing it lives in the
+ * unit's cgroup, and `KillMode=control-group` (the default) SIGKILLs the whole
+ * cgroup on stop — so the restarter can die before the restart is even enqueued,
+ * leaving the OLD process running (the "machine's up but the service never
+ * reloaded, so the new provider never registers" bug). A transient unit is
+ * detached from that cgroup and survives the teardown. Falls back to a bare
+ * `systemctl restart` where systemd-run isn't available.
  */
 export function providerRestartCommand(opts: {
   platform: NodeJS.Platform;
@@ -1052,15 +1250,51 @@ export function providerRestartCommand(opts: {
   label: string;
 }): string {
   if (opts.platform === 'darwin') return `launchctl kickstart -k gui/$(id -u)/${opts.label}`;
-  if (opts.hasUserSession) return `systemctl --user restart ${opts.unit} 2>/dev/null || systemctl restart ${opts.unit}`;
-  return `systemctl restart ${opts.unit}`;
+  if (opts.hasUserSession) {
+    return (
+      `systemd-run --user --quiet --collect systemctl --user restart ${opts.unit} 2>/dev/null || ` +
+      `systemd-run --quiet --collect systemctl restart ${opts.unit} 2>/dev/null || ` +
+      `systemctl --user restart ${opts.unit} 2>/dev/null || systemctl restart ${opts.unit}`
+    );
+  }
+  return `systemd-run --quiet --collect systemctl restart ${opts.unit} 2>/dev/null || systemctl restart ${opts.unit}`;
+}
+
+/**
+ * The systemd unit this process is actually running under, read from its own
+ * cgroup. `getSystemdUnit()` computes the name a *fresh setup* would register
+ * (`nanoclaw-v2-<slug>`), but other installers name it differently — the Proxmox
+ * community/deploy path uses a plain `nanoclaw.service`. Restarting the computed
+ * name then hits a unit that doesn't exist and silently no-ops, so the service
+ * never reloads (the "Codex installed but never activates" bug). Reading the live
+ * cgroup makes the restart target whatever unit we're truly under, regardless of
+ * what the installer called it. Pure so it's unit-tested against real cgroup text.
+ */
+export function parseSystemdUnitFromCgroup(cgroup: string): string | null {
+  // cgroup v2: "0::/system.slice/nanoclaw.service". A --user service nests under
+  // "user@UID.service/…/<unit>.service", so the LEAF (last match) is our unit.
+  let unit: string | null = null;
+  for (const line of cgroup.split('\n')) {
+    const matches = line.match(/[A-Za-z0-9@%:._-]+\.service/g);
+    if (matches && matches.length) unit = matches[matches.length - 1];
+  }
+  return unit;
+}
+
+function runningSystemdUnit(): string | null {
+  try {
+    return parseSystemdUnitFromCgroup(fs.readFileSync('/proc/self/cgroup', 'utf8'));
+  } catch {
+    return null;
+  }
 }
 
 function restartHostForProvider(): void {
   const cmd = providerRestartCommand({
     platform: process.platform,
     hasUserSession: Boolean(process.env.XDG_RUNTIME_DIR),
-    unit: getSystemdUnit(),
+    // The unit we're ACTUALLY running under wins; fall back to the computed name.
+    unit: runningSystemdUnit() ?? getSystemdUnit(),
     label: getLaunchdLabel(),
   });
   spawn('sh', ['-c', `sleep 2; ${cmd}`], { detached: true, stdio: 'ignore' }).unref();

@@ -5,9 +5,9 @@ description: Use Codex (OpenAI's codex app-server) as a full agent provider — 
 
 # Codex agent provider
 
-> Shortcut: `pnpm exec tsx setup/index.ts --step provider-auth codex` performs this whole install (manifest-driven from the providers branch: files, barrels, CLI manifest entry, image rebuild) plus auth in one command. The steps below are the same operations, for agent-driven or manual application.
+> Shortcut: `pnpm exec tsx setup/index.ts --step provider-auth codex` performs this whole install (manifest-driven from the fork's `providers-codex` branch: files, barrels, CLI manifest entry, image rebuild) plus auth in one command. The steps below are the same operations, for agent-driven or manual application.
 
-NanoClaw selects each group's agent backend from `container_configs.provider` (default `claude`). This skill installs the Codex provider: copy the payload from the `providers` branch, append one import to each of the three provider barrels, add the pinned Codex CLI to the container manifest (`container/cli-tools.json`), rebuild, then run the vault auth walk-through.
+NanoClaw selects each group's agent backend from `container_configs.provider` (default `claude`). This skill installs the Codex provider: copy the payload from the fork's `providers-codex` branch, append one import to each of the three provider barrels, add the pinned Codex CLI to the container manifest (`container/cli-tools.json`), rebuild, then run the vault auth walk-through.
 
 The provider runs `codex app-server` as a child process speaking JSON-RPC over stdio: native streaming, MCP tools, server-side conversation history (the continuation is a thread id, no on-disk transcript). Credentials are **vault-only**: OneCLI serves a sentinel `auth.json` stub into the container and swaps the real ChatGPT token or API key on the wire — no key in `.env`, nothing readable in the container.
 
@@ -27,9 +27,9 @@ Check whether the payload is already wired (a prior apply, or a trunk that still
 
 ### 1. Fetch and copy the payload
 
-Fetch the `providers` branch and copy the Codex payload into all three trees (additive — overwrite each file, never merge the branch). The host files are the provider contribution + AGENTS.md compose + their guards; the container files are the provider runtime (turn loop, JSON-RPC wrapper, per-exchange archiver) + their guards; the setup file is the picker entry + vault auth walk-through; `container/AGENTS.md` is the runtime-contract base the composed AGENTS.md embeds.
+Fetch the **`providers-codex`** branch and copy the Codex payload into all three trees (additive — overwrite each file, never merge the branch). `providers-codex` is this fork's own Codex source (on forgejo): upstream's `providers` payload plus a small carried patch — the MCP-union writer fix, since Codex's `config.toml` can't express this fork's remote (sse/http) MCP servers, so the writer skips them. Keep it current with upstream via `scripts/sync-providers-codex.sh` (rebase-carry; see its header). The host files are the provider contribution + AGENTS.md compose + their guards; the container files are the provider runtime (turn loop, JSON-RPC wrapper, native memory SessionStart hook, per-exchange archiver) + their guards; the setup file is the picker entry + vault auth walk-through; `container/AGENTS.md` is the runtime-contract base the composed AGENTS.md embeds.
 
-```nc:copy from-branch:providers
+```nc:copy from-branch:providers-codex
 src/providers/codex.ts
 src/providers/codex-agents-md.ts
 src/providers/codex-registration.test.ts
@@ -110,7 +110,11 @@ ncl groups config update --id <group-id> --provider codex
 ncl groups restart --id <group-id>
 ```
 
-Switching is an operator action — run it from the host. Memory does NOT carry over automatically — each provider keeps its own store; run `/migrate-memory` to carry it across. See [docs/provider-migration.md](../../docs/provider-migration.md) for the carry-over table and rollback.
+Switching is an operator action — run it from the host. Every provider uses the
+same `memory/` tree, so memory carries across automatically. Run
+`/migrate-memory` only when upgrading a group that still has legacy `.seed.md`,
+`CLAUDE.local.md`, or unindexed imported memory. See
+[docs/provider-migration.md](../../docs/provider-migration.md).
 
 ### Default new groups to codex (optional)
 

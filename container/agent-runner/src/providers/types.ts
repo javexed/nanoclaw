@@ -1,3 +1,5 @@
+import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
+
 export interface AgentProvider {
   /**
    * True if the provider's underlying SDK handles slash commands natively and
@@ -21,6 +23,8 @@ export interface AgentProvider {
    * provider, never gated on a provider name.
    */
   readonly usesMemoryScaffold?: boolean;
+  /** Register shared memory through the provider's native session-start mechanism. */
+  registerMemorySessionHook(hook: MemorySessionHookRegistration): void;
 
   /**
    * Optional. Called by the poll-loop after each completed exchange (a

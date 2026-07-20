@@ -90,6 +90,8 @@ export interface PollLoopConfig {
     autoKeep?: boolean;
     cooldownMinutes?: number;
     rooms?: Record<string, { autoTrigger?: boolean; autoKeep?: boolean }>;
+    /** Classifier gate — {url, model}: consulted before an auto-review. */
+    classifier?: { url: string; model: string };
   };
   /**
    * Optional stop signal. In production the loop runs until the container
@@ -349,14 +351,23 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         return;
       autoReviewInFlight = true;
       lastAutoReviewAt = Date.now();
-      log(`Auto learning review (turn used ${toolCount} tools)`);
-      void runLearningReview(config, routing, messages, continuation, LEARNING_REVIEW_PROMPT, {
-        announceDecline: false,
-      })
-        .catch((err) => log(`Auto learning review failed: ${err instanceof Error ? err.message : String(err)}`))
-        .finally(() => {
+      const clf = config.learning?.classifier;
+      void (async () => {
+        try {
+          if (clf?.url && clf?.model && !(await classifyWorthReviewing(clf, messages, toolCount))) {
+            log(`Learning classifier: turn not skill-worthy — skipping review`);
+            return;
+          }
+          log(`Auto learning review (turn used ${toolCount} tools)`);
+          await runLearningReview(config, routing, messages, continuation, LEARNING_REVIEW_PROMPT, {
+            announceDecline: false,
+          });
+        } catch (err) {
+          log(`Auto learning review failed: ${err instanceof Error ? err.message : String(err)}`);
+        } finally {
           autoReviewInFlight = false;
-        });
+        }
+      })();
     };
 
     const query = config.provider.query({
@@ -998,6 +1009,56 @@ export function shouldAutoReview(args: {
   const cooldownMs = (learning?.cooldownMinutes ?? 30) * 60_000;
   if (lastAutoReviewAt !== null && now - lastAutoReviewAt < cooldownMs) return false;
   return true;
+}
+
+/**
+ * Classifier gate: ask a small local model whether a busy turn is actually
+ * worth distilling into a skill, before spending the (expensive) review on the
+ * agent's own model. Best-effort — any failure (unreachable, timeout, bad
+ * response) returns true so a classifier hiccup never SILENTLY drops a review
+ * the heuristic already flagged. The endpoint is container-reachable (resolved
+ * host-side at pick time).
+ */
+export async function classifyWorthReviewing(
+  classifier: { url: string; model: string },
+  messages: MessageInRow[],
+  toolCount: number,
+): Promise<boolean> {
+  const asks = messages
+    .map((m) => (m.content || '').trim())
+    .filter(Boolean)
+    .join('\n')
+    .slice(0, 2000);
+  const system =
+    'You gate a skill-learning loop. Given what a user asked and how much tool ' +
+    'work an assistant did, decide if this turn performed a REUSABLE procedure ' +
+    'worth saving as a skill (a repeatable workflow, a non-obvious setup, a ' +
+    'multi-step task likely to recur). One-off chit-chat, simple lookups, or ' +
+    'unique/personal requests are NOT skill-worthy. Answer with ONLY "yes" or "no".';
+  const user = `User request(s):\n${asks || '(none captured)'}\n\nAssistant used ${toolCount} tools this turn.\n\nSkill-worthy? yes or no:`;
+  try {
+    const res = await fetch(classifier.url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: classifier.model,
+        temperature: 0,
+        max_tokens: 4,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+      }),
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!res.ok) return true;
+    const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    const answer = (body.choices?.[0]?.message?.content ?? '').trim().toLowerCase();
+    // Default to reviewing unless the model clearly said no.
+    return !/^\s*no\b/.test(answer);
+  } catch {
+    return true;
+  }
 }
 
 async function runLearningReview(

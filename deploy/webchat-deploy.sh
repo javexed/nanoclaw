@@ -134,6 +134,12 @@ fi
 env_set ONECLI_URL "$ONECLI_URL"
 [ -n "$TZ_VAL" ] || TZ_VAL="$(timedatectl show -p Timezone --value 2>/dev/null || echo UTC)"
 env_set TZ "$TZ_VAL"
+# When installing from a fork/forgejo that carries fork-only payload branches
+# (e.g. `providers-codex`), persist the source repo so `from-branch` skill
+# installs — codex from Settings — resolve it instead of the nanocoai default.
+# Only written when provided; env-load.ts loads it into the host process, and
+# env_set is add-if-missing so a re-deploy preserves an operator's value.
+if [ -n "${NANOCLAW_CHANNELS_REMOTE_URL:-}" ]; then env_set NANOCLAW_CHANNELS_REMOTE_URL "$NANOCLAW_CHANNELS_REMOTE_URL"; fi
 say "Wrote .env (webchat on ${HOST}:${PORT})"
 
 # ── 3. System service (root + systemd) ──────────────────────────────────────
