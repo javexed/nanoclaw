@@ -79,7 +79,7 @@ export interface ContainerConfig {
    */
   lenientOutput?: boolean;
   /**
-   * Learning-loop behavior (docs/learning-loop.md). Absent keys mean defaults:
+   * Learning-loop behavior (docs/webchat/learning-loop.md). Absent keys mean defaults:
    * autoTrigger ON (a busy turn auto-runs the review; it only STAGES a draft),
    * autoKeep OFF (auto-accepting self-written context is an owner-level opt-in),
    * cooldownMinutes 30.
@@ -159,7 +159,7 @@ export function materializeContainerJson(agentGroupId: string): ContainerConfig 
     if (Object.keys(roomLearning).length > 0) {
       config.learning = { ...(config.learning ?? {}), rooms: roomLearning };
     }
-    // Classifier gate (docs/learning-loop.md): a small local model the runner
+    // Classifier gate (docs/webchat/learning-loop.md): a small local model the runner
     // consults before an expensive review. Precedence:
     //   1. An explicit Settings override (Auto-learn → Classifier model), resolved
     //      to a container-reachable url at pick time.

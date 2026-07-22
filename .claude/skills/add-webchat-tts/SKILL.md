@@ -20,7 +20,7 @@ The webchat host **proxies** synthesis (`/api/tts` → backend) so the browser
 only ever talks to the webchat origin. That's what makes it work over
 Tailscale/remote access, not just localhost.
 
-Design + integration map: [docs/design/add-webchat-tts.md](../../../docs/design/add-webchat-tts.md).
+Design + integration map: [docs/webchat/design/add-webchat-tts.md](../../../docs/webchat/design/add-webchat-tts.md).
 
 ## Prerequisites
 

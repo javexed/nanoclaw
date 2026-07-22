@@ -267,6 +267,10 @@ import {
   getSttCleanupPrompt,
   setSttCleanupPrompt,
   setReadAloudEnabled,
+  getApprovalPrejudgeModelId,
+  setApprovalPrejudgeModelId,
+  getApprovalPrejudgeActions,
+  setApprovalPrejudgeActions,
 } from './db.js';
 import { DraftError, draftAgent } from './drafter.js';
 import { recommendForHost } from './model-recommend.js';
@@ -283,7 +287,18 @@ import { handleChunkedUpload, handleFileServe, handleMultipartUpload } from './f
 import { initWebPush, isValidPushEndpoint } from './push.js';
 import { redactSensitiveData } from './redact.js';
 import { hasAdminPrivilege, isAnyAdmin, isGlobalAdmin, isOwner, warnIfNoPermissionsModule } from './roles.js';
-import { getLearningMasterEnabled, setLearningMasterEnabled, getLearningClassifier, setLearningClassifier } from '../../modules/learning/master.js';
+import {
+  getLearningMasterEnabled,
+  setLearningMasterEnabled,
+  getLearningClassifier,
+  setLearningClassifier,
+} from '../../modules/learning/master.js';
+import {
+  isUsableJudgeModel,
+  NEVER_AUTO_APPROVE_ACTIONS,
+  NEVER_AUTO_APPROVE_PATTERNS,
+} from '../../modules/approvals/prejudge.js';
+import { listRegisteredApprovalActions } from '../../modules/approvals/primitive.js';
 import { maybeHandleTts, ttsEndpoint } from './tts.js';
 import {
   DEFAULT_CLEANUP_PROMPT,
@@ -373,7 +388,7 @@ import {
   updateSkillDraftBody,
 } from '../../db/skill-drafts.js';
 import type { SkillDraft } from '../../db/skill-drafts.js';
-import { markRoomSkillDraftResolved } from './db.js';
+import { listSkillDraftCards, markRoomSkillDraftResolved, skillDraftCardPosition } from './db.js';
 import type { McpServerConfig } from '../../container-config.js';
 import { validateMcpServerName } from '../../mcp-server-config.js';
 import {
@@ -399,7 +414,7 @@ import {
 import { probeMcpEndpoint } from './mcp-probe.js';
 import { checkMcpServer } from './mcp-health.js';
 import { finishOAuthFlow, parseMcpAuth, startOAuthFlow } from './mcp-auth.js';
-import { broadcast, broadcastRooms } from './state.js';
+import { broadcast, broadcastRooms, pushToUser } from './state.js';
 import { setupWebSocket } from './ws.js';
 import {
   findDuplicateScopedSkills,
@@ -686,834 +701,10 @@ async function handleHttp(
   // enabled-gating and backend proxying. See tts.ts + /add-webchat-tts skill.
   if (await maybeHandleTts(req, res, url, method)) return;
 
-  // ── Your @-mention handle (the slug others type to @-mention you) ──────
-  if (url.pathname === '/api/me/handle' && method === 'GET') {
-    return json(res, 200, { handle: getWebchatUserHandle(userId) ?? '' });
-  }
-  if (url.pathname === '/api/me/handle' && method === 'PUT') {
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { handle?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    const handle = typeof body.handle === 'string' ? body.handle.trim().toLowerCase() : '';
-    const result = setWebchatUserHandle(userId, handle);
-    if (!result.ok) {
-      return result.reason === 'taken'
-        ? json(res, 409, { error: 'That handle is already taken' })
-        : json(res, 400, { error: 'Handle must be 1–32 characters: lowercase letters, numbers, and hyphens' });
-    }
-    return json(res, 200, { ok: true, handle });
-  }
-
-  // ── Overview ──────────────────────────────────────────────────────────
-  if (url.pathname === '/api/overview' && method === 'GET') {
-    return json(res, 200, await buildOverview(userId));
-  }
-
-  // ── Rooms ─────────────────────────────────────────────────────────────
-  // Two creation paths exist for historical reasons and they are NOT
-  // redundant: POST /api/agents is "agent-first" (the room is incidental,
-  // 1:1 with the agent's folder), POST /api/rooms is "room-first" (the
-  // room is the conversation unit and you wire 1+ agents to it). Both
-  // converge on the same messaging_groups + messaging_group_agents shape.
-  if (url.pathname === '/api/rooms' && method === 'GET') {
-    const visible = filterRoomsForUser(userId, getAllWebchatRooms());
-    const archivedSet = getArchivedRoomIds(); // global
-    const hiddenSet = getHiddenRoomIdsForUser(userId); // per-user
-    return json(
-      res,
-      200,
-      visible.map((r) => ({
-        ...r,
-        archived: archivedSet.has(r.id),
-        hidden: hiddenSet.has(r.id),
-        canArchive: canArchiveRoom(userId, r.id),
-      })),
-    );
-  }
-  if (url.pathname === '/api/rooms' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') {
-      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    }
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return createRoomHandler(req, res);
-  }
-
-  const roomIdMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)$/);
-  if (roomIdMatch && method === 'DELETE') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return deleteRoomHandler(res, decodeURIComponent(roomIdMatch[1]));
-  }
-
-  const roomAgentsMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/agents$/);
-  if (roomAgentsMatch && method === 'GET') {
-    const roomId = decodeURIComponent(roomAgentsMatch[1]);
-    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
-    const agents = getAgentsForWebchatRoom(roomId);
-    const primeAgentId = getPrimeAgentForWebchatRoom(roomId);
-    return json(
-      res,
-      200,
-      agents.map((a) => ({
-        ...a,
-        is_prime: a.id === primeAgentId,
-        // Whether this agent auto-runs the learning review after busy turns.
-        // Member-visible on purpose: the client uses it to suppress the manual
-        // nudge (auto already ran — a tap would just double the review).
-        learning_auto: parseAgentLearning(a.id).autoTrigger !== false,
-      })),
-    );
-  }
-  // People you can @-mention in this room: anyone with a handle who can access
-  // it (NOT limited to who's currently connected — a mention notifies on
-  // return). Excludes the requester. Used by the composer's @ autocomplete.
-  const roomMentionableMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/mentionable$/);
-  if (roomMentionableMatch && method === 'GET') {
-    const roomId = decodeURIComponent(roomMentionableMatch[1]);
-    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
-    const people = getWebchatHandleUsers()
-      .filter((u) => u.userId !== userId && canAccessRoom(u.userId, roomId))
-      .map((u) => ({ handle: u.handle, name: u.displayName || u.handle }));
-    return json(res, 200, people);
-  }
-
-  if (roomAgentsMatch && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') {
-      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    }
-    // Permission is body-dependent (which agent is being wired), so it is
-    // enforced inside the handler once the AgentRef is parsed. Owners may wire
-    // anything; a scoped admin may wire an agent THEY administer to a room
-    // they can access.
-    return addAgentToRoomHandler(req, res, decodeURIComponent(roomAgentsMatch[1]), userId);
-  }
-
-  // ── UserCreds: per-room credential mode (admin) ────────────────────────────────
-  const roomCredModeMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/credential-mode$/);
-  if (roomCredModeMatch && method === 'GET') {
-    const roomId = decodeURIComponent(roomCredModeMatch[1]);
-    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
-    // The per-room OVERRIDE ('inherit' when unset); the effective mode is what the
-    // room actually runs (override, else the global default).
-    return json(res, 200, {
-      mode: getRoomModeOverride(roomId) ?? 'inherit',
-      effectiveMode: getEffectiveRoomMode(roomId),
-      defaultMode: getCredentialsConfig().defaultMode,
-    });
-  }
-  if (roomCredModeMatch && method === 'PUT') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const roomId = decodeURIComponent(roomCredModeMatch[1]);
-    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    // Owner, or an admin over ANY agent wired to this room.
-    const allowed = isOwner(userId) || getAgentsForWebchatRoom(roomId).some((a) => hasAdminPrivilege(userId, a.id));
-    if (!allowed) return json(res, 403, { error: 'Admin privilege required' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { mode?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    if (body.mode !== 'inherit' && body.mode !== 'disabled' && body.mode !== 'optional' && body.mode !== 'required') {
-      return json(res, 400, { error: "mode must be 'inherit', 'disabled', 'optional', or 'required'" });
-    }
-    // 'inherit' clears the override so the room follows the global default.
-    setRoomModeOverride(roomId, body.mode === 'inherit' ? null : body.mode);
-    return json(res, 200, { ok: true, mode: body.mode });
-  }
-
-  // ── UserCreds OAuth: per-room toggle allowing subscription tokens (admin) ───────
-  const roomOauthMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/oauth-allowed$/);
-  if (roomOauthMatch && method === 'GET') {
-    const roomId = decodeURIComponent(roomOauthMatch[1]);
-    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
-    return json(res, 200, { allowed: getRoomOauthAllowed(roomId) });
-  }
-  if (roomOauthMatch && method === 'PUT') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const roomId = decodeURIComponent(roomOauthMatch[1]);
-    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    const allowed = isOwner(userId) || getAgentsForWebchatRoom(roomId).some((a) => hasAdminPrivilege(userId, a.id));
-    if (!allowed) return json(res, 403, { error: 'Admin privilege required' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { allowed?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    if (typeof body.allowed !== 'boolean') return json(res, 400, { error: 'allowed must be a boolean' });
-    setRoomOauthAllowed(roomId, body.allowed);
-    return json(res, 200, { ok: true, allowed: body.allowed });
-  }
-
-  // ── UserCreds: workspace credentials policy — accepted TYPES + default room mode ──
-  // Read by anyone (the room UIs need it); only the owner can change it.
-  if (url.pathname === '/api/webchat/credentials-config' && (method === 'GET' || method === 'PUT')) {
-    if (method === 'GET') {
-      return json(res, 200, { ...getCredentialsConfig(), codexAvailable: codexAvailable(), canEdit: isOwner(userId) });
-    }
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: Record<string, unknown>;
-    try {
-      body = JSON.parse(raw) as Record<string, unknown>;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    const patch: Partial<CredentialsConfig> = {};
-    if (body.defaultMode !== undefined) {
-      if (body.defaultMode !== 'disabled' && body.defaultMode !== 'optional' && body.defaultMode !== 'required')
-        return json(res, 400, { error: "defaultMode must be 'disabled', 'optional', or 'required'" });
-      patch.defaultMode = body.defaultMode as CredentialMode;
-    }
-    for (const k of ['allowAnthropicKey', 'allowClaudeOauth', 'allowOpenaiKey', 'allowCodexOauth'] as const) {
-      if (body[k] === undefined) continue;
-      if (typeof body[k] !== 'boolean') return json(res, 400, { error: `${k} must be a boolean` });
-      patch[k] = body[k] as boolean;
-    }
-    // Codex types are inert until the provider is installed — refuse to enable them.
-    if ((patch.allowCodexOauth || patch.allowOpenaiKey) && !codexAvailable())
-      return json(res, 400, { error: 'Codex support isn’t installed yet — add it with /add-codex first.' });
-    setCredentialsConfig(patch);
-    return json(res, 200, { ...getCredentialsConfig(), codexAvailable: codexAvailable() });
-  }
-
-  // ── UserCreds: a member connects / disconnects THEIR own Anthropic key ──────────
-  // userId is the server-resolved caller — a user can only manage their own key.
-  if (
-    url.pathname === '/api/user-credentials/credential' &&
-    (method === 'POST' || method === 'DELETE' || method === 'GET')
-  ) {
-    const reqRoomId = method === 'GET' ? (url.searchParams.get('roomId') ?? '') : undefined; // POST/DELETE read roomId from the body below
-    if (method === 'GET') {
-      const roomId = decodeURIComponent(reqRoomId ?? '');
-      if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-      if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
-      const groups = getAgentsForWebchatRoom(roomId);
-      // Effective mode (room override → global default). Credential TYPES are
-      // workspace-wide (Credentials admin page); which ones apply here depends on
-      // the room's provider (Claude vs Codex).
-      const cfg = getCredentialsConfig();
-      const provider = groups[0] && getContainerConfig(groups[0].id)?.provider === 'codex' ? 'codex' : 'claude';
-      // Connection is now user-level (connect once → all same-provider rooms).
-      const connected = userHasConnectedCredential(userId, provider);
-      // Report the connected credential type so the UI shows the right banner.
-      const credType = connected ? (getUserCredential(userId, provider)?.cred_type ?? null) : null;
-      return json(res, 200, {
-        connected,
-        credType,
-        provider,
-        mode: getEffectiveRoomMode(roomId),
-        oauthAllowed: provider === 'codex' ? cfg.allowCodexOauth : cfg.allowClaudeOauth,
-        apiKeyAllowed: provider === 'codex' ? cfg.allowOpenaiKey : cfg.allowAnthropicKey,
-      });
-    }
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { roomId?: unknown; apiKey?: unknown; type?: unknown; token?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    const roomId = typeof body.roomId === 'string' ? body.roomId : '';
-    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
-    const groups = getAgentsForWebchatRoom(roomId);
-    if (groups.length === 0) return json(res, 400, { error: 'Room has no wired agent' });
-    const provider = groups[0] && getContainerConfig(groups[0].id)?.provider === 'codex' ? 'codex' : 'claude';
-    const credType = body.type === 'oauth_token' ? 'oauth_token' : 'api_key';
-    const cfg = getCredentialsConfig();
-    // Rate-limit connects (each recreates a vault secret + spawns onecli procs).
-    if (method === 'POST' && userCredsRateLimited(userId, 'connect'))
-      return json(res, 429, { error: 'Too many attempts — wait a moment and try again.' });
-    try {
-      if (method === 'POST' && credType === 'oauth_token') {
-        // Gate 1: the workspace must accept this provider's subscriptions (Credentials page).
-        if (!(provider === 'codex' ? cfg.allowCodexOauth : cfg.allowClaudeOauth))
-          return json(res, 403, {
-            error: `This workspace does not accept ${provider === 'codex' ? 'Codex (ChatGPT)' : 'Claude'} subscription (OAuth) connections.`,
-          });
-        const token = typeof body.token === 'string' ? body.token.trim() : '';
-        if (provider === 'codex') {
-          // Codex subscription = a whole auth.json (normally produced by the
-          // browser mint; pasting it is a fallback). Require valid credential JSON.
-          let ok = false;
-          try {
-            const parsed = JSON.parse(token) as Record<string, unknown>;
-            ok = Boolean(parsed.tokens || parsed.OPENAI_API_KEY);
-          } catch {
-            ok = false;
-          }
-          if (!ok)
-            return json(res, 400, {
-              error: 'Expected a Codex auth.json — use “Connect with my ChatGPT subscription” instead of pasting.',
-            });
-        } else if (!/^sk-ant-oat/.test(token)) {
-          return json(res, 400, {
-            error: 'Expected a Claude subscription token from `claude setup-token` (sk-ant-oat…)',
-          });
-        }
-        await storeUserCredential(realOnecliAdmin, userId, provider, token, 'oauth_token');
-      } else if (method === 'POST') {
-        if (!(provider === 'codex' ? cfg.allowOpenaiKey : cfg.allowAnthropicKey))
-          return json(res, 403, {
-            error: `This workspace does not accept ${provider === 'codex' ? 'OpenAI' : 'Anthropic'} API keys.`,
-          });
-        // API keys are gated by the room's effective mode (OAuth is workspace-wide
-        // and allowed even in an OAuth-only 'disabled' room — see the spawn gate).
-        // Credentials are user-level, so connecting via a disabled room would
-        // otherwise silently enable UserCreds in the member's other rooms.
-        if (getEffectiveRoomMode(roomId) === 'disabled')
-          return json(res, 403, { error: 'This room does not accept member API keys.' });
-        const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
-        // Codex: an OpenAI key (sk-…). Claude: an Anthropic key (sk-ant-…).
-        if (provider === 'codex') {
-          if (!/^sk-/.test(apiKey)) return json(res, 400, { error: 'Expected an OpenAI API key (sk-…)' });
-        } else if (!/^sk-ant-/.test(apiKey)) {
-          return json(res, 400, { error: 'Expected an Anthropic API key (sk-ant-…)' });
-        }
-        await storeUserCredential(realOnecliAdmin, userId, provider, apiKey, 'api_key');
-      } else {
-        // Disconnect: revoke the user-level credential + un-enroll every group.
-        // Capture the enrolled groups BEFORE revoke (it clears them) so we can
-        // also stop any running per-member container immediately — otherwise it
-        // lingers (with its copy of the session) to the idle ceiling.
-        const enrolledGroupIds = listEnrolledGroups(userId, provider).map((r) => r.agent_group_id);
-        await revokeUserCredential(realOnecliAdmin, userId, provider);
-        for (const gid of enrolledGroupIds) {
-          for (const s of getSessionsByAgentGroup(gid)) {
-            if (s.thread_id === userId) killContainer(s.id, 'UserCreds credential disconnected');
-          }
-        }
-      }
-    } catch (err) {
-      log.error('UserCreds onboard/revoke failed', { userId, roomId, err: err instanceof Error ? err.message : err });
-      return json(res, 502, { error: 'Credential setup failed — check OneCLI is running.' });
-    }
-    return json(res, 200, { ok: true });
-  }
-
-  // ── UserCreds OAuth browser-mint: get a setup-token without a terminal ──────────
-  // A member signs in to their Claude subscription entirely in the browser; the
-  // server runs `claude setup-token` in a throwaway container, scrapes the URL,
-  // takes the pasted code, captures the token, and stores it as the member's
-  // user-level credential — the same storage the paste path uses, minus the
-  // terminal. Same gates as the OAuth paste path: room access + OAuth opt-in.
-  const userCredsMintMatch = url.pathname.match(/^\/api\/user-credentials\/oauth\/(start|code|cancel)$/);
-  if (userCredsMintMatch && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { roomId?: unknown; sessionId?: unknown; code?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    const step = userCredsMintMatch[1];
-    if (step === 'cancel') {
-      if (typeof body.sessionId === 'string') cancelMint(userId, body.sessionId);
-      return json(res, 200, { ok: true });
-    }
-    const roomId = typeof body.roomId === 'string' ? body.roomId : '';
-    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
-    if (!getCredentialsConfig().allowClaudeOauth)
-      return json(res, 403, { error: 'This workspace does not accept Claude subscription (OAuth) connections.' });
-    const groups = getAgentsForWebchatRoom(roomId);
-    if (groups.length === 0) return json(res, 400, { error: 'Room has no wired agent' });
-    try {
-      if (step === 'start') {
-        if (activeMintCount() >= MAX_ACTIVE_MINTS)
-          return json(res, 429, { error: 'Too many sign-ins in progress — try again shortly.' });
-        if (userCredsRateLimited(userId, 'mint-start'))
-          return json(res, 429, { error: 'Too many attempts — wait a moment and try again.' });
-        const { sessionId, url: signinUrl } = await startClaudeMint(userId);
-        return json(res, 200, { sessionId, url: signinUrl });
-      }
-      // step === 'code': mint, then onboard.
-      if (typeof body.sessionId !== 'string' || typeof body.code !== 'string')
-        return json(res, 400, { error: 'sessionId and code required' });
-      const token = await mintClaudeToken(userId, body.sessionId, body.code);
-      await storeUserCredential(realOnecliAdmin, userId, 'claude', token, 'oauth_token');
-      return json(res, 200, { ok: true });
-    } catch (err) {
-      return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
-    }
-  }
-
-  // ── UserCreds Codex browser-mint: connect a ChatGPT subscription without a terminal
-  // `codex login --device-auth` runs in a throwaway container; the user enters
-  // the pairing code at OpenAI's site (no code pasted back here). 'start' returns
-  // the URL + code; 'finish' waits for the written auth.json and stores it as the
-  // member's user-level Codex credential (→ an `openai` auth.json secret). Same
-  // gates as the Claude mint: room access + the room's OAuth opt-in.
-  const codexMintMatch = url.pathname.match(/^\/api\/user-credentials\/codex\/(start|finish|cancel)$/);
-  if (codexMintMatch && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { roomId?: unknown; sessionId?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    const step = codexMintMatch[1];
-    if (step === 'cancel') {
-      if (typeof body.sessionId === 'string') cancelMint(userId, body.sessionId);
-      return json(res, 200, { ok: true });
-    }
-    const roomId = typeof body.roomId === 'string' ? body.roomId : '';
-    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
-    if (!getCredentialsConfig().allowCodexOauth)
-      return json(res, 403, {
-        error: 'This workspace does not accept Codex (ChatGPT) subscription (OAuth) connections.',
-      });
-    const groups = getAgentsForWebchatRoom(roomId);
-    if (groups.length === 0) return json(res, 400, { error: 'Room has no wired agent' });
-    try {
-      if (step === 'start') {
-        if (activeMintCount() >= MAX_ACTIVE_MINTS)
-          return json(res, 429, { error: 'Too many sign-ins in progress — try again shortly.' });
-        if (userCredsRateLimited(userId, 'mint-start'))
-          return json(res, 429, { error: 'Too many attempts — wait a moment and try again.' });
-        const { sessionId, url: signinUrl, userCode } = await startCodexMint(userId);
-        return json(res, 200, { sessionId, url: signinUrl, userCode });
-      }
-      // step === 'finish': wait for auth.json, then onboard.
-      if (typeof body.sessionId !== 'string') return json(res, 400, { error: 'sessionId required' });
-      const authJson = await finishCodexMint(userId, body.sessionId);
-      await storeUserCredential(realOnecliAdmin, userId, 'codex', authJson, 'oauth_token');
-      return json(res, 200, { ok: true });
-    } catch (err) {
-      return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
-    }
-  }
-
-  // ── Workspace DEFAULT logins (owner / global admin ONLY) ────────────────────────
-  // The fallback credentials `all`-mode base agents auto-inject when a member has no
-  // user credential of their own — `claude` (Anthropic key or subscription) and,
-  // when the Codex provider is installed, `codex` (OpenAI key or ChatGPT
-  // subscription). STRICTLY admin-only on EVERY verb incl. GET — a non-admin gets
-  // 403 with no body, so even the existence/connection state of the defaults never
-  // leaks (unlike /api/webchat/credentials-config, which is world-readable so room
-  // UIs can see accepted types).
-  if (url.pathname === '/api/workspace-credential' && (method === 'GET' || method === 'PUT' || method === 'DELETE')) {
-    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
-    // The OneCLI vault, loaded lazily + once per request: only the GET path needs
-    // it (to detect a pre-existing credential), and only when there's no webchat
-    // row to short-circuit on.
-    let vaultSecrets: { id: string; type?: string }[] | null = null;
-    const loadVault = async () => {
-      if (vaultSecrets === null) {
-        try {
-          vaultSecrets = await realOnecliAdmin.listAllSecrets();
-        } catch {
-          vaultSecrets = []; // vault unreachable — fall back to "not connected"
-        }
-      }
-      return vaultSecrets;
-    };
-    const trackedSecretIds = new Set(listAllTrackedSecretIds());
-    // `connected` is true when the webchat manages a workspace-default credential
-    // (`external:false`) OR when a usable provider credential already lives in the
-    // OneCLI vault from `/setup` or a legacy path (`external:true`) — the latter is
-    // what base `all`-mode agents already authenticate with, so the wizard must
-    // not nag the operator to "connect" an engine that already works. An external
-    // credential is webchat-unmanaged: no cred_type to show, and not disconnectable.
-    const credState = async (provider: 'claude' | 'codex') => {
-      const row = getUserCredential(WORKSPACE_DEFAULT_USER_ID, provider);
-      if (row?.status === 'active') return { connected: true, credType: row.cred_type ?? null, external: false };
-      const secType = provider === 'codex' ? 'openai' : 'anthropic';
-      const external = (await loadVault()).some((s) => s.type === secType && !trackedSecretIds.has(s.id));
-      return { connected: external, credType: null, external };
-    };
-    if (method === 'GET') {
-      // Flat claude fields (the original shape) + a codex block + the workspace
-      // default MODEL (the Ollama-engine analogue of the default credential).
-      const defaultModelId = getDefaultModelId();
-      const defaultModel = defaultModelId ? getWebchatModel(defaultModelId) : undefined;
-      return json(res, 200, {
-        ...(await credState('claude')),
-        provider: 'claude',
-        codex: await credState('codex'),
-        codexAvailable: codexAvailable(),
-        defaultModelId: defaultModel?.id ?? null,
-        defaultModelName: defaultModel ? `${defaultModel.name} (${defaultModel.model_id})` : null,
-        // Real fields so the wizard's Ollama card only claims "set" when an Ollama
-        // model is actually the default — kind is authoritative, not inferred.
-        defaultModelKind: defaultModel?.kind ?? null,
-        defaultModelModelId: defaultModel?.model_id ?? null,
-      });
-    }
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (userCredsRateLimited(userId, 'connect'))
-      return json(res, 429, { error: 'Too many attempts — wait a moment and try again.' });
-    // Provider: PUT reads it from the body below; DELETE from the query string.
-    try {
-      if (method === 'DELETE') {
-        const provider = url.searchParams.get('provider') === 'codex' ? 'codex' : 'claude';
-        const priorOauth = getUserCredential(WORKSPACE_DEFAULT_USER_ID, provider)?.cred_type === 'oauth_token';
-        await revokeUserCredential(realOnecliAdmin, WORKSPACE_DEFAULT_USER_ID, provider);
-        restartGroupsForWorkspaceCredChange(provider, priorOauth, false);
-        return json(res, 200, { ok: true });
-      }
-      const raw = await readJsonBody(req, res);
-      if (raw === null) return;
-      let body: { provider?: unknown; type?: unknown; apiKey?: unknown; token?: unknown };
-      try {
-        body = JSON.parse(raw) as typeof body;
-      } catch {
-        return json(res, 400, { error: 'Invalid JSON' });
-      }
-      const provider = body.provider === 'codex' ? 'codex' : 'claude';
-      if (provider === 'codex' && !codexAvailable())
-        return json(res, 400, { error: 'Codex support isn’t installed yet — add it with /add-codex first.' });
-      const priorOauth = getUserCredential(WORKSPACE_DEFAULT_USER_ID, provider)?.cred_type === 'oauth_token';
-      if (body.type === 'oauth_token') {
-        const token = typeof body.token === 'string' ? body.token.trim() : '';
-        if (provider === 'codex') {
-          // A ChatGPT/Codex subscription = a whole auth.json (normally from the
-          // browser mint; pasting is the fallback). Mirror the member validation.
-          let ok = false;
-          try {
-            const parsed = JSON.parse(token) as Record<string, unknown>;
-            ok = Boolean(parsed.tokens || parsed.OPENAI_API_KEY);
-          } catch {
-            ok = false;
-          }
-          if (!ok)
-            return json(res, 400, {
-              error: 'Expected a Codex auth.json — use “Connect with ChatGPT subscription” instead of pasting.',
-            });
-        } else if (!/^sk-ant-oat/.test(token)) {
-          // Claude subscription: pasted `claude setup-token` output. The base-agent
-          // sentinel wiring (user-credentials/index.ts env resolver) flips base
-          // containers into OAuth mode to match.
-          return json(res, 400, {
-            error: 'Expected a Claude subscription token from `claude setup-token` (sk-ant-oat…)',
-          });
-        }
-        await setWorkspaceDefaultCredential(realOnecliAdmin, provider, token, 'oauth_token');
-        afterWorkspaceCredentialSet(provider, priorOauth, true);
-        return json(res, 200, { ok: true });
-      }
-      const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
-      if (provider === 'codex') {
-        if (!/^sk-/.test(apiKey)) return json(res, 400, { error: 'Expected an OpenAI API key (sk-…)' });
-      } else if (!/^sk-ant-/.test(apiKey)) {
-        return json(res, 400, { error: 'Expected an Anthropic API key (sk-ant-…)' });
-      }
-      await setWorkspaceDefaultCredential(realOnecliAdmin, provider, apiKey, 'api_key');
-      afterWorkspaceCredentialSet(provider, priorOauth, false);
-      return json(res, 200, { ok: true });
-    } catch (err) {
-      log.error('Workspace default credential failed', {
-        userId,
-        err: err instanceof Error ? err.message : err,
-      });
-      return json(res, 502, { error: 'Credential setup failed — check OneCLI is running.' });
-    }
-  }
-
-  // ── Workspace-default OAuth browser-mint (owner / global admin ONLY) ────────────
-  // Same throwaway-container `claude setup-token` flow as the per-member mint, but
-  // the captured token is stored as the WORKSPACE DEFAULT (synthetic id), and the
-  // gates are admin-only instead of room access + the member OAuth opt-in (that
-  // policy governs members; the operator setting the workspace fallback is above it).
-  const wsCredMintMatch = url.pathname.match(/^\/api\/workspace-credential\/oauth\/(start|code|cancel)$/);
-  if (wsCredMintMatch && method === 'POST') {
-    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { sessionId?: unknown; code?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    const step = wsCredMintMatch[1];
-    if (step === 'cancel') {
-      if (typeof body.sessionId === 'string') cancelMint(userId, body.sessionId);
-      return json(res, 200, { ok: true });
-    }
-    try {
-      if (step === 'start') {
-        if (activeMintCount() >= MAX_ACTIVE_MINTS)
-          return json(res, 429, { error: 'Too many sign-ins in progress — try again shortly.' });
-        if (userCredsRateLimited(userId, 'mint-start'))
-          return json(res, 429, { error: 'Too many attempts — wait a moment and try again.' });
-        const { sessionId, url: signinUrl } = await startClaudeMint(userId);
-        return json(res, 200, { sessionId, url: signinUrl });
-      }
-      // step === 'code': mint, then store as the workspace default. The spawn-time
-      // sentinel mode may have changed (none/key → oauth) — respawn containers.
-      if (typeof body.sessionId !== 'string' || typeof body.code !== 'string')
-        return json(res, 400, { error: 'sessionId and code required' });
-      const priorRow = getUserCredential(WORKSPACE_DEFAULT_USER_ID, 'claude');
-      const priorOauth = priorRow?.status === 'active' && priorRow.cred_type === 'oauth_token';
-      const token = await mintClaudeToken(userId, body.sessionId, body.code);
-      await setWorkspaceDefaultCredential(realOnecliAdmin, 'claude', token, 'oauth_token');
-      afterWorkspaceCredentialSet('claude', priorOauth, true);
-      return json(res, 200, { ok: true });
-    } catch (err) {
-      return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
-    }
-  }
-
-  // ── Workspace-default Codex browser-mint (owner / global admin ONLY) ────────────
-  // Same `codex login --device-auth` throwaway-container flow as the per-member
-  // Codex mint, but the captured auth.json is stored as the WORKSPACE DEFAULT
-  // (synthetic id) `openai` secret that `all`-mode Codex base agents auto-inject.
-  const wsCodexMintMatch = url.pathname.match(/^\/api\/workspace-credential\/codex\/(start|finish|cancel)$/);
-  if (wsCodexMintMatch && method === 'POST') {
-    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { sessionId?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    const step = wsCodexMintMatch[1];
-    if (step === 'cancel') {
-      if (typeof body.sessionId === 'string') cancelMint(userId, body.sessionId);
-      return json(res, 200, { ok: true });
-    }
-    if (!codexAvailable())
-      return json(res, 400, { error: 'Codex support isn’t installed yet — add it with /add-codex first.' });
-    try {
-      if (step === 'start') {
-        if (activeMintCount() >= MAX_ACTIVE_MINTS)
-          return json(res, 429, { error: 'Too many sign-ins in progress — try again shortly.' });
-        if (userCredsRateLimited(userId, 'mint-start'))
-          return json(res, 429, { error: 'Too many attempts — wait a moment and try again.' });
-        const { sessionId, url: signinUrl, userCode } = await startCodexMint(userId);
-        return json(res, 200, { sessionId, url: signinUrl, userCode });
-      }
-      // step === 'finish': wait for auth.json, then store as the workspace default.
-      if (typeof body.sessionId !== 'string') return json(res, 400, { error: 'sessionId required' });
-      const priorRow = getUserCredential(WORKSPACE_DEFAULT_USER_ID, 'codex');
-      const priorOauth = priorRow?.status === 'active' && priorRow.cred_type === 'oauth_token';
-      const authJson = await finishCodexMint(userId, body.sessionId);
-      await setWorkspaceDefaultCredential(realOnecliAdmin, 'codex', authJson, 'oauth_token');
-      afterWorkspaceCredentialSet('codex', priorOauth, true);
-      return json(res, 200, { ok: true });
-    } catch (err) {
-      return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
-    }
-  }
-
-  // ── Workspace DEFAULT model (owner / global admin ONLY) ─────────────────────────
-  // The ollama-kind roster model every claude-family agent WITHOUT its own
-  // assignment falls back to — what makes "default engine: Ollama" a true
-  // workspace-wide default rather than a one-agent assignment. Same strict
-  // admin gating as the workspace credential.
-  if (url.pathname === '/api/workspace-model' && method === 'PUT') {
-    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { modelId?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    if (body.modelId !== null) {
-      if (typeof body.modelId !== 'string' || !body.modelId.trim())
-        return json(res, 400, { error: 'modelId must be a string or null' });
-      const model = getWebchatModel(body.modelId.trim());
-      if (!model) return json(res, 404, { error: 'Model not found' });
-      if (model.kind !== 'ollama')
-        return json(res, 400, { error: 'The workspace default model must be an ollama roster model' });
-      if (!model.endpoint) return json(res, 400, { error: 'That model has no endpoint to call' });
-      setDefaultModelId(model.id);
-    } else {
-      setDefaultModelId(null);
-    }
-    refreshUnassignedGroupsForDefaultModel('Workspace default model changed');
-    return json(res, 200, { ok: true, defaultModelId: getDefaultModelId() });
-  }
-
-  // ── First-run setup wizard state ────────────────────────────────────────────────
-  // GET is authenticated (any member) so the client can decide whether to auto-open
-  // the wizard; non-admins always get complete:true + canEdit:false so it never
-  // blocks or shows for them. PUT (finish/dismiss/reset) is owner/global-admin only.
-  if (url.pathname === '/api/webchat/onboarding' && (method === 'GET' || method === 'PUT')) {
-    const canEdit = isOwner(userId) || isGlobalAdmin(userId);
-    if (method === 'GET') {
-      return json(res, 200, { complete: canEdit ? getOnboardingComplete() : true, canEdit });
-    }
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!canEdit) return json(res, 403, { error: 'Forbidden' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { complete?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    if (typeof body.complete !== 'boolean') return json(res, 400, { error: 'complete must be a boolean' });
-    setOnboardingComplete(body.complete);
-    return json(res, 200, { complete: body.complete });
-  }
-
-  // ── Feature toggles: MCP + skills marketplace ───────────────────────────────
-  // GET is any authed user (the client hides the MCP/Skills tabs when off; non-
-  // admins get the flag only). PUT is owner/global-admin — flips it on/off
-  // (default on/recommended). Disabling also 403s the endpoints (gate above).
-  if (url.pathname === '/api/webchat/features' && (method === 'GET' || method === 'PUT')) {
-    const canEdit = isOwner(userId) || isGlobalAdmin(userId);
-    if (method === 'GET') {
-      return json(res, 200, { marketplaceEnabled: !getMarketplaceDisabled(), canEdit });
-    }
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!canEdit) return json(res, 403, { error: 'Forbidden' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { marketplaceEnabled?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    if (typeof body.marketplaceEnabled !== 'boolean') {
-      return json(res, 400, { error: 'marketplaceEnabled must be a boolean' });
-    }
-    setMarketplaceDisabled(!body.marketplaceEnabled);
-    // The choice cascades to the individual sources (wizard ask): a
-    // "no marketplace" install starts with the skill marketplace and the MCP
-    // registry REMOVED — not just hidden behind the flag. Re-enabling restores
-    // both; Settings then manages them per-source.
-    setSourceDisabled(MARKETPLACE_ID, !body.marketplaceEnabled);
-    setSourceDisabled(mcpRegistryRemovedKey(), !body.marketplaceEnabled);
-    if (body.marketplaceEnabled) setSourceDisabled(MCP_REGISTRY_ID, false);
-    return json(res, 200, { marketplaceEnabled: !getMarketplaceDisabled() });
-  }
-
-  // ── Wizard opt-in: first Tailscale login becomes owner ──────────────────────
-  // One-shot arm flag. GET/PUT owner/global-admin only. PUT true → the next
-  // tailscale identity to authenticate is promoted to owner (auth.ts finalize),
-  // then the flag disarms itself.
-  if (url.pathname === '/api/webchat/tailscale-owner' && (method === 'GET' || method === 'PUT')) {
-    const canEdit = isOwner(userId) || isGlobalAdmin(userId);
-    if (method === 'GET') {
-      return json(res, 200, { armed: getPromoteFirstTailscaleOwner(), canEdit });
-    }
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!canEdit) return json(res, 403, { error: 'Forbidden' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { armed?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    if (typeof body.armed !== 'boolean') return json(res, 400, { error: 'armed must be a boolean' });
-    setPromoteFirstTailscaleOwner(body.armed);
-    return json(res, 200, { armed: getPromoteFirstTailscaleOwner() });
-  }
-
-  // ── Enable HTTPS over Tailscale (`tailscale serve`) ─────────────────────────
-  // Owner/global-admin only. GET reports whether tailscaled is up, the https
-  // URL, and whether serve is already on. POST runs `tailscale serve --bg
-  // <port>` so webchat is reachable at https://<node>.ts.net with a real cert.
-  // Identity continuity across the http→https switch lives in auth.ts
-  // (tailscaleServeIdentity maps Serve's header back to the whois id).
-  if (url.pathname === '/api/webchat/tailscale-https' && (method === 'GET' || method === 'POST')) {
-    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
-    // This endpoint reports HTTPS status in BOTH flavors: `tailscale serve`
-    // (what the enable button sets up) and native TLS (WEBCHAT_TLS_CERT/KEY —
-    // an install like the tailscale-https setup script produces). Without the
-    // native check, an already-HTTPS install is offered "Enable HTTPS" on a
-    // page it is literally serving over HTTPS.
-    const nativeTls = !!(process.env.WEBCHAT_TLS_CERT && process.env.WEBCHAT_TLS_KEY);
-    if (method === 'GET') {
-      const state = await getTailscaleServeState();
-      if (nativeTls && !state.active) {
-        const port = Number(process.env.WEBCHAT_PORT || DEFAULT_PORT);
-        return json(res, 200, {
-          ...state,
-          active: true,
-          mode: 'native-tls',
-          url: state.url ? `${state.url}${port === 443 ? '' : `:${port}`}` : null,
-        });
-      }
-      return json(res, 200, { ...state, mode: state.active ? 'serve' : null });
-    }
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (nativeTls) {
-      return json(res, 400, {
-        ok: false,
-        error: 'HTTPS is already enabled (native TLS certificate) — nothing to set up.',
-      });
-    }
-    const port = Number(process.env.WEBCHAT_PORT || DEFAULT_PORT);
-    const result = await enableTailscaleServe(port);
-    return json(res, result.ok ? 200 : 400, result);
-  }
-
-  // ── Access & security: install a Cloudflare Tunnel (token-driven) ───────────
-  // Owner/global-admin only, two explicit steps. GET reports install/service
-  // state + whether a one-click install can run here (Linux + root + systemd).
-  // POST /install installs just the cloudflared binary; POST /connect registers
-  // the managed-tunnel connector service from the operator's token — auth is
-  // enforced by the Cloudflare Access policy on the tunnel, dashboard-side.
-  if (url.pathname === '/api/webchat/cloudflared' && method === 'GET') {
-    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
-    return json(res, 200, getCloudflaredInstallState());
-  }
-  if (url.pathname === '/api/webchat/cloudflared/install' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
-    const r = startCloudflaredInstall();
-    if (r.error === 'prereq-missing')
-      return json(res, 409, { error: 'Needs root + systemd — install cloudflared manually instead.' });
-    return json(res, r.started ? 202 : 409, { ...getCloudflaredInstallState(), started: r.started });
-  }
-  if (url.pathname === '/api/webchat/cloudflared/connect' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { token?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    if (typeof body.token !== 'string' || !body.token.trim()) return json(res, 400, { error: 'token required' });
-    const r = startCloudflaredConnect(body.token);
-    if (r.error === 'prereq-missing')
-      return json(res, 409, { error: 'Needs root + systemd — install cloudflared manually instead.' });
-    if (r.error === 'not-installed') return json(res, 409, { error: 'Install cloudflared first.' });
-    if (r.error === 'bad-token') return json(res, 400, { error: 'That doesn’t look like a tunnel token.' });
-    return json(res, r.started ? 202 : 409, { ...getCloudflaredInstallState(), started: r.started });
-  }
+  // These two routes stay inline (not in API_ROUTES): they read `auth.source`,
+  // which only exists in this scope — RouteCtx deliberately carries the
+  // resolved identity, not the auth object. Their paths collide with no
+  // table entry, so position relative to the table is immaterial.
 
   // ── Access & security: retire the bearer token ──────────────────────────────
   // Owner/global-admin only. GET reports the auth-method picture so Settings can
@@ -1566,310 +757,46 @@ async function handleHttp(
     return json(res, 200, getAuthManagementInfo());
   }
 
-  const roomAgentMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/agents\/([^/]+)$/);
-  if (roomAgentMatch && method === 'DELETE') {
-    const roomId = decodeURIComponent(roomAgentMatch[1]);
-    const agentId = decodeURIComponent(roomAgentMatch[2]);
-    // Owner can unwire any agent. A scoped admin may unwire an agent THEY
-    // administer from a room they can access — they can never touch agents
-    // they don't administer.
-    if (!isOwner(userId) && !(canAccessRoom(userId, roomId) && hasAdminPrivilege(userId, agentId))) {
-      return json(res, 403, { error: 'Admin privilege required' });
-    }
-    return removeAgentFromRoomHandler(res, roomId, agentId);
+  // This prefix gate ran mid-chain in the old dispatcher; it now runs before
+  // the table dispatch (its guarded routes live in API_ROUTES). No route
+  // above it in the original order matched these prefixes, so hoisting it is
+  // behavior-neutral.
+  // MCP + skills marketplace can be turned off workspace-wide (hardened installs
+  // — both are code-execution surfaces). Gate every management endpoint at the
+  // server, not just the UI, per the admin-surface rule (DOM hide + server 403).
+  if (
+    (url.pathname === '/api/mcp-servers' ||
+      url.pathname.startsWith('/api/mcp-servers/') ||
+      url.pathname === '/api/skills' ||
+      url.pathname.startsWith('/api/skills/')) &&
+    getMarketplaceDisabled()
+  ) {
+    return json(res, 403, { error: 'MCP and the skills marketplace are disabled by the workspace owner.' });
   }
 
-  // ── Prime agent designation (room-scoped) ──
-  const roomPrimeMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/prime$/);
-  if (roomPrimeMatch && method === 'PUT') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const roomId = decodeURIComponent(roomPrimeMatch[1]);
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { agentId?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
+  for (const r of API_ROUTES) {
+    const methods = Array.isArray(r.method) ? r.method : [r.method];
+    if (!methods.includes(method)) continue;
+    const m =
+      typeof r.path === 'string'
+        ? url.pathname === r.path
+          ? ([url.pathname] as unknown as RegExpMatchArray)
+          : null
+        : url.pathname.match(r.path);
+    if (!m) continue;
+    for (const g of r.guards ?? []) {
+      if (g === 'csrf' && req.headers['x-webchat-csrf'] !== '1')
+        return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+      if (g === 'owner' && !isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+      if (g === 'anyAdmin' && !isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
     }
-    if (typeof body.agentId !== 'string' || !body.agentId.trim()) {
-      return json(res, 400, { error: 'agentId required' });
-    }
-    return setRoomPrimeHandler(res, roomId, body.agentId.trim());
-  }
-  if (roomPrimeMatch && method === 'DELETE') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return clearRoomPrimeHandler(res, decodeURIComponent(roomPrimeMatch[1]));
+    return r.h({ req, res, url, method, userId, senderIdentity, hooks }, m);
   }
 
-  // ── Global archive (owner + admin) ──
-  // Marks the room as closed-to-active-work for EVERYONE. Owners + any
-  // admin (global or scoped admin of an agent wired to the room) can
-  // toggle. Archive is presentation only — routing continues unchanged.
-  // CSRF-guarded because it's a state-mutating POST.
-  const roomArchiveMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/(archive|unarchive)$/);
-  if (roomArchiveMatch && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') {
-      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    }
-    const roomId = decodeURIComponent(roomArchiveMatch[1]);
-    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    if (!canArchiveRoom(userId, roomId)) return json(res, 403, { error: 'Admin only' });
-    if (roomArchiveMatch[2] === 'archive') {
-      archiveRoom(roomId, userId);
-    } else {
-      unarchiveRoom(roomId);
-    }
-    broadcastRooms();
-    return json(res, 200, { ok: true });
-  }
-
-  // ── Per-user hide (sidebar preference, no auth beyond room access) ──
-  // Any user with access to the room can hide it from THEIR sidebar.
-  // Doesn't affect anyone else, routing, archive state, or anything
-  // beyond that user's view. CSRF-guarded because it's state-mutating.
-  const roomHideMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/(hide|unhide)$/);
-  if (roomHideMatch && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') {
-      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    }
-    const roomId = decodeURIComponent(roomHideMatch[1]);
-    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
-    if (roomHideMatch[2] === 'hide') {
-      hideRoomForUser(userId, roomId);
-    } else {
-      unhideRoomForUser(userId, roomId);
-    }
-    broadcastRooms();
-    return json(res, 200, { ok: true });
-  }
-
-  // ── Per-user pin (sidebar preference, no auth beyond room access) ──
-  // Pins lift a room into the sticky group at the top of THIS user's sidebar.
-  // Per-user; broadcastRooms re-sends each user their own annotated list, so the
-  // pin syncs live across the user's other devices.
-  const roomPinMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/(pin|unpin)$/);
-  if (roomPinMatch && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') {
-      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    }
-    const roomId = decodeURIComponent(roomPinMatch[1]);
-    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
-    if (roomPinMatch[2] === 'pin') {
-      pinRoomForUser(userId, roomId);
-    } else {
-      unpinRoomForUser(userId, roomId);
-    }
-    broadcastRooms();
-    return json(res, 200, { ok: true });
-  }
-
-  // Reorder the caller's pinned rooms. Body: { order: string[] } — the desired
-  // top-to-bottom room-id order. Per-user (setPinnedOrderForUser only touches
-  // this user's pins; unknown/unpinned ids are ignored), so no per-room access
-  // check is needed beyond the authenticated user. broadcastRooms re-syncs the
-  // new order to the user's other devices.
-  if (url.pathname === '/api/rooms/pins/order' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') {
-      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    }
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { order?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    if (!Array.isArray(body.order) || body.order.some((x) => typeof x !== 'string')) {
-      return json(res, 400, { error: 'order must be an array of room id strings' });
-    }
-    setPinnedOrderForUser(userId, body.order as string[]);
-    broadcastRooms();
-    return json(res, 200, { ok: true });
-  }
-
-  // ── Engage mode (room-scoped) ──
-  // Controls what `recomputeEngagePatterns` rewrites un-primed wirings to:
-  //   'mention-only' — agents fire only on explicit @-mention (no fallback).
-  // This is the only mode; the legacy 'broadcast' (every wired agent answers
-  // every message) has been retired.
-  const roomEngageMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/engage-mode$/);
-  if (roomEngageMatch && method === 'GET') {
-    const roomId = decodeURIComponent(roomEngageMatch[1]);
-    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
-    return json(res, 200, { mode: getRoomEngageDefault(roomId) });
-  }
-  if (roomEngageMatch && method === 'PUT') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const roomId = decodeURIComponent(roomEngageMatch[1]);
-    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { mode?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    if (body.mode !== 'mention-only') {
-      return json(res, 400, { error: "mode must be 'mention-only'" });
-    }
-    setRoomEngageDefault(roomId, body.mode);
-    // Re-run pattern computation so the new mode is reflected in every wiring.
-    // No-op when a prime is set (prime branch takes over). Cheap one-UPDATE-per-wiring.
-    recomputeEngagePatterns(roomId);
-    broadcastRooms();
-    return json(res, 200, { ok: true, mode: body.mode });
-  }
-
-  // Rename a room (its messaging_groups.name). Owner-only; broadcastRooms pushes
-  // the new title to every connected client live.
-  const roomNameMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/name$/);
-  if (roomNameMatch && method === 'PUT') {
-    if (req.headers['x-webchat-csrf'] !== '1') {
-      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    }
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const roomId = decodeURIComponent(roomNameMatch[1]);
-    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { name?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    const name = sanitizeRoomName(body.name);
-    if (name === null) return json(res, 400, { error: 'name must be 1–80 characters' });
-    updateWebchatRoomName(roomId, name);
-    broadcastRooms();
-    return json(res, 200, { ok: true, name });
-  }
-
-  // ── Threads (per-room) ────────────────────────────────────────────────
-  // A thread maps to an agent session; see docs/webchat/threads.md.
-  // List/read/create/rename are member-gated; delete (destroys history + tears
-  // down the thread's session) is owner-only.
-  const roomThreadReadMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads\/([^/]+)\/read$/);
-  if (roomThreadReadMatch && method === 'PUT') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const roomId = decodeURIComponent(roomThreadReadMatch[1]);
-    const threadId = decodeURIComponent(roomThreadReadMatch[2]);
-    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
-    markThreadRead(userId, roomId, threadId);
-    return json(res, 200, { ok: true });
-  }
-
-  const roomThreadsMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads$/);
-  if (roomThreadsMatch && method === 'GET') {
-    const roomId = decodeURIComponent(roomThreadsMatch[1]);
-    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
-    ensureMainThread(roomId); // every room has a main thread once listed
-    const unread = getUnreadThreadIdsForRoom(userId, roomId);
-    return json(
-      res,
-      200,
-      listWebchatThreads(roomId).map((t) => ({ ...t, unread: unread.has(t.thread_id) })),
-    );
-  }
-  if (roomThreadsMatch && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const roomId = decodeURIComponent(roomThreadsMatch[1]);
-    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { title?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    const title = sanitizeThreadTitle(body.title);
-    if (title === null) return json(res, 400, { error: 'title must be 1–80 characters' });
-    const thread = createWebchatThread(roomId, title);
-    broadcastRooms(); // refresh each client's sidebar thread-count chevron
-    return json(res, 200, thread);
-  }
-
-  const roomThreadMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads\/([^/]+)$/);
-  if (roomThreadMatch && method === 'PATCH') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const roomId = decodeURIComponent(roomThreadMatch[1]);
-    const threadId = decodeURIComponent(roomThreadMatch[2]);
-    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
-    if (!getWebchatThread(roomId, threadId)) return json(res, 404, { error: 'Thread not found' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { title?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    const title = sanitizeThreadTitle(body.title);
-    if (title === null) return json(res, 400, { error: 'title must be 1–80 characters' });
-    renameWebchatThread(roomId, threadId, title);
-    return json(res, 200, { ok: true, title });
-  }
-  if (roomThreadMatch && method === 'DELETE') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const roomId = decodeURIComponent(roomThreadMatch[1]);
-    const threadId = decodeURIComponent(roomThreadMatch[2]);
-    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    if (threadId === 'main') return json(res, 400, { error: 'The main thread cannot be deleted' });
-    if (!getWebchatThread(roomId, threadId)) return json(res, 404, { error: 'Thread not found' });
-    return deleteThreadHandler(res, roomId, threadId);
-  }
-
-  // ── Thread context sync (pull main → thread / push thread → main) ──
-  // Both are verbatim + additive: copy the source's native message delta into
-  // the destination, seed the destination agent session(s) as silent context,
-  // broadcast the copies, and advance the per-thread high-water mark so repeat
-  // syncs only carry genuinely new messages. The 'main' regular chat is the
-  // shared trunk; only a topic thread can pull from / push to it.
-  // See docs/webchat/thread-context-sync.md.
-  const roomThreadPullMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/threads\/([^/]+)\/(pull|push)$/);
-  if (roomThreadPullMatch && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const roomId = decodeURIComponent(roomThreadPullMatch[1]);
-    const threadId = decodeURIComponent(roomThreadPullMatch[2]);
-    const dir = roomThreadPullMatch[3] as 'pull' | 'push';
-    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
-    if (threadId === MAIN_THREAD) return json(res, 400, { error: 'The regular chat has no main to sync with' });
-    if (!getWebchatThread(roomId, threadId)) return json(res, 404, { error: 'Thread not found' });
-    const copied =
-      dir === 'pull'
-        ? syncThreadContext({
-            roomId,
-            srcThreadId: MAIN_THREAD,
-            destThreadId: threadId,
-            markThreadId: threadId,
-            direction: 'pulled',
-            dividerText: 'Pulled from main chat',
-            freshLimit: FRESH_SYNC_LIMIT,
-          })
-        : syncThreadContext({
-            roomId,
-            srcThreadId: threadId,
-            destThreadId: MAIN_THREAD,
-            markThreadId: threadId,
-            direction: 'pushed',
-            dividerText: 'Pushed from thread',
-            freshLimit: FRESH_SYNC_LIMIT,
-          });
-    return json(res, 200, { copied });
-  }
+  // The engaged-agents routes stay inline (not in API_ROUTES): while the
+  // flag below is off they must fall through to the default 404, which a
+  // table entry cannot do (matching consumes the request). No table entry
+  // matches their paths, so they are checked here, after the table.
 
   // ── Engaged agents (per-thread set) — DORMANT ──
   // The engaged-agents routing model is disabled (see the dormancy note in
@@ -1927,904 +854,2184 @@ async function handleHttp(
     return json(res, 200, { ok: true, engaged: engagedAgentsForThread(roomId, threadId) });
   }
 
-  // Room → agent → model topology for the explore view, scoped to the caller's
-  // accessible rooms (and only the agents/models reachable from them).
-  if (url.pathname === '/api/topology' && method === 'GET') {
-    const rooms = filterRoomsForUser(userId, getAllWebchatRooms());
-    // ALL agents the caller manages become columns/nodes (not just wired ones),
-    // so unused agents show as orphans and can be wired from the matrix.
-    const agents = listAgentsForUser(userId).map((a) => ({ id: a.id, name: a.name }));
-    const topo = getWebchatTopology(rooms, agents);
-    // SCOPED skills only — the ones wired to a specific agent (including anything
-    // the learning loop produced). The shared pool is on ~every agent, so drawing
-    // it would add hundreds of identical edges that say nothing about any one
-    // agent; it stays visible in the agent's own settings. A skill wired to two
-    // agents is ONE node with two edges — that's the fact worth seeing.
-    const skillMap = new Map<string, { id: string; name: string; origin: string | null }>();
-    const skillEdges: { agent: string; skill: string }[] = [];
-    for (const a of agents) {
-      for (const sk of listScopedSkills(a.id)) {
-        if (!skillMap.has(sk.name)) {
-          skillMap.set(sk.name, { id: sk.name, name: sk.name, origin: sk.origin?.label ?? null });
-        }
-        skillEdges.push({ agent: a.id, skill: sk.name });
-      }
-    }
-    return json(res, 200, { ...topo, skills: [...skillMap.values()], skillEdges });
-  }
+  // Static PWA is served pre-auth (see the servePwa call above the auth gate).
+  return json(res, 404, { error: 'Not found' });
+}
 
-  // Full-text search across the caller's accessible rooms (FTS5). Scoped to
-  // rooms the user can see — never leaks messages from other rooms.
-  if (url.pathname === '/api/search' && method === 'GET') {
-    const q = url.searchParams.get('q') ?? '';
-    if (!q.trim()) return json(res, 200, { results: [] });
-    const rooms = filterRoomsForUser(userId, getAllWebchatRooms());
-    const nameById = new Map(rooms.map((r) => [r.id, r.name]));
-    const hits = searchWebchatMessages(
-      rooms.map((r) => r.id),
-      q,
-      50,
-    );
-    return json(res, 200, {
-      results: hits.map((h) => ({
-        id: h.id,
-        roomId: h.room_id,
-        roomName: nameById.get(h.room_id) ?? h.room_id,
-        sender: h.sender,
-        senderType: h.sender_type,
-        snippet: redactSensitiveData(h.snippet),
-        createdAt: h.created_at,
-      })),
-    });
-  }
+// ── Declarative API route table ──────────────────────────────────────────
+// One entry per converted branch of the old hand-rolled dispatcher.
+// ORDER IS LOAD-BEARING: entries are tried top to bottom in exactly the
+// order the original if-chain checked them (literal paths before the
+// overlapping :id regexes, e.g. /api/agents/draft before /api/agents/:id).
+// Guards run IN ORDER before the handler and reproduce the exact original
+// responses; any auth beyond the three uniform checks stays in the handler.
 
-  const histMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/messages$/);
-  if (histMatch && method === 'GET') {
-    const room = getWebchatRoom(histMatch[1]);
-    if (!room) return json(res, 404, { error: 'Room not found' });
-    if (!canAccessRoom(userId, room.id)) return json(res, 403, { error: 'Access denied' });
-    const afterId = url.searchParams.get('after_id');
-    const beforeId = url.searchParams.get('before_id');
-    // Optional thread filter — absent = the whole room (back-compat).
-    const threadId = url.searchParams.get('thread_id') || undefined;
-    const msgs = afterId
-      ? getWebchatMessagesAfterId(room.id, afterId, 200, threadId)
-      : beforeId
-        ? getWebchatMessagesBeforeId(room.id, beforeId, 50, threadId)
-        : getWebchatMessages(room.id, 100, threadId);
-    return json(
-      res,
-      200,
-      msgs.map((m) => ({ ...m, content: redactSensitiveData(m.content) })),
-    );
-  }
+interface RouteCtx {
+  req: IncomingMessage;
+  res: ServerResponse;
+  url: URL;
+  method: string;
+  userId: string;
+  senderIdentity: string;
+  hooks: WebchatServerHooks;
+}
 
-  // ── Upload (multipart / chunked) + serve ──────────────────────────────
-  // Require a custom header on uploads so cross-origin form-POSTs (which are
-  // CORS "simple requests" and skip preflight) can't auto-attach credentials
-  // from a fronting proxy / cookie / Tailscale identity. The PWA sets this
-  // header in authFetch().
-  const uploadMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/upload$/);
-  if (uploadMatch && method === 'POST') {
-    const roomId = decodeURIComponent(uploadMatch[1]);
-    const csrfOk = req.headers['x-webchat-csrf'] === '1';
-    const accessOk = canAccessRoom(userId, roomId);
-    log.info('Webchat upload (multipart) request', {
-      roomId,
-      userId,
-      contentType: req.headers['content-type'],
-      contentLength: req.headers['content-length'],
-      csrfOk,
-      accessOk,
-    });
-    if (!csrfOk) return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!accessOk) return json(res, 403, { error: 'Access denied' });
-    return handleMultipartUpload(
-      req,
-      res,
-      roomId,
-      senderIdentity,
-      userId,
-      hooks,
-      url.searchParams.get('thread_id') || undefined,
-    );
+type RouteGuard = 'csrf' | 'owner' | 'anyAdmin';
+
+interface ApiRoute {
+  method: string | string[];
+  path: string | RegExp; // string = exact url.pathname match
+  guards?: RouteGuard[]; // applied IN ORDER before the handler
+  h: (ctx: RouteCtx, m: RegExpMatchArray) => void | Promise<void>;
+}
+
+const RE_ROOM_ID = /^\/api\/rooms\/([^/]+)$/;
+const RE_ROOM_AGENTS = /^\/api\/rooms\/([^/]+)\/agents$/;
+const RE_ROOM_MENTIONABLE = /^\/api\/rooms\/([^/]+)\/mentionable$/;
+const RE_ROOM_CRED_MODE = /^\/api\/rooms\/([^/]+)\/credential-mode$/;
+const RE_ROOM_OAUTH = /^\/api\/rooms\/([^/]+)\/oauth-allowed$/;
+const RE_USER_CREDS_MINT = /^\/api\/user-credentials\/oauth\/(start|code|cancel)$/;
+const RE_CODEX_MINT = /^\/api\/user-credentials\/codex\/(start|finish|cancel)$/;
+const RE_WS_CRED_MINT = /^\/api\/workspace-credential\/oauth\/(start|code|cancel)$/;
+const RE_WS_CODEX_MINT = /^\/api\/workspace-credential\/codex\/(start|finish|cancel)$/;
+const RE_ROOM_AGENT = /^\/api\/rooms\/([^/]+)\/agents\/([^/]+)$/;
+const RE_ROOM_PRIME = /^\/api\/rooms\/([^/]+)\/prime$/;
+const RE_ROOM_ARCHIVE = /^\/api\/rooms\/([^/]+)\/(archive|unarchive)$/;
+const RE_ROOM_HIDE = /^\/api\/rooms\/([^/]+)\/(hide|unhide)$/;
+const RE_ROOM_PIN = /^\/api\/rooms\/([^/]+)\/(pin|unpin)$/;
+const RE_ROOM_ENGAGE = /^\/api\/rooms\/([^/]+)\/engage-mode$/;
+const RE_ROOM_NAME = /^\/api\/rooms\/([^/]+)\/name$/;
+const RE_ROOM_THREAD_READ = /^\/api\/rooms\/([^/]+)\/threads\/([^/]+)\/read$/;
+const RE_ROOM_THREADS = /^\/api\/rooms\/([^/]+)\/threads$/;
+const RE_ROOM_THREAD = /^\/api\/rooms\/([^/]+)\/threads\/([^/]+)$/;
+const RE_ROOM_THREAD_PULL = /^\/api\/rooms\/([^/]+)\/threads\/([^/]+)\/(pull|push)$/;
+const RE_HIST = /^\/api\/rooms\/([^/]+)\/messages$/;
+const RE_UPLOAD = /^\/api\/rooms\/([^/]+)\/upload$/;
+const RE_CHUNK = /^\/api\/rooms\/([^/]+)\/upload\/chunk$/;
+const RE_FILE = /^\/api\/files\/([^/]+)\/([^/]+)$/;
+const RE_AGENT = /^\/api\/agents\/([^/]+)$/;
+const RE_INSTR = /^\/api\/agents\/([^/]+)\/instructions$/;
+const RE_AGENT_ROOMS = /^\/api\/agents\/([^/]+)\/rooms$/;
+const RE_AGENT_MODEL = /^\/api\/agents\/([^/]+)\/model$/;
+const RE_MCP_SOURCE = /^\/api\/mcp-sources\/([^/]+)$/;
+const RE_MCP_OAUTH_START = /^\/api\/mcp-servers\/([^/]+)\/oauth\/start$/;
+const RE_MCP_REPIN = /^\/api\/mcp-servers\/([^/]+)\/repin$/;
+const RE_MCP_TOOLS = /^\/api\/mcp-servers\/([^/]+)\/tools$/;
+const RE_MCP_AUTH = /^\/api\/mcp-servers\/([^/]+)\/auth$/;
+const RE_MCP_SERVER_ID = /^\/api\/mcp-servers\/([^/]+)$/;
+const RE_AGENT_MCP = /^\/api\/agents\/([^/]+)\/mcp-servers$/;
+const RE_SKILL_SOURCE = /^\/api\/skills\/sources\/([^/]+)$/;
+const RE_SKILL_UPDATE = /^\/api\/skills\/([^/]+)\/update$/;
+const RE_SKILL_ITEM = /^\/api\/skills\/([^/]+)$/;
+const RE_AGENT_SKILLS = /^\/api\/agents\/([^/]+)\/skills$/;
+const RE_AGENT_SKILL_IMPORT = /^\/api\/agents\/([^/]+)\/skills\/import$/;
+const RE_SCOPED_SKILL_CONTENT = /^\/api\/agents\/([^/]+)\/skills\/scoped\/([^/]+)\/content$/;
+const RE_ROOM_LEARNING = /^\/api\/rooms\/([^/]+)\/learning$/;
+const RE_ROOM_EXPORT = /^\/api\/rooms\/([^/]+)\/export$/;
+const RE_AGENT_EXPORT = /^\/api\/agents\/([^/]+)\/export$/;
+const RE_AGENT_LEARNING = /^\/api\/agents\/([^/]+)\/learning$/;
+const RE_SKILL_REVERT = /^\/api\/agents\/([^/]+)\/skills\/scoped\/([^/]+)\/revert$/;
+const RE_SKILL_RESTORE = /^\/api\/agents\/([^/]+)\/skills\/archived\/([^/]+)\/restore$/;
+const RE_AGENT_SCOPED_SKILL = /^\/api\/agents\/([^/]+)\/skills\/scoped\/([^/]+)$/;
+const RE_DRAFT = /^\/api\/skill-drafts\/([^/]+)$/;
+const RE_DRAFT_KEEP = /^\/api\/skill-drafts\/([^/]+)\/keep$/;
+const RE_AGENT_STATUS = /^\/api\/agents\/([^/]+)\/status$/;
+const RE_AGENT_SESSIONS = /^\/api\/agents\/([^/]+)\/sessions$/;
+const RE_SESSION_RESET = /^\/api\/sessions\/([^/]+)\/reset$/;
+const RE_ROOM_BROADCAST = /^\/api\/rooms\/([^/]+)\/sessions\/broadcast$/;
+const RE_ROUTER_DEL = /^\/api\/router\/routers\/([^/]+)$/;
+const RE_MODEL_ID = /^\/api\/models\/([^/]+)$/;
+const RE_APPROVE = /^\/api\/approvals\/([^/]+)\/respond$/;
+const RE_USER_ID = /^\/api\/users\/([^/]+)$/;
+
+// ── Your @-mention handle (the slug others type to @-mention you) ──────
+async function rMeHandleGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  return json(res, 200, { handle: getWebchatUserHandle(userId) ?? '' });
+}
+
+async function rMeHandlePut(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { handle?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
   }
-  const chunkMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/upload\/chunk$/);
-  if (chunkMatch && method === 'POST') {
-    const roomId = decodeURIComponent(chunkMatch[1]);
-    const csrfOk = req.headers['x-webchat-csrf'] === '1';
-    const accessOk = canAccessRoom(userId, roomId);
-    log.info('Webchat upload (chunked) request', {
-      roomId,
-      userId,
-      contentType: req.headers['content-type'],
-      contentLength: req.headers['content-length'],
-      csrfOk,
-      accessOk,
-    });
-    if (!csrfOk) return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!accessOk) return json(res, 403, { error: 'Access denied' });
-    return handleChunkedUpload(
-      req,
-      res,
-      roomId,
-      senderIdentity,
-      userId,
-      hooks,
-      url.searchParams.get('thread_id') || undefined,
-    );
+  const handle = typeof body.handle === 'string' ? body.handle.trim().toLowerCase() : '';
+  const result = setWebchatUserHandle(userId, handle);
+  if (!result.ok) {
+    return result.reason === 'taken'
+      ? json(res, 409, { error: 'That handle is already taken' })
+      : json(res, 400, { error: 'Handle must be 1–32 characters: lowercase letters, numbers, and hyphens' });
   }
-  const fileMatch = url.pathname.match(/^\/api\/files\/([^/]+)\/([^/]+)$/);
-  if (fileMatch && method === 'GET') {
-    const roomId = decodeURIComponent(fileMatch[1]);
+  return json(res, 200, { ok: true, handle });
+}
+
+// ── Overview ──────────────────────────────────────────────────────────
+async function rOverviewGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  return json(res, 200, await buildOverview(userId));
+}
+
+// ── Rooms ─────────────────────────────────────────────────────────────
+// Two creation paths exist for historical reasons and they are NOT
+// redundant: POST /api/agents is "agent-first" (the room is incidental,
+// 1:1 with the agent's folder), POST /api/rooms is "room-first" (the
+// room is the conversation unit and you wire 1+ agents to it). Both
+// converge on the same messaging_groups + messaging_group_agents shape.
+async function rRoomsGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  const visible = filterRoomsForUser(userId, getAllWebchatRooms());
+  const archivedSet = getArchivedRoomIds(); // global
+  const hiddenSet = getHiddenRoomIdsForUser(userId); // per-user
+  return json(
+    res,
+    200,
+    visible.map((r) => ({
+      ...r,
+      archived: archivedSet.has(r.id),
+      hidden: hiddenSet.has(r.id),
+      canArchive: canArchiveRoom(userId, r.id),
+    })),
+  );
+}
+
+async function rRoomsPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  return createRoomHandler(req, res);
+}
+
+async function rRoomIdDelete(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  return deleteRoomHandler(res, decodeURIComponent(m[1]));
+}
+
+async function rRoomAgentsGet(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+  if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+  const agents = getAgentsForWebchatRoom(roomId);
+  const primeAgentId = getPrimeAgentForWebchatRoom(roomId);
+  return json(
+    res,
+    200,
+    agents.map((a) => ({
+      ...a,
+      is_prime: a.id === primeAgentId,
+      // Whether this agent auto-runs the learning review after busy turns.
+      // Member-visible on purpose: the client uses it to suppress the manual
+      // nudge (auto already ran — a tap would just double the review).
+      learning_auto: parseAgentLearning(a.id).autoTrigger !== false,
+    })),
+  );
+}
+
+// People you can @-mention in this room: anyone with a handle who can access
+// it (NOT limited to who's currently connected — a mention notifies on
+// return). Excludes the requester. Used by the composer's @ autocomplete.
+async function rRoomMentionableGet(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+  if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+  const people = getWebchatHandleUsers()
+    .filter((u) => u.userId !== userId && canAccessRoom(u.userId, roomId))
+    .map((u) => ({ handle: u.handle, name: u.displayName || u.handle }));
+  return json(res, 200, people);
+}
+
+async function rRoomAgentsPost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  // Permission is body-dependent (which agent is being wired), so it is
+  // enforced inside the handler once the AgentRef is parsed. Owners may wire
+  // anything; a scoped admin may wire an agent THEY administer to a room
+  // they can access.
+  return addAgentToRoomHandler(req, res, decodeURIComponent(m[1]), userId);
+}
+
+// ── UserCreds: per-room credential mode (admin) ────────────────────────────────
+async function rRoomCredModeGet(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+  if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+  // The per-room OVERRIDE ('inherit' when unset); the effective mode is what the
+  // room actually runs (override, else the global default).
+  return json(res, 200, {
+    mode: getRoomModeOverride(roomId) ?? 'inherit',
+    effectiveMode: getEffectiveRoomMode(roomId),
+    defaultMode: getCredentialsConfig().defaultMode,
+  });
+}
+
+async function rRoomCredModePut(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+  // Owner, or an admin over ANY agent wired to this room.
+  const allowed = isOwner(userId) || getAgentsForWebchatRoom(roomId).some((a) => hasAdminPrivilege(userId, a.id));
+  if (!allowed) return json(res, 403, { error: 'Admin privilege required' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { mode?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  if (body.mode !== 'inherit' && body.mode !== 'disabled' && body.mode !== 'optional' && body.mode !== 'required') {
+    return json(res, 400, { error: "mode must be 'inherit', 'disabled', 'optional', or 'required'" });
+  }
+  // 'inherit' clears the override so the room follows the global default.
+  setRoomModeOverride(roomId, body.mode === 'inherit' ? null : body.mode);
+  return json(res, 200, { ok: true, mode: body.mode });
+}
+
+// ── UserCreds OAuth: per-room toggle allowing subscription tokens (admin) ───────
+async function rRoomOauthGet(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+  if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+  return json(res, 200, { allowed: getRoomOauthAllowed(roomId) });
+}
+
+async function rRoomOauthPut(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+  const allowed = isOwner(userId) || getAgentsForWebchatRoom(roomId).some((a) => hasAdminPrivilege(userId, a.id));
+  if (!allowed) return json(res, 403, { error: 'Admin privilege required' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { allowed?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  if (typeof body.allowed !== 'boolean') return json(res, 400, { error: 'allowed must be a boolean' });
+  setRoomOauthAllowed(roomId, body.allowed);
+  return json(res, 200, { ok: true, allowed: body.allowed });
+}
+
+// ── UserCreds: workspace credentials policy — accepted TYPES + default room mode ──
+// Read by anyone (the room UIs need it); only the owner can change it.
+async function rWebchatCredentialsConfig(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, method, userId } = ctx;
+  if (method === 'GET') {
+    return json(res, 200, { ...getCredentialsConfig(), codexAvailable: codexAvailable(), canEdit: isOwner(userId) });
+  }
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: Record<string, unknown>;
+  try {
+    body = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  const patch: Partial<CredentialsConfig> = {};
+  if (body.defaultMode !== undefined) {
+    if (body.defaultMode !== 'disabled' && body.defaultMode !== 'optional' && body.defaultMode !== 'required')
+      return json(res, 400, { error: "defaultMode must be 'disabled', 'optional', or 'required'" });
+    patch.defaultMode = body.defaultMode as CredentialMode;
+  }
+  for (const k of ['allowAnthropicKey', 'allowClaudeOauth', 'allowOpenaiKey', 'allowCodexOauth'] as const) {
+    if (body[k] === undefined) continue;
+    if (typeof body[k] !== 'boolean') return json(res, 400, { error: `${k} must be a boolean` });
+    patch[k] = body[k] as boolean;
+  }
+  // Codex types are inert until the provider is installed — refuse to enable them.
+  if ((patch.allowCodexOauth || patch.allowOpenaiKey) && !codexAvailable())
+    return json(res, 400, { error: 'Codex support isn’t installed yet — add it with /add-codex first.' });
+  setCredentialsConfig(patch);
+  return json(res, 200, { ...getCredentialsConfig(), codexAvailable: codexAvailable() });
+}
+
+// ── UserCreds: a member connects / disconnects THEIR own Anthropic key ──────────
+// userId is the server-resolved caller — a user can only manage their own key.
+async function rUserCredentialsCredential(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, url, method, userId } = ctx;
+  const reqRoomId = method === 'GET' ? (url.searchParams.get('roomId') ?? '') : undefined; // POST/DELETE read roomId from the body below
+  if (method === 'GET') {
+    const roomId = decodeURIComponent(reqRoomId ?? '');
+    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
     if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
-    return handleFileServe(res, roomId, decodeURIComponent(fileMatch[2]));
-  }
-
-  // ── Agents (= agent groups) ─────────────────────────────────────────────
-  if (url.pathname === '/api/agents' && method === 'GET') {
-    const includeArchived = url.searchParams.get('includeArchived') === '1';
-    return json(res, 200, listAgentsForUser(userId, includeArchived));
-  }
-
-  // POST /api/agents/draft must come BEFORE the /api/agents/:id pattern
-  // (which would otherwise match 'draft' as an id) AND before the bare
-  // /api/agents POST so the literal-path handlers stay distinct.
-  if (url.pathname === '/api/agents/draft' && method === 'POST') {
-    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin only' });
-    if (req.headers['x-webchat-csrf'] !== '1') {
-      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    }
-    return draftAgentHandler(req, res);
-  }
-
-  if (url.pathname === '/api/agents' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') {
-      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    }
-    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin only' });
-    return createAgentHandler(req, res, userId);
-  }
-
-  const agentMatch = url.pathname.match(/^\/api\/agents\/([^/]+)$/);
-  if (agentMatch && method === 'PUT') {
-    const group = resolveAgent(decodeURIComponent(agentMatch[1]));
-    if (!group) return json(res, 404, { error: 'Agent not found' });
-    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
-    return updateAgentHandler(req, res, group.id);
-  }
-  if (agentMatch && method === 'DELETE') {
-    const group = resolveAgent(decodeURIComponent(agentMatch[1]));
-    if (!group) return json(res, 404, { error: 'Agent not found' });
-    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
-    return deleteAgentHandler(res, group.id);
-  }
-
-  const instrMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/instructions$/);
-  if (instrMatch && method === 'GET') {
-    const group = resolveAgent(decodeURIComponent(instrMatch[1]));
-    if (!group) return json(res, 404, { error: 'Agent not found' });
-    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
-    return readInstructions(res, group.id);
-  }
-  if (instrMatch && method === 'PUT') {
-    const group = resolveAgent(decodeURIComponent(instrMatch[1]));
-    if (!group) return json(res, 404, { error: 'Agent not found' });
-    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
-    return writeInstructions(req, res, group.id);
-  }
-
-  // GET the rooms an agent is wired to (agent-centric mirror of
-  // GET /api/rooms/:id/agents). Read-only; writes go through the existing
-  // owner-only POST/DELETE /api/rooms/:roomId/agents endpoints.
-  const agentRoomsMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/rooms$/);
-  if (agentRoomsMatch && method === 'GET') {
-    const group = resolveAgent(decodeURIComponent(agentRoomsMatch[1]));
-    if (!group) return json(res, 404, { error: 'Agent not found' });
-    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
-    return json(res, 200, getWebchatRoomsForAgent(group.id));
-  }
-
-  // ── Per-agent model assignment ─────────────────────────────────────────
-  const agentModelMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/model$/);
-  if (agentModelMatch && method === 'PUT') {
-    const group = resolveAgent(decodeURIComponent(agentModelMatch[1]));
-    if (!group) return json(res, 404, { error: 'Agent not found' });
-    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
-    return assignAgentModelHandler(req, res, group.id);
-  }
-
-  // ── MCP servers (registry + per-agent assignment) ──────────────────────
-  // A registry of MCP tool servers (webchat_mcp_servers) mirroring the models
-  // registry: define a server once (owner-gated CRUD + a probe that connects
-  // as a real MCP client and lists the server's tools), then attach it to any
-  // number of agents. Assignment syncs container_configs.mcp_servers — the
-  // same field `ncl groups config add-mcp-server` writes and the container
-  // reads — and restarts the group's containers. List responses never include
-  // env/headers (they may hold credentials).
-  // MCP + skills marketplace can be turned off workspace-wide (hardened installs
-  // — both are code-execution surfaces). Gate every management endpoint at the
-  // server, not just the UI, per the admin-surface rule (DOM hide + server 403).
-  if (
-    (url.pathname === '/api/mcp-servers' ||
-      url.pathname.startsWith('/api/mcp-servers/') ||
-      url.pathname === '/api/skills' ||
-      url.pathname.startsWith('/api/skills/')) &&
-    getMarketplaceDisabled()
-  ) {
-    return json(res, 403, { error: 'MCP and the skills marketplace are disabled by the workspace owner.' });
-  }
-
-  // MCP registry is admin-only (scoped admin or higher) — end to end.
-  if (url.pathname === '/api/mcp-servers' && method === 'GET') {
-    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
-    return json(res, 200, listMcpServersForUI());
-  }
-  if (url.pathname === '/api/mcp-servers' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
-    return createMcpServerHandler(req, res);
-  }
-  // Read-only discovery over the public MCP registry. Admin-gated like the rest of
-  // the MCP surface; adds no write path (a row prefills the existing add form, so
-  // every server still goes through probe → create).
-  if (url.pathname === '/api/mcp-sources' && method === 'GET') {
-    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
+    const groups = getAgentsForWebchatRoom(roomId);
+    // Effective mode (room override → global default). Credential TYPES are
+    // workspace-wide (Credentials admin page); which ones apply here depends on
+    // the room's provider (Claude vs Codex).
+    const cfg = getCredentialsConfig();
+    const provider = groups[0] && getContainerConfig(groups[0].id)?.provider === 'codex' ? 'codex' : 'claude';
+    // Connection is now user-level (connect once → all same-provider rooms).
+    const connected = userHasConnectedCredential(userId, provider);
+    // Report the connected credential type so the UI shows the right banner.
+    const credType = connected ? (getUserCredential(userId, provider)?.cred_type ?? null) : null;
     return json(res, 200, {
-      sources: [
-        {
-          ...MCP_REGISTRY_SOURCE,
-          disabled: isSourceDisabled(MCP_REGISTRY_ID),
-          removed: isSourceDisabled(mcpRegistryRemovedKey()),
-        },
-      ],
+      connected,
+      credType,
+      provider,
+      mode: getEffectiveRoomMode(roomId),
+      oauthAllowed: provider === 'codex' ? cfg.allowCodexOauth : cfg.allowClaudeOauth,
+      apiKeyAllowed: provider === 'codex' ? cfg.allowOpenaiKey : cfg.allowAnthropicKey,
     });
   }
-  const mcpSourceMatch = url.pathname.match(/^\/api\/mcp-sources\/([^/]+)$/);
-  if (mcpSourceMatch && method === 'PUT') {
-    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const id = decodeURIComponent(mcpSourceMatch[1]);
-    if (id !== MCP_REGISTRY_ID) return json(res, 404, { error: 'Unknown source' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let disabled = false;
-    try {
-      disabled = !!(JSON.parse(raw) as { disabled?: unknown }).disabled;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    setSourceDisabled(MCP_REGISTRY_ID, disabled);
-    return json(res, 200, { ok: true, disabled });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { roomId?: unknown; apiKey?: unknown; type?: unknown; token?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
   }
-  // Full removal (parity with skill sources' Remove). Stronger than disable:
-  // the row leaves Settings save for a one-line restore, and the catalog is
-  // gone server-side. Restore = POST on the same path.
-  if (mcpSourceMatch && method === 'DELETE') {
-    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (decodeURIComponent(mcpSourceMatch[1]) !== MCP_REGISTRY_ID) return json(res, 404, { error: 'Unknown source' });
-    setSourceDisabled(mcpRegistryRemovedKey(), true);
-    return json(res, 200, { ok: true, removed: true });
-  }
-  if (mcpSourceMatch && method === 'POST') {
-    // Restore a removed source (clears the disabled flag too — a restore
-    // should come back usable, not resurrect half-off).
-    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (decodeURIComponent(mcpSourceMatch[1]) !== MCP_REGISTRY_ID) return json(res, 404, { error: 'Unknown source' });
-    setSourceDisabled(mcpRegistryRemovedKey(), false);
-    setSourceDisabled(MCP_REGISTRY_ID, false);
-    return json(res, 200, { ok: true, removed: false });
-  }
-  if (url.pathname === '/api/mcp-catalog' && method === 'GET') {
-    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
-    return mcpCatalogHandler(res, url.searchParams.get('q') || '');
-  }
-  if (url.pathname === '/api/mcp-servers/probe' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
-    return probeMcpServerHandler(req, res);
-  }
-  // OAuth callback: the admin's browser lands here from the authorization
-  // server. Auth = whois like everything else, plus the single-use state.
-  if (url.pathname === '/api/mcp-servers/oauth/callback' && method === 'GET') {
-    const code = url.searchParams.get('code') || '';
-    const state = url.searchParams.get('state') || '';
-    if (!code || !state) return json(res, 400, { error: 'Missing code/state' });
-    try {
-      const { serverId } = await finishOAuthFlow(state, code);
-      const server = getWebchatMcpServer(serverId);
-      if (server) {
-        // Re-sync every assigned agent onto the relay URL now that auth exists.
-        for (const gid of getAgentsAssignedToMcpServer(serverId)) {
-          syncAgentMcpConfig(gid, server, true);
-          reloadAgentMcpServers(gid);
+  const roomId = typeof body.roomId === 'string' ? body.roomId : '';
+  if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+  if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+  const groups = getAgentsForWebchatRoom(roomId);
+  if (groups.length === 0) return json(res, 400, { error: 'Room has no wired agent' });
+  const provider = groups[0] && getContainerConfig(groups[0].id)?.provider === 'codex' ? 'codex' : 'claude';
+  const credType = body.type === 'oauth_token' ? 'oauth_token' : 'api_key';
+  const cfg = getCredentialsConfig();
+  // Rate-limit connects (each recreates a vault secret + spawns onecli procs).
+  if (method === 'POST' && userCredsRateLimited(userId, 'connect'))
+    return json(res, 429, { error: 'Too many attempts — wait a moment and try again.' });
+  try {
+    if (method === 'POST' && credType === 'oauth_token') {
+      // Gate 1: the workspace must accept this provider's subscriptions (Credentials page).
+      if (!(provider === 'codex' ? cfg.allowCodexOauth : cfg.allowClaudeOauth))
+        return json(res, 403, {
+          error: `This workspace does not accept ${provider === 'codex' ? 'Codex (ChatGPT)' : 'Claude'} subscription (OAuth) connections.`,
+        });
+      const token = typeof body.token === 'string' ? body.token.trim() : '';
+      if (provider === 'codex') {
+        // Codex subscription = a whole auth.json (normally produced by the
+        // browser mint; pasting it is a fallback). Require valid credential JSON.
+        let ok = false;
+        try {
+          const parsed = JSON.parse(token) as Record<string, unknown>;
+          ok = Boolean(parsed.tokens || parsed.OPENAI_API_KEY);
+        } catch {
+          ok = false;
         }
-        void checkMcpServer(server).catch(() => {});
+        if (!ok)
+          return json(res, 400, {
+            error: 'Expected a Codex auth.json — use “Connect with my ChatGPT subscription” instead of pasting.',
+          });
+      } else if (!/^sk-ant-oat/.test(token)) {
+        return json(res, 400, {
+          error: 'Expected a Claude subscription token from `claude setup-token` (sk-ant-oat…)',
+        });
       }
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(
-        '<!doctype html><meta charset="utf-8"><title>Connected</title><body style="font-family:system-ui;padding:2rem">✅ MCP server connected — you can close this tab and return to NanoClaw.</body>',
-      );
-      return;
-    } catch (err) {
-      res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(
-        `<!doctype html><meta charset="utf-8"><title>Failed</title><body style="font-family:system-ui;padding:2rem">OAuth failed: ${escapeHtml(err instanceof Error ? err.message : String(err))}</body>`,
-      );
-      return;
+      await storeUserCredential(realOnecliAdmin, userId, provider, token, 'oauth_token');
+    } else if (method === 'POST') {
+      if (!(provider === 'codex' ? cfg.allowOpenaiKey : cfg.allowAnthropicKey))
+        return json(res, 403, {
+          error: `This workspace does not accept ${provider === 'codex' ? 'OpenAI' : 'Anthropic'} API keys.`,
+        });
+      // API keys are gated by the room's effective mode (OAuth is workspace-wide
+      // and allowed even in an OAuth-only 'disabled' room — see the spawn gate).
+      // Credentials are user-level, so connecting via a disabled room would
+      // otherwise silently enable UserCreds in the member's other rooms.
+      if (getEffectiveRoomMode(roomId) === 'disabled')
+        return json(res, 403, { error: 'This room does not accept member API keys.' });
+      const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
+      // Codex: an OpenAI key (sk-…). Claude: an Anthropic key (sk-ant-…).
+      if (provider === 'codex') {
+        if (!/^sk-/.test(apiKey)) return json(res, 400, { error: 'Expected an OpenAI API key (sk-…)' });
+      } else if (!/^sk-ant-/.test(apiKey)) {
+        return json(res, 400, { error: 'Expected an Anthropic API key (sk-ant-…)' });
+      }
+      await storeUserCredential(realOnecliAdmin, userId, provider, apiKey, 'api_key');
+    } else {
+      // Disconnect: revoke the user-level credential + un-enroll every group.
+      // Capture the enrolled groups BEFORE revoke (it clears them) so we can
+      // also stop any running per-member container immediately — otherwise it
+      // lingers (with its copy of the session) to the idle ceiling.
+      const enrolledGroupIds = listEnrolledGroups(userId, provider).map((r) => r.agent_group_id);
+      await revokeUserCredential(realOnecliAdmin, userId, provider);
+      for (const gid of enrolledGroupIds) {
+        for (const s of getSessionsByAgentGroup(gid)) {
+          if (s.thread_id === userId) killContainer(s.id, 'UserCreds credential disconnected');
+        }
+      }
     }
+  } catch (err) {
+    log.error('UserCreds onboard/revoke failed', { userId, roomId, err: err instanceof Error ? err.message : err });
+    return json(res, 502, { error: 'Credential setup failed — check OneCLI is running.' });
   }
-  const mcpOauthStartMatch = url.pathname.match(/^\/api\/mcp-servers\/([^/]+)\/oauth\/start$/);
-  if (mcpOauthStartMatch && method === 'POST') {
-    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let staticClient: { client_id: string; client_secret?: string } | undefined;
-    try {
-      const b = JSON.parse(raw || '{}') as { client_id?: string; client_secret?: string };
-      if (b.client_id) staticClient = { client_id: String(b.client_id), client_secret: b.client_secret };
-    } catch {
-      /* empty body is fine */
-    }
-    const host = String(req.headers.host || '');
-    if (!host) return json(res, 400, { error: 'Missing Host header' });
-    const redirectUri = `https://${host}/api/mcp-servers/oauth/callback`;
-    try {
-      const authorizeUrl = await startOAuthFlow(decodeURIComponent(mcpOauthStartMatch[1]), redirectUri, staticClient);
-      return json(res, 200, { authorizeUrl });
-    } catch (err) {
-      return json(res, 422, { error: err instanceof Error ? err.message : String(err) });
-    }
+  return json(res, 200, { ok: true });
+}
+
+// ── UserCreds OAuth browser-mint: get a setup-token without a terminal ──────────
+// A member signs in to their Claude subscription entirely in the browser; the
+// server runs `claude setup-token` in a throwaway container, scrapes the URL,
+// takes the pasted code, captures the token, and stores it as the member's
+// user-level credential — the same storage the paste path uses, minus the
+// terminal. Same gates as the OAuth paste path: room access + OAuth opt-in.
+async function rUserCredsMintPost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { roomId?: unknown; sessionId?: unknown; code?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
   }
-  // Re-approve a drifted tool surface: pin what the server exposes NOW.
-  const mcpRepinMatch = url.pathname.match(/^\/api\/mcp-servers\/([^/]+)\/repin$/);
-  if (mcpRepinMatch && method === 'POST') {
-    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const server = getWebchatMcpServer(decodeURIComponent(mcpRepinMatch[1]));
-    if (!server) return json(res, 404, { error: 'MCP server not found' });
-    if (server.transport === 'stdio' || !server.url) return json(res, 400, { error: 'Only remote servers are pinned' });
-    setMcpServerDrift(server.id, null);
-    getDb().prepare(`UPDATE webchat_mcp_servers SET pinned_tools = NULL WHERE id = ?`).run(server.id);
-    const health = await checkMcpServer(getWebchatMcpServer(server.id)!); // re-probe pins the current surface
-    return json(res, 200, { ok: true, health });
-  }
-  // Tool allowlist for a server (null/empty = all tools). Flows into each
-  // assigned agent's container config → the SDK's allowedTools filter.
-  const mcpToolsMatch = url.pathname.match(/^\/api\/mcp-servers\/([^/]+)\/tools$/);
-  if (mcpToolsMatch && method === 'PUT') {
-    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const server = getWebchatMcpServer(decodeURIComponent(mcpToolsMatch[1]));
-    if (!server) return json(res, 404, { error: 'MCP server not found' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let enabled: string[] | null = null;
-    try {
-      const b = JSON.parse(raw) as { enabled?: unknown };
-      if (Array.isArray(b.enabled)) enabled = b.enabled.map(String).slice(0, 500);
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    setMcpServerEnabledTools(server.id, enabled && enabled.length ? enabled : null);
-    const updated = getWebchatMcpServer(server.id)!;
-    for (const gid of getAgentsAssignedToMcpServer(server.id)) {
-      syncAgentMcpConfig(gid, updated, true);
-      reloadAgentMcpServers(gid);
-    }
+  const step = m[1];
+  if (step === 'cancel') {
+    if (typeof body.sessionId === 'string') cancelMint(userId, body.sessionId);
     return json(res, 200, { ok: true });
   }
-  // Host-side credential for a server: {token} sets a bearer secret, null
-  // clears. Never echoed back; containers switch to the relay on next sync.
-  const mcpAuthMatch = url.pathname.match(/^\/api\/mcp-servers\/([^/]+)\/auth$/);
-  if (mcpAuthMatch && method === 'PUT') {
-    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const server = getWebchatMcpServer(decodeURIComponent(mcpAuthMatch[1]));
-    if (!server) return json(res, 404, { error: 'MCP server not found' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let token: string | null = null;
-    try {
-      const b = JSON.parse(raw) as { token?: unknown };
-      token = typeof b.token === 'string' && b.token.trim() ? b.token.trim() : null;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
+  const roomId = typeof body.roomId === 'string' ? body.roomId : '';
+  if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+  if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+  if (!getCredentialsConfig().allowClaudeOauth)
+    return json(res, 403, { error: 'This workspace does not accept Claude subscription (OAuth) connections.' });
+  const groups = getAgentsForWebchatRoom(roomId);
+  if (groups.length === 0) return json(res, 400, { error: 'Room has no wired agent' });
+  try {
+    if (step === 'start') {
+      if (activeMintCount() >= MAX_ACTIVE_MINTS)
+        return json(res, 429, { error: 'Too many sign-ins in progress — try again shortly.' });
+      if (userCredsRateLimited(userId, 'mint-start'))
+        return json(res, 429, { error: 'Too many attempts — wait a moment and try again.' });
+      const { sessionId, url: signinUrl } = await startClaudeMint(userId);
+      return json(res, 200, { sessionId, url: signinUrl });
     }
-    setMcpServerAuth(server.id, token ? { kind: 'bearer', token } : null);
-    const updated = getWebchatMcpServer(server.id)!;
-    for (const gid of getAgentsAssignedToMcpServer(server.id)) {
-      syncAgentMcpConfig(gid, updated, true);
-      reloadAgentMcpServers(gid);
-    }
-    return json(res, 200, { ok: true, hasAuth: !!token });
+    // step === 'code': mint, then onboard.
+    if (typeof body.sessionId !== 'string' || typeof body.code !== 'string')
+      return json(res, 400, { error: 'sessionId and code required' });
+    const token = await mintClaudeToken(userId, body.sessionId, body.code);
+    await storeUserCredential(realOnecliAdmin, userId, 'claude', token, 'oauth_token');
+    return json(res, 200, { ok: true });
+  } catch (err) {
+    return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
   }
-  const mcpServerIdMatch = url.pathname.match(/^\/api\/mcp-servers\/([^/]+)$/);
-  if (mcpServerIdMatch && method === 'PUT') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return updateMcpServerHandler(req, res, decodeURIComponent(mcpServerIdMatch[1]));
-  }
-  if (mcpServerIdMatch && method === 'DELETE') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return deleteMcpServerHandler(res, decodeURIComponent(mcpServerIdMatch[1]), url.searchParams.get('force') === '1');
-  }
-  const agentMcpMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/mcp-servers$/);
-  if (agentMcpMatch && (method === 'GET' || method === 'PUT')) {
-    const group = resolveAgent(decodeURIComponent(agentMcpMatch[1]));
-    if (!group) return json(res, 404, { error: 'Agent not found' });
-    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
-    if (method === 'GET') return listAgentMcpHandler(res, group.id);
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    return setAgentMcpHandler(req, res, group.id);
-  }
+}
 
-  // ── Skills (per-agent capability toggles) ──────────────────────────────
-  // Available skills = the folders in container/skills (bind-mounted read-only
-  // into every container); each agent's container config picks which it gets.
-  if (url.pathname === '/api/skills' && method === 'GET') {
-    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
-    return json(res, 200, { skills: listAvailableSkills() });
+// ── UserCreds Codex browser-mint: connect a ChatGPT subscription without a terminal
+// `codex login --device-auth` runs in a throwaway container; the user enters
+// the pairing code at OpenAI's site (no code pasted back here). 'start' returns
+// the URL + code; 'finish' waits for the written auth.json and stores it as the
+// member's user-level Codex credential (→ an `openai` auth.json secret). Same
+// gates as the Claude mint: room access + the room's OAuth opt-in.
+async function rCodexMintPost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { roomId?: unknown; sessionId?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
   }
-  // Import a skill from a GitHub folder URL into data/user-skills (no rebuild).
-  // Owner/global-admin only: an imported skill lands in a shared mount that fans
-  // out to every 'all' agent install-wide, so importing code is an install-wide
-  // trust action (same bar as the source registry), NOT a per-group one — a
-  // scoped admin of one group must not be able to inject code into others'.
-  if (url.pathname === '/api/skills/import' && method === 'POST') {
-    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    return importSkillHandler(req, res);
+  const step = m[1];
+  if (step === 'cancel') {
+    if (typeof body.sessionId === 'string') cancelMint(userId, body.sessionId);
+    return json(res, 200, { ok: true });
   }
-  // One merged pool of skills for a trust tier (official = Anthropic; community =
-  // every community GitHub collection + the awesomeskill.ai marketplace). `q`
-  // filters/searches the pool. Community results are unvetted — the UI warns +
-  // gates import behind a review confirm.
-  if (url.pathname === '/api/skills/catalog' && method === 'GET') {
-    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
-    return catalogPoolHandler(res, url.searchParams.get('tier') || 'official', url.searchParams.get('q') || '');
+  const roomId = typeof body.roomId === 'string' ? body.roomId : '';
+  if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+  if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+  if (!getCredentialsConfig().allowCodexOauth)
+    return json(res, 403, {
+      error: 'This workspace does not accept Codex (ChatGPT) subscription (OAuth) connections.',
+    });
+  const groups = getAgentsForWebchatRoom(roomId);
+  if (groups.length === 0) return json(res, 400, { error: 'Room has no wired agent' });
+  try {
+    if (step === 'start') {
+      if (activeMintCount() >= MAX_ACTIVE_MINTS)
+        return json(res, 429, { error: 'Too many sign-ins in progress — try again shortly.' });
+      if (userCredsRateLimited(userId, 'mint-start'))
+        return json(res, 429, { error: 'Too many attempts — wait a moment and try again.' });
+      const { sessionId, url: signinUrl, userCode } = await startCodexMint(userId);
+      return json(res, 200, { sessionId, url: signinUrl, userCode });
+    }
+    // step === 'finish': wait for auth.json, then onboard.
+    if (typeof body.sessionId !== 'string') return json(res, 400, { error: 'sessionId required' });
+    const authJson = await finishCodexMint(userId, body.sessionId);
+    await storeUserCredential(realOnecliAdmin, userId, 'codex', authJson, 'oauth_token');
+    return json(res, 200, { ok: true });
+  } catch (err) {
+    return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
   }
-  // Suggest skills (installed + catalogs) matching a new agent's description.
-  if (url.pathname === '/api/skills/suggest' && method === 'GET') {
-    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
-    return suggestSkillsHandler(res, url.searchParams.get('text') || '');
-  }
-  // Catalog-source registry: list is admin-visible; changes are global-admin
-  // only ("well-known sites" are an install-wide trust decision).
-  // NOTE: these literal routes must stay ABOVE the /api/skills/:name matcher.
-  if (url.pathname === '/api/skills/sources' && method === 'GET') {
-    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
-    // `sources` = editable GitHub collections; `builtins` = code-wired sources
-    // that also feed the pool but have nothing to edit (the marketplace).
+}
+
+// ── Workspace DEFAULT logins (owner / global admin ONLY) ────────────────────────
+// The fallback credentials `all`-mode base agents auto-inject when a member has no
+// user credential of their own — `claude` (Anthropic key or subscription) and,
+// when the Codex provider is installed, `codex` (OpenAI key or ChatGPT
+// subscription). STRICTLY admin-only on EVERY verb incl. GET — a non-admin gets
+// 403 with no body, so even the existence/connection state of the defaults never
+// leaks (unlike /api/webchat/credentials-config, which is world-readable so room
+// UIs can see accepted types).
+async function rWorkspaceCredential(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, url, method, userId } = ctx;
+  if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
+  // The OneCLI vault, loaded lazily + once per request: only the GET path needs
+  // it (to detect a pre-existing credential), and only when there's no webchat
+  // row to short-circuit on.
+  let vaultSecrets: { id: string; type?: string }[] | null = null;
+  const loadVault = async () => {
+    if (vaultSecrets === null) {
+      try {
+        vaultSecrets = await realOnecliAdmin.listAllSecrets();
+      } catch {
+        vaultSecrets = []; // vault unreachable — fall back to "not connected"
+      }
+    }
+    return vaultSecrets;
+  };
+  const trackedSecretIds = new Set(listAllTrackedSecretIds());
+  // `connected` is true when the webchat manages a workspace-default credential
+  // (`external:false`) OR when a usable provider credential already lives in the
+  // OneCLI vault from `/setup` or a legacy path (`external:true`) — the latter is
+  // what base `all`-mode agents already authenticate with, so the wizard must
+  // not nag the operator to "connect" an engine that already works. An external
+  // credential is webchat-unmanaged: no cred_type to show, and not disconnectable.
+  const credState = async (provider: 'claude' | 'codex') => {
+    const row = getUserCredential(WORKSPACE_DEFAULT_USER_ID, provider);
+    if (row?.status === 'active') return { connected: true, credType: row.cred_type ?? null, external: false };
+    const secType = provider === 'codex' ? 'openai' : 'anthropic';
+    const external = (await loadVault()).some((s) => s.type === secType && !trackedSecretIds.has(s.id));
+    return { connected: external, credType: null, external };
+  };
+  if (method === 'GET') {
+    // Flat claude fields (the original shape) + a codex block + the workspace
+    // default MODEL (the Ollama-engine analogue of the default credential).
+    const defaultModelId = getDefaultModelId();
+    const defaultModel = defaultModelId ? getWebchatModel(defaultModelId) : undefined;
     return json(res, 200, {
-      sources: listSkillSources(),
-      builtins: [
-        {
-          id: MARKETPLACE_ID,
-          label: SKILL_DISCOVERY_SOURCE.name,
-          url: SKILL_DISCOVERY_SOURCE.url,
-          disabled: isSourceDisabled(MARKETPLACE_ID),
-        },
-      ],
+      ...(await credState('claude')),
+      provider: 'claude',
+      codex: await credState('codex'),
+      codexAvailable: codexAvailable(),
+      defaultModelId: defaultModel?.id ?? null,
+      defaultModelName: defaultModel ? `${defaultModel.name} (${defaultModel.model_id})` : null,
+      // Real fields so the wizard's Ollama card only claims "set" when an Ollama
+      // model is actually the default — kind is authoritative, not inferred.
+      defaultModelKind: defaultModel?.kind ?? null,
+      defaultModelModelId: defaultModel?.model_id ?? null,
     });
   }
-  const skillSourceMatch = url.pathname.match(/^\/api\/skills\/sources\/([^/]+)$/);
-  if (skillSourceMatch && (method === 'PUT' || method === 'DELETE')) {
-    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const sourceId = decodeURIComponent(skillSourceMatch[1]);
-    // Built-in marketplace: there's nothing in the DB to edit/delete — DELETE
-    // switches it off (removed from the pool), PUT switches it back on.
-    if (sourceId === MARKETPLACE_ID) {
-      setSourceDisabled(MARKETPLACE_ID, method === 'DELETE');
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  if (userCredsRateLimited(userId, 'connect'))
+    return json(res, 429, { error: 'Too many attempts — wait a moment and try again.' });
+  // Provider: PUT reads it from the body below; DELETE from the query string.
+  try {
+    if (method === 'DELETE') {
+      const provider = url.searchParams.get('provider') === 'codex' ? 'codex' : 'claude';
+      const priorOauth = getUserCredential(WORKSPACE_DEFAULT_USER_ID, provider)?.cred_type === 'oauth_token';
+      await revokeUserCredential(realOnecliAdmin, WORKSPACE_DEFAULT_USER_ID, provider);
+      restartGroupsForWorkspaceCredChange(provider, priorOauth, false);
       return json(res, 200, { ok: true });
     }
-    if (method === 'PUT') return putSkillSourceHandler(req, res, sourceId);
-    catalogCache.delete(sourceId);
-    return deleteSkillSource(sourceId) ? json(res, 200, { ok: true }) : json(res, 404, { error: 'Source not found' });
-  }
-  // Delete a user skill (imported/uploaded). Shipped skills can't be removed.
-  // Read / write / delete a single skill. GET returns its SKILL.md (any
-  // source); PUT creates or edits a USER skill's SKILL.md (shipped skills are
-  // read-only — they're repo files); DELETE removes a user skill.
-  // Cross-agent duplicates + promotion (learning loop). Detection is read-only
-  // and admin-visible; PROMOTION writes the shared pool — install-wide reach —
-  // so it stays owner/global-admin, the pool's own boundary.
-  // Pre-import inspection: fetch the skill's files WITHOUT writing anything and
-  // return the "what's inside" inventory + lint findings. Read-only, so any
-  // admin may look (per-group admins import scoped skills through the same
-  // preview). NOTE: literal /api/skills/* routes must stay ABOVE the
-  // /api/skills/:name matcher.
-  if (url.pathname === '/api/skills/inspect' && method === 'POST') {
-    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    return inspectSkillHandler(req, res);
-  }
-  // Update checks for pinned pool imports: which user skills' upstream has
-  // moved since their recorded commit. Read-only.
-  if (url.pathname === '/api/skills/updates' && method === 'GET') {
-    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
-    return skillUpdatesHandler(res);
-  }
-  const skillUpdateMatch = url.pathname.match(/^\/api\/skills\/([^/]+)\/update$/);
-  if (skillUpdateMatch && method === 'POST') {
-    // Same gate as pool import — an update IS a pool import.
-    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    return applySkillUpdateHandler(res, decodeURIComponent(skillUpdateMatch[1]));
-  }
-  if (url.pathname === '/api/skills/duplicates' && method === 'GET') {
-    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
-    const dups = findDuplicateScopedSkills().map((d) => ({
-      ...d,
-      agents: d.agents.map((id) => getAgentGroup(id)?.name || id),
-    }));
-    return json(res, 200, { duplicates: dups });
-  }
-  if (url.pathname === '/api/skills/promote' && method === 'POST') {
-    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
     const raw = await readJsonBody(req, res);
     if (raw === null) return;
-    let name = '';
-    try {
-      name = sanitizeSkillName(String((JSON.parse(raw) as { name?: unknown }).name || ''));
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    if (!name) return json(res, 400, { error: 'Invalid skill name' });
-    const dup = findDuplicateScopedSkills().find((d) => d.name === name);
-    const r = promoteScopedSkill(name);
-    if (!r.ok) return json(res, 409, { error: r.error });
-    // Every holder's containers must respawn to see the pooled copy.
-    let restarted = 0;
-    for (const g of listAgentsForUser(userId)) {
-      if (dup?.agents.includes(g.id)) restarted += restartAgentGroupContainers(g.id, 'Skill promoted to shared pool');
-    }
-    return json(res, 200, { ok: true, restarted });
-  }
-  const skillItemMatch = url.pathname.match(/^\/api\/skills\/([^/]+)$/);
-  if (skillItemMatch && (method === 'GET' || method === 'PUT' || method === 'DELETE')) {
-    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
-    const skillName = decodeURIComponent(skillItemMatch[1]);
-    if (method === 'GET') return getSkillContentHandler(res, skillName); // viewing is fine for any admin
-    // Writing a skill (create/edit/delete) introduces code that fans out to every
-    // 'all' agent install-wide → owner/global-admin only, like import.
-    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (method === 'PUT') return putUserSkillHandler(req, res, skillName);
-    return deleteUserSkillHandler(res, skillName);
-  }
-  const agentSkillsMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/skills$/);
-  if (agentSkillsMatch && (method === 'GET' || method === 'PUT')) {
-    const group = resolveAgent(decodeURIComponent(agentSkillsMatch[1]));
-    if (!group) return json(res, 404, { error: 'Agent not found' });
-    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
-    if (method === 'GET') {
-      const available = listAvailableSkills();
-      // getContainerConfig returns the raw row — skills is a JSON string ("all"
-      // or a name array), so parse it (configFromDb does the same).
-      let sel: string[] | 'all' = 'all';
-      try {
-        const rawSkills = getContainerConfig(group.id)?.skills;
-        if (rawSkills != null) sel = JSON.parse(rawSkills) as string[] | 'all';
-      } catch {
-        sel = 'all';
-      }
-      const enabled = sel === 'all' ? available.map((s) => s.name) : sel;
-      // Also surface skills wired to THIS agent only (real dirs in its own
-      // .claude-shared/skills), which the shared pool doesn't include.
-      return json(res, 200, {
-        available,
-        enabled,
-        scoped: listScopedSkills(group.id),
-        // Curator output: scoped skills archived for disuse. Restorable, never deleted.
-        archived: listArchivedSkills(group.id),
-      });
-    }
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    return setAgentSkillsHandler(req, res, group.id);
-  }
-  // Import a skill wired to ONE agent (its own .claude-shared/skills), so it
-  // reaches only that group — never the shared pool / other 'all' agents.
-  // Per-group admin is sufficient: it can't affect any other group.
-  const agentSkillImportMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/skills\/import$/);
-  if (agentSkillImportMatch && method === 'POST') {
-    const group = resolveAgent(decodeURIComponent(agentSkillImportMatch[1]));
-    if (!group) return json(res, 404, { error: 'Agent not found' });
-    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    return importScopedSkillHandler(req, res, group.id);
-  }
-  // Read / edit the SKILL.md of a skill scoped to ONE agent (its own
-  // .claude-shared/skills — where a learned-and-kept or per-agent import lives).
-  // A scoped skill affects only this agent, so per-group admin is sufficient to
-  // view AND edit — it can never reach an agent the caller can't access. (Pool
-  // skills fan out install-wide and stay owner/global-admin via /api/skills/:name.)
-  // The /content suffix keeps this distinct from the scoped wire/unwire routes.
-  const scopedSkillContentMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/skills\/scoped\/([^/]+)\/content$/);
-  if (scopedSkillContentMatch && (method === 'GET' || method === 'PUT')) {
-    const group = resolveAgent(decodeURIComponent(scopedSkillContentMatch[1]));
-    if (!group) return json(res, 404, { error: 'Agent not found' });
-    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
-    const name = sanitizeSkillName(decodeURIComponent(scopedSkillContentMatch[2]));
-    if (!name) return json(res, 400, { error: 'Invalid skill name' });
-    if (method === 'GET') return getScopedSkillContentHandler(res, group.id, name);
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    return putScopedSkillContentHandler(req, res, group.id, name);
-  }
-  // Learning-loop settings, per agent. Two toggles, two owners (docs/learning-loop.md):
-  //   autoTrigger — spends tokens, stages drafts → per-agent ADMIN.
-  //   autoKeep    — writes live agent context unreviewed → OWNER/GLOBAL ADMIN only,
-  //                 the same boundary as every other skill write.
-  // Per-ROOM learning settings — the layer the 🎓 menu edits. Room overrides
-  // the wired agents' per-agent config; the effective view resolves
-  // room → first wired agent → defaults, so the toggles show what will
-  // actually happen in THIS room.
-  const roomLearningMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/learning$/);
-  if (roomLearningMatch && (method === 'GET' || method === 'PUT')) {
-    const roomId = decodeURIComponent(roomLearningMatch[1]);
-    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    const mg = getMessagingGroupByPlatform('webchat', roomId);
-    if (!mg) return json(res, 404, { error: 'Room has no messaging group' });
-    const wired = getMessagingGroupAgents(mg.id).map((w) => ({ id: w.agent_group_id }));
-    // Both toggles spend or commit on the wired agents' behalf — admin over
-    // every one of them (a room is only as governable as its least-governed
-    // agent).
-    const canManage = wired.length > 0 && wired.every((a) => hasAdminPrivilege(userId, a.id));
-    const room = getRoomLearning(mg.id);
-    const agentFallback = wired.length > 0 ? parseAgentLearning(wired[0].id) : {};
-    const effective = {
-      autoTrigger: room.autoTrigger ?? agentFallback.autoTrigger !== false,
-      autoKeep: room.autoKeep ?? agentFallback.autoKeep === true,
-    };
-    if (method === 'GET') {
-      return json(res, 200, { ...effective, canManage, roomOverride: room });
-    }
-    if (!canManage) return json(res, 403, { error: 'Admin privilege over every wired agent required' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { autoTrigger?: unknown; autoKeep?: unknown };
+    let body: { provider?: unknown; type?: unknown; apiKey?: unknown; token?: unknown };
     try {
       body = JSON.parse(raw) as typeof body;
     } catch {
       return json(res, 400, { error: 'Invalid JSON' });
     }
-    // Boolean sets the room override; explicit null CLEARS it (back to the
-    // agent-level default) — JSON.stringify drops undefined keys on save.
-    const patch: { autoTrigger?: boolean; autoKeep?: boolean } = {};
-    if (typeof body.autoTrigger === 'boolean' || body.autoTrigger === null) {
-      patch.autoTrigger = body.autoTrigger ?? undefined;
-    }
-    if (typeof body.autoKeep === 'boolean' || body.autoKeep === null) {
-      patch.autoKeep = body.autoKeep ?? undefined;
-    }
-    const next = setRoomLearning(mg.id, patch);
-    // Auto-trigger lives in the CONTAINER config (rooms map) — respawn the
-    // wired agents so their next turn sees it. Auto-keep is host-side and
-    // needs no restart, but the map rides along anyway.
-    let restarted = 0;
-    for (const a of wired) restarted += restartAgentGroupContainers(a.id, 'Room learning settings changed');
-    return json(res, 200, {
-      autoTrigger: next.autoTrigger ?? agentFallback.autoTrigger !== false,
-      autoKeep: next.autoKeep ?? agentFallback.autoKeep === true,
-      canManage,
-      roomOverride: next,
-      restarted,
-    });
-  }
-  // ── System backup (Phase 2): export streams; restore swaps + reboots ──
-  if (url.pathname === '/api/system/export' && method === 'GET') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const lean = url.searchParams.get('lean') === '1';
-    let stage: string;
-    try {
-      stage = await stageSystemExport(lean);
-    } catch (err) {
-      return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
-    }
-    const fname = `nanoclaw-system-${new Date().toISOString().slice(0, 10)}${lean ? '-lean' : ''}.tgz`;
-    res.writeHead(200, {
-      'Content-Type': 'application/gzip',
-      'Content-Disposition': `attachment; filename="${fname}"`,
-    });
-    const tar = spawnTar(systemTarArgs(stage, lean));
-    tar.stdout?.pipe(res);
-    let tarErr = '';
-    tar.stderr?.on('data', (d: Buffer) => (tarErr += d));
-    tar.on('close', (code: number) => {
-      fs.rmSync(stage, { recursive: true, force: true });
-      // tar exits 1 for "file changed as we read it" — tolerable on a live
-      // system; only exit 2 (fatal) voids the stream.
-      if (code !== null && code >= 2) {
-        log.error('System export tar failed', { code, err: tarErr.slice(0, 300) });
-        res.destroy();
-      } else {
-        res.end();
+    const provider = body.provider === 'codex' ? 'codex' : 'claude';
+    if (provider === 'codex' && !codexAvailable())
+      return json(res, 400, { error: 'Codex support isn’t installed yet — add it with /add-codex first.' });
+    const priorOauth = getUserCredential(WORKSPACE_DEFAULT_USER_ID, provider)?.cred_type === 'oauth_token';
+    if (body.type === 'oauth_token') {
+      const token = typeof body.token === 'string' ? body.token.trim() : '';
+      if (provider === 'codex') {
+        // A ChatGPT/Codex subscription = a whole auth.json (normally from the
+        // browser mint; pasting is the fallback). Mirror the member validation.
+        let ok = false;
+        try {
+          const parsed = JSON.parse(token) as Record<string, unknown>;
+          ok = Boolean(parsed.tokens || parsed.OPENAI_API_KEY);
+        } catch {
+          ok = false;
+        }
+        if (!ok)
+          return json(res, 400, {
+            error: 'Expected a Codex auth.json — use “Connect with ChatGPT subscription” instead of pasting.',
+          });
+      } else if (!/^sk-ant-oat/.test(token)) {
+        // Claude subscription: pasted `claude setup-token` output. The base-agent
+        // sentinel wiring (user-credentials/index.ts env resolver) flips base
+        // containers into OAuth mode to match.
+        return json(res, 400, {
+          error: 'Expected a Claude subscription token from `claude setup-token` (sk-ant-oat…)',
+        });
       }
-    });
-    res.on('close', () => tar.kill('SIGTERM'));
-    return;
-  }
-  if (url.pathname === '/api/system/import' && method === 'POST') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    return importSystemUploadHandler(req, res);
-  }
-  if (url.pathname === '/api/system/import/apply' && method === 'POST') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    return importSystemApplyHandler(req, res);
-  }
-  // ── Room export/import (backup Phase 3) ───────────────────────────────
-  const roomExportMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/export$/);
-  if (roomExportMatch && method === 'GET') {
-    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
-    const roomId = decodeURIComponent(roomExportMatch[1]);
-    if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
-    let staged: { stage: string };
-    try {
-      staged = stageRoomExport(roomId);
-    } catch (err) {
-      return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+      await setWorkspaceDefaultCredential(realOnecliAdmin, provider, token, 'oauth_token');
+      afterWorkspaceCredentialSet(provider, priorOauth, true);
+      return json(res, 200, { ok: true });
     }
-    res.writeHead(200, {
-      'Content-Type': 'application/gzip',
-      'Content-Disposition': `attachment; filename="nanoclaw-room-${roomId}-${new Date().toISOString().slice(0, 10)}.tgz"`,
-    });
-    const tar = spawnTar(roomTarArgs(staged.stage, roomId));
-    tar.stdout?.pipe(res);
-    tar.on('close', (code: number) => {
-      fs.rmSync(staged.stage, { recursive: true, force: true });
-      if (code !== null && code >= 2) res.destroy();
-      else res.end();
-    });
-    res.on('close', () => tar.kill('SIGTERM'));
-    return;
-  }
-  if (url.pathname === '/api/rooms/import' && method === 'POST') {
-    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    return importRoomUploadHandler(req, res);
-  }
-  if (url.pathname === '/api/rooms/import/apply' && method === 'POST') {
-    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    return importRoomApplyHandler(req, res);
-  }
-  // ── Agent export/import (backup Phase 1) ──────────────────────────────
-  const agentExportMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/export$/);
-  if (agentExportMatch && method === 'GET') {
-    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
-    const group = resolveAgent(decodeURIComponent(agentExportMatch[1]));
-    if (!group) return json(res, 404, { error: 'Agent not found' });
-    const withConvos = url.searchParams.get('conversations') === '1';
-    // Session DBs are DELETE-mode journals — only safe to copy with the
-    // agent's containers stopped. They respawn on the next message.
-    if (withConvos) restartAgentGroupContainers(group.id, 'Export with conversations');
-    let stage: string;
-    try {
-      stage = stageAgentExport(group.id, withConvos);
-    } catch (err) {
-      return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+    const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
+    if (provider === 'codex') {
+      if (!/^sk-/.test(apiKey)) return json(res, 400, { error: 'Expected an OpenAI API key (sk-…)' });
+    } else if (!/^sk-ant-/.test(apiKey)) {
+      return json(res, 400, { error: 'Expected an Anthropic API key (sk-ant-…)' });
     }
-    const fname = `nanoclaw-agent-${group.folder}-${new Date().toISOString().slice(0, 10)}.tgz`;
-    res.writeHead(200, {
-      'Content-Type': 'application/gzip',
-      'Content-Disposition': `attachment; filename="${fname}"`,
+    await setWorkspaceDefaultCredential(realOnecliAdmin, provider, apiKey, 'api_key');
+    afterWorkspaceCredentialSet(provider, priorOauth, false);
+    return json(res, 200, { ok: true });
+  } catch (err) {
+    log.error('Workspace default credential failed', {
+      userId,
+      err: err instanceof Error ? err.message : err,
     });
-    const tar = spawnTar(exportTarArgs(stage, group, withConvos));
-    tar.stdout?.pipe(res);
-    let tarErr = '';
-    tar.stderr?.on('data', (d: Buffer) => (tarErr += d));
-    tar.on('close', (code: number) => {
-      fs.rmSync(stage, { recursive: true, force: true });
-      if (code !== 0) {
-        log.error('Agent export tar failed', { agent: group.id, code, err: tarErr.slice(0, 300) });
-        res.destroy();
-      } else {
-        res.end();
-      }
-    });
-    res.on('close', () => tar.kill('SIGTERM'));
-    return;
+    return json(res, 502, { error: 'Credential setup failed — check OneCLI is running.' });
   }
-  if (url.pathname === '/api/agents/import' && method === 'POST') {
-    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    return importAgentUploadHandler(req, res);
-  }
-  if (url.pathname === '/api/agents/import/apply' && method === 'POST') {
-    if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    return importAgentApplyHandler(req, res);
-  }
-  const agentLearningMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/learning$/);
-  if (agentLearningMatch && (method === 'GET' || method === 'PUT')) {
-    const group = resolveAgent(decodeURIComponent(agentLearningMatch[1]));
-    if (!group) return json(res, 404, { error: 'Agent not found' });
-    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
-    const current = parseAgentLearning(group.id);
-    // Auto-keep is admin-tier like the manual Keep it automates: a scoped admin
-    // can already keep any draft for their agent with a tap, so gating the
-    // toggle higher only added friction, not protection. The blast radius is
-    // unchanged — a kept skill is scoped to the one agent they administer.
-    const canAutoKeep = hasAdminPrivilege(userId, group.id);
-    if (method === 'GET') {
-      return json(res, 200, {
-        autoTrigger: current.autoTrigger !== false, // absent = on
-        autoKeep: current.autoKeep === true, // absent = off
-        canAutoKeep,
-      });
-    }
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { autoTrigger?: unknown; autoKeep?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    const next = { ...current };
-    if (typeof body.autoTrigger === 'boolean') next.autoTrigger = body.autoTrigger;
-    if (typeof body.autoKeep === 'boolean') {
-      if (!canAutoKeep) return json(res, 403, { error: 'Admin privilege required for auto-keep' });
-      next.autoKeep = body.autoKeep;
-    }
-    updateContainerConfigJson(group.id, 'learning', next);
-    // Config materializes at spawn — restart so the container sees it now.
-    const restarted = restartAgentGroupContainers(group.id, 'Learning settings changed');
-    return json(res, 200, {
-      ok: true,
-      autoTrigger: next.autoTrigger !== false,
-      autoKeep: next.autoKeep === true,
-      canAutoKeep,
-      restarted,
-    });
-  }
-  const skillRevertMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/skills\/scoped\/([^/]+)\/revert$/);
-  if (skillRevertMatch && method === 'POST') {
-    const group = resolveAgent(decodeURIComponent(skillRevertMatch[1]));
-    if (!group) return json(res, 404, { error: 'Agent not found' });
-    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const name = sanitizeSkillName(decodeURIComponent(skillRevertMatch[2]));
-    if (!name) return json(res, 400, { error: 'Invalid skill name' });
-    const r = revertLastRevision(scopedSkillsDir(group.id), name);
-    if (!r.ok) return json(res, 409, { error: r.error });
-    const restarted = restartAgentGroupContainers(group.id, 'Skill revision reverted');
-    return json(res, 200, { ok: true, restarted });
-  }
-  const skillRestoreMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/skills\/archived\/([^/]+)\/restore$/);
-  if (skillRestoreMatch && method === 'POST') {
-    const group = resolveAgent(decodeURIComponent(skillRestoreMatch[1]));
-    if (!group) return json(res, 404, { error: 'Agent not found' });
-    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const name = sanitizeSkillName(decodeURIComponent(skillRestoreMatch[2]));
-    if (!name) return json(res, 400, { error: 'Invalid skill name' });
-    const r = restoreArchivedSkill(group.id, name);
-    if (!r.ok) return json(res, 409, { error: r.error });
-    const restarted = restartAgentGroupContainers(group.id, 'Webchat archived skill restored');
-    return json(res, 200, { ok: true, restarted });
-  }
-  const agentScopedSkillMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/skills\/scoped\/([^/]+)$/);
-  if (agentScopedSkillMatch && method === 'DELETE') {
-    const group = resolveAgent(decodeURIComponent(agentScopedSkillMatch[1]));
-    if (!group) return json(res, 404, { error: 'Agent not found' });
-    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    return deleteScopedSkillHandler(res, group.id, decodeURIComponent(agentScopedSkillMatch[2]));
-  }
+}
 
-  // ── Learning loop: skill drafts (proposed skills awaiting review) ───────
-  if (url.pathname === '/api/skill-drafts' && method === 'GET') {
-    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
-    const drafts = listSkillDrafts().map((d) => ({
+// ── Workspace-default OAuth browser-mint (owner / global admin ONLY) ────────────
+// Same throwaway-container `claude setup-token` flow as the per-member mint, but
+// the captured token is stored as the WORKSPACE DEFAULT (synthetic id), and the
+// gates are admin-only instead of room access + the member OAuth opt-in (that
+// policy governs members; the operator setting the workspace fallback is above it).
+async function rWsCredMintPost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { sessionId?: unknown; code?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  const step = m[1];
+  if (step === 'cancel') {
+    if (typeof body.sessionId === 'string') cancelMint(userId, body.sessionId);
+    return json(res, 200, { ok: true });
+  }
+  try {
+    if (step === 'start') {
+      if (activeMintCount() >= MAX_ACTIVE_MINTS)
+        return json(res, 429, { error: 'Too many sign-ins in progress — try again shortly.' });
+      if (userCredsRateLimited(userId, 'mint-start'))
+        return json(res, 429, { error: 'Too many attempts — wait a moment and try again.' });
+      const { sessionId, url: signinUrl } = await startClaudeMint(userId);
+      return json(res, 200, { sessionId, url: signinUrl });
+    }
+    // step === 'code': mint, then store as the workspace default. The spawn-time
+    // sentinel mode may have changed (none/key → oauth) — respawn containers.
+    if (typeof body.sessionId !== 'string' || typeof body.code !== 'string')
+      return json(res, 400, { error: 'sessionId and code required' });
+    const priorRow = getUserCredential(WORKSPACE_DEFAULT_USER_ID, 'claude');
+    const priorOauth = priorRow?.status === 'active' && priorRow.cred_type === 'oauth_token';
+    const token = await mintClaudeToken(userId, body.sessionId, body.code);
+    await setWorkspaceDefaultCredential(realOnecliAdmin, 'claude', token, 'oauth_token');
+    afterWorkspaceCredentialSet('claude', priorOauth, true);
+    return json(res, 200, { ok: true });
+  } catch (err) {
+    return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+// ── Workspace-default Codex browser-mint (owner / global admin ONLY) ────────────
+// Same `codex login --device-auth` throwaway-container flow as the per-member
+// Codex mint, but the captured auth.json is stored as the WORKSPACE DEFAULT
+// (synthetic id) `openai` secret that `all`-mode Codex base agents auto-inject.
+async function rWsCodexMintPost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { sessionId?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  const step = m[1];
+  if (step === 'cancel') {
+    if (typeof body.sessionId === 'string') cancelMint(userId, body.sessionId);
+    return json(res, 200, { ok: true });
+  }
+  if (!codexAvailable())
+    return json(res, 400, { error: 'Codex support isn’t installed yet — add it with /add-codex first.' });
+  try {
+    if (step === 'start') {
+      if (activeMintCount() >= MAX_ACTIVE_MINTS)
+        return json(res, 429, { error: 'Too many sign-ins in progress — try again shortly.' });
+      if (userCredsRateLimited(userId, 'mint-start'))
+        return json(res, 429, { error: 'Too many attempts — wait a moment and try again.' });
+      const { sessionId, url: signinUrl, userCode } = await startCodexMint(userId);
+      return json(res, 200, { sessionId, url: signinUrl, userCode });
+    }
+    // step === 'finish': wait for auth.json, then store as the workspace default.
+    if (typeof body.sessionId !== 'string') return json(res, 400, { error: 'sessionId required' });
+    const priorRow = getUserCredential(WORKSPACE_DEFAULT_USER_ID, 'codex');
+    const priorOauth = priorRow?.status === 'active' && priorRow.cred_type === 'oauth_token';
+    const authJson = await finishCodexMint(userId, body.sessionId);
+    await setWorkspaceDefaultCredential(realOnecliAdmin, 'codex', authJson, 'oauth_token');
+    afterWorkspaceCredentialSet('codex', priorOauth, true);
+    return json(res, 200, { ok: true });
+  } catch (err) {
+    return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+// ── Workspace DEFAULT model (owner / global admin ONLY) ─────────────────────────
+// The ollama-kind roster model every claude-family agent WITHOUT its own
+// assignment falls back to — what makes "default engine: Ollama" a true
+// workspace-wide default rather than a one-agent assignment. Same strict
+// admin gating as the workspace credential.
+async function rWorkspaceModelPut(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { modelId?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  if (body.modelId !== null) {
+    if (typeof body.modelId !== 'string' || !body.modelId.trim())
+      return json(res, 400, { error: 'modelId must be a string or null' });
+    const model = getWebchatModel(body.modelId.trim());
+    if (!model) return json(res, 404, { error: 'Model not found' });
+    if (model.kind !== 'ollama')
+      return json(res, 400, { error: 'The workspace default model must be an ollama roster model' });
+    if (!model.endpoint) return json(res, 400, { error: 'That model has no endpoint to call' });
+    setDefaultModelId(model.id);
+  } else {
+    setDefaultModelId(null);
+  }
+  refreshUnassignedGroupsForDefaultModel('Workspace default model changed');
+  return json(res, 200, { ok: true, defaultModelId: getDefaultModelId() });
+}
+
+// ── First-run setup wizard state ────────────────────────────────────────────────
+// GET is authenticated (any member) so the client can decide whether to auto-open
+// the wizard; non-admins always get complete:true + canEdit:false so it never
+// blocks or shows for them. PUT (finish/dismiss/reset) is owner/global-admin only.
+async function rWebchatOnboarding(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, method, userId } = ctx;
+  const canEdit = isOwner(userId) || isGlobalAdmin(userId);
+  if (method === 'GET') {
+    return json(res, 200, { complete: canEdit ? getOnboardingComplete() : true, canEdit });
+  }
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  if (!canEdit) return json(res, 403, { error: 'Forbidden' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { complete?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  if (typeof body.complete !== 'boolean') return json(res, 400, { error: 'complete must be a boolean' });
+  setOnboardingComplete(body.complete);
+  return json(res, 200, { complete: body.complete });
+}
+
+// ── Feature toggles: MCP + skills marketplace ───────────────────────────────
+// GET is any authed user (the client hides the MCP/Skills tabs when off; non-
+// admins get the flag only). PUT is owner/global-admin — flips it on/off
+// (default on/recommended). Disabling also 403s the endpoints (gate above).
+async function rWebchatFeatures(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, method, userId } = ctx;
+  const canEdit = isOwner(userId) || isGlobalAdmin(userId);
+  if (method === 'GET') {
+    return json(res, 200, { marketplaceEnabled: !getMarketplaceDisabled(), canEdit });
+  }
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  if (!canEdit) return json(res, 403, { error: 'Forbidden' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { marketplaceEnabled?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  if (typeof body.marketplaceEnabled !== 'boolean') {
+    return json(res, 400, { error: 'marketplaceEnabled must be a boolean' });
+  }
+  setMarketplaceDisabled(!body.marketplaceEnabled);
+  // The choice cascades to the individual sources (wizard ask): a
+  // "no marketplace" install starts with the skill marketplace and the MCP
+  // registry REMOVED — not just hidden behind the flag. Re-enabling restores
+  // both; Settings then manages them per-source.
+  setSourceDisabled(MARKETPLACE_ID, !body.marketplaceEnabled);
+  setSourceDisabled(mcpRegistryRemovedKey(), !body.marketplaceEnabled);
+  if (body.marketplaceEnabled) setSourceDisabled(MCP_REGISTRY_ID, false);
+  return json(res, 200, { marketplaceEnabled: !getMarketplaceDisabled() });
+}
+
+// ── Wizard opt-in: first Tailscale login becomes owner ──────────────────────
+// One-shot arm flag. GET/PUT owner/global-admin only. PUT true → the next
+// tailscale identity to authenticate is promoted to owner (auth.ts finalize),
+// then the flag disarms itself.
+async function rWebchatTailscaleOwner(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, method, userId } = ctx;
+  const canEdit = isOwner(userId) || isGlobalAdmin(userId);
+  if (method === 'GET') {
+    return json(res, 200, { armed: getPromoteFirstTailscaleOwner(), canEdit });
+  }
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  if (!canEdit) return json(res, 403, { error: 'Forbidden' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { armed?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  if (typeof body.armed !== 'boolean') return json(res, 400, { error: 'armed must be a boolean' });
+  setPromoteFirstTailscaleOwner(body.armed);
+  return json(res, 200, { armed: getPromoteFirstTailscaleOwner() });
+}
+
+// ── Enable HTTPS over Tailscale (`tailscale serve`) ─────────────────────────
+// Owner/global-admin only. GET reports whether tailscaled is up, the https
+// URL, and whether serve is already on. POST runs `tailscale serve --bg
+// <port>` so webchat is reachable at https://<node>.ts.net with a real cert.
+// Identity continuity across the http→https switch lives in auth.ts
+// (tailscaleServeIdentity maps Serve's header back to the whois id).
+async function rWebchatTailscaleHttps(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, method, userId } = ctx;
+  if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
+  // This endpoint reports HTTPS status in BOTH flavors: `tailscale serve`
+  // (what the enable button sets up) and native TLS (WEBCHAT_TLS_CERT/KEY —
+  // an install like the tailscale-https setup script produces). Without the
+  // native check, an already-HTTPS install is offered "Enable HTTPS" on a
+  // page it is literally serving over HTTPS.
+  const nativeTls = !!(process.env.WEBCHAT_TLS_CERT && process.env.WEBCHAT_TLS_KEY);
+  if (method === 'GET') {
+    const state = await getTailscaleServeState();
+    if (nativeTls && !state.active) {
+      const port = Number(process.env.WEBCHAT_PORT || DEFAULT_PORT);
+      return json(res, 200, {
+        ...state,
+        active: true,
+        mode: 'native-tls',
+        url: state.url ? `${state.url}${port === 443 ? '' : `:${port}`}` : null,
+      });
+    }
+    return json(res, 200, { ...state, mode: state.active ? 'serve' : null });
+  }
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  if (nativeTls) {
+    return json(res, 400, {
+      ok: false,
+      error: 'HTTPS is already enabled (native TLS certificate) — nothing to set up.',
+    });
+  }
+  const port = Number(process.env.WEBCHAT_PORT || DEFAULT_PORT);
+  const result = await enableTailscaleServe(port);
+  return json(res, result.ok ? 200 : 400, result);
+}
+
+// ── Access & security: install a Cloudflare Tunnel (token-driven) ───────────
+// Owner/global-admin only, two explicit steps. GET reports install/service
+// state + whether a one-click install can run here (Linux + root + systemd).
+// POST /install installs just the cloudflared binary; POST /connect registers
+// the managed-tunnel connector service from the operator's token — auth is
+// enforced by the Cloudflare Access policy on the tunnel, dashboard-side.
+async function rWebchatCloudflaredGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
+  return json(res, 200, getCloudflaredInstallState());
+}
+
+async function rWebchatCloudflaredInstallPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
+  const r = startCloudflaredInstall();
+  if (r.error === 'prereq-missing')
+    return json(res, 409, { error: 'Needs root + systemd — install cloudflared manually instead.' });
+  return json(res, r.started ? 202 : 409, { ...getCloudflaredInstallState(), started: r.started });
+}
+
+async function rWebchatCloudflaredConnectPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Forbidden' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { token?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  if (typeof body.token !== 'string' || !body.token.trim()) return json(res, 400, { error: 'token required' });
+  const r = startCloudflaredConnect(body.token);
+  if (r.error === 'prereq-missing')
+    return json(res, 409, { error: 'Needs root + systemd — install cloudflared manually instead.' });
+  if (r.error === 'not-installed') return json(res, 409, { error: 'Install cloudflared first.' });
+  if (r.error === 'bad-token') return json(res, 400, { error: 'That doesn’t look like a tunnel token.' });
+  return json(res, r.started ? 202 : 409, { ...getCloudflaredInstallState(), started: r.started });
+}
+
+async function rRoomAgentDelete(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  const agentId = decodeURIComponent(m[2]);
+  // Owner can unwire any agent. A scoped admin may unwire an agent THEY
+  // administer from a room they can access — they can never touch agents
+  // they don't administer.
+  if (!isOwner(userId) && !(canAccessRoom(userId, roomId) && hasAdminPrivilege(userId, agentId))) {
+    return json(res, 403, { error: 'Admin privilege required' });
+  }
+  return removeAgentFromRoomHandler(res, roomId, agentId);
+}
+
+// ── Prime agent designation (room-scoped) ──
+async function rRoomPrimePut(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { agentId?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  if (typeof body.agentId !== 'string' || !body.agentId.trim()) {
+    return json(res, 400, { error: 'agentId required' });
+  }
+  return setRoomPrimeHandler(res, roomId, body.agentId.trim());
+}
+
+async function rRoomPrimeDelete(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  return clearRoomPrimeHandler(res, decodeURIComponent(m[1]));
+}
+
+// ── Global archive (owner + admin) ──
+// Marks the room as closed-to-active-work for EVERYONE. Owners + any
+// admin (global or scoped admin of an agent wired to the room) can
+// toggle. Archive is presentation only — routing continues unchanged.
+// CSRF-guarded because it's a state-mutating POST.
+async function rRoomArchivePost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+  if (!canArchiveRoom(userId, roomId)) return json(res, 403, { error: 'Admin only' });
+  if (m[2] === 'archive') {
+    archiveRoom(roomId, userId);
+  } else {
+    unarchiveRoom(roomId);
+  }
+  broadcastRooms();
+  return json(res, 200, { ok: true });
+}
+
+// ── Per-user hide (sidebar preference, no auth beyond room access) ──
+// Any user with access to the room can hide it from THEIR sidebar.
+// Doesn't affect anyone else, routing, archive state, or anything
+// beyond that user's view. CSRF-guarded because it's state-mutating.
+async function rRoomHidePost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+  if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+  if (m[2] === 'hide') {
+    hideRoomForUser(userId, roomId);
+  } else {
+    unhideRoomForUser(userId, roomId);
+  }
+  broadcastRooms();
+  return json(res, 200, { ok: true });
+}
+
+// ── Per-user pin (sidebar preference, no auth beyond room access) ──
+// Pins lift a room into the sticky group at the top of THIS user's sidebar.
+// Per-user; broadcastRooms re-sends each user their own annotated list, so the
+// pin syncs live across the user's other devices.
+async function rRoomPinPost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+  if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+  if (m[2] === 'pin') {
+    pinRoomForUser(userId, roomId);
+  } else {
+    unpinRoomForUser(userId, roomId);
+  }
+  broadcastRooms();
+  return json(res, 200, { ok: true });
+}
+
+// Reorder the caller's pinned rooms. Body: { order: string[] } — the desired
+// top-to-bottom room-id order. Per-user (setPinnedOrderForUser only touches
+// this user's pins; unknown/unpinned ids are ignored), so no per-room access
+// check is needed beyond the authenticated user. broadcastRooms re-syncs the
+// new order to the user's other devices.
+async function rRoomsPinsOrderPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { order?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  if (!Array.isArray(body.order) || body.order.some((x) => typeof x !== 'string')) {
+    return json(res, 400, { error: 'order must be an array of room id strings' });
+  }
+  setPinnedOrderForUser(userId, body.order as string[]);
+  broadcastRooms();
+  return json(res, 200, { ok: true });
+}
+
+// ── Engage mode (room-scoped) ──
+// Controls what `recomputeEngagePatterns` rewrites un-primed wirings to:
+//   'mention-only' — agents fire only on explicit @-mention (no fallback).
+// This is the only mode; the legacy 'broadcast' (every wired agent answers
+// every message) has been retired.
+async function rRoomEngageGet(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+  if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+  return json(res, 200, { mode: getRoomEngageDefault(roomId) });
+}
+
+async function rRoomEngagePut(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { mode?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  if (body.mode !== 'mention-only') {
+    return json(res, 400, { error: "mode must be 'mention-only'" });
+  }
+  setRoomEngageDefault(roomId, body.mode);
+  // Re-run pattern computation so the new mode is reflected in every wiring.
+  // No-op when a prime is set (prime branch takes over). Cheap one-UPDATE-per-wiring.
+  recomputeEngagePatterns(roomId);
+  broadcastRooms();
+  return json(res, 200, { ok: true, mode: body.mode });
+}
+
+// Rename a room (its messaging_groups.name). Owner-only; broadcastRooms pushes
+// the new title to every connected client live.
+async function rRoomNamePut(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { name?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  const name = sanitizeRoomName(body.name);
+  if (name === null) return json(res, 400, { error: 'name must be 1–80 characters' });
+  updateWebchatRoomName(roomId, name);
+  broadcastRooms();
+  return json(res, 200, { ok: true, name });
+}
+
+// ── Threads (per-room) ────────────────────────────────────────────────
+// A thread maps to an agent session; see docs/webchat/threads.md.
+// List/read/create/rename are member-gated; delete (destroys history + tears
+// down the thread's session) is owner-only.
+async function rRoomThreadReadPut(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  const threadId = decodeURIComponent(m[2]);
+  if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+  if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+  markThreadRead(userId, roomId, threadId);
+  return json(res, 200, { ok: true });
+}
+
+async function rRoomThreadsGet(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+  if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+  ensureMainThread(roomId); // every room has a main thread once listed
+  const unread = getUnreadThreadIdsForRoom(userId, roomId);
+  return json(
+    res,
+    200,
+    listWebchatThreads(roomId).map((t) => ({ ...t, unread: unread.has(t.thread_id) })),
+  );
+}
+
+async function rRoomThreadsPost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+  if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { title?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  const title = sanitizeThreadTitle(body.title);
+  if (title === null) return json(res, 400, { error: 'title must be 1–80 characters' });
+  const thread = createWebchatThread(roomId, title);
+  broadcastRooms(); // refresh each client's sidebar thread-count chevron
+  return json(res, 200, thread);
+}
+
+async function rRoomThreadPatch(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  const threadId = decodeURIComponent(m[2]);
+  if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+  if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+  if (!getWebchatThread(roomId, threadId)) return json(res, 404, { error: 'Thread not found' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { title?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  const title = sanitizeThreadTitle(body.title);
+  if (title === null) return json(res, 400, { error: 'title must be 1–80 characters' });
+  renameWebchatThread(roomId, threadId, title);
+  return json(res, 200, { ok: true, title });
+}
+
+async function rRoomThreadDelete(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  const threadId = decodeURIComponent(m[2]);
+  if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+  if (threadId === 'main') return json(res, 400, { error: 'The main thread cannot be deleted' });
+  if (!getWebchatThread(roomId, threadId)) return json(res, 404, { error: 'Thread not found' });
+  return deleteThreadHandler(res, roomId, threadId);
+}
+
+// ── Thread context sync (pull main → thread / push thread → main) ──
+// Both are verbatim + additive: copy the source's native message delta into
+// the destination, seed the destination agent session(s) as silent context,
+// broadcast the copies, and advance the per-thread high-water mark so repeat
+// syncs only carry genuinely new messages. The 'main' regular chat is the
+// shared trunk; only a topic thread can pull from / push to it.
+// See docs/webchat/thread-context-sync.md.
+async function rRoomThreadPullPost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  const threadId = decodeURIComponent(m[2]);
+  const dir = m[3] as 'pull' | 'push';
+  if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+  if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+  if (threadId === MAIN_THREAD) return json(res, 400, { error: 'The regular chat has no main to sync with' });
+  if (!getWebchatThread(roomId, threadId)) return json(res, 404, { error: 'Thread not found' });
+  const copied =
+    dir === 'pull'
+      ? syncThreadContext({
+          roomId,
+          srcThreadId: MAIN_THREAD,
+          destThreadId: threadId,
+          markThreadId: threadId,
+          direction: 'pulled',
+          dividerText: 'Pulled from main chat',
+          freshLimit: FRESH_SYNC_LIMIT,
+        })
+      : syncThreadContext({
+          roomId,
+          srcThreadId: threadId,
+          destThreadId: MAIN_THREAD,
+          markThreadId: threadId,
+          direction: 'pushed',
+          dividerText: 'Pushed from thread',
+          freshLimit: FRESH_SYNC_LIMIT,
+        });
+  return json(res, 200, { copied });
+}
+
+// Room → agent → model topology for the explore view, scoped to the caller's
+// accessible rooms (and only the agents/models reachable from them).
+async function rTopologyGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  const rooms = filterRoomsForUser(userId, getAllWebchatRooms());
+  // ALL agents the caller manages become columns/nodes (not just wired ones),
+  // so unused agents show as orphans and can be wired from the matrix.
+  const agents = listAgentsForUser(userId).map((a) => ({ id: a.id, name: a.name }));
+  const topo = getWebchatTopology(rooms, agents);
+  // SCOPED skills only — the ones wired to a specific agent (including anything
+  // the learning loop produced). The shared pool is on ~every agent, so drawing
+  // it would add hundreds of identical edges that say nothing about any one
+  // agent; it stays visible in the agent's own settings. A skill wired to two
+  // agents is ONE node with two edges — that's the fact worth seeing.
+  const skillMap = new Map<string, { id: string; name: string; origin: string | null }>();
+  const skillEdges: { agent: string; skill: string }[] = [];
+  for (const a of agents) {
+    for (const sk of listScopedSkills(a.id)) {
+      if (!skillMap.has(sk.name)) {
+        skillMap.set(sk.name, { id: sk.name, name: sk.name, origin: sk.origin?.label ?? null });
+      }
+      skillEdges.push({ agent: a.id, skill: sk.name });
+    }
+  }
+  return json(res, 200, { ...topo, skills: [...skillMap.values()], skillEdges });
+}
+
+// Full-text search across the caller's accessible rooms (FTS5). Scoped to
+// rooms the user can see — never leaks messages from other rooms.
+async function rSearchGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res, url, userId } = ctx;
+  const q = url.searchParams.get('q') ?? '';
+  if (!q.trim()) return json(res, 200, { results: [] });
+  const rooms = filterRoomsForUser(userId, getAllWebchatRooms());
+  const nameById = new Map(rooms.map((r) => [r.id, r.name]));
+  const hits = searchWebchatMessages(
+    rooms.map((r) => r.id),
+    q,
+    50,
+  );
+  return json(res, 200, {
+    results: hits.map((h) => ({
+      id: h.id,
+      roomId: h.room_id,
+      roomName: nameById.get(h.room_id) ?? h.room_id,
+      sender: h.sender,
+      senderType: h.sender_type,
+      snippet: redactSensitiveData(h.snippet),
+      createdAt: h.created_at,
+    })),
+  });
+}
+
+async function rHistGet(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, url, userId } = ctx;
+  const room = getWebchatRoom(m[1]);
+  if (!room) return json(res, 404, { error: 'Room not found' });
+  if (!canAccessRoom(userId, room.id)) return json(res, 403, { error: 'Access denied' });
+  const afterId = url.searchParams.get('after_id');
+  const beforeId = url.searchParams.get('before_id');
+  // Optional thread filter — absent = the whole room (back-compat).
+  const threadId = url.searchParams.get('thread_id') || undefined;
+  const msgs = afterId
+    ? getWebchatMessagesAfterId(room.id, afterId, 200, threadId)
+    : beforeId
+      ? getWebchatMessagesBeforeId(room.id, beforeId, 50, threadId)
+      : getWebchatMessages(room.id, 100, threadId);
+  return json(
+    res,
+    200,
+    msgs.map((m) => ({ ...m, content: redactSensitiveData(m.content) })),
+  );
+}
+
+// ── Upload (multipart / chunked) + serve ──────────────────────────────
+// Require a custom header on uploads so cross-origin form-POSTs (which are
+// CORS "simple requests" and skip preflight) can't auto-attach credentials
+// from a fronting proxy / cookie / Tailscale identity. The PWA sets this
+// header in authFetch().
+async function rUploadPost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, url, userId, senderIdentity, hooks } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  const csrfOk = req.headers['x-webchat-csrf'] === '1';
+  const accessOk = canAccessRoom(userId, roomId);
+  log.info('Webchat upload (multipart) request', {
+    roomId,
+    userId,
+    contentType: req.headers['content-type'],
+    contentLength: req.headers['content-length'],
+    csrfOk,
+    accessOk,
+  });
+  if (!csrfOk) return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  if (!accessOk) return json(res, 403, { error: 'Access denied' });
+  return handleMultipartUpload(
+    req,
+    res,
+    roomId,
+    senderIdentity,
+    userId,
+    hooks,
+    url.searchParams.get('thread_id') || undefined,
+  );
+}
+
+async function rChunkPost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, url, userId, senderIdentity, hooks } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  const csrfOk = req.headers['x-webchat-csrf'] === '1';
+  const accessOk = canAccessRoom(userId, roomId);
+  log.info('Webchat upload (chunked) request', {
+    roomId,
+    userId,
+    contentType: req.headers['content-type'],
+    contentLength: req.headers['content-length'],
+    csrfOk,
+    accessOk,
+  });
+  if (!csrfOk) return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  if (!accessOk) return json(res, 403, { error: 'Access denied' });
+  return handleChunkedUpload(
+    req,
+    res,
+    roomId,
+    senderIdentity,
+    userId,
+    hooks,
+    url.searchParams.get('thread_id') || undefined,
+  );
+}
+
+async function rFileGet(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  if (!canAccessRoom(userId, roomId)) return json(res, 403, { error: 'Access denied' });
+  return handleFileServe(res, roomId, decodeURIComponent(m[2]));
+}
+
+// ── Agents (= agent groups) ─────────────────────────────────────────────
+async function rAgentsGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res, url, userId } = ctx;
+  const includeArchived = url.searchParams.get('includeArchived') === '1';
+  return json(res, 200, listAgentsForUser(userId, includeArchived));
+}
+
+// POST /api/agents/draft must come BEFORE the /api/agents/:id pattern
+// (which would otherwise match 'draft' as an id) AND before the bare
+// /api/agents POST so the literal-path handlers stay distinct.
+async function rAgentsDraftPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin only' });
+  if (req.headers['x-webchat-csrf'] !== '1') {
+    return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  }
+  return draftAgentHandler(req, res);
+}
+
+async function rAgentsPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin only' });
+  return createAgentHandler(req, res, userId);
+}
+
+async function rAgentPut(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  const group = resolveAgent(decodeURIComponent(m[1]));
+  if (!group) return json(res, 404, { error: 'Agent not found' });
+  if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+  return updateAgentHandler(req, res, group.id);
+}
+
+async function rAgentDelete(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  const group = resolveAgent(decodeURIComponent(m[1]));
+  if (!group) return json(res, 404, { error: 'Agent not found' });
+  if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+  return deleteAgentHandler(res, group.id);
+}
+
+async function rInstrGet(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  const group = resolveAgent(decodeURIComponent(m[1]));
+  if (!group) return json(res, 404, { error: 'Agent not found' });
+  if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+  return readInstructions(res, group.id);
+}
+
+async function rInstrPut(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  const group = resolveAgent(decodeURIComponent(m[1]));
+  if (!group) return json(res, 404, { error: 'Agent not found' });
+  if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+  return writeInstructions(req, res, group.id);
+}
+
+// GET the rooms an agent is wired to (agent-centric mirror of
+// GET /api/rooms/:id/agents). Read-only; writes go through the existing
+// owner-only POST/DELETE /api/rooms/:roomId/agents endpoints.
+async function rAgentRoomsGet(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  const group = resolveAgent(decodeURIComponent(m[1]));
+  if (!group) return json(res, 404, { error: 'Agent not found' });
+  if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+  return json(res, 200, getWebchatRoomsForAgent(group.id));
+}
+
+// ── Per-agent model assignment ─────────────────────────────────────────
+async function rAgentModelPut(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  const group = resolveAgent(decodeURIComponent(m[1]));
+  if (!group) return json(res, 404, { error: 'Agent not found' });
+  if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+  return assignAgentModelHandler(req, res, group.id);
+}
+
+// ── MCP servers (registry + per-agent assignment) ──────────────────────
+// A registry of MCP tool servers (webchat_mcp_servers) mirroring the models
+// registry: define a server once (owner-gated CRUD + a probe that connects
+// as a real MCP client and lists the server's tools), then attach it to any
+// number of agents. Assignment syncs container_configs.mcp_servers — the
+// same field `ncl groups config add-mcp-server` writes and the container
+// reads — and restarts the group's containers. List responses never include
+// env/headers (they may hold credentials).
+
+// MCP registry is admin-only (scoped admin or higher) — end to end.
+async function rMcpServersGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  return json(res, 200, listMcpServersForUI());
+}
+
+async function rMcpServersPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  return createMcpServerHandler(req, res);
+}
+
+// Read-only discovery over the public MCP registry. Admin-gated like the rest of
+// the MCP surface; adds no write path (a row prefills the existing add form, so
+// every server still goes through probe → create).
+async function rMcpSourcesGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  return json(res, 200, {
+    sources: [
+      {
+        ...MCP_REGISTRY_SOURCE,
+        disabled: isSourceDisabled(MCP_REGISTRY_ID),
+        removed: isSourceDisabled(mcpRegistryRemovedKey()),
+      },
+    ],
+  });
+}
+
+async function rMcpSourcePut(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  const id = decodeURIComponent(m[1]);
+  if (id !== MCP_REGISTRY_ID) return json(res, 404, { error: 'Unknown source' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let disabled = false;
+  try {
+    disabled = !!(JSON.parse(raw) as { disabled?: unknown }).disabled;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  setSourceDisabled(MCP_REGISTRY_ID, disabled);
+  return json(res, 200, { ok: true, disabled });
+}
+
+// Full removal (parity with skill sources' Remove). Stronger than disable:
+// the row leaves Settings save for a one-line restore, and the catalog is
+// gone server-side. Restore = POST on the same path.
+async function rMcpSourceDelete(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  if (decodeURIComponent(m[1]) !== MCP_REGISTRY_ID) return json(res, 404, { error: 'Unknown source' });
+  setSourceDisabled(mcpRegistryRemovedKey(), true);
+  return json(res, 200, { ok: true, removed: true });
+}
+
+async function rMcpSourcePost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  // Restore a removed source (clears the disabled flag too — a restore
+  // should come back usable, not resurrect half-off).
+  if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  if (decodeURIComponent(m[1]) !== MCP_REGISTRY_ID) return json(res, 404, { error: 'Unknown source' });
+  setSourceDisabled(mcpRegistryRemovedKey(), false);
+  setSourceDisabled(MCP_REGISTRY_ID, false);
+  return json(res, 200, { ok: true, removed: false });
+}
+
+async function rMcpCatalogGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res, url } = ctx;
+  return mcpCatalogHandler(res, url.searchParams.get('q') || '');
+}
+
+async function rMcpServersProbePost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  return probeMcpServerHandler(req, res);
+}
+
+// OAuth callback: the admin's browser lands here from the authorization
+// server. Auth = whois like everything else, plus the single-use state.
+async function rMcpServersOauthCallbackGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res, url } = ctx;
+  const code = url.searchParams.get('code') || '';
+  const state = url.searchParams.get('state') || '';
+  if (!code || !state) return json(res, 400, { error: 'Missing code/state' });
+  try {
+    const { serverId } = await finishOAuthFlow(state, code);
+    const server = getWebchatMcpServer(serverId);
+    if (server) {
+      // Re-sync every assigned agent onto the relay URL now that auth exists.
+      for (const gid of getAgentsAssignedToMcpServer(serverId)) {
+        syncAgentMcpConfig(gid, server, true);
+        reloadAgentMcpServers(gid);
+      }
+      void checkMcpServer(server).catch(() => {});
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(
+      '<!doctype html><meta charset="utf-8"><title>Connected</title><body style="font-family:system-ui;padding:2rem">✅ MCP server connected — you can close this tab and return to NanoClaw.</body>',
+    );
+    return;
+  } catch (err) {
+    res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(
+      `<!doctype html><meta charset="utf-8"><title>Failed</title><body style="font-family:system-ui;padding:2rem">OAuth failed: ${escapeHtml(err instanceof Error ? err.message : String(err))}</body>`,
+    );
+    return;
+  }
+}
+
+async function rMcpOauthStartPost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let staticClient: { client_id: string; client_secret?: string } | undefined;
+  try {
+    const b = JSON.parse(raw || '{}') as { client_id?: string; client_secret?: string };
+    if (b.client_id) staticClient = { client_id: String(b.client_id), client_secret: b.client_secret };
+  } catch {
+    /* empty body is fine */
+  }
+  const host = String(req.headers.host || '');
+  if (!host) return json(res, 400, { error: 'Missing Host header' });
+  const redirectUri = `https://${host}/api/mcp-servers/oauth/callback`;
+  try {
+    const authorizeUrl = await startOAuthFlow(decodeURIComponent(m[1]), redirectUri, staticClient);
+    return json(res, 200, { authorizeUrl });
+  } catch (err) {
+    return json(res, 422, { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+// Re-approve a drifted tool surface: pin what the server exposes NOW.
+async function rMcpRepinPost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  const server = getWebchatMcpServer(decodeURIComponent(m[1]));
+  if (!server) return json(res, 404, { error: 'MCP server not found' });
+  if (server.transport === 'stdio' || !server.url) return json(res, 400, { error: 'Only remote servers are pinned' });
+  setMcpServerDrift(server.id, null);
+  getDb().prepare(`UPDATE webchat_mcp_servers SET pinned_tools = NULL WHERE id = ?`).run(server.id);
+  const health = await checkMcpServer(getWebchatMcpServer(server.id)!); // re-probe pins the current surface
+  return json(res, 200, { ok: true, health });
+}
+
+// Tool allowlist for a server (null/empty = all tools). Flows into each
+// assigned agent's container config → the SDK's allowedTools filter.
+async function rMcpToolsPut(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  const server = getWebchatMcpServer(decodeURIComponent(m[1]));
+  if (!server) return json(res, 404, { error: 'MCP server not found' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let enabled: string[] | null = null;
+  try {
+    const b = JSON.parse(raw) as { enabled?: unknown };
+    if (Array.isArray(b.enabled)) enabled = b.enabled.map(String).slice(0, 500);
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  setMcpServerEnabledTools(server.id, enabled && enabled.length ? enabled : null);
+  const updated = getWebchatMcpServer(server.id)!;
+  for (const gid of getAgentsAssignedToMcpServer(server.id)) {
+    syncAgentMcpConfig(gid, updated, true);
+    reloadAgentMcpServers(gid);
+  }
+  return json(res, 200, { ok: true });
+}
+
+// Host-side credential for a server: {token} sets a bearer secret, null
+// clears. Never echoed back; containers switch to the relay on next sync.
+async function rMcpAuthPut(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  const server = getWebchatMcpServer(decodeURIComponent(m[1]));
+  if (!server) return json(res, 404, { error: 'MCP server not found' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let token: string | null = null;
+  try {
+    const b = JSON.parse(raw) as { token?: unknown };
+    token = typeof b.token === 'string' && b.token.trim() ? b.token.trim() : null;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  setMcpServerAuth(server.id, token ? { kind: 'bearer', token } : null);
+  const updated = getWebchatMcpServer(server.id)!;
+  for (const gid of getAgentsAssignedToMcpServer(server.id)) {
+    syncAgentMcpConfig(gid, updated, true);
+    reloadAgentMcpServers(gid);
+  }
+  return json(res, 200, { ok: true, hasAuth: !!token });
+}
+
+async function rMcpServerIdPut(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  return updateMcpServerHandler(req, res, decodeURIComponent(m[1]));
+}
+
+async function rMcpServerIdDelete(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, url } = ctx;
+  return deleteMcpServerHandler(res, decodeURIComponent(m[1]), url.searchParams.get('force') === '1');
+}
+
+async function rAgentMcp(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, method, userId } = ctx;
+  const group = resolveAgent(decodeURIComponent(m[1]));
+  if (!group) return json(res, 404, { error: 'Agent not found' });
+  if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+  if (method === 'GET') return listAgentMcpHandler(res, group.id);
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  return setAgentMcpHandler(req, res, group.id);
+}
+
+// ── Skills (per-agent capability toggles) ──────────────────────────────
+// Available skills = the folders in container/skills (bind-mounted read-only
+// into every container); each agent's container config picks which it gets.
+// Plus the AGENT-SCOPED skills (learned-and-kept / per-agent imports) across
+// every agent the caller administers, so a skill that lives on one agent only
+// still shows in the registry — with enough context to say where it lives.
+async function rSkillsGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  const pool = listAvailableSkills();
+  const skills = [...pool, ...listScopedSkillsForUser(userId, pool)].sort((a, b) => a.name.localeCompare(b.name));
+  return json(res, 200, { skills });
+}
+
+// Import a skill from a GitHub folder URL into data/user-skills (no rebuild).
+// Owner/global-admin only: an imported skill lands in a shared mount that fans
+// out to every 'all' agent install-wide, so importing code is an install-wide
+// trust action (same bar as the source registry), NOT a per-group one — a
+// scoped admin of one group must not be able to inject code into others'.
+async function rSkillsImportPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  return importSkillHandler(req, res);
+}
+
+// One merged pool of skills for a trust tier (official = Anthropic; community =
+// every community GitHub collection + the awesomeskill.ai marketplace). `q`
+// filters/searches the pool. Community results are unvetted — the UI warns +
+// gates import behind a review confirm.
+async function rSkillsCatalogGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res, url } = ctx;
+  return catalogPoolHandler(res, url.searchParams.get('tier') || 'official', url.searchParams.get('q') || '');
+}
+
+// Suggest skills (installed + catalogs) matching a new agent's description.
+async function rSkillsSuggestGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res, url } = ctx;
+  return suggestSkillsHandler(res, url.searchParams.get('text') || '');
+}
+
+// Catalog-source registry: list is admin-visible; changes are global-admin
+// only ("well-known sites" are an install-wide trust decision).
+// NOTE: these literal routes must stay ABOVE the /api/skills/:name matcher.
+async function rSkillsSourcesGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  // `sources` = editable GitHub collections; `builtins` = code-wired sources
+  // that also feed the pool but have nothing to edit (the marketplace).
+  return json(res, 200, {
+    sources: listSkillSources(),
+    builtins: [
+      {
+        id: MARKETPLACE_ID,
+        label: SKILL_DISCOVERY_SOURCE.name,
+        url: SKILL_DISCOVERY_SOURCE.url,
+        disabled: isSourceDisabled(MARKETPLACE_ID),
+      },
+    ],
+  });
+}
+
+async function rSkillSource(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, method, userId } = ctx;
+  if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  const sourceId = decodeURIComponent(m[1]);
+  // Built-in marketplace: there's nothing in the DB to edit/delete — DELETE
+  // switches it off (removed from the pool), PUT switches it back on.
+  if (sourceId === MARKETPLACE_ID) {
+    setSourceDisabled(MARKETPLACE_ID, method === 'DELETE');
+    return json(res, 200, { ok: true });
+  }
+  if (method === 'PUT') return putSkillSourceHandler(req, res, sourceId);
+  catalogCache.delete(sourceId);
+  return deleteSkillSource(sourceId) ? json(res, 200, { ok: true }) : json(res, 404, { error: 'Source not found' });
+}
+
+// Delete a user skill (imported/uploaded). Shipped skills can't be removed.
+// Read / write / delete a single skill. GET returns its SKILL.md (any
+// source); PUT creates or edits a USER skill's SKILL.md (shipped skills are
+// read-only — they're repo files); DELETE removes a user skill.
+// Cross-agent duplicates + promotion (learning loop). Detection is read-only
+// and admin-visible; PROMOTION writes the shared pool — install-wide reach —
+// so it stays owner/global-admin, the pool's own boundary.
+// Pre-import inspection: fetch the skill's files WITHOUT writing anything and
+// return the "what's inside" inventory + lint findings. Read-only, so any
+// admin may look (per-group admins import scoped skills through the same
+// preview). NOTE: literal /api/skills/* routes must stay ABOVE the
+// /api/skills/:name matcher.
+async function rSkillsInspectPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  return inspectSkillHandler(req, res);
+}
+
+// Update checks for pinned pool imports: which user skills' upstream has
+// moved since their recorded commit. Read-only.
+async function rSkillsUpdatesGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  return skillUpdatesHandler(res);
+}
+
+async function rSkillUpdatePost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  // Same gate as pool import — an update IS a pool import.
+  if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  return applySkillUpdateHandler(res, decodeURIComponent(m[1]));
+}
+
+async function rSkillsDuplicatesGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  const dups = findDuplicateScopedSkills().map((d) => ({
+    ...d,
+    agents: d.agents.map((id) => getAgentGroup(id)?.name || id),
+  }));
+  return json(res, 200, { duplicates: dups });
+}
+
+async function rSkillsPromotePost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let name = '';
+  try {
+    name = sanitizeSkillName(String((JSON.parse(raw) as { name?: unknown }).name || ''));
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  if (!name) return json(res, 400, { error: 'Invalid skill name' });
+  const dup = findDuplicateScopedSkills().find((d) => d.name === name);
+  const r = promoteScopedSkill(name);
+  if (!r.ok) return json(res, 409, { error: r.error });
+  // Every holder's containers must respawn to see the pooled copy.
+  let restarted = 0;
+  for (const g of listAgentsForUser(userId)) {
+    if (dup?.agents.includes(g.id)) restarted += restartAgentGroupContainers(g.id, 'Skill promoted to shared pool');
+  }
+  return json(res, 200, { ok: true, restarted });
+}
+
+async function rSkillItem(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, method, userId } = ctx;
+  const skillName = decodeURIComponent(m[1]);
+  if (method === 'GET') return getSkillContentHandler(res, skillName); // viewing is fine for any admin
+  // Writing a skill (create/edit/delete) introduces code that fans out to every
+  // 'all' agent install-wide → owner/global-admin only, like import.
+  if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  if (method === 'PUT') return putUserSkillHandler(req, res, skillName);
+  return deleteUserSkillHandler(res, skillName);
+}
+
+async function rAgentSkills(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, method, userId } = ctx;
+  const group = resolveAgent(decodeURIComponent(m[1]));
+  if (!group) return json(res, 404, { error: 'Agent not found' });
+  if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+  if (method === 'GET') {
+    const available = listAvailableSkills();
+    // getContainerConfig returns the raw row — skills is a JSON string ("all"
+    // or a name array), so parse it (configFromDb does the same).
+    let sel: string[] | 'all' = 'all';
+    try {
+      const rawSkills = getContainerConfig(group.id)?.skills;
+      if (rawSkills != null) sel = JSON.parse(rawSkills) as string[] | 'all';
+    } catch {
+      sel = 'all';
+    }
+    const enabled = sel === 'all' ? available.map((s) => s.name) : sel;
+    // Also surface skills wired to THIS agent only (real dirs in its own
+    // .claude-shared/skills), which the shared pool doesn't include.
+    return json(res, 200, {
+      available,
+      enabled,
+      scoped: listScopedSkills(group.id),
+      // Curator output: scoped skills archived for disuse. Restorable, never deleted.
+      archived: listArchivedSkills(group.id),
+    });
+  }
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  return setAgentSkillsHandler(req, res, group.id);
+}
+
+// Import a skill wired to ONE agent (its own .claude-shared/skills), so it
+// reaches only that group — never the shared pool / other 'all' agents.
+// Per-group admin is sufficient: it can't affect any other group.
+async function rAgentSkillImportPost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  const group = resolveAgent(decodeURIComponent(m[1]));
+  if (!group) return json(res, 404, { error: 'Agent not found' });
+  if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  return importScopedSkillHandler(req, res, group.id);
+}
+
+// Read / edit the SKILL.md of a skill scoped to ONE agent (its own
+// .claude-shared/skills — where a learned-and-kept or per-agent import lives).
+// A scoped skill affects only this agent, so per-group admin is sufficient to
+// view AND edit — it can never reach an agent the caller can't access. (Pool
+// skills fan out install-wide and stay owner/global-admin via /api/skills/:name.)
+// The /content suffix keeps this distinct from the scoped wire/unwire routes.
+async function rScopedSkillContent(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, method, userId } = ctx;
+  const group = resolveAgent(decodeURIComponent(m[1]));
+  if (!group) return json(res, 404, { error: 'Agent not found' });
+  if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+  const name = sanitizeSkillName(decodeURIComponent(m[2]));
+  if (!name) return json(res, 400, { error: 'Invalid skill name' });
+  if (method === 'GET') return getScopedSkillContentHandler(res, group.id, name);
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  return putScopedSkillContentHandler(req, res, group.id, name);
+}
+
+// Learning-loop settings, per agent. Two toggles, two owners (docs/webchat/learning-loop.md):
+//   autoTrigger — spends tokens, stages drafts → per-agent ADMIN.
+//   autoKeep    — writes live agent context unreviewed → OWNER/GLOBAL ADMIN only,
+//                 the same boundary as every other skill write.
+// Per-ROOM learning settings — the layer the 🎓 menu edits. Room overrides
+// the wired agents' per-agent config; the effective view resolves
+// room → first wired agent → defaults, so the toggles show what will
+// actually happen in THIS room.
+async function rRoomLearning(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, method, userId } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+  const mg = getMessagingGroupByPlatform('webchat', roomId);
+  if (!mg) return json(res, 404, { error: 'Room has no messaging group' });
+  const wired = getMessagingGroupAgents(mg.id).map((w) => ({ id: w.agent_group_id }));
+  // Both toggles spend or commit on the wired agents' behalf — admin over
+  // every one of them (a room is only as governable as its least-governed
+  // agent).
+  const canManage = wired.length > 0 && wired.every((a) => hasAdminPrivilege(userId, a.id));
+  const room = getRoomLearning(mg.id);
+  const agentFallback = wired.length > 0 ? parseAgentLearning(wired[0].id) : {};
+  const effective = {
+    autoTrigger: room.autoTrigger ?? agentFallback.autoTrigger !== false,
+    autoKeep: room.autoKeep ?? agentFallback.autoKeep === true,
+  };
+  if (method === 'GET') {
+    return json(res, 200, { ...effective, canManage, roomOverride: room });
+  }
+  if (!canManage) return json(res, 403, { error: 'Admin privilege over every wired agent required' });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { autoTrigger?: unknown; autoKeep?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  // Boolean sets the room override; explicit null CLEARS it (back to the
+  // agent-level default) — JSON.stringify drops undefined keys on save.
+  const patch: { autoTrigger?: boolean; autoKeep?: boolean } = {};
+  if (typeof body.autoTrigger === 'boolean' || body.autoTrigger === null) {
+    patch.autoTrigger = body.autoTrigger ?? undefined;
+  }
+  if (typeof body.autoKeep === 'boolean' || body.autoKeep === null) {
+    patch.autoKeep = body.autoKeep ?? undefined;
+  }
+  const next = setRoomLearning(mg.id, patch);
+  // Auto-trigger lives in the CONTAINER config (rooms map) — respawn the
+  // wired agents so their next turn sees it. Auto-keep is host-side and
+  // needs no restart, but the map rides along anyway.
+  let restarted = 0;
+  for (const a of wired) restarted += restartAgentGroupContainers(a.id, 'Room learning settings changed');
+  return json(res, 200, {
+    autoTrigger: next.autoTrigger ?? agentFallback.autoTrigger !== false,
+    autoKeep: next.autoKeep ?? agentFallback.autoKeep === true,
+    canManage,
+    roomOverride: next,
+    restarted,
+  });
+}
+
+// ── System backup (Phase 2): export streams; restore swaps + reboots ──
+async function rSystemExportGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res, url } = ctx;
+  const lean = url.searchParams.get('lean') === '1';
+  let stage: string;
+  try {
+    stage = await stageSystemExport(lean);
+  } catch (err) {
+    return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+  }
+  const fname = `nanoclaw-system-${new Date().toISOString().slice(0, 10)}${lean ? '-lean' : ''}.tgz`;
+  res.writeHead(200, {
+    'Content-Type': 'application/gzip',
+    'Content-Disposition': `attachment; filename="${fname}"`,
+  });
+  const tar = spawnTar(systemTarArgs(stage, lean));
+  tar.stdout?.pipe(res);
+  let tarErr = '';
+  tar.stderr?.on('data', (d: Buffer) => (tarErr += d));
+  tar.on('close', (code: number) => {
+    fs.rmSync(stage, { recursive: true, force: true });
+    // tar exits 1 for "file changed as we read it" — tolerable on a live
+    // system; only exit 2 (fatal) voids the stream.
+    if (code !== null && code >= 2) {
+      log.error('System export tar failed', { code, err: tarErr.slice(0, 300) });
+      res.destroy();
+    } else {
+      res.end();
+    }
+  });
+  res.on('close', () => tar.kill('SIGTERM'));
+  return;
+}
+
+async function rSystemImportPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  return importSystemUploadHandler(req, res);
+}
+
+async function rSystemImportApplyPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  return importSystemApplyHandler(req, res);
+}
+
+// ── Room export/import (backup Phase 3) ───────────────────────────────
+async function rRoomExportGet(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+  const roomId = decodeURIComponent(m[1]);
+  if (!getWebchatRoom(roomId)) return json(res, 404, { error: 'Room not found' });
+  let staged: { stage: string };
+  try {
+    staged = stageRoomExport(roomId);
+  } catch (err) {
+    return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+  }
+  res.writeHead(200, {
+    'Content-Type': 'application/gzip',
+    'Content-Disposition': `attachment; filename="nanoclaw-room-${roomId}-${new Date().toISOString().slice(0, 10)}.tgz"`,
+  });
+  const tar = spawnTar(roomTarArgs(staged.stage, roomId));
+  tar.stdout?.pipe(res);
+  tar.on('close', (code: number) => {
+    fs.rmSync(staged.stage, { recursive: true, force: true });
+    if (code !== null && code >= 2) res.destroy();
+    else res.end();
+  });
+  res.on('close', () => tar.kill('SIGTERM'));
+  return;
+}
+
+async function rRoomsImportPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  return importRoomUploadHandler(req, res);
+}
+
+async function rRoomsImportApplyPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  return importRoomApplyHandler(req, res);
+}
+
+// ── Agent export/import (backup Phase 1) ──────────────────────────────
+async function rAgentExportGet(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, url, userId } = ctx;
+  if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+  const group = resolveAgent(decodeURIComponent(m[1]));
+  if (!group) return json(res, 404, { error: 'Agent not found' });
+  const withConvos = url.searchParams.get('conversations') === '1';
+  // Session DBs are DELETE-mode journals — only safe to copy with the
+  // agent's containers stopped. They respawn on the next message.
+  if (withConvos) restartAgentGroupContainers(group.id, 'Export with conversations');
+  let stage: string;
+  try {
+    stage = stageAgentExport(group.id, withConvos);
+  } catch (err) {
+    return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+  }
+  const fname = `nanoclaw-agent-${group.folder}-${new Date().toISOString().slice(0, 10)}.tgz`;
+  res.writeHead(200, {
+    'Content-Type': 'application/gzip',
+    'Content-Disposition': `attachment; filename="${fname}"`,
+  });
+  const tar = spawnTar(exportTarArgs(stage, group, withConvos));
+  tar.stdout?.pipe(res);
+  let tarErr = '';
+  tar.stderr?.on('data', (d: Buffer) => (tarErr += d));
+  tar.on('close', (code: number) => {
+    fs.rmSync(stage, { recursive: true, force: true });
+    if (code !== 0) {
+      log.error('Agent export tar failed', { agent: group.id, code, err: tarErr.slice(0, 300) });
+      res.destroy();
+    } else {
+      res.end();
+    }
+  });
+  res.on('close', () => tar.kill('SIGTERM'));
+  return;
+}
+
+async function rAgentsImportPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  return importAgentUploadHandler(req, res);
+}
+
+async function rAgentsImportApplyPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  if (!isOwner(userId) && !isGlobalAdmin(userId)) return json(res, 403, { error: 'Global admin required' });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  return importAgentApplyHandler(req, res);
+}
+
+async function rAgentLearning(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, method, userId } = ctx;
+  const group = resolveAgent(decodeURIComponent(m[1]));
+  if (!group) return json(res, 404, { error: 'Agent not found' });
+  if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+  const current = parseAgentLearning(group.id);
+  // Auto-keep is admin-tier like the manual Keep it automates: a scoped admin
+  // can already keep any draft for their agent with a tap, so gating the
+  // toggle higher only added friction, not protection. The blast radius is
+  // unchanged — a kept skill is scoped to the one agent they administer.
+  const canAutoKeep = hasAdminPrivilege(userId, group.id);
+  if (method === 'GET') {
+    return json(res, 200, {
+      autoTrigger: current.autoTrigger !== false, // absent = on
+      autoKeep: current.autoKeep === true, // absent = off
+      reviewModel: current.reviewModel ?? null, // absent = the agent's own model
+      replayReview: current.replayReview === true, // absent = digest
+      canAutoKeep,
+    });
+  }
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { autoTrigger?: unknown; autoKeep?: unknown; reviewModel?: unknown; replayReview?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  const next = { ...current };
+  if (typeof body.autoTrigger === 'boolean') next.autoTrigger = body.autoTrigger;
+  if (typeof body.autoKeep === 'boolean') {
+    if (!canAutoKeep) return json(res, 403, { error: 'Admin privilege required for auto-keep' });
+    next.autoKeep = body.autoKeep;
+  }
+  // Review-model / review-input keys ride the same learning JSON. On this
+  // branch they round-trip dormant — the container-side digest review
+  // (PR #353) is what consumes them; until it merges nothing reads them.
+  if ('reviewModel' in body) {
+    const rm = body.reviewModel;
+    if (rm !== null && (typeof rm !== 'string' || !rm.trim() || rm.length > 200)) {
+      return json(res, 400, { error: 'reviewModel must be a model id or null' });
+    }
+    if (rm === null) delete next.reviewModel;
+    else next.reviewModel = (rm as string).trim();
+  }
+  if (typeof body.replayReview === 'boolean') {
+    if (body.replayReview) next.replayReview = true;
+    else delete next.replayReview; // absent = digest, the default
+  }
+  updateContainerConfigJson(group.id, 'learning', next);
+  // Config materializes at spawn — restart so the container sees it now.
+  const restarted = restartAgentGroupContainers(group.id, 'Learning settings changed');
+  return json(res, 200, {
+    ok: true,
+    autoTrigger: next.autoTrigger !== false,
+    autoKeep: next.autoKeep === true,
+    reviewModel: next.reviewModel ?? null,
+    replayReview: next.replayReview === true,
+    canAutoKeep,
+    restarted,
+  });
+}
+
+async function rSkillRevertPost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  const group = resolveAgent(decodeURIComponent(m[1]));
+  if (!group) return json(res, 404, { error: 'Agent not found' });
+  if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  const name = sanitizeSkillName(decodeURIComponent(m[2]));
+  if (!name) return json(res, 400, { error: 'Invalid skill name' });
+  const r = revertLastRevision(scopedSkillsDir(group.id), name);
+  if (!r.ok) return json(res, 409, { error: r.error });
+  const restarted = restartAgentGroupContainers(group.id, 'Skill revision reverted');
+  return json(res, 200, { ok: true, restarted });
+}
+
+async function rSkillRestorePost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  const group = resolveAgent(decodeURIComponent(m[1]));
+  if (!group) return json(res, 404, { error: 'Agent not found' });
+  if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  const name = sanitizeSkillName(decodeURIComponent(m[2]));
+  if (!name) return json(res, 400, { error: 'Invalid skill name' });
+  const r = restoreArchivedSkill(group.id, name);
+  if (!r.ok) return json(res, 409, { error: r.error });
+  const restarted = restartAgentGroupContainers(group.id, 'Webchat archived skill restored');
+  return json(res, 200, { ok: true, restarted });
+}
+
+async function rAgentScopedSkillDelete(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  const group = resolveAgent(decodeURIComponent(m[1]));
+  if (!group) return json(res, 404, { error: 'Agent not found' });
+  if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  return deleteScopedSkillHandler(res, group.id, decodeURIComponent(m[2]));
+}
+
+// ── Learning loop: skill drafts (proposed skills awaiting review) ───────
+async function rSkillDraftsGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  // Scoped admins see only their own groups' drafts (owners/global admins
+  // pass hasAdminPrivilege for every group) — same tier as the per-draft routes.
+  const drafts = listSkillDrafts()
+    .filter((d) => hasAdminPrivilege(userId, d.agent_group_id))
+    .map((d) => ({
       id: d.id,
       skillName: d.skill_name,
       description: d.description,
@@ -2837,867 +3044,1332 @@ async function handleHttp(
       // without the session that produced it is guessing.
       roomId: draftSourceRoom(d.session_id),
     }));
-    return json(res, 200, { drafts });
+  return json(res, 200, { drafts });
+}
+
+async function rDraftPut(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  // Edit a pending draft's body before keeping it. Same tier as Keep: admin
+  // over the agent the draft belongs to — editing shapes what gets kept.
+  const id = decodeURIComponent(m[1]);
+  const draft = getSkillDraft(id);
+  if (!draft || draft.status !== 'pending') return json(res, 404, { error: 'Draft not found' });
+  if (!hasAdminPrivilege(userId, draft.agent_group_id)) return json(res, 403, { error: 'Admin privilege required' });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body = '';
+  try {
+    body = String((JSON.parse(raw) as { body?: unknown }).body || '');
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
   }
-  const draftMatch = url.pathname.match(/^\/api\/skill-drafts\/([^/]+)$/);
-  if (draftMatch && method === 'PUT') {
-    // Edit a pending draft's body before keeping it. Same tier as Keep: admin
-    // over the agent the draft belongs to — editing shapes what gets kept.
-    const id = decodeURIComponent(draftMatch[1]);
-    const draft = getSkillDraft(id);
-    if (!draft || draft.status !== 'pending') return json(res, 404, { error: 'Draft not found' });
-    if (!hasAdminPrivilege(userId, draft.agent_group_id)) return json(res, 403, { error: 'Admin privilege required' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body = '';
+  if (!/^---\s*\n[\s\S]*?description:\s*\S[\s\S]*?\n---/.test(body)) {
+    return json(res, 400, { error: 'Body must be a SKILL.md with YAML front-matter including a description' });
+  }
+  if (!updateSkillDraftBody(id, body)) return json(res, 404, { error: 'Draft not found' });
+  return json(res, 200, { ok: true });
+}
+
+async function rDraft(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, method, userId } = ctx;
+  const id = decodeURIComponent(m[1]);
+  const draft = getSkillDraft(id);
+  if (!draft || draft.status !== 'pending') return json(res, 404, { error: 'Draft not found' });
+  // Same tier as PUT/Keep: admin over the agent the draft belongs to. A
+  // scoped admin of group B must not read or discard group A's drafts —
+  // isAnyAdmin above only hides existence from non-admins.
+  if (!hasAdminPrivilege(userId, draft.agent_group_id)) return json(res, 403, { error: 'Admin privilege required' });
+  if (method === 'GET') {
+    // For a patch, hand back the version it would REPLACE too, so the reviewer
+    // sees what actually changes rather than a wall of unchanged text.
+    let currentBody = '';
+    if (draft.kind === 'patch' && draft.target_skill) {
+      currentBody = readSkillBody(draft.agent_group_id, draft.target_skill);
+    }
+    return json(res, 200, {
+      id: draft.id,
+      skillName: draft.skill_name,
+      description: draft.description,
+      kind: draft.kind,
+      targetSkill: draft.target_skill,
+      agentGroupId: draft.agent_group_id,
+      body: readSkillDraftBody(id) || '',
+      currentBody,
+    });
+  }
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  if (!resolveSkillDraft(id, 'discarded')) return json(res, 404, { error: 'Draft not found' });
+  resolveDraftCard(id, 'discarded', userId);
+  return json(res, 200, { ok: true });
+}
+
+// Keep + wire a draft to an agent group (scoped, origin "learned").
+async function rDraftKeepPost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  const id = decodeURIComponent(m[1]);
+  const draft = getSkillDraft(id);
+  if (!draft || draft.status !== 'pending') return json(res, 404, { error: 'Draft not found' });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  // Admin over the draft's OWN group is required here; the handler separately
+  // checks admin over the body-supplied TARGET group. Without this, a scoped
+  // admin of group B could wire group A's draft content into group B.
+  if (!hasAdminPrivilege(userId, draft.agent_group_id)) return json(res, 403, { error: 'Admin privilege required' });
+  return keepSkillDraftHandler(req, res, userId, draft);
+}
+
+// ── Learning timeline (Journey view) ───────────────────────────────────
+// Read-only chronological feed of what each agent learned, derived from the
+// records that already exist — no new event storage:
+//   - proposed / kept / discarded: the persisted in-room skill-draft cards
+//     (the ONLY durable outcome record — resolveSkillDraft deletes the row),
+//     plus pending skill_drafts rows that never got a card (non-webchat).
+//     Card events are dated by PROPOSAL time; resolution time isn't stored.
+//   - kept (fallback): a learned-origin scoped skill with no card recording
+//     its keep (pre-cards, or kept outside webchat). Dated by its oldest
+//     history snapshot when revised (first-revision time bounds the keep),
+//     else SKILL.md mtime.
+//   - revised: on-disk .history/<name>/<ts>/ snapshots. A revert also
+//     snapshots (and consumes the restored one), so reverts appear here as
+//     revisions — the disk record can't tell them apart.
+//   - archived: the curator's .archive/ entries, dated by dir mtime.
+// Visibility mirrors the drafts-list rule: owner sees all, a scoped admin
+// only their groups. Row actions on the client reuse EXISTING endpoints
+// (scoped-skill editor, revert); this route mutates nothing.
+interface LearningTimelineEvent {
+  id: string;
+  kind: 'proposed' | 'kept' | 'discarded' | 'revised' | 'archived';
+  ts: number; // epoch ms, as the sources store it — display conversion is client-side
+  agentGroupId: string;
+  agentName: string;
+  skillName: string;
+  description?: string;
+  roomId?: string | null;
+  roomName?: string | null;
+  /** Who resolved it: a user id, 'auto-keep', 'expired', or 'superseded'. */
+  by?: string | null;
+  draftId?: string;
+  /** kept/revised only: the scoped skill is live, so the editor can open it. */
+  skillExists?: boolean;
+  /** Newest revision of a live skill only — the existing revert endpoint applies. */
+  canRevert?: boolean;
+}
+
+// At equal ts (a kept dated by its first-revision snapshot), the revision
+// reads as the more recent act — rank it above in the newest-first feed.
+const TIMELINE_KIND_RANK: Record<LearningTimelineEvent['kind'], number> = {
+  proposed: 0,
+  kept: 1,
+  discarded: 2,
+  revised: 3,
+  archived: 4,
+};
+
+async function rLearningTimelineGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res, url, userId } = ctx;
+  const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '100', 10) || 100, 1), 200);
+  const beforeRaw = Number(url.searchParams.get('before'));
+  const cutoff = Number.isFinite(beforeRaw) && beforeRaw > 0 ? beforeRaw : Number.MAX_SAFE_INTEGER;
+
+  const owner = isOwner(userId);
+  const allowed = new Map<string, string>();
+  for (const g of getAllAgentGroups()) {
+    if (owner || hasAdminPrivilege(userId, g.id)) allowed.set(g.id, g.name || g.id);
+  }
+
+  const events: LearningTimelineEvent[] = [];
+  const roomNameOf = (roomId: string | null): string | null =>
+    roomId ? (getWebchatRoom(roomId)?.name ?? null) : null;
+  const skillLives = (gid: string, name: string): boolean =>
+    !!name && fs.existsSync(path.join(scopedSkillsDir(gid), name, 'SKILL.md'));
+
+  // 1. Draft cards — fetched unwindowed (bounded) so the kept-card dedupe set
+  // is complete regardless of the page cursor; the sort+slice below pages.
+  const cards = listSkillDraftCards(undefined, 1000);
+  const keptCardSkills = new Set<string>();
+  for (const c of cards) {
+    if (!allowed.has(c.agentGroupId)) continue;
+    const landed = sanitizeSkillName(c.kind === 'patch' && c.targetSkill ? c.targetSkill : c.skillName);
+    if (c.status === 'kept' && landed) keptCardSkills.add(`${c.agentGroupId}/${landed}`);
+    if (c.createdAt >= cutoff) continue;
+    const kind = c.status === 'pending' ? 'proposed' : c.status;
+    events.push({
+      id: `card-${c.draftId}`,
+      kind,
+      ts: c.createdAt,
+      agentGroupId: c.agentGroupId,
+      agentName: allowed.get(c.agentGroupId) as string,
+      skillName: landed || c.skillName,
+      description: c.description || undefined,
+      roomId: c.roomId,
+      roomName: roomNameOf(c.roomId),
+      by: c.resolvedBy,
+      draftId: c.draftId,
+      skillExists: kind === 'kept' ? skillLives(c.agentGroupId, landed) : undefined,
+    });
+  }
+
+  // 2. Pending drafts that never got a card (proposed from a non-webchat session).
+  for (const d of listSkillDrafts()) {
+    if (!allowed.has(d.agent_group_id) || d.created_at >= cutoff) continue;
+    if (skillDraftCardPosition(d.id)) continue; // its card is the event
+    events.push({
+      id: `draft-${d.id}`,
+      kind: 'proposed',
+      ts: d.created_at,
+      agentGroupId: d.agent_group_id,
+      agentName: allowed.get(d.agent_group_id) as string,
+      skillName: d.kind === 'patch' && d.target_skill ? d.target_skill : d.skill_name,
+      description: d.description || undefined,
+      roomId: draftSourceRoom(d.session_id),
+      roomName: roomNameOf(draftSourceRoom(d.session_id)),
+      draftId: d.id,
+    });
+  }
+
+  // 3. Disk: revisions, card-less keeps, curator archives — per visible agent.
+  for (const [gid, gname] of allowed) {
+    const dir = scopedSkillsDir(gid);
+    let entries: fs.Dirent[] = [];
     try {
-      body = String((JSON.parse(raw) as { body?: unknown }).body || '');
+      entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
+      entries = [];
     }
-    if (!/^---\s*\n[\s\S]*?description:\s*\S[\s\S]*?\n---/.test(body)) {
-      return json(res, 400, { error: 'Body must be a SKILL.md with YAML front-matter including a description' });
-    }
-    if (!updateSkillDraftBody(id, body)) return json(res, 404, { error: 'Draft not found' });
-    return json(res, 200, { ok: true });
-  }
-  if (draftMatch && (method === 'GET' || method === 'DELETE')) {
-    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin privilege required' });
-    const id = decodeURIComponent(draftMatch[1]);
-    const draft = getSkillDraft(id);
-    if (!draft || draft.status !== 'pending') return json(res, 404, { error: 'Draft not found' });
-    if (method === 'GET') {
-      // For a patch, hand back the version it would REPLACE too, so the reviewer
-      // sees what actually changes rather than a wall of unchanged text.
-      let currentBody = '';
-      if (draft.kind === 'patch' && draft.target_skill) {
-        currentBody = readSkillBody(draft.agent_group_id, draft.target_skill);
+    for (const e of entries) {
+      // Dirent kinds come from lstat: pooled symlinks fail isDirectory() and skip.
+      if (!e.isDirectory() || e.name.startsWith('.')) continue;
+      const name = e.name;
+      let mtime = 0;
+      try {
+        mtime = fs.statSync(path.join(dir, name, 'SKILL.md')).mtimeMs;
+      } catch {
+        continue; // not a skill
       }
-      return json(res, 200, {
-        id: draft.id,
-        skillName: draft.skill_name,
-        description: draft.description,
-        kind: draft.kind,
-        targetSkill: draft.target_skill,
-        agentGroupId: draft.agent_group_id,
-        body: readSkillDraftBody(id) || '',
-        currentBody,
+      const revs = listRevisions(dir, name);
+      revs.forEach((rev, i) => {
+        if (rev >= cutoff) return;
+        events.push({
+          id: `rev-${gid}-${name}-${rev}`,
+          kind: 'revised',
+          ts: rev,
+          agentGroupId: gid,
+          agentName: gname,
+          skillName: name,
+          skillExists: true,
+          canRevert: i === 0 ? true : undefined,
+        });
       });
-    }
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!resolveSkillDraft(id, 'discarded')) return json(res, 404, { error: 'Draft not found' });
-    resolveDraftCard(id, 'discarded', userId);
-    return json(res, 200, { ok: true });
-  }
-  // Keep + wire a draft to an agent group (scoped, origin "learned").
-  const draftKeepMatch = url.pathname.match(/^\/api\/skill-drafts\/([^/]+)\/keep$/);
-  if (draftKeepMatch && method === 'POST') {
-    const id = decodeURIComponent(draftKeepMatch[1]);
-    const draft = getSkillDraft(id);
-    if (!draft || draft.status !== 'pending') return json(res, 404, { error: 'Draft not found' });
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    return keepSkillDraftHandler(req, res, userId, draft);
-  }
-
-  // ── Lifecycle status (active | paused | archived) ──────────────────────
-  const agentStatusMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/status$/);
-  if (agentStatusMatch && method === 'PUT') {
-    if (req.headers['x-webchat-csrf'] !== '1') {
-      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    }
-    const group = resolveAgent(decodeURIComponent(agentStatusMatch[1]));
-    if (!group) return json(res, 404, { error: 'Agent not found' });
-    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
-    return setAgentStatusHandler(req, res, group.id);
-  }
-
-  // ── Sessions (list + reset) ────────────────────────────────────────────
-  // Lets an admin reach an agent's sessions — including background a2a
-  // sessions no room-typed /clear can target — and reset one (inject /clear).
-  const agentSessionsMatch = url.pathname.match(/^\/api\/agents\/([^/]+)\/sessions$/);
-  if (agentSessionsMatch && method === 'GET') {
-    const group = resolveAgent(decodeURIComponent(agentSessionsMatch[1]));
-    if (!group) return json(res, 404, { error: 'Agent not found' });
-    if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
-    const sessions = getSessionsByAgentGroup(group.id)
-      .filter((s) => s.status === 'active')
-      .map((s) => ({
-        id: s.id,
-        thread_id: s.thread_id,
-        container_status: s.container_status,
-        last_active: s.last_active,
-      }));
-    return json(res, 200, { sessions });
-  }
-  const sessionResetMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/reset$/);
-  if (sessionResetMatch && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const session = getSession(decodeURIComponent(sessionResetMatch[1]));
-    if (!session) return json(res, 404, { error: 'Session not found' });
-    if (!hasAdminPrivilege(userId, session.agent_group_id)) {
-      return json(res, 403, { error: 'Admin privilege required' });
-    }
-    try {
-      injectSessionCommand(session.agent_group_id, session.id, '/clear');
-      return json(res, 200, { ok: true });
-    } catch (err) {
-      return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
-    }
-  }
-  // Bulk: inject a command (/clear or /compact) into every active session of
-  // every agent wired to a room — the "/clear all" / "/compact all" fan-out.
-  // Resolves the room's agents server-side, and only touches agents the caller
-  // has admin over (incl. their background a2a sessions).
-  const roomBroadcastMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/sessions\/broadcast$/);
-  if (roomBroadcastMatch && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const roomId = decodeURIComponent(roomBroadcastMatch[1]);
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let command = '';
-    try {
-      command = String((JSON.parse(raw) as { command?: unknown }).command || '');
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    if (!SESSION_COMMANDS.has(command)) return json(res, 400, { error: 'command must be /clear or /compact' });
-    const agents = getAgentsForWebchatRoom(roomId).filter((a) => hasAdminPrivilege(userId, a.id));
-    if (agents.length === 0) return json(res, 403, { error: 'Admin privilege required' });
-    let count = 0;
-    for (const a of agents) {
-      for (const s of getSessionsByAgentGroup(a.id).filter((x) => x.status === 'active')) {
-        try {
-          injectSessionCommand(a.id, s.id, command);
-          count++;
-        } catch {
-          /* skip sessions whose inbound.db is missing */
+      if (readSkillOrigin(path.join(dir, name))?.label === 'learned' && !keptCardSkills.has(`${gid}/${name}`)) {
+        const ts = Math.round(revs.length ? revs[revs.length - 1] : mtime);
+        if (ts < cutoff) {
+          events.push({
+            id: `keep-${gid}-${name}`,
+            kind: 'kept',
+            ts,
+            agentGroupId: gid,
+            agentName: gname,
+            skillName: name,
+            skillExists: true,
+          });
         }
       }
     }
-    return json(res, 200, { ok: true, count });
-  }
-
-  // ── Models ────────────────────────────────────────────────────────────
-  if (url.pathname === '/api/models' && method === 'GET') {
-    return json(res, 200, listModelsForUI());
-  }
-
-  // ── Ollama host management (owner-only; SSRF-gated in ollama-manage) ──
-  if (url.pathname === '/api/ollama/hosts' && method === 'GET') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const hosts = new Set<string>();
-    for (const m of listWebchatModels()) {
-      if (m.kind === 'ollama' && m.endpoint) hosts.add(m.endpoint.replace(/\/+$/, ''));
+    for (const a of listArchivedSkills(gid)) {
+      const ts = Math.round(a.archivedAt);
+      if (ts >= cutoff) continue;
+      events.push({
+        id: `arch-${gid}-${a.name}`,
+        kind: 'archived',
+        ts,
+        agentGroupId: gid,
+        agentName: gname,
+        skillName: a.name,
+      });
     }
-    try {
-      const cfg = fs.readFileSync(path.join(process.cwd(), 'data/litellm/config.yaml'), 'utf8');
-      for (const h of (parseConfiguredHosts(cfg) ?? '').split(',')) {
-        if (h.trim()) hosts.add(h.trim().replace(/\/+$/, ''));
+  }
+
+  events.sort(
+    (a, b) => b.ts - a.ts || TIMELINE_KIND_RANK[b.kind] - TIMELINE_KIND_RANK[a.kind] || a.id.localeCompare(b.id),
+  );
+  // The cursor is strictly-less-than, so a page must never end mid-tie — any
+  // event sharing the boundary ts (e.g. a kept dated by its first revision)
+  // would be unreachable from the next page. Extend across the tie instead.
+  const page = events.slice(0, limit);
+  let nextBefore: number | null = null;
+  if (events.length > limit) {
+    const lastTs = page[page.length - 1].ts;
+    let i = limit;
+    while (i < events.length && events[i].ts === lastTs) page.push(events[i++]);
+    nextBefore = i < events.length ? lastTs : null;
+  }
+  return json(res, 200, { events: page, nextBefore });
+}
+
+// ── Lifecycle status (active | paused | archived) ──────────────────────
+async function rAgentStatusPut(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  const group = resolveAgent(decodeURIComponent(m[1]));
+  if (!group) return json(res, 404, { error: 'Agent not found' });
+  if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+  return setAgentStatusHandler(req, res, group.id);
+}
+
+// ── Sessions (list + reset) ────────────────────────────────────────────
+// Lets an admin reach an agent's sessions — including background a2a
+// sessions no room-typed /clear can target — and reset one (inject /clear).
+async function rAgentSessionsGet(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  const group = resolveAgent(decodeURIComponent(m[1]));
+  if (!group) return json(res, 404, { error: 'Agent not found' });
+  if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
+  const sessions = getSessionsByAgentGroup(group.id)
+    .filter((s) => s.status === 'active')
+    .map((s) => ({
+      id: s.id,
+      thread_id: s.thread_id,
+      container_status: s.container_status,
+      last_active: s.last_active,
+    }));
+  return json(res, 200, { sessions });
+}
+
+async function rSessionResetPost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  const session = getSession(decodeURIComponent(m[1]));
+  if (!session) return json(res, 404, { error: 'Session not found' });
+  if (!hasAdminPrivilege(userId, session.agent_group_id)) {
+    return json(res, 403, { error: 'Admin privilege required' });
+  }
+  try {
+    injectSessionCommand(session.agent_group_id, session.id, '/clear');
+    return json(res, 200, { ok: true });
+  } catch (err) {
+    return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+// Bulk: inject a command (/clear or /compact) into every active session of
+// every agent wired to a room — the "/clear all" / "/compact all" fan-out.
+// Resolves the room's agents server-side, and only touches agents the caller
+// has admin over (incl. their background a2a sessions).
+async function rRoomBroadcastPost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  const roomId = decodeURIComponent(m[1]);
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let command = '';
+  try {
+    command = String((JSON.parse(raw) as { command?: unknown }).command || '');
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  if (!SESSION_COMMANDS.has(command)) return json(res, 400, { error: 'command must be /clear or /compact' });
+  const agents = getAgentsForWebchatRoom(roomId).filter((a) => hasAdminPrivilege(userId, a.id));
+  if (agents.length === 0) return json(res, 403, { error: 'Admin privilege required' });
+  let count = 0;
+  for (const a of agents) {
+    for (const s of getSessionsByAgentGroup(a.id).filter((x) => x.status === 'active')) {
+      try {
+        injectSessionCommand(a.id, s.id, command);
+        count++;
+      } catch {
+        /* skip sessions whose inbound.db is missing */
       }
-    } catch {
-      /* no litellm installed — models-derived hosts only */
-    }
-    return json(res, 200, { hosts: [...hosts].sort() });
-  }
-  if (url.pathname === '/api/ollama/models' && method === 'GET') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const host = url.searchParams.get('host') || '';
-    if (!host) return json(res, 400, { error: 'host required' });
-    try {
-      return json(res, 200, { models: await listHostModels(host) });
-    } catch (err) {
-      return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
     }
   }
-  if (url.pathname === '/api/router/routes' && method === 'GET') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const cfg = readRoutesConfig();
-    if (!cfg) return json(res, 404, { error: 'Routing not installed' });
-    const view = routerView(cfg, url.searchParams.get('router') ?? undefined);
+  return json(res, 200, { ok: true, count });
+}
+
+// ── Models ────────────────────────────────────────────────────────────
+async function rModelsGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  // Members get the roster (pickers need id/name/kind/model_id) but not the
+  // infrastructure fields — endpoint (internal model-server URLs) and
+  // credential_ref stay owner-only, matching the rest of the model surface.
+  return json(res, 200, listModelsForUI(isOwner(userId)));
+}
+
+// ── Ollama host management (owner-only; SSRF-gated in ollama-manage) ──
+async function rOllamaHostsGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  const hosts = new Set<string>();
+  for (const m of listWebchatModels()) {
+    if (m.kind === 'ollama' && m.endpoint) hosts.add(m.endpoint.replace(/\/+$/, ''));
+  }
+  try {
+    const cfg = fs.readFileSync(path.join(process.cwd(), 'data/litellm/config.yaml'), 'utf8');
+    for (const h of (parseConfiguredHosts(cfg) ?? '').split(',')) {
+      if (h.trim()) hosts.add(h.trim().replace(/\/+$/, ''));
+    }
+  } catch {
+    /* no litellm installed — models-derived hosts only */
+  }
+  return json(res, 200, { hosts: [...hosts].sort() });
+}
+
+async function rOllamaModelsGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res, url } = ctx;
+  const host = url.searchParams.get('host') || '';
+  if (!host) return json(res, 400, { error: 'host required' });
+  try {
+    return json(res, 200, { models: await listHostModels(host) });
+  } catch (err) {
+    return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+async function rRouterRoutesGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res, url } = ctx;
+  const cfg = readRoutesConfig();
+  if (!cfg) return json(res, 404, { error: 'Routing not installed' });
+  const view = routerView(cfg, url.searchParams.get('router') ?? undefined);
+  return json(res, 200, {
+    routers: listRouters(cfg),
+    router: view.name,
+    routes: view.routes,
+    default_route: view.default_route ?? null,
+    live: cfg.live ?? null,
+  });
+}
+
+async function rRouterRoutesPut(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, url } = ctx;
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let update: RoutesUpdate;
+  try {
+    update = JSON.parse(raw) as RoutesUpdate;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  const cfg = readRoutesConfig();
+  if (!cfg) return json(res, 404, { error: 'Routing not installed' });
+  try {
+    const target = url.searchParams.get('router') ?? undefined;
+    const merged = mergeRoutesUpdate(cfg, update, target);
+    writeRoutesConfig(merged);
+    const view = routerView(merged, target);
     return json(res, 200, {
-      routers: listRouters(cfg),
+      ok: true,
+      routers: listRouters(merged),
       router: view.name,
       routes: view.routes,
       default_route: view.default_route ?? null,
-      live: cfg.live ?? null,
+      live: merged.live ?? null,
     });
+  } catch (err) {
+    return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
   }
-  if (url.pathname === '/api/router/routes' && method === 'PUT') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let update: RoutesUpdate;
-    try {
-      update = JSON.parse(raw) as RoutesUpdate;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    const cfg = readRoutesConfig();
-    if (!cfg) return json(res, 404, { error: 'Routing not installed' });
-    try {
-      const target = url.searchParams.get('router') ?? undefined;
-      const merged = mergeRoutesUpdate(cfg, update, target);
-      writeRoutesConfig(merged);
-      const view = routerView(merged, target);
-      return json(res, 200, {
-        ok: true,
-        routers: listRouters(merged),
-        router: view.name,
-        routes: view.routes,
-        default_route: view.default_route ?? null,
-        live: merged.live ?? null,
-      });
-    } catch (err) {
-      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
-    }
-  }
-  if (url.pathname === '/api/router/routers' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { name?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    const name = typeof body.name === 'string' ? body.name.trim() : '';
-    const cfg = readRoutesConfig();
-    if (!cfg) return json(res, 404, { error: 'Routing not installed' });
-    try {
-      const next = addRouter(cfg, name); // clones the primary router as a starting point
-      writeRoutesConfig(next);
-      // Register the router as an openai-compatible model so agents can assign
-      // it (the virtual model name = the router name, at the router endpoint).
-      const endpoint = (await getRouterInfo()).endpoint;
-      if (!listWebchatModels().some((m) => m.model_id === name && m.endpoint === endpoint)) {
-        createWebchatModel({
-          id: randomUUID(),
-          name,
-          kind: 'openai-compatible',
-          endpoint,
-          model_id: name,
-          credential_ref: null,
-          created_at: Date.now(),
-        });
-      }
-      return json(res, 200, { ok: true, routers: listRouters(next), router: name });
-    } catch (err) {
-      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
-    }
-  }
-  const routerDelMatch = url.pathname.match(/^\/api\/router\/routers\/([^/]+)$/);
-  if (routerDelMatch && method === 'DELETE') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const name = decodeURIComponent(routerDelMatch[1]);
-    const cfg = readRoutesConfig();
-    if (!cfg) return json(res, 404, { error: 'Routing not installed' });
-    // Refuse while an agent is still assigned to this router's model.
-    const model = listWebchatModels().find((m) => m.model_id === name);
-    if (model) {
-      const assigned = getAgentsAssignedToModel(model.id);
-      if (assigned.length > 0) {
-        return json(res, 409, {
-          error: `router "${name}" is assigned to ${assigned.length} agent(s) — unassign first`,
-        });
-      }
-    }
-    try {
-      const next = deleteRouter(cfg, name);
-      writeRoutesConfig(next);
-      if (model) deleteWebchatModel(model.id);
-      return json(res, 200, { ok: true, routers: listRouters(next) });
-    } catch (err) {
-      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
-    }
-  }
-  if (url.pathname === '/api/router/classify' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { prompt?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    if (typeof body.prompt !== 'string' || !body.prompt.trim()) return json(res, 400, { error: 'prompt required' });
-    try {
-      return json(res, 200, await dryClassify(body.prompt.trim()));
-    } catch (err) {
-      return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
-    }
-  }
-  if (url.pathname === '/api/router/decisions' && method === 'GET') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const limit = Math.max(1, Math.min(100, Number(url.searchParams.get('limit')) || 20));
-    return json(res, 200, { decisions: recentDecisions(limit) });
-  }
-  if (url.pathname === '/api/router/metrics' && method === 'GET') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const days = Math.max(1, Math.min(30, Number(url.searchParams.get('days')) || 7));
-    return json(res, 200, getRouterMetrics(days));
-  }
-  if (url.pathname === '/api/router/suggestions' && method === 'GET') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return json(res, 200, { suggestions: await getRouteSuggestions() });
-  }
-  if (url.pathname === '/api/router/models' && method === 'GET') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return json(res, 200, await getRouterInfo());
-  }
-  if (url.pathname === '/api/ollama/pulls' && method === 'GET') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return json(res, 200, { pulls: getPullsSnapshot() });
-  }
-  // Wizard: hardware profile + a recommended local model to prefill the download.
-  // Also report whether a REMOTE Ollama is already in the roster — if so, local
-  // RAM isn't the constraint (models run on that box), so the client softens the
-  // "tight fit" warning.
-  if (url.pathname === '/api/ollama/recommend' && method === 'GET') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const remote = listWebchatModels().find((m) => {
-      if (m.kind !== 'ollama' || !m.endpoint) return false;
-      const host = (() => {
-        try {
-          return new URL(m.endpoint).hostname;
-        } catch {
-          return '';
-        }
-      })();
-      return host && !['127.0.0.1', 'localhost', '::1', 'host.docker.internal'].includes(host);
-    });
-    return json(res, 200, {
-      ...recommendForHost(),
-      remoteOllama: remote ? { present: true, endpoint: remote.endpoint } : { present: false },
-    });
-  }
-  // Local Ollama for the wizard: status probe + one-click rootless install.
-  if (url.pathname === '/api/ollama/local' && method === 'GET') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return json(res, 200, await getOllamaLocalState());
-  }
-  if (url.pathname === '/api/ollama/install' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const result = startOllamaInstall();
-    return json(res, result.started ? 200 : 409, result);
-  }
-  if (url.pathname === '/api/codex/install' && method === 'GET') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return json(res, 200, { ...getCodexInstallProgress(), installed: codexAvailable() });
-  }
-  if (url.pathname === '/api/codex/install' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    if (codexAvailable()) return json(res, 409, { error: 'Codex is already installed', code: 'already-installed' });
-    const r = startCodexInstall();
-    if (r.error === 'skill-missing')
-      return json(res, 409, { error: 'The add-codex skill is not present in this checkout.', code: 'skill-missing' });
-    return json(res, r.started ? 202 : 409, {
-      ...getCodexInstallProgress(),
-      installed: codexAvailable(),
-      started: r.started,
-    });
-  }
-  if (url.pathname === '/api/ollama/pull' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { host?: unknown; model?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    if (typeof body.host !== 'string' || !body.host.trim()) return json(res, 400, { error: 'host required' });
-    if (typeof body.model !== 'string' || !body.model.trim()) return json(res, 400, { error: 'model required' });
-    try {
-      const job = await startPull(body.host.trim(), body.model.trim());
-      return json(res, 202, { pull: job });
-    } catch (err) {
-      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
-    }
-  }
-  if (url.pathname === '/api/router/roster-refresh' && method === 'GET') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return json(res, 200, getRosterRefreshState());
-  }
-  if (url.pathname === '/api/router/roster-refresh' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const started = startRosterRefresh();
-    return json(res, started ? 202 : 409, { ...getRosterRefreshState(), started });
-  }
-  if (url.pathname === '/api/webchat/tts/install' && method === 'GET') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return json(res, 200, await getTtsInstallState());
-  }
-  if (url.pathname === '/api/webchat/tts/install' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const r = startTtsInstall();
-    if (!r.started && r.error === 'installer-missing') {
-      return json(res, 409, { error: 'The /add-webchat-tts installer is missing from this checkout.' });
-    }
-    return json(res, r.started ? 202 : 409, { ...(await getTtsInstallState()), started: r.started });
-  }
-  if (url.pathname === '/api/webchat/tailscale/install' && method === 'GET') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return json(res, 200, getTailscaleInstallState());
-  }
-  if (url.pathname === '/api/webchat/tailscale/install' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const r = startTailscaleInstall();
-    if (!r.started && r.error === 'prereq-missing') {
-      return json(res, 409, {
-        error: "Can't install Tailscale here — /dev/net/tun or root is missing. Use the Proxmox community helper.",
-      });
-    }
-    return json(res, r.started ? 202 : 409, { ...getTailscaleInstallState(), started: r.started });
-  }
-  if (url.pathname === '/api/webchat/stt/install' && method === 'GET') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return json(res, 200, getSttInstallState());
-  }
-  if (url.pathname === '/api/webchat/stt/install' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { provider?: unknown; model?: unknown; apiKey?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    const provider = body.provider === 'elevenlabs' ? 'elevenlabs' : 'local';
-    const r = startSttInstall({
-      provider,
-      model: typeof body.model === 'string' ? body.model : undefined,
-      apiKey: typeof body.apiKey === 'string' ? body.apiKey : undefined,
-    });
-    if (!r.started) {
-      const msg =
-        r.error === 'installer-missing'
-          ? 'The add-webchat-dictation installer is missing from this checkout.'
-          : r.error === 'missing-key'
-            ? 'An ElevenLabs API key is required.'
-            : r.error === 'bad-model'
-              ? 'Unknown model.'
-              : 'An install is already running.';
-      return json(res, 409, { error: msg });
-    }
-    return json(res, 202, { ...getSttInstallState(), started: true });
-  }
-  // Voice list, proxied from the TTS backend (Kokoro serves ~67). Owner-only —
-  // it's the voice-picker's data source, not a runtime need.
-  if (url.pathname === '/api/tts/voices' && method === 'GET') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    try {
-      const upstream = await fetch(`${ttsEndpoint()}/v1/audio/voices`, { signal: AbortSignal.timeout(5000) });
-      if (!upstream.ok) return json(res, 502, { error: `TTS backend answered ${upstream.status}` });
-      const body = (await upstream.json()) as { voices?: unknown };
-      const voices = Array.isArray(body.voices) ? body.voices.filter((v) => typeof v === 'string') : [];
-      return json(res, 200, { voices });
-    } catch {
-      return json(res, 502, { error: 'TTS backend unreachable' });
-    }
-  }
-  // Auto-learn MASTER switch (Settings → Features). GET for every authed user
-  // (the client hides the per-agent / per-room learning controls when off);
-  // PUT is owner-only. Enforced at spawn in materializeContainerJson.
-  if (url.pathname === '/api/learning/config' && (method === 'GET' || method === 'PUT')) {
-    const canEdit = isOwner(userId) || isGlobalAdmin(userId);
-    if (method === 'GET') {
-      const base = { enabled: getLearningMasterEnabled() };
-      return json(
-        res,
-        canEdit ? 200 : 200,
-        canEdit ? { ...base, canEdit: true, classifierModelId: getLearningClassifier().modelId } : { ...base, canEdit: false },
-      );
-    }
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!canEdit) return json(res, 403, { error: 'Owner only' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { enabled?: unknown; classifierModelId?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    // Classifier model pick — resolve the roster model to CONTAINER-REACHABLE
-    // call params so the agent-runner (a Docker container) can reach it.
-    if ('classifierModelId' in body) {
-      if (body.classifierModelId === null) {
-        setLearningClassifier(null, null, null);
-        return json(res, 200, { ok: true, classifierModelId: null });
-      }
-      if (typeof body.classifierModelId !== 'string' || !body.classifierModelId.trim())
-        return json(res, 400, { error: 'classifierModelId must be a string or null' });
-      const model = getWebchatModel(body.classifierModelId.trim());
-      if (!model) return json(res, 404, { error: 'Model not found' });
-      const clf = classifierParamsForModel(model);
-      if (!clf)
-        return json(res, 400, { error: 'Classifier must be an ollama or openai-compatible roster model with an endpoint' });
-      setLearningClassifier(model.id, clf.url, clf.model);
-      return json(res, 200, { ok: true, classifierModelId: model.id });
-    }
-    if (typeof body.enabled !== 'boolean') return json(res, 400, { error: 'enabled must be a boolean' });
-    setLearningMasterEnabled(body.enabled);
-    return json(res, 200, { ok: true, enabled: body.enabled });
-  }
-  // Read aloud is workspace-level: the owner flips it for everyone (the GET
-  // half lives in tts.ts's public config probe).
-  if (url.pathname === '/api/tts/config' && method === 'PUT') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { readAloud?: unknown; voice?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    // Voice change — persisted to .env and activated in-process (no restart).
-    // Strict shape: Kokoro voice ids / blends only, since this lands in .env.
-    if ('voice' in body) {
-      if (typeof body.voice !== 'string' || !/^[a-z0-9_]+(\+[a-z0-9_]+)*$/.test(body.voice) || body.voice.length > 120)
-        return json(res, 400, { error: 'voice must be a voice id (letters/digits/underscore, + for blends)' });
-      upsertEnv(process.cwd(), 'WEBCHAT_TTS_VOICE', body.voice);
-      process.env.WEBCHAT_TTS_VOICE = body.voice;
-      return json(res, 200, { ok: true, voice: body.voice });
-    }
-    if (typeof body.readAloud !== 'boolean') return json(res, 400, { error: 'readAloud must be a boolean' });
-    setReadAloudEnabled(body.readAloud);
-    return json(res, 200, { ok: true, readAloud: body.readAloud });
-  }
-  // Dictation runtime config. GET is for every authed user (the mic gates on
-  // `enabled`); provider/cleanup details only for owners/global admins.
-  if (url.pathname === '/api/stt/config' && (method === 'GET' || method === 'PUT')) {
-    const canEdit = isOwner(userId) || isGlobalAdmin(userId);
-    if (method === 'GET') {
-      const base = { enabled: sttEnabled(), cleanup: getSttCleanupModelId() !== null };
-      return json(
-        res,
-        200,
-        canEdit
-          ? {
-              ...base,
-              provider: sttProvider(),
-              cleanupModelId: getSttCleanupModelId(),
-              cleanupPrompt: getSttCleanupPrompt(),
-              defaultCleanupPrompt: DEFAULT_CLEANUP_PROMPT,
-              canEdit: true,
-            }
-          : base,
-      );
-    }
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!canEdit) return json(res, 403, { error: 'Forbidden' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { cleanupModelId?: unknown; cleanupPrompt?: unknown; enabled?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    // Workspace toggle — mirrors Read aloud: the owner flips the mic for
-    // everyone. Env-backed (WEBCHAT_STT_ENABLED already gates every STT
-    // surface), persisted + activated in-process.
-    if ('enabled' in body) {
-      if (typeof body.enabled !== 'boolean') return json(res, 400, { error: 'enabled must be a boolean' });
-      upsertEnv(process.cwd(), 'WEBCHAT_STT_ENABLED', body.enabled ? 'true' : 'false');
-      process.env.WEBCHAT_STT_ENABLED = body.enabled ? 'true' : 'false';
-      return json(res, 200, { ok: true, enabled: body.enabled });
-    }
-    // Prompt edit — its own PUT shape; null/empty resets to the built-in default.
-    if ('cleanupPrompt' in body) {
-      if (body.cleanupPrompt !== null && typeof body.cleanupPrompt !== 'string')
-        return json(res, 400, { error: 'cleanupPrompt must be a string or null' });
-      const trimmed = typeof body.cleanupPrompt === 'string' ? body.cleanupPrompt.trim() : '';
-      if (trimmed.length > 4000) return json(res, 413, { error: 'Prompt too long (4000 chars max)' });
-      const stored = trimmed && trimmed !== DEFAULT_CLEANUP_PROMPT ? trimmed : null;
-      setSttCleanupPrompt(stored);
-      return json(res, 200, { ok: true, cleanupPrompt: stored });
-    }
-    if (body.cleanupModelId === null) {
-      setSttCleanupModelId(null);
-      return json(res, 200, { ok: true, cleanupModelId: null });
-    }
-    if (typeof body.cleanupModelId !== 'string' || !body.cleanupModelId.trim())
-      return json(res, 400, { error: 'cleanupModelId must be a string or null' });
-    const model = getWebchatModel(body.cleanupModelId.trim());
-    if (!model) return json(res, 404, { error: 'Model not found' });
-    if (model.kind !== 'ollama' && model.kind !== 'openai-compatible')
-      return json(res, 400, { error: 'Cleanup model must be an ollama or openai-compatible roster model' });
-    if (!model.endpoint) return json(res, 400, { error: 'That model has no endpoint to call' });
-    setSttCleanupModelId(model.id);
-    return json(res, 200, { ok: true, cleanupModelId: model.id });
-  }
-  if (url.pathname === '/api/stt/transcribe' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!sttEnabled()) return json(res, 404, { error: 'Voice dictation not configured' });
-    const declared = Number(req.headers['content-length'] ?? 0);
-    if (declared > MAX_SEGMENT_BYTES) return json(res, 413, { error: 'Segment too large' });
-    const chunks: Buffer[] = [];
-    let received = 0;
-    let aborted = false;
-    req.on('data', (c: Buffer) => {
-      received += c.length;
-      if (received > MAX_SEGMENT_BYTES) {
-        aborted = true;
-        req.destroy();
-        return;
-      }
-      chunks.push(c);
-    });
-    await new Promise<void>((resolve) => {
-      req.on('end', resolve);
-      req.on('close', resolve);
-      req.on('error', resolve);
-    });
-    if (aborted) return json(res, 413, { error: 'Segment too large' });
-    const wav = Buffer.concat(chunks);
-    // Below ~1 kB it's a click or an empty buffer, not speech — don't bill a
-    // transcription round-trip for it.
-    if (wav.length < MIN_SEGMENT_BYTES) return json(res, 200, { text: '' });
-    try {
-      const text = await transcribeSegment(wav);
-      return json(res, 200, { text });
-    } catch (err) {
-      log.warn('Webchat STT: transcription failed', { err: err instanceof Error ? err.message : err });
-      return json(res, 502, { error: 'Transcription failed — check the dictation backend.' });
-    }
-  }
-  if (url.pathname === '/api/stt/cleanup' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { text?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    if (typeof body.text !== 'string') return json(res, 400, { error: 'text required' });
-    if (body.text.length > MAX_CLEANUP_CHARS) return json(res, 413, { error: 'Text too long to clean up' });
-    const result = await cleanupTranscript(body.text);
-    return json(res, 200, result);
-  }
-  if (url.pathname === '/api/router/install' && method === 'GET') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return json(res, 200, getRoutingInstallState());
-  }
-  if (url.pathname === '/api/router/install' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const r = startRoutingInstall();
-    if (r.error === 'litellm-not-installed') {
-      return json(res, 409, {
-        error: 'LiteLLM is not installed. Run /add-litellm first.',
-        code: 'litellm-not-installed',
-      });
-    }
-    if (r.error === 'installer-missing') {
-      return json(res, 409, {
-        error: 'The add-routing skill is not present in this checkout.',
-        code: 'installer-missing',
-      });
-    }
-    return json(res, r.started ? 202 : 409, { ...getRoutingInstallState(), started: r.started });
-  }
-  if (url.pathname === '/api/router/litellm-install' && method === 'GET') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return json(res, 200, getLitellmInstallState());
-  }
-  if (url.pathname === '/api/router/litellm-install' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    // Point LiteLLM at the operator's real model servers (a remote/LAN Ollama in
-    // the roster, or the hosts an existing config already declares) — not a
-    // localhost Ollama that may not exist. Falls back to the localhost default
-    // only when the roster is empty.
-    const r = startLitellmInstall(process.cwd(), deriveModelServerHosts() ?? undefined);
-    if (r.error === 'installer-missing') {
-      return json(res, 409, {
-        error: 'The add-litellm skill is not present in this checkout.',
-        code: 'installer-missing',
-      });
-    }
-    return json(res, r.started ? 202 : 409, { ...getLitellmInstallState(), started: r.started });
-  }
-  if (url.pathname === '/api/models' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') {
-      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    }
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return createModelHandler(req, res);
-  }
-  if (url.pathname === '/api/models/discover' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') {
-      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    }
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return discoverModelsHandler(req, res);
-  }
-  if (url.pathname === '/api/models/probe' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') {
-      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    }
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return probeModelsHandler(req, res);
-  }
-  if (url.pathname === '/api/models/bulk' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') {
-      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    }
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return bulkCreateModelsHandler(req, res);
-  }
-  const modelIdMatch = url.pathname.match(/^\/api\/models\/([^/]+)$/);
-  if (modelIdMatch && method === 'PUT') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return updateModelHandler(req, res, decodeURIComponent(modelIdMatch[1]));
-  }
-  if (modelIdMatch && method === 'DELETE') {
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    const force = url.searchParams.get('force') === '1';
-    return deleteModelHandler(res, decodeURIComponent(modelIdMatch[1]), force);
-  }
+}
 
-  // ── Approvals inbox (per-user) ────────────────────────────────────────
-  if (url.pathname === '/api/approvals/pending' && method === 'GET') {
-    const rows = getWebchatPendingApprovalsForUser(userId);
+async function rRouterRoutersPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { name?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  const name = typeof body.name === 'string' ? body.name.trim() : '';
+  const cfg = readRoutesConfig();
+  if (!cfg) return json(res, 404, { error: 'Routing not installed' });
+  try {
+    const next = addRouter(cfg, name); // clones the primary router as a starting point
+    writeRoutesConfig(next);
+    // Register the router as an openai-compatible model so agents can assign
+    // it (the virtual model name = the router name, at the router endpoint).
+    const endpoint = (await getRouterInfo()).endpoint;
+    if (!listWebchatModels().some((m) => m.model_id === name && m.endpoint === endpoint)) {
+      createWebchatModel({
+        id: randomUUID(),
+        name,
+        kind: 'openai-compatible',
+        endpoint,
+        model_id: name,
+        credential_ref: null,
+        created_at: Date.now(),
+      });
+    }
+    return json(res, 200, { ok: true, routers: listRouters(next), router: name });
+  } catch (err) {
+    return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+async function rRouterDelDelete(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  const name = decodeURIComponent(m[1]);
+  const cfg = readRoutesConfig();
+  if (!cfg) return json(res, 404, { error: 'Routing not installed' });
+  // Refuse while an agent is still assigned to this router's model.
+  const model = listWebchatModels().find((m) => m.model_id === name);
+  if (model) {
+    const assigned = getAgentsAssignedToModel(model.id);
+    if (assigned.length > 0) {
+      return json(res, 409, {
+        error: `router "${name}" is assigned to ${assigned.length} agent(s) — unassign first`,
+      });
+    }
+  }
+  try {
+    const next = deleteRouter(cfg, name);
+    writeRoutesConfig(next);
+    if (model) deleteWebchatModel(model.id);
+    return json(res, 200, { ok: true, routers: listRouters(next) });
+  } catch (err) {
+    return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+async function rRouterClassifyPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { prompt?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  if (typeof body.prompt !== 'string' || !body.prompt.trim()) return json(res, 400, { error: 'prompt required' });
+  try {
+    return json(res, 200, await dryClassify(body.prompt.trim()));
+  } catch (err) {
+    return json(res, 502, { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+async function rRouterDecisionsGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res, url } = ctx;
+  const limit = Math.max(1, Math.min(100, Number(url.searchParams.get('limit')) || 20));
+  return json(res, 200, { decisions: recentDecisions(limit) });
+}
+
+async function rRouterMetricsGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res, url } = ctx;
+  const days = Math.max(1, Math.min(30, Number(url.searchParams.get('days')) || 7));
+  return json(res, 200, getRouterMetrics(days));
+}
+
+async function rRouterSuggestionsGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  return json(res, 200, { suggestions: await getRouteSuggestions() });
+}
+
+async function rRouterModelsGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  return json(res, 200, await getRouterInfo());
+}
+
+async function rOllamaPullsGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  return json(res, 200, { pulls: getPullsSnapshot() });
+}
+
+// Wizard: hardware profile + a recommended local model to prefill the download.
+// Also report whether a REMOTE Ollama is already in the roster — if so, local
+// RAM isn't the constraint (models run on that box), so the client softens the
+// "tight fit" warning.
+async function rOllamaRecommendGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  const remote = listWebchatModels().find((m) => {
+    if (m.kind !== 'ollama' || !m.endpoint) return false;
+    const host = (() => {
+      try {
+        return new URL(m.endpoint).hostname;
+      } catch {
+        return '';
+      }
+    })();
+    return host && !['127.0.0.1', 'localhost', '::1', 'host.docker.internal'].includes(host);
+  });
+  return json(res, 200, {
+    ...recommendForHost(),
+    remoteOllama: remote ? { present: true, endpoint: remote.endpoint } : { present: false },
+  });
+}
+
+// Local Ollama for the wizard: status probe + one-click rootless install.
+async function rOllamaLocalGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  return json(res, 200, await getOllamaLocalState());
+}
+
+async function rOllamaInstallPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  const result = startOllamaInstall();
+  return json(res, result.started ? 200 : 409, result);
+}
+
+async function rCodexInstallGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  return json(res, 200, { ...getCodexInstallProgress(), installed: codexAvailable() });
+}
+
+async function rCodexInstallPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  if (codexAvailable()) return json(res, 409, { error: 'Codex is already installed', code: 'already-installed' });
+  const r = startCodexInstall();
+  if (r.error === 'skill-missing')
+    return json(res, 409, { error: 'The add-codex skill is not present in this checkout.', code: 'skill-missing' });
+  return json(res, r.started ? 202 : 409, {
+    ...getCodexInstallProgress(),
+    installed: codexAvailable(),
+    started: r.started,
+  });
+}
+
+async function rOllamaPullPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { host?: unknown; model?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  if (typeof body.host !== 'string' || !body.host.trim()) return json(res, 400, { error: 'host required' });
+  if (typeof body.model !== 'string' || !body.model.trim()) return json(res, 400, { error: 'model required' });
+  try {
+    const job = await startPull(body.host.trim(), body.model.trim());
+    return json(res, 202, { pull: job });
+  } catch (err) {
+    return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+async function rRouterRosterRefreshGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  return json(res, 200, getRosterRefreshState());
+}
+
+async function rRouterRosterRefreshPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  const started = startRosterRefresh();
+  return json(res, started ? 202 : 409, { ...getRosterRefreshState(), started });
+}
+
+async function rWebchatTtsInstallGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  return json(res, 200, await getTtsInstallState());
+}
+
+async function rWebchatTtsInstallPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  const r = startTtsInstall();
+  if (!r.started && r.error === 'installer-missing') {
+    return json(res, 409, { error: 'The /add-webchat-tts installer is missing from this checkout.' });
+  }
+  return json(res, r.started ? 202 : 409, { ...(await getTtsInstallState()), started: r.started });
+}
+
+async function rWebchatTailscaleInstallGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  return json(res, 200, getTailscaleInstallState());
+}
+
+async function rWebchatTailscaleInstallPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  const r = startTailscaleInstall();
+  if (!r.started && r.error === 'prereq-missing') {
+    return json(res, 409, {
+      error: "Can't install Tailscale here — /dev/net/tun or root is missing. Use the Proxmox community helper.",
+    });
+  }
+  return json(res, r.started ? 202 : 409, { ...getTailscaleInstallState(), started: r.started });
+}
+
+async function rWebchatSttInstallGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  return json(res, 200, getSttInstallState());
+}
+
+async function rWebchatSttInstallPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { provider?: unknown; model?: unknown; apiKey?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  const provider = body.provider === 'elevenlabs' ? 'elevenlabs' : 'local';
+  const r = startSttInstall({
+    provider,
+    model: typeof body.model === 'string' ? body.model : undefined,
+    apiKey: typeof body.apiKey === 'string' ? body.apiKey : undefined,
+  });
+  if (!r.started) {
+    const msg =
+      r.error === 'installer-missing'
+        ? 'The add-webchat-dictation installer is missing from this checkout.'
+        : r.error === 'missing-key'
+          ? 'An ElevenLabs API key is required.'
+          : r.error === 'bad-model'
+            ? 'Unknown model.'
+            : 'An install is already running.';
+    return json(res, 409, { error: msg });
+  }
+  return json(res, 202, { ...getSttInstallState(), started: true });
+}
+
+// Voice list, proxied from the TTS backend (Kokoro serves ~67). Owner-only —
+// it's the voice-picker's data source, not a runtime need.
+async function rTtsVoicesGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  try {
+    const upstream = await fetch(`${ttsEndpoint()}/v1/audio/voices`, { signal: AbortSignal.timeout(5000) });
+    if (!upstream.ok) return json(res, 502, { error: `TTS backend answered ${upstream.status}` });
+    const body = (await upstream.json()) as { voices?: unknown };
+    const voices = Array.isArray(body.voices) ? body.voices.filter((v) => typeof v === 'string') : [];
+    return json(res, 200, { voices });
+  } catch {
+    return json(res, 502, { error: 'TTS backend unreachable' });
+  }
+}
+
+// Auto-learn MASTER switch (Settings → Features). GET for every authed user
+// (the client hides the per-agent / per-room learning controls when off);
+// PUT is owner-only. Enforced at spawn in materializeContainerJson.
+async function rLearningConfig(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, method, userId } = ctx;
+  const canEdit = isOwner(userId) || isGlobalAdmin(userId);
+  if (method === 'GET') {
+    const base = { enabled: getLearningMasterEnabled() };
+    return json(
+      res,
+      canEdit ? 200 : 200,
+      canEdit
+        ? { ...base, canEdit: true, classifierModelId: getLearningClassifier().modelId }
+        : { ...base, canEdit: false },
+    );
+  }
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  if (!canEdit) return json(res, 403, { error: 'Owner only' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { enabled?: unknown; classifierModelId?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  // Classifier model pick — resolve the roster model to CONTAINER-REACHABLE
+  // call params so the agent-runner (a Docker container) can reach it.
+  if ('classifierModelId' in body) {
+    if (body.classifierModelId === null) {
+      setLearningClassifier(null, null, null);
+      return json(res, 200, { ok: true, classifierModelId: null });
+    }
+    if (typeof body.classifierModelId !== 'string' || !body.classifierModelId.trim())
+      return json(res, 400, { error: 'classifierModelId must be a string or null' });
+    const model = getWebchatModel(body.classifierModelId.trim());
+    if (!model) return json(res, 404, { error: 'Model not found' });
+    const clf = classifierParamsForModel(model);
+    if (!clf)
+      return json(res, 400, {
+        error: 'Classifier must be an ollama or openai-compatible roster model with an endpoint',
+      });
+    setLearningClassifier(model.id, clf.url, clf.model);
+    return json(res, 200, { ok: true, classifierModelId: model.id });
+  }
+  if (typeof body.enabled !== 'boolean') return json(res, 400, { error: 'enabled must be a boolean' });
+  setLearningMasterEnabled(body.enabled);
+  return json(res, 200, { ok: true, enabled: body.enabled });
+}
+
+// Read aloud is workspace-level: the owner flips it for everyone (the GET
+// half lives in tts.ts's public config probe).
+async function rTtsConfigPut(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { readAloud?: unknown; voice?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  // Voice change — persisted to .env and activated in-process (no restart).
+  // Strict shape: Kokoro voice ids / blends only, since this lands in .env.
+  if ('voice' in body) {
+    if (typeof body.voice !== 'string' || !/^[a-z0-9_]+(\+[a-z0-9_]+)*$/.test(body.voice) || body.voice.length > 120)
+      return json(res, 400, { error: 'voice must be a voice id (letters/digits/underscore, + for blends)' });
+    upsertEnv(process.cwd(), 'WEBCHAT_TTS_VOICE', body.voice);
+    process.env.WEBCHAT_TTS_VOICE = body.voice;
+    return json(res, 200, { ok: true, voice: body.voice });
+  }
+  if (typeof body.readAloud !== 'boolean') return json(res, 400, { error: 'readAloud must be a boolean' });
+  setReadAloudEnabled(body.readAloud);
+  return json(res, 200, { ok: true, readAloud: body.readAloud });
+}
+
+// Dictation runtime config. GET is for every authed user (the mic gates on
+// `enabled`); provider/cleanup details only for owners/global admins.
+async function rSttConfig(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, method, userId } = ctx;
+  const canEdit = isOwner(userId) || isGlobalAdmin(userId);
+  if (method === 'GET') {
+    const base = { enabled: sttEnabled(), cleanup: getSttCleanupModelId() !== null };
     return json(
       res,
       200,
-      rows.map((r) => ({
-        questionId: r.approval_id,
-        action: r.action,
-        title: r.title,
-        options: JSON.parse(r.options_json),
-        // Payload is action-specific (apt list / mcp config / etc). The PWA
-        // renders it as a JSON-pretty block so the user can review what
-        // they're approving without us having to ship per-action templates.
-        payload: safeParseJson(r.payload),
-        created_at: r.created_at,
-      })),
+      canEdit
+        ? {
+            ...base,
+            provider: sttProvider(),
+            cleanupModelId: getSttCleanupModelId(),
+            cleanupPrompt: getSttCleanupPrompt(),
+            defaultCleanupPrompt: DEFAULT_CLEANUP_PROMPT,
+            canEdit: true,
+          }
+        : base,
     );
   }
-  const approveMatch = url.pathname.match(/^\/api\/approvals\/([^/]+)\/respond$/);
-  if (approveMatch && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') {
-      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    }
-    const approvalId = decodeURIComponent(approveMatch[1]);
-    const pending = getPendingApproval(approvalId);
-    if (!pending || pending.status !== 'pending') {
-      return json(res, 404, { error: 'Approval not found or already resolved' });
-    }
-    // Authorize against the webchat-owned index, not the pending_approvals row
-    // columns — trunk's `requestApproval` doesn't populate channel_type /
-    // platform_id, so those are NULL on every webchat-routed approval. Same
-    // constraint that drove the read path's JOIN against webchat_approvals_index.
-    const expectedPlatformId = approvalInboxForUser(userId);
-    if (!expectedPlatformId || !isWebchatApprovalIndexedFor(approvalId, expectedPlatformId)) {
-      return json(res, 403, { error: 'Not the intended approver for this request' });
-    }
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { value?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    const value = typeof body.value === 'string' ? body.value : '';
-    if (value !== 'approve' && value !== 'reject') {
-      return json(res, 400, { error: 'value must be "approve" or "reject"' });
-    }
-    // Hand off to the existing approvals plumbing — onAction → response
-    // handler → registered approval handler. We don't update the row here;
-    // handleApprovalsResponse owns the lifecycle (status update + delete).
-    hooks.onAction(approvalId, value, userId);
-    return json(res, 200, { ok: true });
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  if (!canEdit) return json(res, 403, { error: 'Forbidden' });
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { cleanupModelId?: unknown; cleanupPrompt?: unknown; enabled?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
   }
-
-  // ── Permissions ───────────────────────────────────────────────────────
-  // Owners see/do everything. Scoped/global admins can view the permissions
-  // panel and grant/revoke *member* access on groups they administer; role
-  // grants (admin/owner) and user deletion stay owner-only since they
-  // escalate privilege. The /api/users view is scoped per-caller below.
-  if (url.pathname === '/api/users' && method === 'GET') {
-    if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin only' });
-    return json(res, 200, listUsersWithPermissions(userId));
+  // Workspace toggle — mirrors Read aloud: the owner flips the mic for
+  // everyone. Env-backed (WEBCHAT_STT_ENABLED already gates every STT
+  // surface), persisted + activated in-process.
+  if ('enabled' in body) {
+    if (typeof body.enabled !== 'boolean') return json(res, 400, { error: 'enabled must be a boolean' });
+    upsertEnv(process.cwd(), 'WEBCHAT_STT_ENABLED', body.enabled ? 'true' : 'false');
+    process.env.WEBCHAT_STT_ENABLED = body.enabled ? 'true' : 'false';
+    return json(res, 200, { ok: true, enabled: body.enabled });
   }
-  const userIdMatch = url.pathname.match(/^\/api\/users\/([^/]+)$/);
-  if (userIdMatch && method === 'DELETE') {
-    if (req.headers['x-webchat-csrf'] !== '1') {
-      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    }
-    if (!isOwner(userId)) return json(res, 403, { error: 'Owner only' });
-    return deleteUserHandler(res, decodeURIComponent(userIdMatch[1]), userId);
+  // Prompt edit — its own PUT shape; null/empty resets to the built-in default.
+  if ('cleanupPrompt' in body) {
+    if (body.cleanupPrompt !== null && typeof body.cleanupPrompt !== 'string')
+      return json(res, 400, { error: 'cleanupPrompt must be a string or null' });
+    const trimmed = typeof body.cleanupPrompt === 'string' ? body.cleanupPrompt.trim() : '';
+    if (trimmed.length > 4000) return json(res, 413, { error: 'Prompt too long (4000 chars max)' });
+    const stored = trimmed && trimmed !== DEFAULT_CLEANUP_PROMPT ? trimmed : null;
+    setSttCleanupPrompt(stored);
+    return json(res, 200, { ok: true, cleanupPrompt: stored });
   }
-  if (url.pathname === '/api/permissions/grant' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') {
-      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    }
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { userId?: unknown; kind?: unknown; agentGroupId?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    const granted = checkMemberGrantAuth(userId, body.kind, body.agentGroupId);
-    if (granted) return json(res, 403, granted);
-    return grantPermissionHandler(res, body, userId);
+  if (body.cleanupModelId === null) {
+    setSttCleanupModelId(null);
+    return json(res, 200, { ok: true, cleanupModelId: null });
   }
-  if (url.pathname === '/api/permissions/revoke' && method === 'POST') {
-    if (req.headers['x-webchat-csrf'] !== '1') {
-      return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
-    }
-    const raw = await readJsonBody(req, res);
-    if (raw === null) return;
-    let body: { userId?: unknown; kind?: unknown; agentGroupId?: unknown };
-    try {
-      body = JSON.parse(raw) as typeof body;
-    } catch {
-      return json(res, 400, { error: 'Invalid JSON' });
-    }
-    const revoked = checkMemberGrantAuth(userId, body.kind, body.agentGroupId);
-    if (revoked) return json(res, 403, revoked);
-    return revokePermissionHandler(res, body);
-  }
-
-  // ── Push ──────────────────────────────────────────────────────────────
-  if (url.pathname === '/api/push/vapid-public' && method === 'GET') {
-    const pub = process.env.WEBCHAT_VAPID_PUBLIC_KEY || '';
-    if (!pub) return json(res, 501, { error: 'WEBCHAT_VAPID_PUBLIC_KEY not set' });
-    return json(res, 200, { key: pub });
-  }
-  if (url.pathname === '/api/push/subscribe' && method === 'POST') {
-    return pushSubscribe(req, res, userId);
-  }
-  if (url.pathname === '/api/push/unsubscribe' && method === 'POST') {
-    return pushUnsubscribe(req, res, userId);
-  }
-
-  // Static PWA is served pre-auth (see the servePwa call above the auth gate).
-  return json(res, 404, { error: 'Not found' });
+  if (typeof body.cleanupModelId !== 'string' || !body.cleanupModelId.trim())
+    return json(res, 400, { error: 'cleanupModelId must be a string or null' });
+  const model = getWebchatModel(body.cleanupModelId.trim());
+  if (!model) return json(res, 404, { error: 'Model not found' });
+  if (model.kind !== 'ollama' && model.kind !== 'openai-compatible')
+    return json(res, 400, { error: 'Cleanup model must be an ollama or openai-compatible roster model' });
+  if (!model.endpoint) return json(res, 400, { error: 'That model has no endpoint to call' });
+  setSttCleanupModelId(model.id);
+  return json(res, 200, { ok: true, cleanupModelId: model.id });
 }
+
+async function rSttTranscribePost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  if (!sttEnabled()) return json(res, 404, { error: 'Voice dictation not configured' });
+  const declared = Number(req.headers['content-length'] ?? 0);
+  if (declared > MAX_SEGMENT_BYTES) return json(res, 413, { error: 'Segment too large' });
+  const chunks: Buffer[] = [];
+  let received = 0;
+  let aborted = false;
+  req.on('data', (c: Buffer) => {
+    received += c.length;
+    if (received > MAX_SEGMENT_BYTES) {
+      aborted = true;
+      req.destroy();
+      return;
+    }
+    chunks.push(c);
+  });
+  await new Promise<void>((resolve) => {
+    req.on('end', resolve);
+    req.on('close', resolve);
+    req.on('error', resolve);
+  });
+  if (aborted) return json(res, 413, { error: 'Segment too large' });
+  const wav = Buffer.concat(chunks);
+  // Below ~1 kB it's a click or an empty buffer, not speech — don't bill a
+  // transcription round-trip for it.
+  if (wav.length < MIN_SEGMENT_BYTES) return json(res, 200, { text: '' });
+  try {
+    const text = await transcribeSegment(wav);
+    return json(res, 200, { text });
+  } catch (err) {
+    log.warn('Webchat STT: transcription failed', { err: err instanceof Error ? err.message : err });
+    return json(res, 502, { error: 'Transcription failed — check the dictation backend.' });
+  }
+}
+
+async function rSttCleanupPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { text?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  if (typeof body.text !== 'string') return json(res, 400, { error: 'text required' });
+  if (body.text.length > MAX_CLEANUP_CHARS) return json(res, 413, { error: 'Text too long to clean up' });
+  const result = await cleanupTranscript(body.text);
+  return json(res, 200, result);
+}
+
+async function rRouterInstallGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  return json(res, 200, getRoutingInstallState());
+}
+
+async function rRouterInstallPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  const r = startRoutingInstall();
+  if (r.error === 'litellm-not-installed') {
+    return json(res, 409, {
+      error: 'LiteLLM is not installed. Run /add-litellm first.',
+      code: 'litellm-not-installed',
+    });
+  }
+  if (r.error === 'installer-missing') {
+    return json(res, 409, {
+      error: 'The add-routing skill is not present in this checkout.',
+      code: 'installer-missing',
+    });
+  }
+  return json(res, r.started ? 202 : 409, { ...getRoutingInstallState(), started: r.started });
+}
+
+async function rRouterLitellmInstallGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  return json(res, 200, getLitellmInstallState());
+}
+
+async function rRouterLitellmInstallPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  // Point LiteLLM at the operator's real model servers (a remote/LAN Ollama in
+  // the roster, or the hosts an existing config already declares) — not a
+  // localhost Ollama that may not exist. Falls back to the localhost default
+  // only when the roster is empty.
+  const r = startLitellmInstall(process.cwd(), deriveModelServerHosts() ?? undefined);
+  if (r.error === 'installer-missing') {
+    return json(res, 409, {
+      error: 'The add-litellm skill is not present in this checkout.',
+      code: 'installer-missing',
+    });
+  }
+  return json(res, r.started ? 202 : 409, { ...getLitellmInstallState(), started: r.started });
+}
+
+async function rModelsPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  return createModelHandler(req, res);
+}
+
+async function rModelsDiscoverPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  return discoverModelsHandler(req, res);
+}
+
+async function rModelsProbePost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  return probeModelsHandler(req, res);
+}
+
+async function rModelsBulkPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  return bulkCreateModelsHandler(req, res);
+}
+
+async function rModelIdPut(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  return updateModelHandler(req, res, decodeURIComponent(m[1]));
+}
+
+async function rModelIdDelete(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, url } = ctx;
+  const force = url.searchParams.get('force') === '1';
+  return deleteModelHandler(res, decodeURIComponent(m[1]), force);
+}
+
+// ── Approvals inbox (per-user) ────────────────────────────────────────
+// ── Approval pre-judge config (owner-only; Settings → Approval pre-judge) ──
+// See src/modules/approvals/prejudge.ts and docs/webchat/approval-prejudge.md.
+
+function prejudgeConfigView(): Record<string, unknown> {
+  return {
+    modelId: getApprovalPrejudgeModelId(),
+    actions: getApprovalPrejudgeActions(),
+    // Every action registered with an approval handler — the opt-in
+    // candidates the settings UI lists.
+    knownActions: listRegisteredApprovalActions(),
+    neverList: {
+      actions: [...NEVER_AUTO_APPROVE_ACTIONS],
+      payloadPatterns: NEVER_AUTO_APPROVE_PATTERNS.map((re) => re.source),
+    },
+  };
+}
+
+async function rApprovalPrejudgeGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  return json(ctx.res, 200, prejudgeConfigView());
+}
+
+async function rApprovalPrejudgePut(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res } = ctx;
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { modelId?: unknown; actions?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+
+  if ('modelId' in body) {
+    if (body.modelId !== null && typeof body.modelId !== 'string') {
+      return json(res, 400, { error: 'modelId must be a roster model id or null' });
+    }
+    if (typeof body.modelId === 'string') {
+      // Same gate as the runtime consult (prejudge.ts): anthropic-kind
+      // models qualify with a NULL endpoint — they route through the
+      // OneCLI gateway rather than a local /v1/chat/completions server.
+      const model = getWebchatModel(body.modelId);
+      if (!isUsableJudgeModel(model)) {
+        return json(res, 400, {
+          error:
+            'modelId must name an anthropic roster model, or an ollama/openai-compatible roster model with an endpoint',
+        });
+      }
+    }
+  }
+  let actions: string[] | undefined;
+  if ('actions' in body) {
+    if (!Array.isArray(body.actions) || body.actions.some((a) => typeof a !== 'string' || !a.trim())) {
+      return json(res, 400, { error: 'actions must be an array of non-empty action names' });
+    }
+    actions = [...new Set((body.actions as string[]).map((a) => a.trim()))];
+    const blocked = actions.filter((a) => NEVER_AUTO_APPROVE_ACTIONS.has(a));
+    if (blocked.length > 0) {
+      return json(res, 400, { error: `never-auto-approve actions cannot be opted in: ${blocked.join(', ')}` });
+    }
+  }
+
+  if ('modelId' in body) setApprovalPrejudgeModelId((body.modelId as string | null) ?? null);
+  if (actions !== undefined) setApprovalPrejudgeActions(actions);
+  return json(res, 200, { ok: true, ...prejudgeConfigView() });
+}
+
+async function rApprovalsPendingGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  const rows = getWebchatPendingApprovalsForUser(userId);
+  return json(
+    res,
+    200,
+    rows.map((r) => ({
+      questionId: r.approval_id,
+      action: r.action,
+      title: r.title,
+      options: JSON.parse(r.options_json),
+      // Payload is action-specific (apt list / mcp config / etc). The PWA
+      // renders it as a JSON-pretty block so the user can review what
+      // they're approving without us having to ship per-action templates.
+      payload: safeParseJson(r.payload),
+      created_at: r.created_at,
+    })),
+  );
+}
+
+async function rApprovePost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId, hooks } = ctx;
+  const approvalId = decodeURIComponent(m[1]);
+  const pending = getPendingApproval(approvalId);
+  if (!pending || pending.status !== 'pending') {
+    return json(res, 404, { error: 'Approval not found or already resolved' });
+  }
+  // Authorize against the webchat-owned index, not the pending_approvals row
+  // columns — trunk's `requestApproval` doesn't populate channel_type /
+  // platform_id, so those are NULL on every webchat-routed approval. Same
+  // constraint that drove the read path's JOIN against webchat_approvals_index.
+  const expectedPlatformId = approvalInboxForUser(userId);
+  if (!expectedPlatformId || !isWebchatApprovalIndexedFor(approvalId, expectedPlatformId)) {
+    return json(res, 403, { error: 'Not the intended approver for this request' });
+  }
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { value?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  const value = typeof body.value === 'string' ? body.value : '';
+  if (value !== 'approve' && value !== 'reject') {
+    return json(res, 400, { error: 'value must be "approve" or "reject"' });
+  }
+  // Hand off to the existing approvals plumbing — onAction → response
+  // handler → registered approval handler. We don't update the row here;
+  // handleApprovalsResponse owns the lifecycle (status update + delete).
+  hooks.onAction(approvalId, value, userId);
+  return json(res, 200, { ok: true });
+}
+
+// ── Permissions ───────────────────────────────────────────────────────
+// Owners see/do everything. Scoped/global admins can view the permissions
+// panel and grant/revoke *member* access on groups they administer; role
+// grants (admin/owner) and user deletion stay owner-only since they
+// escalate privilege. The /api/users view is scoped per-caller below.
+async function rUsersGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  if (!isAnyAdmin(userId)) return json(res, 403, { error: 'Admin only' });
+  return json(res, 200, listUsersWithPermissions(userId));
+}
+
+async function rUserIdDelete(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { res, userId } = ctx;
+  return deleteUserHandler(res, decodeURIComponent(m[1]), userId);
+}
+
+async function rPermissionsGrantPost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { userId?: unknown; kind?: unknown; agentGroupId?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  const granted = checkMemberGrantAuth(userId, body.kind, body.agentGroupId);
+  if (granted) return json(res, 403, granted);
+  return grantPermissionHandler(res, body, userId);
+}
+
+async function rPermissionsRevokePost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { userId?: unknown; kind?: unknown; agentGroupId?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  const revoked = checkMemberGrantAuth(userId, body.kind, body.agentGroupId);
+  if (revoked) return json(res, 403, revoked);
+  return revokePermissionHandler(res, body);
+}
+
+// ── Push ──────────────────────────────────────────────────────────────
+async function rPushVapidPublicGet(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { res } = ctx;
+  const pub = process.env.WEBCHAT_VAPID_PUBLIC_KEY || '';
+  if (!pub) return json(res, 501, { error: 'WEBCHAT_VAPID_PUBLIC_KEY not set' });
+  return json(res, 200, { key: pub });
+}
+
+async function rPushSubscribePost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  // CSRF: with ambient auth (localhost auto-pass / tailscale whois) a
+  // cross-site simple POST is the one vector that skips the preflight —
+  // these two were the only mutating POSTs without the header check.
+  if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+  return pushSubscribe(req, res, userId);
+}
+
+async function rPushUnsubscribePost(ctx: RouteCtx, _m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId } = ctx;
+  return pushUnsubscribe(req, res, userId);
+}
+
+const API_ROUTES: ApiRoute[] = [
+  { method: 'GET', path: '/api/me/handle', h: rMeHandleGet },
+  { method: 'PUT', path: '/api/me/handle', guards: ['csrf'], h: rMeHandlePut },
+  { method: 'GET', path: '/api/overview', h: rOverviewGet },
+  { method: 'GET', path: '/api/rooms', h: rRoomsGet },
+  { method: 'POST', path: '/api/rooms', guards: ['csrf', 'owner'], h: rRoomsPost },
+  { method: 'DELETE', path: RE_ROOM_ID, guards: ['owner', 'csrf'], h: rRoomIdDelete },
+  { method: 'GET', path: RE_ROOM_AGENTS, h: rRoomAgentsGet },
+  { method: 'GET', path: RE_ROOM_MENTIONABLE, h: rRoomMentionableGet },
+  { method: 'POST', path: RE_ROOM_AGENTS, guards: ['csrf'], h: rRoomAgentsPost },
+  { method: 'GET', path: RE_ROOM_CRED_MODE, h: rRoomCredModeGet },
+  { method: 'PUT', path: RE_ROOM_CRED_MODE, guards: ['csrf'], h: rRoomCredModePut },
+  { method: 'GET', path: RE_ROOM_OAUTH, h: rRoomOauthGet },
+  { method: 'PUT', path: RE_ROOM_OAUTH, guards: ['csrf'], h: rRoomOauthPut },
+  { method: ['GET', 'PUT'], path: '/api/webchat/credentials-config', h: rWebchatCredentialsConfig },
+  { method: ['POST', 'DELETE', 'GET'], path: '/api/user-credentials/credential', h: rUserCredentialsCredential },
+  { method: 'POST', path: RE_USER_CREDS_MINT, guards: ['csrf'], h: rUserCredsMintPost },
+  { method: 'POST', path: RE_CODEX_MINT, guards: ['csrf'], h: rCodexMintPost },
+  { method: ['GET', 'PUT', 'DELETE'], path: '/api/workspace-credential', h: rWorkspaceCredential },
+  { method: 'POST', path: RE_WS_CRED_MINT, h: rWsCredMintPost },
+  { method: 'POST', path: RE_WS_CODEX_MINT, h: rWsCodexMintPost },
+  { method: 'PUT', path: '/api/workspace-model', h: rWorkspaceModelPut },
+  { method: ['GET', 'PUT'], path: '/api/webchat/onboarding', h: rWebchatOnboarding },
+  { method: ['GET', 'PUT'], path: '/api/webchat/features', h: rWebchatFeatures },
+  { method: ['GET', 'PUT'], path: '/api/webchat/tailscale-owner', h: rWebchatTailscaleOwner },
+  { method: ['GET', 'POST'], path: '/api/webchat/tailscale-https', h: rWebchatTailscaleHttps },
+  { method: 'GET', path: '/api/webchat/cloudflared', h: rWebchatCloudflaredGet },
+  { method: 'POST', path: '/api/webchat/cloudflared/install', guards: ['csrf'], h: rWebchatCloudflaredInstallPost },
+  { method: 'POST', path: '/api/webchat/cloudflared/connect', guards: ['csrf'], h: rWebchatCloudflaredConnectPost },
+  { method: 'DELETE', path: RE_ROOM_AGENT, h: rRoomAgentDelete },
+  { method: 'PUT', path: RE_ROOM_PRIME, guards: ['owner', 'csrf'], h: rRoomPrimePut },
+  { method: 'DELETE', path: RE_ROOM_PRIME, guards: ['owner', 'csrf'], h: rRoomPrimeDelete },
+  { method: 'POST', path: RE_ROOM_ARCHIVE, guards: ['csrf'], h: rRoomArchivePost },
+  { method: 'POST', path: RE_ROOM_HIDE, guards: ['csrf'], h: rRoomHidePost },
+  { method: 'POST', path: RE_ROOM_PIN, guards: ['csrf'], h: rRoomPinPost },
+  { method: 'POST', path: '/api/rooms/pins/order', guards: ['csrf'], h: rRoomsPinsOrderPost },
+  { method: 'GET', path: RE_ROOM_ENGAGE, h: rRoomEngageGet },
+  { method: 'PUT', path: RE_ROOM_ENGAGE, guards: ['owner', 'csrf'], h: rRoomEngagePut },
+  { method: 'PUT', path: RE_ROOM_NAME, guards: ['csrf', 'owner'], h: rRoomNamePut },
+  { method: 'PUT', path: RE_ROOM_THREAD_READ, guards: ['csrf'], h: rRoomThreadReadPut },
+  { method: 'GET', path: RE_ROOM_THREADS, h: rRoomThreadsGet },
+  { method: 'POST', path: RE_ROOM_THREADS, guards: ['csrf'], h: rRoomThreadsPost },
+  { method: 'PATCH', path: RE_ROOM_THREAD, guards: ['csrf'], h: rRoomThreadPatch },
+  { method: 'DELETE', path: RE_ROOM_THREAD, guards: ['csrf', 'owner'], h: rRoomThreadDelete },
+  { method: 'POST', path: RE_ROOM_THREAD_PULL, guards: ['csrf'], h: rRoomThreadPullPost },
+  { method: 'GET', path: '/api/topology', h: rTopologyGet },
+  { method: 'GET', path: '/api/search', h: rSearchGet },
+  { method: 'GET', path: RE_HIST, h: rHistGet },
+  { method: 'POST', path: RE_UPLOAD, h: rUploadPost },
+  { method: 'POST', path: RE_CHUNK, h: rChunkPost },
+  { method: 'GET', path: RE_FILE, h: rFileGet },
+  { method: 'GET', path: '/api/agents', h: rAgentsGet },
+  // POST /api/agents/draft must come BEFORE the /api/agents/:id pattern
+  // (which would otherwise match 'draft' as an id) AND before the bare
+  // /api/agents POST so the literal-path handlers stay distinct.
+  { method: 'POST', path: '/api/agents/draft', h: rAgentsDraftPost },
+  { method: 'POST', path: '/api/agents', guards: ['csrf'], h: rAgentsPost },
+  { method: 'PUT', path: RE_AGENT, h: rAgentPut },
+  { method: 'DELETE', path: RE_AGENT, h: rAgentDelete },
+  { method: 'GET', path: RE_INSTR, h: rInstrGet },
+  { method: 'PUT', path: RE_INSTR, h: rInstrPut },
+  { method: 'GET', path: RE_AGENT_ROOMS, h: rAgentRoomsGet },
+  { method: 'PUT', path: RE_AGENT_MODEL, h: rAgentModelPut },
+  { method: 'GET', path: '/api/mcp-servers', guards: ['anyAdmin'], h: rMcpServersGet },
+  { method: 'POST', path: '/api/mcp-servers', guards: ['csrf', 'anyAdmin'], h: rMcpServersPost },
+  { method: 'GET', path: '/api/mcp-sources', guards: ['anyAdmin'], h: rMcpSourcesGet },
+  { method: 'PUT', path: RE_MCP_SOURCE, h: rMcpSourcePut },
+  { method: 'DELETE', path: RE_MCP_SOURCE, h: rMcpSourceDelete },
+  { method: 'POST', path: RE_MCP_SOURCE, h: rMcpSourcePost },
+  { method: 'GET', path: '/api/mcp-catalog', guards: ['anyAdmin'], h: rMcpCatalogGet },
+  { method: 'POST', path: '/api/mcp-servers/probe', guards: ['csrf', 'anyAdmin'], h: rMcpServersProbePost },
+  { method: 'GET', path: '/api/mcp-servers/oauth/callback', h: rMcpServersOauthCallbackGet },
+  { method: 'POST', path: RE_MCP_OAUTH_START, guards: ['anyAdmin', 'csrf'], h: rMcpOauthStartPost },
+  { method: 'POST', path: RE_MCP_REPIN, guards: ['anyAdmin', 'csrf'], h: rMcpRepinPost },
+  { method: 'PUT', path: RE_MCP_TOOLS, guards: ['anyAdmin', 'csrf'], h: rMcpToolsPut },
+  { method: 'PUT', path: RE_MCP_AUTH, h: rMcpAuthPut },
+  { method: 'PUT', path: RE_MCP_SERVER_ID, guards: ['owner', 'csrf'], h: rMcpServerIdPut },
+  { method: 'DELETE', path: RE_MCP_SERVER_ID, guards: ['owner', 'csrf'], h: rMcpServerIdDelete },
+  { method: ['GET', 'PUT'], path: RE_AGENT_MCP, h: rAgentMcp },
+  { method: 'GET', path: '/api/skills', guards: ['anyAdmin'], h: rSkillsGet },
+  { method: 'POST', path: '/api/skills/import', h: rSkillsImportPost },
+  { method: 'GET', path: '/api/skills/catalog', guards: ['anyAdmin'], h: rSkillsCatalogGet },
+  { method: 'GET', path: '/api/skills/suggest', guards: ['anyAdmin'], h: rSkillsSuggestGet },
+  // NOTE: the literal /api/skills/* routes must stay ABOVE the
+  // /api/skills/:name (RE_SKILL_ITEM) matcher.
+  { method: 'GET', path: '/api/skills/sources', guards: ['anyAdmin'], h: rSkillsSourcesGet },
+  { method: ['PUT', 'DELETE'], path: RE_SKILL_SOURCE, h: rSkillSource },
+  { method: 'POST', path: '/api/skills/inspect', guards: ['anyAdmin', 'csrf'], h: rSkillsInspectPost },
+  { method: 'GET', path: '/api/skills/updates', guards: ['anyAdmin'], h: rSkillsUpdatesGet },
+  { method: 'POST', path: RE_SKILL_UPDATE, h: rSkillUpdatePost },
+  { method: 'GET', path: '/api/skills/duplicates', guards: ['anyAdmin'], h: rSkillsDuplicatesGet },
+  { method: 'POST', path: '/api/skills/promote', h: rSkillsPromotePost },
+  { method: ['GET', 'PUT', 'DELETE'], path: RE_SKILL_ITEM, guards: ['anyAdmin'], h: rSkillItem },
+  { method: ['GET', 'PUT'], path: RE_AGENT_SKILLS, h: rAgentSkills },
+  { method: 'POST', path: RE_AGENT_SKILL_IMPORT, h: rAgentSkillImportPost },
+  { method: ['GET', 'PUT'], path: RE_SCOPED_SKILL_CONTENT, h: rScopedSkillContent },
+  { method: ['GET', 'PUT'], path: RE_ROOM_LEARNING, h: rRoomLearning },
+  { method: 'GET', path: '/api/system/export', guards: ['owner'], h: rSystemExportGet },
+  { method: 'POST', path: '/api/system/import', guards: ['owner', 'csrf'], h: rSystemImportPost },
+  { method: 'POST', path: '/api/system/import/apply', guards: ['owner', 'csrf'], h: rSystemImportApplyPost },
+  { method: 'GET', path: RE_ROOM_EXPORT, h: rRoomExportGet },
+  { method: 'POST', path: '/api/rooms/import', h: rRoomsImportPost },
+  { method: 'POST', path: '/api/rooms/import/apply', h: rRoomsImportApplyPost },
+  { method: 'GET', path: RE_AGENT_EXPORT, h: rAgentExportGet },
+  { method: 'POST', path: '/api/agents/import', h: rAgentsImportPost },
+  { method: 'POST', path: '/api/agents/import/apply', h: rAgentsImportApplyPost },
+  { method: ['GET', 'PUT'], path: RE_AGENT_LEARNING, h: rAgentLearning },
+  { method: 'POST', path: RE_SKILL_REVERT, h: rSkillRevertPost },
+  { method: 'POST', path: RE_SKILL_RESTORE, h: rSkillRestorePost },
+  { method: 'DELETE', path: RE_AGENT_SCOPED_SKILL, h: rAgentScopedSkillDelete },
+  { method: 'GET', path: '/api/skill-drafts', guards: ['anyAdmin'], h: rSkillDraftsGet },
+  { method: 'GET', path: '/api/learning/timeline', guards: ['anyAdmin'], h: rLearningTimelineGet },
+  { method: 'PUT', path: RE_DRAFT, h: rDraftPut },
+  { method: ['GET', 'DELETE'], path: RE_DRAFT, guards: ['anyAdmin'], h: rDraft },
+  { method: 'POST', path: RE_DRAFT_KEEP, h: rDraftKeepPost },
+  { method: 'PUT', path: RE_AGENT_STATUS, guards: ['csrf'], h: rAgentStatusPut },
+  { method: 'GET', path: RE_AGENT_SESSIONS, h: rAgentSessionsGet },
+  { method: 'POST', path: RE_SESSION_RESET, guards: ['csrf'], h: rSessionResetPost },
+  { method: 'POST', path: RE_ROOM_BROADCAST, guards: ['csrf'], h: rRoomBroadcastPost },
+  { method: 'GET', path: '/api/models', h: rModelsGet },
+  { method: 'GET', path: '/api/ollama/hosts', guards: ['owner'], h: rOllamaHostsGet },
+  { method: 'GET', path: '/api/ollama/models', guards: ['owner'], h: rOllamaModelsGet },
+  { method: 'GET', path: '/api/router/routes', guards: ['owner'], h: rRouterRoutesGet },
+  { method: 'PUT', path: '/api/router/routes', guards: ['csrf', 'owner'], h: rRouterRoutesPut },
+  { method: 'POST', path: '/api/router/routers', guards: ['csrf', 'owner'], h: rRouterRoutersPost },
+  { method: 'DELETE', path: RE_ROUTER_DEL, guards: ['csrf', 'owner'], h: rRouterDelDelete },
+  { method: 'POST', path: '/api/router/classify', guards: ['csrf', 'owner'], h: rRouterClassifyPost },
+  { method: 'GET', path: '/api/router/decisions', guards: ['owner'], h: rRouterDecisionsGet },
+  { method: 'GET', path: '/api/router/metrics', guards: ['owner'], h: rRouterMetricsGet },
+  { method: 'GET', path: '/api/router/suggestions', guards: ['owner'], h: rRouterSuggestionsGet },
+  { method: 'GET', path: '/api/router/models', guards: ['owner'], h: rRouterModelsGet },
+  { method: 'GET', path: '/api/ollama/pulls', guards: ['owner'], h: rOllamaPullsGet },
+  { method: 'GET', path: '/api/ollama/recommend', guards: ['owner'], h: rOllamaRecommendGet },
+  { method: 'GET', path: '/api/ollama/local', guards: ['owner'], h: rOllamaLocalGet },
+  { method: 'POST', path: '/api/ollama/install', guards: ['csrf', 'owner'], h: rOllamaInstallPost },
+  { method: 'GET', path: '/api/codex/install', guards: ['owner'], h: rCodexInstallGet },
+  { method: 'POST', path: '/api/codex/install', guards: ['csrf', 'owner'], h: rCodexInstallPost },
+  { method: 'POST', path: '/api/ollama/pull', guards: ['csrf', 'owner'], h: rOllamaPullPost },
+  { method: 'GET', path: '/api/router/roster-refresh', guards: ['owner'], h: rRouterRosterRefreshGet },
+  { method: 'POST', path: '/api/router/roster-refresh', guards: ['csrf', 'owner'], h: rRouterRosterRefreshPost },
+  { method: 'GET', path: '/api/webchat/tts/install', guards: ['owner'], h: rWebchatTtsInstallGet },
+  { method: 'POST', path: '/api/webchat/tts/install', guards: ['csrf', 'owner'], h: rWebchatTtsInstallPost },
+  { method: 'GET', path: '/api/webchat/tailscale/install', guards: ['owner'], h: rWebchatTailscaleInstallGet },
+  {
+    method: 'POST',
+    path: '/api/webchat/tailscale/install',
+    guards: ['csrf', 'owner'],
+    h: rWebchatTailscaleInstallPost,
+  },
+  { method: 'GET', path: '/api/webchat/stt/install', guards: ['owner'], h: rWebchatSttInstallGet },
+  { method: 'POST', path: '/api/webchat/stt/install', guards: ['csrf', 'owner'], h: rWebchatSttInstallPost },
+  { method: 'GET', path: '/api/tts/voices', guards: ['owner'], h: rTtsVoicesGet },
+  { method: ['GET', 'PUT'], path: '/api/learning/config', h: rLearningConfig },
+  { method: 'PUT', path: '/api/tts/config', guards: ['csrf', 'owner'], h: rTtsConfigPut },
+  { method: ['GET', 'PUT'], path: '/api/stt/config', h: rSttConfig },
+  { method: 'POST', path: '/api/stt/transcribe', guards: ['csrf'], h: rSttTranscribePost },
+  { method: 'POST', path: '/api/stt/cleanup', guards: ['csrf'], h: rSttCleanupPost },
+  { method: 'GET', path: '/api/router/install', guards: ['owner'], h: rRouterInstallGet },
+  { method: 'POST', path: '/api/router/install', guards: ['csrf', 'owner'], h: rRouterInstallPost },
+  { method: 'GET', path: '/api/router/litellm-install', guards: ['owner'], h: rRouterLitellmInstallGet },
+  { method: 'POST', path: '/api/router/litellm-install', guards: ['csrf', 'owner'], h: rRouterLitellmInstallPost },
+  { method: 'POST', path: '/api/models', guards: ['csrf', 'owner'], h: rModelsPost },
+  { method: 'POST', path: '/api/models/discover', guards: ['csrf', 'owner'], h: rModelsDiscoverPost },
+  { method: 'POST', path: '/api/models/probe', guards: ['csrf', 'owner'], h: rModelsProbePost },
+  { method: 'POST', path: '/api/models/bulk', guards: ['csrf', 'owner'], h: rModelsBulkPost },
+  { method: 'PUT', path: RE_MODEL_ID, guards: ['owner', 'csrf'], h: rModelIdPut },
+  { method: 'DELETE', path: RE_MODEL_ID, guards: ['owner', 'csrf'], h: rModelIdDelete },
+  { method: 'GET', path: '/api/approvals/pending', h: rApprovalsPendingGet },
+  { method: 'GET', path: '/api/approvals/prejudge', guards: ['owner'], h: rApprovalPrejudgeGet },
+  { method: 'PUT', path: '/api/approvals/prejudge', guards: ['csrf', 'owner'], h: rApprovalPrejudgePut },
+  { method: 'POST', path: RE_APPROVE, guards: ['csrf'], h: rApprovePost },
+  { method: 'GET', path: '/api/users', h: rUsersGet },
+  { method: 'DELETE', path: RE_USER_ID, guards: ['csrf', 'owner'], h: rUserIdDelete },
+  { method: 'POST', path: '/api/permissions/grant', guards: ['csrf'], h: rPermissionsGrantPost },
+  { method: 'POST', path: '/api/permissions/revoke', guards: ['csrf'], h: rPermissionsRevokePost },
+  { method: 'GET', path: '/api/push/vapid-public', h: rPushVapidPublicGet },
+  { method: 'POST', path: '/api/push/subscribe', h: rPushSubscribePost },
+  { method: 'POST', path: '/api/push/unsubscribe', guards: ['csrf'], h: rPushUnsubscribePost },
+];
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -5713,7 +6385,7 @@ interface ModelForUI extends WebchatModel {
   rooms: Array<{ id: string; name: string }>;
 }
 
-function listModelsForUI(): ModelForUI[] {
+function listModelsForUI(includeSensitive: boolean): ModelForUI[] {
   return listWebchatModels().map((m) => {
     const ids = getAgentsAssignedToModel(m.id);
     const roomMap = new Map<string, { id: string; name: string }>();
@@ -5722,6 +6394,10 @@ function listModelsForUI(): ModelForUI[] {
     }
     return {
       ...m,
+      // Owner-only infrastructure fields — nulled for members (the endpoint is
+      // an internal model-server URL; every consumer that reads it is an
+      // owner-gated flow: wizard Ollama select, STT cleanup, auto-learn).
+      ...(includeSensitive ? {} : { endpoint: null, credential_ref: null }),
       agents_assigned: ids.length,
       agents: ids.map((id) => ({ id, name: getAgentGroup(id)?.name ?? id })),
       rooms: [...roomMap.values()],
@@ -6634,6 +7310,10 @@ function parseAgentLearning(agentGroupId: string): {
   autoTrigger?: boolean;
   autoKeep?: boolean;
   cooldownMinutes?: number;
+  /** Roster model id or a raw Claude model id — consumed container-side (PR #353). */
+  reviewModel?: string;
+  /** true = replay the full turn to the review; absent = digest (default). */
+  replayReview?: boolean;
 } {
   try {
     const raw = getContainerConfig(agentGroupId)?.learning;
@@ -6756,6 +7436,46 @@ function listScopedSkills(
     }
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// Scoped skills flattened for the registry list (/api/skills), each carrying
+// where it lives: its agent + the webchat rooms that agent is wired to.
+// Visibility mirrors the topology + skill-drafts rule: aggregate over
+// listAgentsForUser (owner → all agents, otherwise hasAdminPrivilege per
+// group), so an admin never sees a skill on an agent they can't reach.
+// A scoped skill whose name is already in the shared pool is skipped — the
+// pool row is the source of truth there (post-promotion scoped dirs are
+// symlinks and already excluded, but a same-named real dir must not
+// double-list either).
+type ScopedSkillForList = {
+  name: string;
+  description: string;
+  source: 'scoped';
+  origin: SkillOrigin | null;
+  agentGroupId: string;
+  agentName: string;
+  rooms: Array<{ id: string; name: string }>;
+};
+function listScopedSkillsForUser(userId: string, pool: AvailableSkill[]): ScopedSkillForList[] {
+  const poolNames = new Set(pool.map((s) => s.name));
+  const out: ScopedSkillForList[] = [];
+  for (const a of listAgentsForUser(userId)) {
+    const scoped = listScopedSkills(a.id).filter((sk) => !poolNames.has(sk.name));
+    if (!scoped.length) continue;
+    const rooms = getWebchatRoomsForAgent(a.id).map((r) => ({ id: r.id, name: r.name }));
+    for (const sk of scoped) {
+      out.push({
+        name: sk.name,
+        description: sk.description,
+        source: 'scoped',
+        origin: sk.origin,
+        agentGroupId: a.id,
+        agentName: a.name,
+        rooms,
+      });
+    }
+  }
+  return out;
 }
 
 function sanitizeSkillName(raw: string): string {
@@ -7702,13 +8422,122 @@ function resolveDraftCard(draftId: string, outcome: 'kept' | 'discarded', userId
   if (flipped) broadcast(flipped.roomId, { type: 'message', ...flipped.message });
 }
 
+// A draft as the keep routes see it — the metadata the apply/review paths need.
+type KeepDraftMeta = { id: string; skill_name: string; kind?: string; target_skill?: string | null };
+
+// In-flight keep reviews (learning loop, async Keep), keyed by draft id.
+// Deliberately in-memory rather than a status column: the draft row stays
+// 'pending' in the DB, so the overlap re-drive (force=1 / updateTarget) works
+// unchanged with no migration, and a host restart clears the map — worst case
+// is pressing Keep again. Same-draft double-keep is refused off this map.
+const keepReviewJobs = new Map<string, Promise<void>>();
+
+/** Test seam: the in-flight review job for a draft (undefined when idle). */
+export function keepReviewJobFor(draftId: string): Promise<void> | undefined {
+  return keepReviewJobs.get(draftId);
+}
+
+/**
+ * The actual keep write, shared by the sync (force/updateTarget) and async
+ * (background review) paths. The write itself lives in modules/learning/
+ * apply.ts — ONE implementation shared with auto-keep, so the paths cannot
+ * drift. An "update existing" choice re-types the draft as a patch of the
+ * chosen skill. sanitizeSkillName in apply.ts guards the path.
+ */
+function applyKeepDecision(
+  draft: KeepDraftMeta,
+  groupId: string,
+  updateTarget: string,
+  userId: string,
+): { status: number; body: Record<string, unknown> } {
+  const toApply = updateTarget
+    ? { ...draft, agent_group_id: groupId, kind: 'patch' as const, target_skill: updateTarget }
+    : { ...draft, agent_group_id: groupId };
+  const r = applySkillDraft(
+    toApply as Parameters<typeof applySkillDraft>[0],
+    updateTarget || draft.kind === 'patch' ? 'Webchat skill revision applied' : 'Webchat learned skill kept',
+  );
+  if (!r.ok) return { status: r.status, body: { error: r.error } };
+  resolveDraftCard(draft.id, 'kept', userId);
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      name: r.name,
+      patched: r.patched,
+      updated: !!updateTarget,
+      forkedFromPool: r.forkedFromPool,
+      restarted: r.restarted,
+    },
+  };
+}
+
+/**
+ * Background half of an async Keep: run the overlap review, then either apply
+ * the draft or hand the overlaps back to the pressing user's connected tabs
+ * as a `skill_draft_review` WS event ('kept' | 'overlaps' | 'error'). On
+ * overlaps the draft stays pending, so the client's overlap-choice modal can
+ * re-drive the keep with force=1 / updateTarget exactly as before.
+ */
+async function runKeepReview(draft: KeepDraftMeta, group: { id: string; name: string }, userId: string): Promise<void> {
+  const base = {
+    type: 'skill_draft_review' as const,
+    draftId: draft.id,
+    skillName: draft.skill_name,
+    agentGroupId: group.id,
+    agentName: group.name,
+  };
+  try {
+    // Re-fetch: the draft may have been discarded (or kept via a concurrent
+    // force) between the 202 and the job actually running.
+    const fresh = getSkillDraft(draft.id);
+    if (!fresh || fresh.status !== 'pending') {
+      pushToUser(userId, { ...base, outcome: 'error', error: 'Draft no longer pending' });
+      return;
+    }
+    // Keep-time overlap review: compare the draft against the agent's scoped
+    // skills, its OTHER pending drafts, and the pool. Advisory, not a wall —
+    // the human overrides with force=1 ("Keep anyway"). Detects the twins the
+    // exact-name supersede can't (the reviewer names skills freely).
+    let overlaps: Awaited<ReturnType<typeof findKeepOverlaps>> = [];
+    try {
+      overlaps = await findKeepOverlaps(fresh);
+    } catch (err) {
+      // Same posture as the old sync path: the review is advisory — its
+      // failure never blocks a keep.
+      log.warn('Keep overlap review failed — keeping without it', { draftId: draft.id, err: String(err) });
+    }
+    if (overlaps.length > 0) {
+      pushToUser(userId, {
+        ...base,
+        outcome: 'overlaps',
+        overlaps: overlaps.map((o) => ({ name: o.name, source: o.source, reason: o.reason })),
+      });
+      return;
+    }
+    const r = applyKeepDecision(draft, group.id, '', userId);
+    if (r.status !== 200) {
+      pushToUser(userId, { ...base, outcome: 'error', error: String(r.body.error ?? 'Keep failed') });
+      return;
+    }
+    pushToUser(userId, { ...base, outcome: 'kept', ...r.body });
+  } catch (err) {
+    log.warn('Keep review job failed', { draftId: draft.id, err: String(err) });
+    pushToUser(userId, { ...base, outcome: 'error', error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
 // Keep + wire a learning-loop draft: write its SKILL.md into the chosen agent's
 // own .claude-shared/skills (scoped, origin "learned"), then mark it kept.
+// The overlap review is slow (optionally LLM-backed), so a plain Keep is
+// asynchronous: validate everything, answer 202 { queued: true }, and let
+// runKeepReview push the outcome over the WS. force / updateTarget are
+// explicit human decisions that skip the review, so they stay synchronous.
 async function keepSkillDraftHandler(
   req: IncomingMessage,
   res: ServerResponse,
   userId: string,
-  draft: { id: string; skill_name: string; kind?: string; target_skill?: string | null },
+  draft: KeepDraftMeta,
 ): Promise<void> {
   const raw = await readJsonBody(req, res);
   if (raw === null) return;
@@ -7721,50 +8550,22 @@ async function keepSkillDraftHandler(
   const group = resolveAgent(agentGroupId);
   if (!group) return json(res, 404, { error: 'Agent not found' });
   if (!hasAdminPrivilege(userId, group.id)) return json(res, 403, { error: 'Admin privilege required' });
-  // Keep-time overlap review: compare the draft against the agent's scoped
-  // skills, its OTHER pending drafts, and the pool. Advisory, not a wall —
-  // the human overrides with force=1 ("Keep anyway"). Detects the twins the
-  // exact-name supersede can't (the reviewer names skills freely).
   const params = new URL(req.url || '', 'http://x').searchParams;
   const force = params.get('force') === '1';
   // `updateTarget` = the operator chose "Update <existing skill>" in the overlap
   // review: apply THIS draft as a revision of that skill (snapshots the old
-  // version) instead of creating a duplicate. An explicit decision, so it skips
-  // the overlap review. sanitizeSkillName in apply.ts guards the path.
+  // version) instead of creating a duplicate.
   const updateTarget = (params.get('updateTarget') || '').trim();
-  if (!force && !updateTarget) {
-    try {
-      const overlaps = await findKeepOverlaps(getSkillDraft(draft.id)!);
-      if (overlaps.length > 0) {
-        return json(res, 409, {
-          error: 'Possible overlap with existing skills',
-          overlaps: overlaps.map((o) => ({ name: o.name, source: o.source, reason: o.reason })),
-        });
-      }
-    } catch (err) {
-      log.warn('Keep overlap review failed — keeping without it', { draftId: draft.id, err: String(err) });
-    }
+  if (force || updateTarget) {
+    const r = applyKeepDecision(draft, group.id, updateTarget, userId);
+    return json(res, r.status, r.body);
   }
-  // The write itself lives in modules/learning/apply.ts — ONE implementation
-  // shared with auto-keep, so the two paths cannot drift. An "update existing"
-  // choice re-types the draft as a patch of the chosen skill.
-  const toApply = updateTarget
-    ? { ...draft, agent_group_id: group.id, kind: 'patch' as const, target_skill: updateTarget }
-    : { ...draft, agent_group_id: group.id };
-  const r = applySkillDraft(
-    toApply as Parameters<typeof applySkillDraft>[0],
-    updateTarget || draft.kind === 'patch' ? 'Webchat skill revision applied' : 'Webchat learned skill kept',
+  if (keepReviewJobs.has(draft.id)) return json(res, 409, { error: 'Review already in progress' });
+  const job = runKeepReview(draft, { id: group.id, name: group.name }, userId).finally(() =>
+    keepReviewJobs.delete(draft.id),
   );
-  if (!r.ok) return json(res, r.status, { error: r.error });
-  resolveDraftCard(draft.id, 'kept', userId);
-  return json(res, 200, {
-    ok: true,
-    name: r.name,
-    patched: r.patched,
-    updated: !!updateTarget,
-    forkedFromPool: r.forkedFromPool,
-    restarted: r.restarted,
-  });
+  keepReviewJobs.set(draft.id, job);
+  return json(res, 202, { queued: true });
 }
 
 function listAgentMcpHandler(res: ServerResponse, agentGroupId: string): void {

@@ -16,7 +16,7 @@
  * core iterates handlers and the first one to return `true` claims the response.
  */
 import { wakeContainer } from '../../container-runner.js';
-import { claimPendingApproval, deletePendingApproval, getPendingApproval, getSession } from '../../db/sessions.js';
+import { deletePendingApproval, getPendingApproval, getSession } from '../../db/sessions.js';
 import type { ResponsePayload } from '../../response-registry.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
@@ -26,6 +26,35 @@ import { finalizeReject } from './finalize.js';
 import { ONECLI_ACTION, resolveOneCLIApproval } from './onecli-approvals.js';
 import { getApprovalHandler, notifyApprovalResolved, REJECT_WITH_REASON_VALUE } from './primitive.js';
 import { armReasonCapture } from './reason-capture.js';
+
+// Double-fire guard for the approve path. A slow handler (install_packages runs
+// buildAgentGroupImage, ~30s) tempts an admin to click Approve again while
+// nothing visibly happens, delivering the response twice; two concurrent
+// rebuilds race on the same temp Dockerfile → "ENOENT unlink Dockerfile". We
+// claim the approval IN-PROCESS — a synchronous check-and-add that completes
+// before any `await`, so a concurrent second delivery is refused — and delete
+// the pending_approvals ROW only AFTER the handler (releaseApproval).
+//
+// The row MUST stay live during the handler: an approved cli_command replays
+// through dispatch() → guard(), whose grantSatisfies() re-checks the row via
+// getPendingApproval() (src/guard/guard.ts). A destructive delete-up-front claim
+// made that lookup return null, so every approval-gated command failed with
+// "replay carried an invalid or mismatched grant". The host is a single process,
+// so an in-process Set is a sufficient double-fire gate; a late repeat click
+// after release finds no row (getPendingApproval at the top returns null).
+const inFlightApprovals = new Set<string>();
+
+function claimApproval(approvalId: string): boolean {
+  if (inFlightApprovals.has(approvalId)) return false;
+  inFlightApprovals.add(approvalId);
+  return true;
+}
+
+/** Delete the resolved row and clear the in-flight claim — call AFTER the handler. */
+function releaseApproval(approvalId: string): void {
+  deletePendingApproval(approvalId);
+  inFlightApprovals.delete(approvalId);
+}
 
 export async function handleApprovalsResponse(payload: ResponsePayload): Promise<boolean> {
   const approval = getPendingApproval(payload.questionId);
@@ -86,17 +115,10 @@ async function handleRegisteredApproval(
 
   // Approved — dispatch to the module that registered for this action.
   //
-  // Claim the row up-front (atomic delete). The handler can be slow —
-  // install_packages runs buildAgentGroupImage (~30s) — and an admin who
-  // clicks Approve again while nothing visibly happens delivers the response
-  // twice. Without claiming first, the second delivery re-passes
-  // getPendingApproval + auth (the row lingers until the handler finishes) and
-  // fires the handler AGAIN, concurrently: two rebuilds racing on the same
-  // temp Dockerfile → "ENOENT unlink Dockerfile". Whoever deletes the row
-  // first owns the approval; a repeat/concurrent delivery finds nothing and
-  // returns. The delete is synchronous (better-sqlite3), so it completes
-  // before the first `await` below — no interleave window.
-  if (!claimPendingApproval(approval.approval_id)) return;
+  // Claim in-process first (double-click / concurrent-delivery guard). The row
+  // itself is deleted AFTER the handler (releaseApproval) so the approved
+  // replay's guard liveness check still sees it — see the claimApproval note.
+  if (!claimApproval(approval.approval_id)) return;
 
   const notify = (text: string): void => {
     writeSessionMessage(session.agent_group_id, session.id, {
@@ -117,6 +139,7 @@ async function handleRegisteredApproval(
       action: approval.action,
     });
     notify(`Your ${approval.action} was approved, but no handler is installed to apply it.`);
+    releaseApproval(approval.approval_id);
     await notifyApprovalResolved({ approval, session, outcome: 'approve', userId });
     await wakeContainer(session);
     return;
@@ -131,11 +154,24 @@ async function handleRegisteredApproval(
     notify(
       `Your ${approval.action} was approved, but applying it failed: ${err instanceof Error ? err.message : String(err)}.`,
     );
+  } finally {
+    // Delete AFTER the handler so the approved replay's guard liveness check
+    // (getPendingApproval) saw the row while it ran — see the claimApproval note.
+    releaseApproval(approval.approval_id);
   }
 
-  // Row already claimed above.
   await notifyApprovalResolved({ approval, session, outcome: 'approve', userId });
   await wakeContainer(session);
+}
+
+/**
+ * Fork (approval pre-judge): resolve a pending approval through the exact
+ * same dispatch path a human Approve click takes — in-process claim, handler
+ * dispatch, agent notify, resolved-callbacks, container wake. `userId`
+ * records the resolver for audit surfaces (e.g. `prejudge:<model-id>`).
+ */
+export async function resolveApprovalAsApproved(approval: PendingApproval, userId: string): Promise<void> {
+  await handleRegisteredApproval(approval, 'approve', userId);
 }
 
 function namespacedUserId(payload: ResponsePayload): string | null {

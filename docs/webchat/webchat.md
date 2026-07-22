@@ -12,7 +12,7 @@ This is the overview. Focused design docs cover the harder subsystems in depth:
 - Thread context sync: [thread-context-sync.md](thread-context-sync.md)
 - Thread-engaged agents (dormant): [thread-engaged-agents.md](thread-engaged-agents.md)
 - User credentials (per-member): [user-credentials.md](user-credentials.md), [user-credentials-oauth.md](user-credentials-oauth.md)
-- Local-model routing: [llm-router.md](../design/llm-router.md), [add-litellm.md](../design/add-litellm.md)
+- Local-model routing: [llm-router.md](design/llm-router.md), [add-litellm.md](design/add-litellm.md)
 
 Ships **disabled by default** — the adapter factory returns `null` unless
 `WEBCHAT_ENABLED=true`.
@@ -278,7 +278,7 @@ Loaded from `.env` into `process.env` (if unset) by the adapter's `env-load.ts`
   `POST …/skills/archived/:name/restore`, `GET|PUT /api/agents/:id/learning`.
   Learning-loop drafts: `GET /api/skill-drafts`, `GET|PUT|DELETE
   /api/skill-drafts/:id`, `POST /api/skill-drafts/:id/keep`
-  (see [docs/learning-loop.md](../learning-loop.md)).
+  (see [docs/webchat/learning-loop.md](learning-loop.md)).
 - **Approvals / permissions / push** — `GET /api/approvals/pending`,
   `POST /api/approvals/:id/respond`, `GET /api/users`, `DELETE /api/users/:id`,
   `POST /api/permissions/grant|revoke`, `GET /api/push/vapid-public`,

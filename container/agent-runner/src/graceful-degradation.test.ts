@@ -119,16 +119,9 @@ describe('poll loop — non-quota terminal error surfacing (A)', () => {
     expect(JSON.parse(out[0].content).text).toContain('kaboom');
   });
 
-  it('surfaces an error thrown mid-stream by the provider', async () => {
-    insertMessage('m1', { sender: 'Alice', text: 'hi' });
-    const provider = new MockProvider({}, () => ({ throw: 'connection refused by backend' }));
-
-    await runUntil(provider, () => getUndeliveredMessages().length > 0);
-
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toContain('connection refused');
-  });
+  // NOTE: the thrown-mid-stream case ("surfaces an error thrown mid-stream")
+  // is asserted with strictly more expectations (pending drained, Error:
+  // prefix) in integration.test.ts "poll loop — provider error recovery".
 });
 
 // ── B: empty-turn safety net ──

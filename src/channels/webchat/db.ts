@@ -642,270 +642,130 @@ export function setCredentialsConfig(patch: Partial<CredentialsConfig>): void {
     );
 }
 
+// ── Settings-singleton column factory ──
+// Every simple webchat_settings column is exposed as a (get, set) pair over the
+// singleton row (id = 1). The getter tolerates a missing row/table/column and
+// returns the decoded default (decode(undefined)); the setter seeds the
+// NOT NULL credential columns from current config so the row can be created if
+// it doesn't exist yet, then flips only its own column on conflict.
+
+function settingsGetter<T>(column: string, decode: (value: unknown) => T): () => T {
+  return () => {
+    try {
+      const row = getDb().prepare(`SELECT ${column} FROM webchat_settings WHERE id = 1`).get() as
+        | Record<string, unknown>
+        | undefined;
+      return decode(row?.[column]);
+    } catch {
+      return decode(undefined);
+    }
+  };
+}
+
+function settingsSetter<V>(column: string, encode: (value: V) => string | number | null): (value: V) => void {
+  return (value) => {
+    const cfg = getCredentialsConfig();
+    getDb()
+      .prepare(
+        `INSERT INTO webchat_settings
+           (id, default_credential_mode, allow_anthropic_key, allow_claude_oauth, allow_openai_key, allow_codex_oauth, ${column}, updated_at)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           ${column} = excluded.${column},
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        cfg.defaultMode,
+        cfg.allowAnthropicKey ? 1 : 0,
+        cfg.allowClaudeOauth ? 1 : 0,
+        cfg.allowOpenaiKey ? 1 : 0,
+        cfg.allowCodexOauth ? 1 : 0,
+        encode(value),
+        Date.now(),
+      );
+  };
+}
+
+const decodeBool = (v: unknown): boolean => v === 1;
+const encodeBool = (v: boolean): number => (v ? 1 : 0);
+const decodeNullableString = (v: unknown): string | null => (v as string | null) ?? null;
+const encodeNullableString = (v: string | null): string | null => v;
+
 /**
  * First-run wizard state (webchat_settings singleton). Defaults to `false`
  * (not onboarded) if the row/table/column is missing, so a fresh install shows
  * the wizard rather than silently skipping it.
  */
-export function getOnboardingComplete(): boolean {
-  try {
-    const row = getDb().prepare(`SELECT onboarding_complete FROM webchat_settings WHERE id = 1`).get() as
-      | { onboarding_complete: number }
-      | undefined;
-    return row?.onboarding_complete === 1;
-  } catch {
-    return false;
-  }
-}
-
-export function setOnboardingComplete(complete: boolean): void {
-  // Seed the singleton from current config so the NOT NULL columns are satisfied
-  // if the row doesn't exist yet, then flip only onboarding_complete on conflict.
-  const cfg = getCredentialsConfig();
-  getDb()
-    .prepare(
-      `INSERT INTO webchat_settings
-         (id, default_credential_mode, allow_anthropic_key, allow_claude_oauth, allow_openai_key, allow_codex_oauth, onboarding_complete, updated_at)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET
-         onboarding_complete = excluded.onboarding_complete,
-         updated_at          = excluded.updated_at`,
-    )
-    .run(
-      cfg.defaultMode,
-      cfg.allowAnthropicKey ? 1 : 0,
-      cfg.allowClaudeOauth ? 1 : 0,
-      cfg.allowOpenaiKey ? 1 : 0,
-      cfg.allowCodexOauth ? 1 : 0,
-      complete ? 1 : 0,
-      Date.now(),
-    );
-}
+export const getOnboardingComplete = settingsGetter('onboarding_complete', decodeBool);
+export const setOnboardingComplete = settingsSetter('onboarding_complete', encodeBool);
 
 // Bearer-token opt-out: true = WEBCHAT_TOKEN is ignored by auth.ts (the owner
 // retired it in favour of Tailscale/SSO). Default false so the seeded token
 // keeps working until explicitly disabled. See moduleWebchatBearerAuth.
-export function getBearerTokenDisabled(): boolean {
-  try {
-    const row = getDb().prepare(`SELECT bearer_token_disabled FROM webchat_settings WHERE id = 1`).get() as
-      | { bearer_token_disabled: number }
-      | undefined;
-    return row?.bearer_token_disabled === 1;
-  } catch {
-    return false;
-  }
-}
-
-export function setBearerTokenDisabled(disabled: boolean): void {
-  // Seed the singleton from current config so the NOT NULL columns are satisfied
-  // if the row doesn't exist yet, then flip only bearer_token_disabled.
-  const cfg = getCredentialsConfig();
-  getDb()
-    .prepare(
-      `INSERT INTO webchat_settings
-         (id, default_credential_mode, allow_anthropic_key, allow_claude_oauth, allow_openai_key, allow_codex_oauth, bearer_token_disabled, updated_at)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET
-         bearer_token_disabled = excluded.bearer_token_disabled,
-         updated_at            = excluded.updated_at`,
-    )
-    .run(
-      cfg.defaultMode,
-      cfg.allowAnthropicKey ? 1 : 0,
-      cfg.allowClaudeOauth ? 1 : 0,
-      cfg.allowOpenaiKey ? 1 : 0,
-      cfg.allowCodexOauth ? 1 : 0,
-      disabled ? 1 : 0,
-      Date.now(),
-    );
-}
+export const getBearerTokenDisabled = settingsGetter('bearer_token_disabled', decodeBool);
+export const setBearerTokenDisabled = settingsSetter('bearer_token_disabled', encodeBool);
 
 // MCP + skills-marketplace opt-out: true = both features are turned off (tabs
 // hidden + endpoints 403). Default false (enabled). See moduleWebchatMarketplaceToggle.
-export function getMarketplaceDisabled(): boolean {
-  try {
-    const row = getDb().prepare(`SELECT marketplace_disabled FROM webchat_settings WHERE id = 1`).get() as
-      | { marketplace_disabled: number }
-      | undefined;
-    return row?.marketplace_disabled === 1;
-  } catch {
-    return false;
-  }
-}
-
-export function setMarketplaceDisabled(disabled: boolean): void {
-  const cfg = getCredentialsConfig();
-  getDb()
-    .prepare(
-      `INSERT INTO webchat_settings
-         (id, default_credential_mode, allow_anthropic_key, allow_claude_oauth, allow_openai_key, allow_codex_oauth, marketplace_disabled, updated_at)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET
-         marketplace_disabled = excluded.marketplace_disabled,
-         updated_at           = excluded.updated_at`,
-    )
-    .run(
-      cfg.defaultMode,
-      cfg.allowAnthropicKey ? 1 : 0,
-      cfg.allowClaudeOauth ? 1 : 0,
-      cfg.allowOpenaiKey ? 1 : 0,
-      cfg.allowCodexOauth ? 1 : 0,
-      disabled ? 1 : 0,
-      Date.now(),
-    );
-}
+export const getMarketplaceDisabled = settingsGetter('marketplace_disabled', decodeBool);
+export const setMarketplaceDisabled = settingsSetter('marketplace_disabled', encodeBool);
 
 /**
  * Voice-dictation cleanup model (webchat_settings singleton). NULL = no cleanup —
  * dictation delivers the raw Whisper transcript. Missing row/column reads as NULL
  * so the feature degrades to raw rather than erroring.
  */
-export function getSttCleanupModelId(): string | null {
-  try {
-    const row = getDb().prepare(`SELECT stt_cleanup_model_id FROM webchat_settings WHERE id = 1`).get() as
-      | { stt_cleanup_model_id: string | null }
-      | undefined;
-    return row?.stt_cleanup_model_id ?? null;
-  } catch {
-    return null;
-  }
-}
+export const getSttCleanupModelId = settingsGetter('stt_cleanup_model_id', decodeNullableString);
+export const setSttCleanupModelId = settingsSetter('stt_cleanup_model_id', encodeNullableString);
 
 /**
  * Custom cleanup prompt (webchat_settings singleton). NULL = the built-in
- * default in stt.ts. Same degrade-to-default read as the cleanup model.
+ * default in stt.ts. Same degrade-to-default read as the cleanup model;
+ * blank/whitespace-only values also read as NULL.
  */
-export function getSttCleanupPrompt(): string | null {
-  try {
-    const row = getDb().prepare(`SELECT stt_cleanup_prompt FROM webchat_settings WHERE id = 1`).get() as
-      | { stt_cleanup_prompt: string | null }
-      | undefined;
-    const p = row?.stt_cleanup_prompt;
-    return typeof p === 'string' && p.trim() ? p : null;
-  } catch {
-    return null;
-  }
-}
-
-export function setSttCleanupPrompt(prompt: string | null): void {
-  const cfg = getCredentialsConfig();
-  getDb()
-    .prepare(
-      `INSERT INTO webchat_settings
-         (id, default_credential_mode, allow_anthropic_key, allow_claude_oauth, allow_openai_key, allow_codex_oauth, stt_cleanup_prompt, updated_at)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET
-         stt_cleanup_prompt = excluded.stt_cleanup_prompt,
-         updated_at         = excluded.updated_at`,
-    )
-    .run(
-      cfg.defaultMode,
-      cfg.allowAnthropicKey ? 1 : 0,
-      cfg.allowClaudeOauth ? 1 : 0,
-      cfg.allowOpenaiKey ? 1 : 0,
-      cfg.allowCodexOauth ? 1 : 0,
-      prompt,
-      Date.now(),
-    );
-}
-
-export function setSttCleanupModelId(modelId: string | null): void {
-  // Seed the singleton from current config (NOT NULL columns) if absent, then
-  // flip only the STT column on conflict — same pattern as setOnboardingComplete.
-  const cfg = getCredentialsConfig();
-  getDb()
-    .prepare(
-      `INSERT INTO webchat_settings
-         (id, default_credential_mode, allow_anthropic_key, allow_claude_oauth, allow_openai_key, allow_codex_oauth, stt_cleanup_model_id, updated_at)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET
-         stt_cleanup_model_id = excluded.stt_cleanup_model_id,
-         updated_at           = excluded.updated_at`,
-    )
-    .run(
-      cfg.defaultMode,
-      cfg.allowAnthropicKey ? 1 : 0,
-      cfg.allowClaudeOauth ? 1 : 0,
-      cfg.allowOpenaiKey ? 1 : 0,
-      cfg.allowCodexOauth ? 1 : 0,
-      modelId,
-      Date.now(),
-    );
-}
+export const getSttCleanupPrompt = settingsGetter('stt_cleanup_prompt', (v) =>
+  typeof v === 'string' && v.trim() ? v : null,
+);
+export const setSttCleanupPrompt = settingsSetter('stt_cleanup_prompt', encodeNullableString);
 
 // Workspace-level Read aloud: true = every authed user gets the speaker
 // control on agent replies. Owner-set from Settings → Features (was a
 // per-device switch — confusing in shared rooms). See moduleWebchatReadAloud.
-export function getReadAloudEnabled(): boolean {
-  try {
-    const row = getDb().prepare(`SELECT read_aloud_enabled FROM webchat_settings WHERE id = 1`).get() as
-      | { read_aloud_enabled: number }
-      | undefined;
-    return row?.read_aloud_enabled === 1;
-  } catch {
-    return false;
-  }
-}
+export const getReadAloudEnabled = settingsGetter('read_aloud_enabled', decodeBool);
+export const setReadAloudEnabled = settingsSetter('read_aloud_enabled', encodeBool);
 
-export function setReadAloudEnabled(enabled: boolean): void {
-  // Seed the singleton from current config (NOT NULL columns) if absent, then
-  // flip only this column on conflict — same pattern as setBearerTokenDisabled.
-  const cfg = getCredentialsConfig();
-  getDb()
-    .prepare(
-      `INSERT INTO webchat_settings
-         (id, default_credential_mode, allow_anthropic_key, allow_claude_oauth, allow_openai_key, allow_codex_oauth, read_aloud_enabled, updated_at)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET
-         read_aloud_enabled = excluded.read_aloud_enabled,
-         updated_at         = excluded.updated_at`,
-    )
-    .run(
-      cfg.defaultMode,
-      cfg.allowAnthropicKey ? 1 : 0,
-      cfg.allowClaudeOauth ? 1 : 0,
-      cfg.allowOpenaiKey ? 1 : 0,
-      cfg.allowCodexOauth ? 1 : 0,
-      enabled ? 1 : 0,
-      Date.now(),
-    );
-}
+/**
+ * Approval pre-judge model (webchat_settings singleton). The roster model
+ * (webchat_models.id, ollama / openai-compatible kind) that triages opted-in
+ * approval holds before a human sees them. NULL = feature OFF (the default).
+ * See src/modules/approvals/prejudge.ts and docs/webchat/approval-prejudge.md.
+ */
+export const getApprovalPrejudgeModelId = settingsGetter('approval_prejudge_model_id', decodeNullableString);
+export const setApprovalPrejudgeModelId = settingsSetter('approval_prejudge_model_id', encodeNullableString);
+
+/**
+ * Approval actions opted in to the pre-judge (JSON array of action names).
+ * DEFAULT EMPTY — even with a model configured, nothing is pre-judged until
+ * an action is explicitly listed here. Malformed values read as empty (off).
+ */
+export const getApprovalPrejudgeActions = settingsGetter('approval_prejudge_actions', (v): string[] => {
+  if (typeof v !== 'string' || !v) return [];
+  try {
+    const parsed: unknown = JSON.parse(v);
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+});
+export const setApprovalPrejudgeActions = settingsSetter('approval_prejudge_actions', (v: string[]) =>
+  JSON.stringify(v),
+);
 
 // One-shot "first Tailscale login becomes owner" arm flag (wizard opt-in).
 // true = the next tailscale identity to authenticate is granted owner, then the
 // flag clears. See moduleWebchatTailscaleOwner + auth.ts finalize().
-export function getPromoteFirstTailscaleOwner(): boolean {
-  try {
-    const row = getDb().prepare(`SELECT promote_first_tailscale_owner FROM webchat_settings WHERE id = 1`).get() as
-      | { promote_first_tailscale_owner: number }
-      | undefined;
-    return row?.promote_first_tailscale_owner === 1;
-  } catch {
-    return false;
-  }
-}
-
-export function setPromoteFirstTailscaleOwner(enabled: boolean): void {
-  const cfg = getCredentialsConfig();
-  getDb()
-    .prepare(
-      `INSERT INTO webchat_settings
-         (id, default_credential_mode, allow_anthropic_key, allow_claude_oauth, allow_openai_key, allow_codex_oauth, promote_first_tailscale_owner, updated_at)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET
-         promote_first_tailscale_owner = excluded.promote_first_tailscale_owner,
-         updated_at                    = excluded.updated_at`,
-    )
-    .run(
-      cfg.defaultMode,
-      cfg.allowAnthropicKey ? 1 : 0,
-      cfg.allowClaudeOauth ? 1 : 0,
-      cfg.allowOpenaiKey ? 1 : 0,
-      cfg.allowCodexOauth ? 1 : 0,
-      enabled ? 1 : 0,
-      Date.now(),
-    );
-}
+export const getPromoteFirstTailscaleOwner = settingsGetter('promote_first_tailscale_owner', decodeBool);
+export const setPromoteFirstTailscaleOwner = settingsSetter('promote_first_tailscale_owner', encodeBool);
 
 // Per-room mode override: NULL = inherit the global default.
 export type RoomModeOverride = CredentialMode | null;
@@ -1088,6 +948,61 @@ export function markRoomSkillDraftResolved(
   const content = JSON.stringify({ ...payload, status: outcome, resolvedBy });
   getDb().prepare('UPDATE webchat_messages SET content = ? WHERE id = ?').run(content, id);
   return { roomId: row.room_id, message: { ...row, content } };
+}
+
+/**
+ * Skill-draft cards as a read-only history feed (learning timeline). The card
+ * rows are the ONLY durable record of a draft's outcome — resolveSkillDraft
+ * deletes the skill_drafts row, but the in-room card persists with
+ * `status` ('pending' | 'kept' | 'discarded') and `resolvedBy` folded into its
+ * content JSON. `createdAt` is the PROPOSAL time; resolution time is not
+ * stored anywhere, so timeline consumers date resolutions by proposal.
+ */
+export interface SkillDraftCardRow {
+  draftId: string;
+  roomId: string;
+  createdAt: number;
+  status: 'pending' | 'kept' | 'discarded';
+  resolvedBy: string | null;
+  skillName: string;
+  description: string;
+  kind: 'create' | 'patch';
+  targetSkill: string | null;
+  agentGroupId: string;
+  agentName: string;
+}
+
+export function listSkillDraftCards(before?: number, limit = 200): SkillDraftCardRow[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT room_id, content, created_at FROM webchat_messages
+       WHERE message_type = 'skill_draft' AND created_at < ?
+       ORDER BY created_at DESC LIMIT ?`,
+    )
+    .all(before ?? Number.MAX_SAFE_INTEGER, limit) as Array<{ room_id: string; content: string; created_at: number }>;
+  const out: SkillDraftCardRow[] = [];
+  for (const r of rows) {
+    try {
+      const p = JSON.parse(r.content) as Record<string, unknown>;
+      if (typeof p.draftId !== 'string' || typeof p.agentGroupId !== 'string') continue;
+      out.push({
+        draftId: p.draftId,
+        roomId: r.room_id,
+        createdAt: r.created_at,
+        status: p.status === 'kept' || p.status === 'discarded' ? p.status : 'pending',
+        resolvedBy: typeof p.resolvedBy === 'string' ? p.resolvedBy : null,
+        skillName: typeof p.skillName === 'string' ? p.skillName : '',
+        description: typeof p.description === 'string' ? p.description : '',
+        kind: p.kind === 'patch' ? 'patch' : 'create',
+        targetSkill: typeof p.targetSkill === 'string' ? p.targetSkill : null,
+        agentGroupId: p.agentGroupId,
+        agentName: typeof p.agentName === 'string' ? p.agentName : p.agentGroupId,
+      });
+    } catch {
+      /* unparseable card — skip */
+    }
+  }
+  return out;
 }
 
 /**
@@ -1486,13 +1401,6 @@ export function renameWebchatThread(roomId: string, threadId: string, title: str
     .run(title, Date.now(), roomId, threadId);
 }
 
-/** Touch a thread's updated_at (called on new activity so the sort reflects it). */
-export function touchWebchatThread(roomId: string, threadId: string): void {
-  getDb()
-    .prepare(`UPDATE webchat_threads SET updated_at = ? WHERE room_id = ? AND thread_id = ?`)
-    .run(Date.now(), roomId, threadId);
-}
-
 /** Delete a thread + its messages + its read markers. 'main' is not deletable
  * (the caller enforces; this guards too). Session teardown is the caller's job. */
 export function deleteWebchatThread(roomId: string, threadId: string): void {
@@ -1708,27 +1616,6 @@ export function getUnreadThreadIdsForRoom(userId: string, roomId: string): Set<s
 
 // ── Push subscriptions ──
 
-export function upsertWebchatPushSubscription(sub: Omit<WebchatPushSubscription, 'created_at'>): void {
-  const row: WebchatPushSubscription = { ...sub, created_at: Date.now() };
-  getDb()
-    .prepare(
-      `INSERT INTO webchat_push_subscriptions (endpoint, identity, keys_json, created_at)
-       VALUES (@endpoint, @identity, @keys_json, @created_at)
-       ON CONFLICT(endpoint) DO UPDATE SET identity = excluded.identity, keys_json = excluded.keys_json`,
-    )
-    .run(row);
-}
-
-export function deleteWebchatPushSubscriptionForIdentity(identity: string, endpoint: string): void {
-  getDb().prepare(`DELETE FROM webchat_push_subscriptions WHERE identity = ? AND endpoint = ?`).run(identity, endpoint);
-}
-
-export function getWebchatPushSubscriptionsForIdentity(identity: string): WebchatPushSubscription[] {
-  return getDb()
-    .prepare(`SELECT * FROM webchat_push_subscriptions WHERE identity = ?`)
-    .all(identity) as WebchatPushSubscription[];
-}
-
 export function deleteWebchatPushSubscriptionByEndpoint(endpoint: string): void {
   getDb().prepare(`DELETE FROM webchat_push_subscriptions WHERE endpoint = ?`).run(endpoint);
 }
@@ -1896,39 +1783,8 @@ export function getAssignedModelForAgent(agentGroupId: string): WebchatModel | n
  * roster model every claude-family agent WITHOUT its own assignment falls
  * back to. The model analogue of the workspace default credential.
  */
-export function getDefaultModelId(): string | null {
-  try {
-    const row = getDb().prepare(`SELECT default_model_id FROM webchat_settings WHERE id = 1`).get() as
-      | { default_model_id: string | null }
-      | undefined;
-    return row?.default_model_id ?? null;
-  } catch {
-    return null;
-  }
-}
-
-export function setDefaultModelId(modelId: string | null): void {
-  // Seed the singleton (NOT NULL columns) if absent, then flip only this column.
-  const cfg = getCredentialsConfig();
-  getDb()
-    .prepare(
-      `INSERT INTO webchat_settings
-         (id, default_credential_mode, allow_anthropic_key, allow_claude_oauth, allow_openai_key, allow_codex_oauth, default_model_id, updated_at)
-       VALUES (1, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET
-         default_model_id = excluded.default_model_id,
-         updated_at       = excluded.updated_at`,
-    )
-    .run(
-      cfg.defaultMode,
-      cfg.allowAnthropicKey ? 1 : 0,
-      cfg.allowClaudeOauth ? 1 : 0,
-      cfg.allowOpenaiKey ? 1 : 0,
-      cfg.allowCodexOauth ? 1 : 0,
-      modelId,
-      Date.now(),
-    );
-}
+export const getDefaultModelId = settingsGetter('default_model_id', decodeNullableString);
+export const setDefaultModelId = settingsSetter('default_model_id', encodeNullableString);
 
 /**
  * The model that actually powers an agent: its own assignment, else the
@@ -2002,6 +1858,35 @@ export function clearArchiveForRoom(roomId: string): void {
   getDb().prepare(`DELETE FROM webchat_room_archives WHERE room_id = ?`).run(roomId);
 }
 
+// ── Per-user room-flag table factory (hides / reads / pins) ──
+// All three tables are keyed on (user_id, room_id) with the trusted webchat
+// user_id, so a flag follows the user across devices. The factory covers the
+// shared shapes — per-user un-flag, per-user room-id set, per-room cascade
+// clear. Each table's divergent pieces (the hide insert's legacy archived_at
+// column, the monotonic read marker + unread join, pin positions/ordering)
+// stay hand-written below.
+
+function userRoomFlagTable(table: string) {
+  return {
+    removeForUser(userId: string, roomId: string): void {
+      getDb().prepare(`DELETE FROM ${table} WHERE user_id = ? AND room_id = ?`).run(userId, roomId);
+    },
+    roomIdsForUser(userId: string): Set<string> {
+      const rows = getDb().prepare(`SELECT room_id FROM ${table} WHERE user_id = ?`).all(userId) as {
+        room_id: string;
+      }[];
+      return new Set(rows.map((r) => r.room_id));
+    },
+    clearForRoom(roomId: string): void {
+      getDb().prepare(`DELETE FROM ${table} WHERE room_id = ?`).run(roomId);
+    },
+  };
+}
+
+const roomHides = userRoomFlagTable('webchat_user_room_hides');
+const roomReads = userRoomFlagTable('webchat_room_reads');
+const roomPins = userRoomFlagTable('webchat_room_pins');
+
 // ── Per-user hide (any user, on rooms they can access) ──
 
 export function hideRoomForUser(userId: string, roomId: string): void {
@@ -2014,20 +1899,9 @@ export function hideRoomForUser(userId: string, roomId: string): void {
     .run(userId, roomId, new Date().toISOString());
 }
 
-export function unhideRoomForUser(userId: string, roomId: string): void {
-  getDb().prepare(`DELETE FROM webchat_user_room_hides WHERE user_id = ? AND room_id = ?`).run(userId, roomId);
-}
-
-export function getHiddenRoomIdsForUser(userId: string): Set<string> {
-  const rows = getDb().prepare(`SELECT room_id FROM webchat_user_room_hides WHERE user_id = ?`).all(userId) as {
-    room_id: string;
-  }[];
-  return new Set(rows.map((r) => r.room_id));
-}
-
-export function clearHidesForRoom(roomId: string): void {
-  getDb().prepare(`DELETE FROM webchat_user_room_hides WHERE room_id = ?`).run(roomId);
-}
+export const unhideRoomForUser = roomHides.removeForUser;
+export const getHiddenRoomIdsForUser = roomHides.roomIdsForUser;
+export const clearHidesForRoom = roomHides.clearForRoom;
 
 // ── Per-user read markers (unread badge persistence) ──
 //
@@ -2077,9 +1951,7 @@ export function getUnreadRoomIdsForUser(userId: string): Set<string> {
 }
 
 /** Drop a room's read markers — called from deleteWebchatRoom's cascade. */
-export function clearReadsForRoom(roomId: string): void {
-  getDb().prepare(`DELETE FROM webchat_room_reads WHERE room_id = ?`).run(roomId);
-}
+export const clearReadsForRoom = roomReads.clearForRoom;
 
 // ── Per-user room pins (sticky group at the top of the sidebar) ──
 // Pins are per-(user, room), keyed on the trusted webchat user_id, so a pin
@@ -2105,16 +1977,8 @@ export function pinRoomForUser(userId: string, roomId: string, ts: number = Date
     .run(userId, roomId, ts, next);
 }
 
-export function unpinRoomForUser(userId: string, roomId: string): void {
-  getDb().prepare(`DELETE FROM webchat_room_pins WHERE user_id = ? AND room_id = ?`).run(userId, roomId);
-}
-
-export function getPinnedRoomIdsForUser(userId: string): Set<string> {
-  const rows = getDb().prepare(`SELECT room_id FROM webchat_room_pins WHERE user_id = ?`).all(userId) as {
-    room_id: string;
-  }[];
-  return new Set(rows.map((r) => r.room_id));
-}
+export const unpinRoomForUser = roomPins.removeForUser;
+export const getPinnedRoomIdsForUser = roomPins.roomIdsForUser;
 
 /** Per-user pinned room → manual sort position (lower = higher in the list). */
 export function getPinnedPositionsForUser(userId: string): Map<string, number> {
@@ -2141,9 +2005,7 @@ export function setPinnedOrderForUser(userId: string, orderedRoomIds: string[]):
 }
 
 /** Drop a room's pins — called from deleteWebchatRoom's cascade. */
-export function clearPinsForRoom(roomId: string): void {
-  getDb().prepare(`DELETE FROM webchat_room_pins WHERE room_id = ?`).run(roomId);
-}
+export const clearPinsForRoom = roomPins.clearForRoom;
 
 /**
  * Newest message `created_at` per room — the sort key for the "Recent" sidebar
@@ -2295,13 +2157,6 @@ export function listSkillSources(): WebchatSkillSource[] {
       .prepare('SELECT id, label, owner, repo, branch, dir, official FROM webchat_skill_sources ORDER BY created_at')
       .all() as SkillSourceRow[]
   ).map(toSource);
-}
-
-export function getSkillSource(id: string): WebchatSkillSource | undefined {
-  const r = getDb()
-    .prepare('SELECT id, label, owner, repo, branch, dir, official FROM webchat_skill_sources WHERE id = ?')
-    .get(id) as SkillSourceRow | undefined;
-  return r ? toSource(r) : undefined;
 }
 
 // Admin-added sources are always community (official=0). The `official` flag is

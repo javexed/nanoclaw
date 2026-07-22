@@ -69,6 +69,13 @@
         <path d="M4 17v2" />
         <path d="M5 18H3" />
       </symbol>
+      <symbol id="i-link" viewBox="0 0 24 24">
+        <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+        <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+      </symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24">
+        <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+      </symbol>
       <symbol id="i-rotate-cw" viewBox="0 0 24 24">
         <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
         <path d="M21 3v5h-5" />
@@ -252,6 +259,9 @@
                   <svg class="icon" aria-hidden="true"><use href="#i-book-open"></use></svg>&nbsp;&nbsp;Skills
                   <span id="learn-drafts-count" class="menu-count" hidden></span>
                 </button>
+                <button id="overflow-journey" class="overflow-item" data-action="journey" role="menuitem" hidden>
+                  <svg class="icon" aria-hidden="true"><use href="#i-graduation-cap"></use></svg>&nbsp;&nbsp;Journey
+                </button>
                 <button class="overflow-item" data-action="topology" role="menuitem">
                   <svg class="icon" aria-hidden="true"><use href="#i-workflow"></use></svg>&nbsp;&nbsp;Topology
                 </button>
@@ -346,10 +356,10 @@
                  this thread's messages up; delete removes the thread. See
                  thread-context-sync.md. -->
             <div id="thread-sync" class="thread-sync" hidden>
-              <button id="thread-pull" class="thread-sync-btn" type="button" title="Pull main chat into this thread">
+              <button id="thread-pull" class="thread-sync-btn" type="button" title="Pull main chat into this thread" aria-label="Pull main chat into this thread">
                 <svg class="icon" aria-hidden="true"><use href="#i-arrow-down"></use></svg>
               </button>
-              <button id="thread-push" class="thread-sync-btn" type="button" title="Push this thread into main chat">
+              <button id="thread-push" class="thread-sync-btn" type="button" title="Push this thread into main chat" aria-label="Push this thread into main chat">
                 <svg class="icon" aria-hidden="true"><use href="#i-arrow-up"></use></svg>
               </button>
               <button
@@ -357,6 +367,7 @@
                 class="thread-sync-btn thread-sync-btn--danger"
                 type="button"
                 title="Delete this thread"
+                aria-label="Delete this thread"
               >
                 <svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg>
               </button>
@@ -468,10 +479,10 @@
                 <svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>
               </button>
               <div id="composer-tools" class="composer-tools" role="group" aria-label="Composer tools">
-                <button type="button" id="file-picker" class="file-picker-btn" title="Upload file">
+                <button type="button" id="file-picker" class="file-picker-btn" title="Upload file" aria-label="Upload file">
                   <svg class="icon" aria-hidden="true"><use href="#i-paperclip"></use></svg>
                 </button>
-                <button type="button" id="camera-btn" class="file-picker-btn mobile-only" title="Take photo">
+                <button type="button" id="camera-btn" class="file-picker-btn mobile-only" title="Take photo" aria-label="Take photo">
                   <svg class="icon" aria-hidden="true"><use href="#i-camera"></use></svg>
                 </button>
                 <button
@@ -479,6 +490,9 @@
                   id="learn-btn"
                   class="file-picker-btn"
                   title="Distill a skill from this session"
+                  aria-label="Distill a skill from this session"
+                  aria-haspopup="menu"
+                  aria-expanded="false"
                   disabled
                 >
                   <svg class="icon" aria-hidden="true"><use href="#i-graduation-cap"></use></svg>
@@ -512,7 +526,7 @@
           <aside id="members-panel" class="members-panel" hidden>
             <div class="members-header">
               <span>Members</span>
-              <button id="members-close" class="members-close">
+              <button id="members-close" class="members-close" aria-label="Close">
                 <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
               </button>
             </div>
@@ -533,7 +547,7 @@
             <div id="agent-edit-view">
               <div class="agent-detail-header">
                 <span id="agent-detail-title">Agent details</span>
-                <button id="agent-detail-close" class="members-close">
+                <button id="agent-detail-close" class="members-close" aria-label="Close">
                   <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
                 </button>
               </div>
@@ -616,6 +630,17 @@
                         <button type="button" class="setting-option" data-on="0">Off</button>
                       </div>
                     </div>
+                    <div class="agent-learning-row">
+                      <span>Review model</span>
+                      <select id="agent-learning-review-model" class="stt-cleanup-select" aria-label="Review model"></select>
+                    </div>
+                    <div class="agent-learning-row">
+                      <span>Review input</span>
+                      <div class="setting-options" id="agent-learning-review-input" role="group" aria-label="Review input">
+                        <button type="button" class="setting-option" data-value="digest">Digest</button>
+                        <button type="button" class="setting-option" data-value="replay">Replay</button>
+                      </div>
+                    </div>
                   </div>
                 </details>
                 <!-- Rooms this agent is wired to (assign / unassign) via the shared
@@ -657,7 +682,7 @@
             <div id="agent-create-view" hidden>
               <div class="agent-detail-header">
                 <span>Create agent</span>
-                <button id="agent-create-close" class="members-close">
+                <button id="agent-create-close" class="members-close" aria-label="Close">
                   <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
                 </button>
               </div>
@@ -708,7 +733,7 @@
             <div id="room-edit-view">
               <div class="agent-detail-header">
                 <span id="room-detail-title">Room settings</span>
-                <button id="room-detail-close" class="members-close">
+                <button id="room-detail-close" class="members-close" aria-label="Close">
                   <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
                 </button>
               </div>
@@ -815,7 +840,7 @@
             <div id="room-create-view" hidden>
               <div class="agent-detail-header">
                 <span>Create room</span>
-                <button id="room-create-close" class="members-close">
+                <button id="room-create-close" class="members-close" aria-label="Close">
                   <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
                 </button>
               </div>
@@ -862,7 +887,7 @@
             <div class="agent-detail-header">
               <span id="route-detail-badge" class="model-kind-badge" hidden></span>
               <span id="route-detail-title">Route</span>
-              <button id="route-detail-close" class="members-close">
+              <button id="route-detail-close" class="members-close" aria-label="Close">
                 <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
               </button>
             </div>
@@ -884,12 +909,17 @@
                 agent group's fallback provider (Claude) instead.
               </p>
               <div class="route-flags">
-                <label class="routing-pin"><input type="checkbox" id="route-pinned" /> Pin — auto-binder never touches this route</label>
-                <label class="routing-pin"><input type="checkbox" id="route-default" /> Default — where classifier errors land</label>
+                <label class="setting-toggle">
+                  <span>Pin</span>
+                  <input type="checkbox" id="route-pinned" />
+                </label>
+                <label class="setting-toggle">
+                  <span>Default</span>
+                  <input type="checkbox" id="route-default" />
+                </label>
               </div>
               <div class="agent-detail-actions">
                 <button type="submit" class="btn btn-primary">Save</button>
-                <span class="routing-save-note">Applies to the next request.</span>
               </div>
               <div class="agent-detail-danger">
                 <button type="button" id="route-delete" class="btn btn-danger">Delete this route</button>
@@ -902,7 +932,7 @@
               <div class="agent-detail-header">
                 <span id="model-detail-badge" class="model-kind-badge" hidden></span>
                 <span id="model-detail-title">Model</span>
-                <button id="model-detail-close" class="members-close">
+                <button id="model-detail-close" class="members-close" aria-label="Close">
                   <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
                 </button>
               </div>
@@ -940,7 +970,7 @@
             <div id="model-create-view" hidden>
               <div class="agent-detail-header">
                 <span>Add model</span>
-                <button id="model-create-close" class="members-close">
+                <button id="model-create-close" class="members-close" aria-label="Close">
                   <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
                 </button>
               </div>
@@ -1029,7 +1059,7 @@
             <div id="mcp-edit-view">
               <div class="agent-detail-header">
                 <span id="mcp-detail-title">MCP server</span>
-                <button id="mcp-detail-close" class="members-close">
+                <button id="mcp-detail-close" class="members-close" aria-label="Close">
                   <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
                 </button>
               </div>
@@ -1077,7 +1107,7 @@
             <div id="mcp-create-view" hidden>
               <div class="agent-detail-header">
                 <span>Add MCP server</span>
-                <button id="mcp-create-close" class="members-close">
+                <button id="mcp-create-close" class="members-close" aria-label="Close">
                   <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
                 </button>
               </div>
@@ -1268,6 +1298,15 @@
               <div id="skill-duplicates" hidden>
                 <span class="form-label">Learned by several agents</span>
                 <ul id="skill-duplicates-list" class="skills-list"></ul>
+              </div>
+              <!-- Filter across every section (name + description). While a
+                   query is active, matching sections auto-expand and empty
+                   ones hide; clearing restores the remembered collapse state.
+                   'Add from link…' = learn a skill from a URL, run by an agent
+                   you pick (room-mediated /learn); gated on the learning master. -->
+              <div class="skills-toolbar">
+                <input id="skills-filter" type="search" autocomplete="off" spellcheck="false" placeholder="Search skills…" hidden />
+                <button id="skills-learn-link" class="btn btn-secondary" type="button" hidden>Add from link…</button>
               </div>
               <ul id="skills-list"></ul>
               <button id="skill-add-btn" class="btn btn-secondary btn-list-footer" type="button">+ Add skill</button>
@@ -1495,7 +1534,7 @@
           <div id="dash-detail" class="dash-detail" hidden>
             <div class="dash-detail-header">
               <span id="dash-detail-title">Detail</span>
-              <button id="dash-detail-close">
+              <button id="dash-detail-close" aria-label="Close">
                 <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
               </button>
             </div>
@@ -1520,6 +1559,37 @@
             <button id="topo-focus-pill" class="topo-focus-pill" hidden aria-label="Clear focus"></button>
           </div>
           <div id="topology-canvas" class="topology-canvas"></div>
+        </div>
+      </section>
+      <section id="journey" hidden>
+        <div class="dash-header">
+          <button id="journey-back" class="mobile-back" aria-label="Back">
+            <svg class="icon" aria-hidden="true"><use href="#i-chevron-left"></use></svg>
+          </button>
+          <span>Journey</span>
+          <button id="journey-refresh" class="btn btn-ghost">
+            <svg class="icon" aria-hidden="true"><use href="#i-rotate-cw"></use></svg> Refresh
+          </button>
+        </div>
+        <div class="journey-body">
+          <!-- Client-side filters over the loaded events (transient — reset on
+               open). Agent options derive from the loaded feed; the skill chip
+               appears via the 'History' deep-links and clears on tap. -->
+          <div class="journey-filters">
+            <select id="journey-agent-filter" aria-label="Agent">
+              <option value="">All agents</option>
+            </select>
+            <div id="journey-kind-filter" class="setting-options" role="group" aria-label="Kind">
+              <button type="button" class="setting-option active" data-kind="">All</button>
+              <button type="button" class="setting-option" data-kind="kept">Kept</button>
+              <button type="button" class="setting-option" data-kind="revised">Revised</button>
+              <button type="button" class="setting-option" data-kind="proposed">Proposed</button>
+            </div>
+            <button type="button" id="journey-skill-chip" class="journey-skill-chip" hidden></button>
+          </div>
+          <div id="journey-list" class="journey-list"></div>
+          <div id="journey-no-match" class="journey-empty" hidden>No matching events</div>
+          <button id="journey-more" class="btn btn-secondary btn-list-footer" hidden>Load more</button>
         </div>
       </section>
       <section id="matrix" hidden>
@@ -1695,7 +1765,7 @@
         <div class="modal">
           <div class="modal-header">
             <span>Settings</span>
-            <button id="settings-close" class="members-close">
+            <button id="settings-close" class="members-close" aria-label="Close">
               <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
             </button>
           </div>
@@ -1981,6 +2051,23 @@
                 </span>
               </div>
               <p class="cred-hint" id="access-https-hint" hidden></p>
+            </div>
+            <!-- Approval pre-judge — owner-only LLM triage in front of approval
+                 holds (docs/webchat/approval-prejudge.md). Judge model Off =
+                 feature off; the action list appears once a judge is set.
+                 Never-listed actions render disabled (always human). -->
+            <div id="settings-prejudge" class="settings-credentials" hidden>
+              <h3 class="settings-section-title">Approval pre-judge</h3>
+              <div class="setting-group">
+                <span class="setting-label">Judge model</span>
+                <select id="prejudge-model-select" class="stt-cleanup-select" aria-label="Approval pre-judge model">
+                  <option value="">Off</option>
+                </select>
+              </div>
+              <div class="setting-group" id="prejudge-actions-group" hidden>
+                <span class="setting-label">Pre-judged actions</span>
+                <div id="prejudge-actions-list" class="prejudge-actions"></div>
+              </div>
             </div>
             <!-- Skill collections registry — the Skills tab's catalog sources.
                  Shown to owners/global admins (server enforces global admin). -->

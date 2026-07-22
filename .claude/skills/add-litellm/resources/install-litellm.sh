@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # install-litellm.sh — idempotent installer for the minimal LiteLLM router
-# (docs/design/add-litellm.md).
+# (docs/webchat/design/add-litellm.md).
 #
 # One job: run a local-only LiteLLM container whose model_list is generated
 # from the configured local model server(s) — Ollama by default; any keyless

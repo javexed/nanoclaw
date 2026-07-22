@@ -6,7 +6,7 @@ description: Layer an N-way capability classifier (Arch-Router 1.5B on your own 
 # Add routing (capability classifier over LiteLLM, shadow-first)
 
 Implements the classifier tier of
-[docs/design/llm-router.md](../../../docs/design/llm-router.md) §16b: an
+[docs/webchat/design/llm-router.md](../../../docs/webchat/design/llm-router.md) §16b: an
 **Arch-Router 1.5B** route-classifier running on your own model server maps
 each prompt to an operator-defined **capability route** (name + English
 description), each route **bound to a roster model**. This skill installs it

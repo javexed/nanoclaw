@@ -1,9 +1,10 @@
 /**
  * Regression: the SDK's `rate_limit_event` is TELEMETRY ("emitted when rate
  * limit info changes"), not an error. We used to treat every one as terminal,
- * which aborted healthy turns across every room and posted a rate-limit notice
- * for what was only a status update (13 spurious aborts across 6 rooms before
- * this was caught). Only status='rejected' is an actual block — and when it is,
+ * which logged a spurious quota error on healthy turns (#3016) and, in
+ * consumers that act on the classification, aborted them outright (13 spurious
+ * aborts across 6 rooms in one downstream install before this was caught).
+ * Only status='rejected' is an actual block — and when it is,
  * the SDK tells us whether it's a transient window limit or genuinely no credits.
  */
 import { describe, expect, it } from 'bun:test';

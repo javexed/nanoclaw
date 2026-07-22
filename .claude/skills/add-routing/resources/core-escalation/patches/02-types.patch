@@ -7,6 +7,6 @@ index aaf3ef9d..011375fc 100644
    cli_scope: string; // 'disabled' | 'group' | 'global'
    egress: string | null; // 'open' (null) | 'host-only' | 'none' — container network reach
 +  fallback_provider: string | null; // §16c escalation target (e.g. 'claude'); NULL = no escalation
-   learning?: string | null; // JSON: { autoTrigger?, autoKeep?, cooldownMinutes? } — see docs/learning-loop.md
+   learning?: string | null; // JSON: { autoTrigger?, autoKeep?, cooldownMinutes? } — see docs/webchat/learning-loop.md
    updated_at: string;
  }

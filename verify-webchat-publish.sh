@@ -132,13 +132,17 @@ if [ -z "$INST" ]; then fail "no install-webchat.sh on $CHANNEL"; else
       install-webchat.sh|uninstall-webchat.sh|configure-webchat.sh|verify-webchat-publish.sh) covered=yes ;;
       e2e/*|playwright.config.ts) covered=yes ;;                                   # dev-only e2e infra — intentionally not installed
       webchat-hooks/*) covered=yes ;;                                              # provider overlays (step 2d) — applied/copied by name
-      README.md|CHANGELOG.md|CONTRIBUTING.md) covered=yes ;;                        # root project docs — repo documentation; the overlay never patches them
+      README.md|README_ja.md|README_ko.md|README_zh.md|CHANGELOG.md|CONTRIBUTING.md) covered=yes ;; # root project docs (all languages) — repo documentation; the overlay never patches them
       .claude/skills/*|docs/*) covered=yes ;;                                       # repo-resident skills + ALL docs — repo documentation, not delivered by the webchat overlay
       .github/*|repo-tokens/*) covered=yes ;;                                       # CI workflows + README badge assets — repo infra, never installed onto a user tree
       templates/*) covered=yes ;;                                                   # repo-resident agent templates + their docs — carried by the base install, not the webchat overlay
       setup/*) covered=yes ;;                                                       # base install/setup scripts (e.g. the headless setup:auto fix) — delivered by the base install / release tarball; webchat's own setup/get-oauth-token.sh is separately in NEW_PATHS
       deploy/*) covered=yes ;;                                                     # host-agnostic installer (VM/Pi/bare metal) — repo-resident tooling run FROM the repo, never delivered by the webchat overlay
       src/cli/*|container/agent-runner/src/cli/*) covered=yes ;;                    # base ncl admin CLI (host + container) — a base feature with zero webchat references; reaches installs via the base tree / release tarball, not the overlay
+      .husky/*) covered=yes ;;                                                     # git-hook dev tooling (staged-scope prettier fix, pre-push) — repo infra like .github/*, never installed onto a user tree
+      scripts/*) covered=yes ;;                                                    # repo tooling run FROM the repo: skill-apply engine (base tree / release tarball, like setup/*) + fork dev scripts (pr-preflight, sync-providers-codex); never delivered by the overlay
+      versions.json) covered=yes ;;                                                # base-install version pins (onecli gateway/CLI) consumed by setup — base tree, not the overlay; fork carries the 1.37.0 credential_not_found fix
+      src/templates/create-agent.test.ts) covered=yes ;;                           # CI-stability timeout headroom on a base test (forgejo runner starves the 5s default under the full suite) — repo test infra, not delivered by the overlay
     esac
     [ "$covered" = no ] && uncovered="${uncovered}${f}"$'\n'
   done < <(git diff --name-only "$BASE" "$CHANNEL")
@@ -216,13 +220,19 @@ WEBCHAT_HOOK_ALLOWLIST=(
   container/agent-runner/src/formatter.ts
   # Security batch + rtk + MCP-hardening hooks (2026-07 cycle):
   container/agent-runner/src/formatter.test.ts
-  docs/SECURITY.md
   src/backfill-container-configs.ts
   src/container-runner.test.ts
   src/egress-lockdown.ts
   src/group-init.ts
   container/agent-runner/src/mcp-tools/server.ts
   container/agent-runner/src/mcp-tools/core.instructions.md
+  # Drift-reduction pass (2026-07, docs/webchat/upstream-drift.md):
+  # eslint.config.js — carries ONLY the public/webchat lint block; eslint flat
+  # config has a single entry point, so a fork-only file can't hold the block
+  # without still diverging the entry point. host-sweep.test.ts — test rider
+  # for the already-blessed src/host-sweep.ts hook (selfHealBloatedContinuation).
+  eslint.config.js
+  src/host-sweep.test.ts
 )
 DECLARED=$(git show "$CHANNEL:install-webchat.sh" 2>/dev/null \
   | awk '/^HOOK_FILES=\(/{f=1;next} f&&/^\)/{f=0} f{gsub(/^[ \t]+/,"");print}')
@@ -256,6 +266,25 @@ if [ -z "$EXP" ]; then fail "no moduleWebchat* exports found in migration.ts"; e
   missing=$(comm -23 <(printf '%s\n' "$EXP") <(printf '%s\n' "$REG"))
   if [ -z "$missing" ]; then pass "all $(printf '%s\n' "$EXP" | grep -c .) webchat migrations are registered in index.ts"
   else fail "exported but NOT registered (would never run on fresh installs):"; printf '%s\n' "$missing" | sed 's/^/      /' >&2
+  fi
+fi
+
+# ── 4b. E2E smoke — optional browser tier ──────────────────────────────────
+# Runs the Playwright suite (e2e/ — happy path + the six-flow smoke spec)
+# against the WORKING TREE when @playwright/test and its chromium build are
+# both present. Hosts without playwright skip this section and the gate still
+# passes — the suite is a dev-only tier, deliberately not per-PR CI (the
+# runner is disk-constrained). See docs/webchat/e2e.md.
+section "E2E smoke — Playwright browser flows (optional)"
+if [ ! -e node_modules/@playwright/test/package.json ]; then
+  echo "  - SKIP: @playwright/test not installed (dev-only; see docs/webchat/e2e.md)"
+elif ! compgen -G "${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}/chromium*" >/dev/null; then
+  echo "  - SKIP: chromium browser not installed (pnpm exec playwright install chromium)"
+else
+  if pnpm run test:e2e >/tmp/vwp-e2e.log 2>&1; then
+    pass "playwright suite green ($(grep -oE '[0-9]+ passed' /tmp/vwp-e2e.log | tail -1 || echo 'all'))"
+  else
+    fail "playwright suite FAILED (see /tmp/vwp-e2e.log)"
   fi
 fi
 

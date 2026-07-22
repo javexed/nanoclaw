@@ -121,6 +121,57 @@ describe('approval response authorization', () => {
     expect(getPendingApproval('appr-2')).toBeUndefined();
   });
 
+  it('keeps the pending row live DURING the handler, deleting it only after (approved-replay grant re-check)', async () => {
+    // Regression: the approve path used to delete the row up-front, before the
+    // handler ran. But an approved cli_command replays through the guard, whose
+    // grantSatisfies() re-checks the row via getPendingApproval() (guard.ts); with
+    // the row already gone every approval-gated command failed with "replay
+    // carried an invalid or mismatched grant". The row must stay live for the
+    // duration of the handler, then be deleted.
+    upsertUser({ id: 'telegram:owner-live', kind: 'telegram', display_name: 'Owner', created_at: now() });
+    grantRole({
+      user_id: 'telegram:owner-live',
+      role: 'owner',
+      agent_group_id: null,
+      granted_by: null,
+      granted_at: now(),
+    });
+
+    const { registerApprovalHandler } = await import('./primitive.js');
+    const { handleApprovalsResponse } = await import('./response-handler.js');
+
+    let rowLiveDuringHandler = false;
+    const handler = vi.fn().mockImplementation(async () => {
+      // What the real cli_command handler's guard replay observes.
+      rowLiveDuringHandler = getPendingApproval('appr-live') !== undefined;
+    });
+    registerApprovalHandler('grant_recheck_action', handler);
+
+    createPendingApproval({
+      approval_id: 'appr-live',
+      session_id: 'sess-1',
+      request_id: 'appr-live',
+      action: 'grant_recheck_action',
+      payload: JSON.stringify({ frame: { command: 'noop' } }),
+      created_at: now(),
+      title: 'Grant recheck',
+      options_json: JSON.stringify([]),
+    });
+
+    await handleApprovalsResponse({
+      questionId: 'appr-live',
+      value: 'approve',
+      userId: 'owner-live',
+      channelType: 'telegram',
+      platformId: 'dm-owner-live',
+      threadId: null,
+    });
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(rowLiveDuringHandler).toBe(true); // was false when the row was deleted up-front
+    expect(getPendingApproval('appr-live')).toBeUndefined(); // released after the handler
+  });
+
   it('allows global admins to resolve approvals without a session-scoped agent group', async () => {
     upsertUser({ id: 'telegram:global-admin', kind: 'telegram', display_name: 'Global Admin', created_at: now() });
     grantRole({

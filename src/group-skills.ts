@@ -5,7 +5,7 @@
  * `data/v2-sessions/<group-id>/.claude-shared/skills/<name>` (src/templates/create-agent.ts).
  * Claude reads that store directly — it is mounted at `~/.claude/skills`, and
  * real dirs survive the symlink-only skill-link prune. Every OTHER surfaces-owning
- * provider (codex, pi, …) reads a DIFFERENT per-group skills directory,
+ * provider (codex, opencode, pi, …) reads a DIFFERENT per-group skills directory,
  * often READ-ONLY-mounted, so the skills must be copied there host-side, before
  * the container starts.
  *

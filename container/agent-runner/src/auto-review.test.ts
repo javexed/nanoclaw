@@ -1,5 +1,5 @@
 /**
- * The auto-trigger decision (docs/learning-loop.md §1).
+ * The auto-trigger decision (docs/webchat/learning-loop.md §1).
  *
  * Auto mode runs a review with nobody watching, so the guards ARE the feature:
  * cost (threshold + cooldown), noise (a /learn turn never re-triggers), and
@@ -7,7 +7,7 @@
  * exists for a human who asked, not for an automation nobody is watching).
  */
 import { describe, expect, it } from 'bun:test';
-import { AUTO_REVIEW_MIN_TOOLS, resolveRoomLearning, shouldAutoReview } from './poll-loop.js';
+import { AUTO_REVIEW_MIN_TOOLS, resolveRoomLearning, shouldAutoReview } from './learning-loop.js';
 
 const base = {
   learning: undefined as { autoTrigger?: boolean; cooldownMinutes?: number } | undefined,

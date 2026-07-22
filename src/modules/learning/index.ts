@@ -1,6 +1,6 @@
 /**
  * Learning loop module — registers the `propose_skill` delivery action.
- * See docs/design/learning-loop.md.
+ * See docs/webchat/design/learning-loop.md.
  */
 import { registerDeliveryAction } from '../../delivery.js';
 import { unguarded } from '../../guard/index.js';

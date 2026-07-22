@@ -1,5 +1,5 @@
 /**
- * The curator sweep (docs/design/learning-loop.md §6).
+ * The curator sweep (docs/webchat/design/learning-loop.md §6).
  *
  * A skill library that only ever grows rots: skills for tools that changed,
  * lessons for projects that ended. Hermes solves this with a curator; ours rides

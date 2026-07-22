@@ -113,6 +113,31 @@ function authFetch(url, opts = {}) {
   return fetch(url, opts);
 }
 
+/** authFetch + JSON ceremony in one call. Sends a JSON body when `body` is
+ * given, parses the JSON response (tolerating empty/non-JSON), and throws
+ * Error(body.error || statusText) on !ok. Options: { method, body, headers }. */
+async function apiJson(url, { method = 'GET', body, headers } = {}) {
+  const opts = { method, headers: { ...headers } };
+  if (body !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const res = await authFetch(url, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error || res.statusText || `HTTP ${res.status}`);
+    err.status = res.status;
+    err.body = data;
+    throw err;
+  }
+  return data;
+}
+
+/** Error → toast, one shape everywhere (kind:'error' can't be forgotten). */
+function toastError(err, fallback) {
+  showToast(err?.message || fallback || 'Something went wrong', { kind: 'error' });
+}
+
 async function checkAuth() {
   // Localhost doesn't need auth
   if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
@@ -803,7 +828,6 @@ async function renderAccessSettings() {
   if (!info) return;
 
   const btn = $('#access-bearer-btn');
-  const hint = $('#access-bearer-hint');
   if (!accessBearerWired) {
     accessBearerWired = true;
     btn?.addEventListener('click', () => toggleBearerToken(btn.dataset.want === 'enable'));
@@ -980,7 +1004,6 @@ let wizardStep = 0;
 let wizardWired = false;
 let wizardOllamaProbe = null; // last successful Ollama probe { kind, endpoint, models }
 let wizardEngine = 'claude'; // default (fallback) engine chosen in step 0
-let wizardOllamaModelId = null; // first roster model added in the Ollama panel — assigned to the created agent
 let wizardCodexAvailable = false;
 let codexInstallActive = false;
 let wizardCred = null; // last /api/workspace-credential snapshot — gates step-0 Next
@@ -1362,7 +1385,6 @@ async function wizardSelectOllamaModel(modelId) {
       wizardSetStatus('#wizard-ollama-status', 'Setting the default failed: ' + (derr.error || dr.statusText), 'err');
       return;
     }
-    wizardOllamaModelId = id;
     $('#wizard-ollama-status').hidden = true; // the ✓ connected card is the confirmation now
     await refreshWizardCredState(); // swaps the picker for the ✓ <model> · default card
   } catch {
@@ -2174,7 +2196,7 @@ function wireWizard() {
       $('#wizard-codex-key').value = '';
       await refreshWizardCredState(); // controls swap to the ✓ connected card
     } finally {
-      btn.disabled = false;
+      done(); // restores label + disabled state
     }
   });
   $('#wizard-claude-save')?.addEventListener('click', async () => {
@@ -2501,6 +2523,7 @@ function openSettings() {
   renderTtsSetupSettings();
   renderSttSetupSettings();
   renderAutoLearnSetting();
+  renderPrejudgeSettings();
   renderSkillSourcesSettings();
   void renderMcpSources();
   renderAccessSettings();
@@ -3453,6 +3476,108 @@ async function renderAutoLearnSetting() {
   });
 }
 
+// ── Settings → Approval pre-judge (owner-only) ──────────────────────────────
+// An optional LLM triage tier in front of approval holds (docs/webchat/
+// approval-prejudge.md). Judge model Off = feature off; the action opt-ins
+// appear once a judge is set. Never-listed actions render disabled — they
+// always reach a human, no matter what.
+async function renderPrejudgeSettings() {
+  const section = $('#settings-prejudge');
+  if (!section) return;
+  section.hidden = !isOwnerView;
+  if (!isOwnerView) return;
+  let cfg = null;
+  try {
+    const r = await authFetch('/api/approvals/prejudge');
+    if (r.ok) cfg = await r.json();
+  } catch {}
+  if (!cfg) {
+    section.hidden = true; // endpoint 403'd or failed — no surface
+    return;
+  }
+  const sel = $('#prejudge-model-select');
+  // Rebuild the options every open — the roster may have changed. Only
+  // models the PUT accepts are listed: anthropic kind (OneCLI-proxied), or
+  // a local kind with an endpoint.
+  sel.innerHTML = '';
+  const off = document.createElement('option');
+  off.value = '';
+  off.textContent = 'Off';
+  sel.appendChild(off);
+  try {
+    const models = await (await authFetch('/api/models')).json();
+    for (const m of models) {
+      const usable = m.kind === 'anthropic' || ((m.kind === 'ollama' || m.kind === 'openai-compatible') && m.endpoint);
+      if (!usable) continue;
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = `${m.name} (${m.model_id})`;
+      sel.appendChild(opt);
+    }
+  } catch {
+    /* roster unavailable — Off still renders */
+  }
+  sel.value = cfg.modelId || '';
+  if (sel.value !== (cfg.modelId || '')) sel.value = ''; // stored judge left the roster
+  renderPrejudgeActions(cfg);
+  sel.onchange = async () => {
+    try {
+      const out = await apiJson('/api/approvals/prejudge', {
+        method: 'PUT',
+        body: { modelId: sel.value || null },
+      });
+      showToast(sel.value ? 'Approval pre-judge on' : 'Approval pre-judge off', { kind: 'success' });
+      renderPrejudgeActions(out);
+    } catch (err) {
+      showToast('Could not save: ' + (err?.message || err), { kind: 'error' });
+      renderPrejudgeSettings();
+    }
+  };
+}
+
+function renderPrejudgeActions(cfg) {
+  const group = $('#prejudge-actions-group');
+  const list = $('#prejudge-actions-list');
+  if (!group || !list) return;
+  group.hidden = !cfg.modelId;
+  if (!cfg.modelId) return;
+  list.innerHTML = '';
+  const never = new Set(cfg.neverList?.actions || []);
+  const opted = new Set(cfg.actions || []);
+  // Everything a handler is registered for, plus the never-list (shown
+  // disabled) and anything already opted in on an older install.
+  const actions = [...new Set([...(cfg.knownActions || []), ...never, ...opted])].sort();
+  for (const action of actions) {
+    const label = document.createElement('label');
+    label.className = 'setting-toggle';
+    const name = document.createElement('span');
+    name.textContent = action;
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.dataset.action = action;
+    cb.checked = opted.has(action);
+    if (never.has(action)) {
+      cb.checked = false;
+      cb.disabled = true;
+      label.classList.add('prejudge-never');
+      label.title = 'Always needs a human';
+    } else {
+      cb.addEventListener('change', async () => {
+        const next = [...list.querySelectorAll('input:not(:disabled):checked')].map((el) => el.dataset.action);
+        try {
+          await apiJson('/api/approvals/prejudge', { method: 'PUT', body: { actions: next } });
+          showToast('Approval pre-judge saved', { kind: 'success' });
+        } catch (err) {
+          cb.checked = !cb.checked;
+          showToast('Could not save: ' + (err?.message || err), { kind: 'error' });
+        }
+      });
+    }
+    label.append(name, cb);
+    list.appendChild(label);
+  }
+}
+
 // ── Settings → "Set up routing" (one-click add-routing install) ─────────────
 // Owner-only (the /api/router/install endpoint 403s otherwise, hiding the whole
 // section). Scaffolds routing + pulls the classifier model, then the Routing tab
@@ -3690,6 +3815,7 @@ $('#overflow-menu')?.addEventListener('click', (e) => {
   else if (action === 'mcp') openManage('mcp');
   else if (action === 'skills') openManage('skills');
   else if (action === 'routing') openManage('routing');
+  else if (action === 'journey') toggleJourney();
   else if (action === 'topology') toggleTopology();
   else if (action === 'wiring') toggleMatrix();
   else if (action === 'dashboard') toggleDashboard();
@@ -3895,7 +4021,7 @@ function blockingOverlayOpen() {
   // confirm modals; the rest are listed explicitly. Visible = present and not
   // [hidden].
   if (document.querySelector('.modal-overlay:not([hidden])')) return true;
-  const others = ['model-picker', 'lightbox', 'members-overlay', 'handle-popover', 'overflow-menu', 'search-results'];
+  const others = ['model-picker', 'lightbox', 'members-overlay', 'handle-popover', 'overflow-menu', 'search-results', 'learn-menu'];
   return others.some((id) => {
     const el = document.getElementById(id);
     return el && !el.hidden;
@@ -4334,6 +4460,9 @@ function connect() {
         if (msg.messages.length > 0) {
           setLastSeenMessageId(msg.messages[msg.messages.length - 1].id);
         }
+        const sendAfter = pendingSendAfterJoin;
+        pendingSendAfterJoin = null;
+        if (sendAfter) triggerLearn(sendAfter);
         const jumpTo = pendingJumpMessageId;
         pendingJumpMessageId = null;
         if (jumpTo) {
@@ -4499,6 +4628,10 @@ function connect() {
         break;
       case 'approval_resolved':
         handleApprovalResolvedEvent(msg);
+        break;
+      case 'skill_draft_review':
+        // Outcome of an async Keep (learning loop) — see handleSkillDraftReview.
+        handleSkillDraftReview(msg);
         break;
       case 'error':
         console.error('WS error:', msg.error);
@@ -5391,13 +5524,10 @@ function updateThreadSyncControls() {
 
 async function createThread(title, roomId = currentRoom) {
   try {
-    const r = await authFetch(`/api/rooms/${encodeURIComponent(roomId)}/threads`, {
+    const thread = await apiJson(`/api/rooms/${encodeURIComponent(roomId)}/threads`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title }),
+      body: { title },
     });
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
-    const thread = await r.json();
     // Create AND enter the new (blank) thread — but cleanly, via a SINGLE WS
     // join, so main's transcript can't bleed in (the old joinRoom+openThread
     // double-join race). Same room → openThread (one join into the thread);
@@ -5624,12 +5754,10 @@ function buildThreadRenameRow(t) {
 
 async function submitThreadRename(threadId, title) {
   try {
-    const r = await authFetch(`/api/rooms/${encodeURIComponent(currentRoom)}/threads/${encodeURIComponent(threadId)}`, {
+    await apiJson(`/api/rooms/${encodeURIComponent(currentRoom)}/threads/${encodeURIComponent(threadId)}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title }),
+      body: { title },
     });
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
     await loadThreadList(currentRoom);
   } catch (err) {
     showToast('Rename failed: ' + (err.message || err), { kind: 'error' });
@@ -5644,11 +5772,9 @@ async function submitThreadRename(threadId, title) {
 async function deleteThreadConfirm(thread, rowEl) {
   const commit = async () => {
     try {
-      const r = await authFetch(
-        `/api/rooms/${encodeURIComponent(currentRoom)}/threads/${encodeURIComponent(thread.thread_id)}`,
-        { method: 'DELETE' },
-      );
-      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+      await apiJson(`/api/rooms/${encodeURIComponent(currentRoom)}/threads/${encodeURIComponent(thread.thread_id)}`, {
+        method: 'DELETE',
+      });
       if (currentThread === thread.thread_id) openThread('main');
       await loadThreadList(currentRoom);
       showToast('Thread deleted', { kind: 'success' });
@@ -5689,6 +5815,11 @@ function cssEscape(s) {
 }
 
 let pendingJumpMessageId = null;
+// One-shot message queued behind a programmatic room switch (the Skills page's
+// 'Add from link…'): sending in the same tick as the join loses the optimistic
+// bubble to the incoming history render, so the 'history' handler flushes this
+// once the transcript is in place. Same idiom as pendingJumpMessageId.
+let pendingSendAfterJoin = null;
 
 // Smooth room/thread switches: instead of blanking the transcript to a
 // "Loading…" flash (a jarring gap while the async `history` message is in
@@ -5711,6 +5842,9 @@ function joinRoom(roomId, roomName, jumpMessageId, initialThread) {
   // When set (e.g. from a search-result click), the `history` handler lands on
   // this message instead of scrolling to the bottom.
   pendingJumpMessageId = jumpMessageId || null;
+  // A queued post-join send belongs to the join that queued it (set AFTER the
+  // joinRoom call) — a newer switch must not deliver it into the wrong room.
+  pendingSendAfterJoin = null;
   closeAgentDetail();
   closeRoomDetail();
   closeModelDetail();
@@ -6012,10 +6146,16 @@ function appendSkillDraftCard(msg, beforeNode) {
     keep.className = 'btn btn-primary';
     keep.textContent = 'Keep';
     keep.title = `Wire to ${d.agentName}`;
+    keep.dataset.draftId = d.draftId;
+    // A re-render mid-review must not resurrect a clickable Keep.
+    if (reviewingDrafts.has(d.draftId)) markDraftReviewing(keep, true);
     keep.addEventListener('click', () =>
-      armUndo(actions, `Keeping ${d.skillName}…`, UNDO_SECONDS, () =>
-        keepSkillDraft({ id: d.draftId, agentGroupId: d.agentGroupId, agentName: d.agentName }, keep),
-      ),
+      // restore() first: the card lives on through 'Keeping…' → 'Reviewing…',
+      // which must land on the real (connected) Keep button.
+      armUndo(actions, `Keeping ${d.skillName}…`, UNDO_SECONDS, (restore) => {
+        restore();
+        return keepSkillDraft({ id: d.draftId, agentGroupId: d.agentGroupId, agentName: d.agentName }, keep);
+      }),
     );
     const drop = document.createElement('button');
     drop.type = 'button';
@@ -6486,7 +6626,7 @@ async function updateUserCredsBanner(roomId) {
       hideAll();
       return;
     }
-    const { connected, mode, credType, oauthAllowed, apiKeyAllowed = true, provider = 'claude' } = await r.json();
+    const { connected, mode, oauthAllowed, apiKeyAllowed = true, provider = 'claude' } = await r.json();
     userCredsProvider = provider;
     const { name, subWord, keyWord, keyPlaceholder } = userCredsWords(provider);
     // The room's mode is the master switch: 'disabled' (User credentials: Off)
@@ -6583,7 +6723,7 @@ $('#handle-creds-action')?.addEventListener('click', async () => {
   }
 });
 
-$('#user-creds-connect-btn')?.addEventListener('click', async () => {
+$('#user-creds-connect-btn')?.addEventListener('click', async (e) => {
   const input = $('#user-creds-key-input');
   // First click reveals the input; second (with a value) submits.
   if (input.hidden) {
@@ -6593,17 +6733,27 @@ $('#user-creds-connect-btn')?.addEventListener('click', async () => {
   }
   const apiKey = input.value.trim();
   if (!apiKey) return;
-  const r = await authFetch('/api/user-credentials/credential', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
-    body: JSON.stringify({ roomId: currentRoom, apiKey }),
-  });
-  if (r.ok) {
-    showToast(`Connected your ${userCredsWords(userCredsProvider).keyWord}.`, { kind: 'success' });
-    await updateUserCredsBanner(currentRoom);
-  } else {
-    const err = await r.json().catch(() => ({}));
-    showToast('Failed to connect key: ' + (err.error || r.statusText), { kind: 'error' });
+  // Busy-guard + try/catch: without them a network failure here was an
+  // unhandled rejection — the user's key submit died with zero feedback.
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  try {
+    const r = await authFetch('/api/user-credentials/credential', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
+      body: JSON.stringify({ roomId: currentRoom, apiKey }),
+    });
+    if (r.ok) {
+      showToast(`Connected your ${userCredsWords(userCredsProvider).keyWord}.`, { kind: 'success' });
+      await updateUserCredsBanner(currentRoom);
+    } else {
+      const err = await r.json().catch(() => ({}));
+      showToast('Failed to connect key: ' + (err.error || r.statusText), { kind: 'error' });
+    }
+  } catch (err) {
+    showToast('Failed to connect key: ' + (err?.message || 'network error'), { kind: 'error' });
+  } finally {
+    btn.disabled = false;
   }
 });
 
@@ -6891,7 +7041,9 @@ function showToast(message, { kind = 'info', timeout } = {}) {
 // Confirm, each `{ label, value, className? }`. Clicking one resolves the promise
 // with its `value` (Confirm still resolves `true`, Cancel/Escape `false`), so a
 // caller can offer more than a yes/no without a bespoke modal.
-function showConfirmModal({ title, body, confirmLabel = 'Confirm', cancelLabel = 'Cancel', destructive = false, extraActions = [] }) {
+// `beforeConfirm` (optional): runs on every confirm attempt (button or Enter);
+// returning false keeps the modal open — the inline-validation hook.
+function showConfirmModal({ title, body, confirmLabel = 'Confirm', cancelLabel = 'Cancel', destructive = false, extraActions = [], beforeConfirm = null }) {
   return new Promise((resolve) => {
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay confirm-overlay';
@@ -6950,12 +7102,16 @@ function showConfirmModal({ title, body, confirmLabel = 'Confirm', cancelLabel =
       overlay.remove();
       resolve(result);
     };
+    const confirm = () => {
+      if (beforeConfirm && beforeConfirm() === false) return;
+      close(true);
+    };
     const onKey = (e) => {
       if (e.key === 'Escape') close(false);
-      else if (e.key === 'Enter') close(true);
+      else if (e.key === 'Enter') confirm();
     };
     cancelBtn.addEventListener('click', () => close(false));
-    confirmBtn.addEventListener('click', () => close(true));
+    confirmBtn.addEventListener('click', confirm);
     overlay.addEventListener('click', (e) => {
       if (e.target === overlay) close(false);
     });
@@ -6963,6 +7119,47 @@ function showConfirmModal({ title, body, confirmLabel = 'Confirm', cancelLabel =
     // Focus Cancel for destructive actions so an accidental Enter doesn't delete.
     (destructive ? cancelBtn : confirmBtn).focus();
   });
+}
+
+/** Single-line text prompt in the app's modal chrome — replaces native prompt()
+ * (unstylable, ESC-inconsistent, blocked in some PWA contexts). Returns the
+ * trimmed value, or null on cancel/empty.
+ * `validate(trimmedValue)` (optional): return an error string to keep the modal
+ * open with that message inline (DESIGN §5 — field validation is inline text),
+ * or null/undefined to accept. */
+async function showInputModal({ title, placeholder = '', value = '', confirmLabel = 'Create', validate = null }) {
+  const wrap = document.createElement('div');
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'confirm-input';
+  input.placeholder = placeholder;
+  input.value = value;
+  input.autocomplete = 'off';
+  wrap.appendChild(input);
+  let beforeConfirm = null;
+  if (validate) {
+    const err = document.createElement('div');
+    err.className = 'confirm-input-error';
+    err.hidden = true;
+    wrap.appendChild(err);
+    input.addEventListener('input', () => {
+      err.hidden = true;
+      input.classList.remove('invalid');
+    });
+    beforeConfirm = () => {
+      const msg = validate(input.value.trim());
+      if (!msg) return true;
+      err.textContent = msg;
+      err.hidden = false;
+      input.classList.add('invalid');
+      input.focus();
+      return false;
+    };
+  }
+  const done = showConfirmModal({ title, body: wrap, confirmLabel, beforeConfirm });
+  input.focus(); // after showConfirmModal's own focus call, so the input wins
+  const ok = await done;
+  return ok ? input.value.trim() || null : null;
 }
 
 function renderFileBubble(meta) {
@@ -7104,10 +7301,13 @@ async function uploadFile(file, caption) {
   form.append('file', file);
   if (caption) form.append('caption', caption);
   try {
-    const res = await authFetch(`/api/rooms/${encodeURIComponent(currentRoom)}/upload`, {
-      method: 'POST',
-      body: form,
-    });
+    const res = await authFetch(
+      `/api/rooms/${encodeURIComponent(currentRoom)}/upload?thread_id=${encodeURIComponent(currentThread)}`,
+      {
+        method: 'POST',
+        body: form,
+      },
+    );
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       console.error('Upload failed:', err.error || res.statusText);
@@ -7166,11 +7366,14 @@ async function uploadFileChunked(file, caption) {
     if (i === totalChunks - 1 && caption) body.caption = caption;
 
     try {
-      const res = await authFetch(`/api/rooms/${encodeURIComponent(currentRoom)}/upload/chunk`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
+      const res = await authFetch(
+        `/api/rooms/${encodeURIComponent(currentRoom)}/upload/chunk?thread_id=${encodeURIComponent(currentThread)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+      );
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         if (statusMsg) statusMsg.textContent = `Upload failed: ${err.error || res.statusText}`;
@@ -8078,7 +8281,7 @@ document.querySelectorAll('.manage-tab').forEach((t) => {
 // delete imported ones. Assignment to agents stays in the agent detail's Skills
 // panel; this is the catalog.
 // Learning loop: skills the agents proposed, staged for review (keep + wire, or
-// discard). See docs/design/learning-loop.md.
+// discard). See docs/webchat/design/learning-loop.md.
 // Pending-drafts badge (learning loop): a count on the ⋯ menu so staged drafts
 // aren't invisible until someone happens to open Skills. Non-admins get a 403
 // from the endpoint → count 0 → badge hidden, correct for who can act on them.
@@ -8116,6 +8319,7 @@ async function renderSkillDrafts() {
   for (const d of drafts) {
     const li = document.createElement('li');
     li.className = 'skill-row';
+    li.dataset.draftId = d.id; // stable row hook (the Keep button detaches during the undo countdown)
     const info = document.createElement('div');
     info.className = 'skill-info';
     info.style.cursor = 'pointer';
@@ -8155,10 +8359,19 @@ async function renderSkillDrafts() {
     keep.className = 'btn btn-secondary skill-catalog-add';
     keep.textContent = 'Keep';
     keep.title = `Wire to ${d.agentName}`;
+    keep.dataset.draftId = d.id;
+    // A re-render mid-review must not resurrect a clickable Keep.
+    if (reviewingDrafts.has(d.id)) markDraftReviewing(keep, true);
     const actions = document.createElement('span');
     actions.className = 'skill-draft-actions';
     keep.addEventListener('click', () =>
-      armUndo(actions, `Keeping ${d.skillName}…`, UNDO_SECONDS, () => keepSkillDraft(d, keep)),
+      // Restore the buttons before the keep runs: the row lives on through
+      // 'Keeping…' → 'Reviewing…', which must land on the real (connected)
+      // Keep button, not linger as a drained countdown.
+      armUndo(actions, `Keeping ${d.skillName}…`, UNDO_SECONDS, (restore) => {
+        restore();
+        return keepSkillDraft(d, keep);
+      }),
     );
     const drop = document.createElement('button');
     drop.type = 'button';
@@ -8216,7 +8429,10 @@ let skillEditorDraft = null;
 // A self-contained SKILL.md viewer/editor modal that overlays the CURRENT view
 // (opened from the agent page, so you never leave it). onSave(content) returns a
 // promise; a thrown error keeps the modal open and surfaces the message.
-function openSkillEditorModal({ name, body, editable, badgeText, onSave }) {
+// `actions` (optional): [{ label, onClick }] — low-emphasis buttons rendered
+// before Cancel/Close; clicking one closes the modal, then runs onClick (e.g.
+// the scoped editor's 'History' jump into Journey).
+function openSkillEditorModal({ name, body, editable, badgeText, onSave, actions = [] }) {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   const modal = document.createElement('div');
@@ -8249,6 +8465,18 @@ function openSkillEditorModal({ name, body, editable, badgeText, onSave }) {
 
   const footer = document.createElement('div');
   footer.className = 'confirm-actions';
+  const actionBtns = actions.map((a) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn btn-ghost';
+    b.textContent = a.label;
+    b.addEventListener('click', () => {
+      close();
+      a.onClick();
+    });
+    footer.appendChild(b);
+    return b;
+  });
   const closeBtn = document.createElement('button');
   closeBtn.type = 'button';
   closeBtn.className = 'btn-cancel';
@@ -8276,7 +8504,7 @@ function openSkillEditorModal({ name, body, editable, badgeText, onSave }) {
     // Focus trap: Tab cycles within the dialog (keyboard users must not land
     // behind the overlay — see manual-checks SC 2.1.2).
     if (e.key === 'Tab') {
-      const focusables = [ta, closeBtn, saveBtn].filter(Boolean);
+      const focusables = [ta, ...actionBtns, closeBtn, saveBtn].filter(Boolean);
       const i = focusables.indexOf(document.activeElement);
       if (e.shiftKey && (i <= 0)) {
         e.preventDefault();
@@ -8320,11 +8548,9 @@ function openSkillEditorModal({ name, body, editable, badgeText, onSave }) {
 async function openScopedSkillEditor(agentId, name) {
   let data = null;
   try {
-    const res = await authFetch(
+    data = await apiJson(
       `/api/agents/${encodeURIComponent(agentId)}/skills/scoped/${encodeURIComponent(name)}/content`,
     );
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
-    data = await res.json();
   } catch (err) {
     return showToast('Couldn’t load skill: ' + (err?.message || err), { kind: 'error' });
   }
@@ -8333,13 +8559,13 @@ async function openScopedSkillEditor(agentId, name) {
     body: data.body,
     editable: !!data.editable,
     badgeText: data.editable ? 'learned · editable (this agent)' : 'read-only',
+    // Deep-link into Journey pre-filtered to this skill's history.
+    actions: [{ label: 'History', onClick: () => openJourney({ agentGroupId: agentId, skill: name }) }],
     onSave: async (content) => {
-      const res = await authFetch(
+      const out = await apiJson(
         `/api/agents/${encodeURIComponent(agentId)}/skills/scoped/${encodeURIComponent(name)}/content`,
-        { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }) },
+        { method: 'PUT', body: { content } },
       );
-      const out = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(out.error || res.statusText);
       showToast(`Saved ${out.name} — applies on this agent's next spawn`, { kind: 'success' });
       if (selectedAgentId) renderAgentSkills(selectedAgentId);
     },
@@ -8351,9 +8577,7 @@ async function openScopedSkillEditor(agentId, name) {
 async function openPoolSkillFromAgent(name) {
   let data = null;
   try {
-    const res = await authFetch(`/api/skills/${encodeURIComponent(name)}`);
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
-    data = await res.json();
+    data = await apiJson(`/api/skills/${encodeURIComponent(name)}`);
   } catch (err) {
     return showToast('Couldn’t load skill: ' + (err?.message || err), { kind: 'error' });
   }
@@ -8364,13 +8588,7 @@ async function openPoolSkillFromAgent(name) {
     editable,
     badgeText: editable ? 'imported · editable' : 'built-in · read-only',
     onSave: async (content) => {
-      const res = await authFetch(`/api/skills/${encodeURIComponent(name)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content }),
-      });
-      const out = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(out.error || res.statusText);
+      const out = await apiJson(`/api/skills/${encodeURIComponent(name)}`, { method: 'PUT', body: { content } });
       showToast(`Saved ${out.name} — applies on each agent's next spawn`, { kind: 'success' });
     },
   });
@@ -8378,9 +8596,7 @@ async function openPoolSkillFromAgent(name) {
 
 async function openSkillDraft(id) {
   try {
-    const res = await authFetch(`/api/skill-drafts/${encodeURIComponent(id)}`);
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
-    const d = await res.json();
+    const d = await apiJson(`/api/skill-drafts/${encodeURIComponent(id)}`);
     const isPatch = d.kind === 'patch' && d.targetSkill;
     skillEditorDraft = {
       id: d.id,
@@ -8468,8 +8684,24 @@ $('#skill-editor-mode')?.addEventListener('click', () => {
   renderDraftEditor();
 });
 
+// Swaps actionsEl's children for a countdown (label + draining bar + Undo)
+// and calls onCommit(restore) when it expires. The container's width is
+// frozen for the countdown: the undo widget is wider than the buttons it
+// replaces, and letting it grow the box squeezes the sibling info column —
+// the row's name wraps and its description re-truncates (DESIGN.md: a state
+// change alters only the control, never sibling typography or layout).
+// onCommit receives `restore`: callers whose row lives on after the commit
+// (Keep → 'Reviewing…') call it to put the original buttons back; callers
+// whose row is about to disappear (Discard, thread delete) ignore it.
 function armUndo(actionsEl, label, seconds, onCommit) {
   const original = [...actionsEl.childNodes];
+  const { width } = actionsEl.getBoundingClientRect();
+  if (width) actionsEl.style.width = `${width}px`;
+  const restore = () => {
+    actionsEl.style.width = '';
+    actionsEl.textContent = '';
+    for (const n of original) actionsEl.appendChild(n);
+  };
   actionsEl.textContent = '';
   const wrap = document.createElement('span');
   wrap.className = 'undo-timer';
@@ -8493,21 +8725,117 @@ function armUndo(actionsEl, label, seconds, onCommit) {
       fill.style.width = '0%';
     }),
   );
-  const t = setTimeout(() => onCommit(), seconds * 1000);
+  const t = setTimeout(() => onCommit(restore), seconds * 1000);
   undo.addEventListener('click', () => {
     clearTimeout(t);
-    actionsEl.textContent = '';
-    for (const n of original) actionsEl.appendChild(n);
+    restore();
   });
 }
 const UNDO_SECONDS = 10;
 
-// Learning-loop trial: mount the draft into a fresh "Trial:" thread's session
-// (and only that session) so the skill is judged by behavior, not prose. The
-// server reuses the same thread on a re-press.
+// Draft ids whose keep is under server-side overlap review (Keep pressed,
+// 202 received, outcome not yet pushed). A re-render keeps those rows in
+// their 'Reviewing…' state, and the WS handler re-enables exactly the right
+// button. Per-draft, so OTHER drafts stay keepable in parallel.
+const reviewingDrafts = new Set();
+
+/** The Keep button currently rendered for a draft (null after navigation). */
+function draftKeepButton(draftId) {
+  return document.querySelector(`button[data-draft-id="${CSS.escape(draftId)}"]`);
+}
+
+/** Reflect a draft's in-flight review on its Keep button, if one is rendered. */
+function markDraftReviewing(btn, reviewing) {
+  if (!btn) return;
+  btn.disabled = reviewing;
+  btn.textContent = reviewing ? 'Reviewing…' : 'Keep';
+}
+
+// Overlap review outcome: the server found existing skills/drafts that cover
+// the same ground. Offer to update one of them (apply this draft over it),
+// keep this as a new skill anyway, or discard the draft. Only 'scoped'/'pool'
+// skills are updatable — a 'pending-draft' overlap is another draft, not a
+// skill to patch. A global modal, so it reaches the user even if they
+// navigated away while the review ran.
+async function showOverlapChoice(d, overlaps) {
+  const el = document.createElement('div');
+  for (const o of overlaps) {
+    const row = document.createElement('div');
+    row.className = 'import-warning';
+    row.textContent = `⚠ ${o.name} (${o.source === 'pending-draft' ? 'pending draft' : o.source}) — ${o.reason}`;
+    el.appendChild(row);
+  }
+  const updatable = overlaps.filter((o) => o.source !== 'pending-draft');
+  // Adaptive primary: a single existing skill → "Update <name>" is the
+  // recommended action; otherwise the primary stays "Keep as new".
+  let confirmLabel;
+  let confirmDecision;
+  const extras = [];
+  if (updatable.length === 1) {
+    confirmLabel = `Update ${updatable[0].name}`;
+    confirmDecision = { action: 'update', target: updatable[0].name };
+    extras.push({ label: 'Keep as new', value: { action: 'keep-new' }, className: 'btn btn-secondary' });
+  } else {
+    confirmLabel = 'Keep as new';
+    confirmDecision = { action: 'keep-new' };
+    for (const o of updatable.slice(0, 3))
+      extras.push({ label: `Update ${o.name}`, value: { action: 'update', target: o.name }, className: 'btn btn-secondary' });
+  }
+  extras.push({ label: 'Discard draft', value: { action: 'discard' }, className: 'btn btn-danger' });
+  const choice = await showConfirmModal({
+    title: `Overlaps with ${overlaps.length === 1 ? overlaps[0].name : overlaps.length + ' existing skills'}`,
+    body: el,
+    confirmLabel,
+    extraActions: extras,
+  });
+  const decision = choice === true ? confirmDecision : choice || { action: 'cancel' };
+  // force / updateTarget skip the server-side review, so these re-drives
+  // resolve synchronously through the same keepSkillDraft.
+  if (decision.action === 'update') return keepSkillDraft(d, draftKeepButton(d.id), false, decision.target);
+  if (decision.action === 'keep-new') return keepSkillDraft(d, draftKeepButton(d.id), true);
+  if (decision.action === 'discard') {
+    await discardSkillDraft(d.id);
+    showToast(`Discarded ${d.skillName || 'draft'}`, { kind: 'success' });
+  }
+}
+
+// Async keep-review outcome, pushed by the server after a 202-queued Keep.
+// kept → success toast + list refresh; overlaps → the overlap-choice modal
+// (re-drives keep with force/updateTarget); error → toast. Fires on every
+// open tab of the pressing user, so the outcome lands as a toast even after
+// navigating away from the Skills view.
+function handleSkillDraftReview(msg) {
+  reviewingDrafts.delete(msg.draftId);
+  const d = { id: msg.draftId, skillName: msg.skillName, agentGroupId: msg.agentGroupId, agentName: msg.agentName };
+  if (msg.outcome === 'kept') {
+    showToast(
+      msg.updated
+        ? `Updated ${msg.name || d.skillName} — wired to ${d.agentName}`
+        : `Kept ${msg.name || d.skillName} — wired to ${d.agentName}`,
+      { kind: 'success' },
+    );
+    void refreshDraftBadge();
+    renderSkillsRegistry();
+    return;
+  }
+  markDraftReviewing(draftKeepButton(msg.draftId), false);
+  if (msg.outcome === 'overlaps' && Array.isArray(msg.overlaps) && msg.overlaps.length) {
+    void showOverlapChoice(d, msg.overlaps);
+    return;
+  }
+  toastError(new Error(msg.error || 'Review failed'), 'Keep failed');
+}
+
+// Keep a staged draft. A plain Keep is asynchronous: the server validates,
+// answers 202 { queued: true }, runs the (slow, LLM-backed) overlap review in
+// the background, and pushes the outcome as a 'skill_draft_review' WS event —
+// so only THIS row goes busy, other drafts stay keepable, and navigation is
+// never blocked. force / updateTarget skip the review and resolve here.
 async function keepSkillDraft(d, btn, force, updateTarget) {
-  btn.disabled = true;
-  btn.textContent = updateTarget ? 'Updating…' : 'Keeping…';
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = updateTarget ? 'Updating…' : 'Keeping…';
+  }
   try {
     const qs = updateTarget ? `?updateTarget=${encodeURIComponent(updateTarget)}` : force ? '?force=1' : '';
     const res = await authFetch(`/api/skill-drafts/${encodeURIComponent(d.id)}/keep${qs}`, {
@@ -8516,50 +8844,9 @@ async function keepSkillDraft(d, btn, force, updateTarget) {
       body: JSON.stringify({ agentGroupId: d.agentGroupId }),
     });
     const body = await res.json().catch(() => ({}));
-    // Overlap review: the server found existing skills/drafts that cover the same
-    // ground. Offer to update one of them (apply this draft over it), keep this as
-    // a new skill anyway, or discard the draft. Only 'scoped'/'pool' skills are
-    // updatable — a 'pending-draft' overlap is another draft, not a skill to patch.
-    if (res.status === 409 && Array.isArray(body.overlaps) && body.overlaps.length) {
-      btn.disabled = false;
-      btn.textContent = 'Keep';
-      const el = document.createElement('div');
-      for (const o of body.overlaps) {
-        const row = document.createElement('div');
-        row.className = 'import-warning';
-        row.textContent = `⚠ ${o.name} (${o.source === 'pending-draft' ? 'pending draft' : o.source}) — ${o.reason}`;
-        el.appendChild(row);
-      }
-      const updatable = body.overlaps.filter((o) => o.source !== 'pending-draft');
-      // Adaptive primary: a single existing skill → "Update <name>" is the
-      // recommended action; otherwise the primary stays "Keep as new".
-      let confirmLabel;
-      let confirmDecision;
-      const extras = [];
-      if (updatable.length === 1) {
-        confirmLabel = `Update ${updatable[0].name}`;
-        confirmDecision = { action: 'update', target: updatable[0].name };
-        extras.push({ label: 'Keep as new', value: { action: 'keep-new' }, className: 'btn btn-secondary' });
-      } else {
-        confirmLabel = 'Keep as new';
-        confirmDecision = { action: 'keep-new' };
-        for (const o of updatable.slice(0, 3))
-          extras.push({ label: `Update ${o.name}`, value: { action: 'update', target: o.name }, className: 'btn btn-secondary' });
-      }
-      extras.push({ label: 'Discard draft', value: { action: 'discard' }, className: 'btn btn-danger' });
-      const choice = await showConfirmModal({
-        title: `Overlaps with ${body.overlaps.length === 1 ? body.overlaps[0].name : body.overlaps.length + ' existing skills'}`,
-        body: el,
-        confirmLabel,
-        extraActions: extras,
-      });
-      const decision = choice === true ? confirmDecision : choice || { action: 'cancel' };
-      if (decision.action === 'update') return keepSkillDraft(d, btn, false, decision.target);
-      if (decision.action === 'keep-new') return keepSkillDraft(d, btn, true);
-      if (decision.action === 'discard') {
-        await discardSkillDraft(d.id);
-        showToast(`Discarded ${d.skillName || 'draft'}`, { kind: 'success' });
-      }
+    if (res.status === 202 && body.queued) {
+      reviewingDrafts.add(d.id);
+      markDraftReviewing(btn, true);
       return;
     }
     if (!res.ok) throw new Error(body.error || res.statusText);
@@ -8570,9 +8857,8 @@ async function keepSkillDraft(d, btn, force, updateTarget) {
     void refreshDraftBadge();
     renderSkillsRegistry();
   } catch (err) {
-    showToast('Keep failed: ' + (err?.message || err), { kind: 'error' });
-    btn.disabled = false;
-    btn.textContent = 'Keep';
+    toastError(err, 'Keep failed');
+    markDraftReviewing(btn, false);
   }
 }
 
@@ -8580,8 +8866,7 @@ async function keepSkillDraft(d, btn, force, updateTarget) {
 // countdown IS the confirmation, and stacking a modal on top of it double-asks.
 async function discardSkillDraft(id) {
   try {
-    const res = await authFetch(`/api/skill-drafts/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    await apiJson(`/api/skill-drafts/${encodeURIComponent(id)}`, { method: 'DELETE' });
     void refreshDraftBadge();
     renderSkillDrafts();
   } catch (err) {
@@ -8636,12 +8921,7 @@ async function renderSkillDuplicates() {
       if (!ok) return;
       promote.disabled = true;
       try {
-        const res = await authFetch('/api/skills/promote', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: d.name }),
-        });
-        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+        await apiJson('/api/skills/promote', { method: 'POST', body: { name: d.name } });
         showToast(`${d.name} promoted — shared with all agents`, { kind: 'success' });
         renderSkillsRegistry();
       } catch (err) {
@@ -8654,12 +8934,99 @@ async function renderSkillDuplicates() {
   }
 }
 
+// ── Skills page sections: 'Workspace' (the shared pool) first, then one
+// section per agent that carries scoped skills. Collapse state is remembered
+// per section (same idiom as the Ollama server cards): Workspace defaults
+// open, agent sections default closed.
+function skillsSectionOpen(key) {
+  const v = localStorage.getItem('skillsSectionOpen:' + key);
+  return v === null ? key === 'pool' : v === '1';
+}
+function setSkillsSectionOpen(key, open) {
+  localStorage.setItem('skillsSectionOpen:' + key, open ? '1' : '0');
+}
+function skillsFilterQuery() {
+  return ($('#skills-filter')?.value || '').trim().toLowerCase();
+}
+// One visibility pass over the rendered list — no re-fetch, no re-render.
+// Without a query: headers always visible, rows follow the persisted collapse
+// state. With a query: rows show iff name+description match, sections with
+// matches are forced open, empty sections hide entirely.
+function applySkillsSections() {
+  const list = $('#skills-list');
+  if (!list) return;
+  const q = skillsFilterQuery();
+  let anyMatch = false;
+  for (const head of list.querySelectorAll('li[data-section-head]')) {
+    const key = head.dataset.sectionHead;
+    const rows = list.querySelectorAll(`li.skill-row[data-section="${CSS.escape(key)}"]`);
+    let shown = 0;
+    for (const row of rows) {
+      const visible = q ? (row.dataset.search || '').includes(q) : skillsSectionOpen(key);
+      row.hidden = !visible;
+      if (visible) shown++;
+    }
+    const open = q ? shown > 0 : skillsSectionOpen(key);
+    head.hidden = q ? shown === 0 : false;
+    head.classList.toggle('open', open);
+    head.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (q && shown > 0) anyMatch = true;
+  }
+  const none = $('#skills-no-match');
+  if (none) none.hidden = !q || anyMatch;
+}
+function buildSkillsSectionHead(key, label, roomName, count) {
+  const li = document.createElement('li');
+  li.className = 'skills-section-head';
+  li.dataset.sectionHead = key;
+  const chev = document.createElement('span');
+  chev.className = 'skills-section-chevron';
+  chev.textContent = '›';
+  const name = document.createElement('span');
+  name.className = 'skills-section-label';
+  name.textContent = label;
+  li.append(chev, name);
+  // Same location logic as the row pill: the room name only when the agent
+  // serves exactly one room — otherwise the agent name (the label) is the
+  // clearest context on its own.
+  if (roomName) {
+    const pill = document.createElement('span');
+    pill.className = 'skill-badge skill-badge-scope';
+    pill.textContent = roomName;
+    li.appendChild(pill);
+  }
+  const n = document.createElement('span');
+  n.className = 'skills-section-count';
+  n.textContent = String(count);
+  li.appendChild(n);
+  li.setAttribute('role', 'button');
+  li.setAttribute('tabindex', '0');
+  const toggle = () => {
+    if (skillsFilterQuery()) return; // an active filter owns expansion
+    setSkillsSectionOpen(key, !skillsSectionOpen(key));
+    applySkillsSections();
+  };
+  li.addEventListener('click', toggle);
+  li.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      toggle();
+    }
+  });
+  return li;
+}
+
 async function renderSkillsRegistry() {
   const list = $('#skills-list');
   if (!list) return;
   showSkillEditor(false); // always land on the browse view
   renderSkillDrafts();
   void renderSkillDuplicates();
+  // 'Add from link…' rides the learning loop (it sends /learn into a room), so
+  // it follows the same master gate as the composer 🎓. The page itself is
+  // already admin-gated, and the picker only offers agents the caller admins.
+  const learnLink = $('#skills-learn-link');
+  if (learnLink) learnLink.hidden = !learningMasterEnabled;
   list.innerHTML = '<li class="skills-empty">Loading…</li>';
   let skills = [];
   try {
@@ -8669,65 +9036,131 @@ async function renderSkillsRegistry() {
     console.error('Failed to load skills:', err);
   }
   list.innerHTML = '';
+  const filterEl = $('#skills-filter');
   if (!skills.length) {
+    if (filterEl) filterEl.hidden = true;
     list.innerHTML = '<li class="skills-empty">No skills yet — import one above.</li>';
     return;
   }
+  if (filterEl) filterEl.hidden = false;
+  // Partition into sections: the shared pool, then one section per agent
+  // holding scoped skills, sorted by agent name.
+  const pool = [];
+  const byAgent = new Map();
   for (const s of skills) {
-    const li = document.createElement('li');
-    li.className = 'skill-row';
-    const info = document.createElement('div');
-    info.className = 'skill-info';
-    const head = document.createElement('div');
-    head.className = 'skill-head';
-    const name = document.createElement('span');
-    name.className = 'skill-name';
-    name.textContent = s.name;
-    // Provenance badge: where the skill came from. Shipped skills are "built-in";
-    // imported ones show their origin ("Anthropic", "obra/superpowers",
-    // "awesomeskill.ai", "custom"); legacy imports with no recorded origin fall
-    // back to "imported".
-    let badge;
-    if (s.source === 'shipped') {
-      badge = document.createElement('span');
-      badge.className = 'skill-badge';
-      badge.textContent = 'built-in';
-    } else if (s.origin && s.origin.label) {
-      badge = originBadgeEl(s.origin);
-    } else {
-      badge = document.createElement('span');
-      badge.className = 'skill-badge skill-badge-user';
-      badge.textContent = 'imported';
-    }
-    head.append(name, badge);
-    const desc = document.createElement('span');
-    desc.className = 'skill-desc';
-    desc.textContent = s.description || '';
-    info.append(head, desc);
-    // Click the row to open the SKILL.md viewer/editor (user skills editable).
-    info.style.cursor = 'pointer';
-    info.setAttribute('role', 'button');
-    info.setAttribute('tabindex', '0');
-    info.addEventListener('click', () => openSkillEditor(s.name));
-    info.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        openSkillEditor(s.name);
-      }
-    });
-    li.appendChild(info);
-    if (s.source === 'user') {
-      li.dataset.skill = s.name;
-      const del = document.createElement('button');
-      del.type = 'button';
-      del.className = 'skill-delete';
-      del.textContent = 'Remove';
-      del.addEventListener('click', () => deleteSkill(s.name));
-      li.appendChild(del);
-    }
-    list.appendChild(li);
+    if (s.source === 'scoped') {
+      let g = byAgent.get(s.agentGroupId);
+      if (!g) byAgent.set(s.agentGroupId, (g = { name: s.agentName || '', rooms: s.rooms || [], skills: [] }));
+      g.skills.push(s);
+    } else pool.push(s);
   }
+  const sections = [];
+  if (pool.length) sections.push({ key: 'pool', label: 'Workspace', roomName: null, skills: pool });
+  for (const [gid, g] of [...byAgent].sort((a, b) => a[1].name.localeCompare(b[1].name))) {
+    sections.push({
+      key: gid,
+      label: g.name,
+      roomName: g.rooms.length === 1 ? g.rooms[0].name : null,
+      skills: g.skills,
+    });
+  }
+  for (const section of sections) {
+    list.appendChild(buildSkillsSectionHead(section.key, section.label, section.roomName, section.skills.length));
+    for (const s of section.skills) appendSkillRow(list, section.key, s);
+  }
+  const none = document.createElement('li');
+  none.id = 'skills-no-match';
+  none.className = 'skills-empty';
+  none.textContent = 'No matching skills';
+  none.hidden = true;
+  list.appendChild(none);
+  applySkillsSections();
   void markSkillUpdates(list);
+}
+
+function appendSkillRow(list, sectionKey, s) {
+  const li = document.createElement('li');
+  li.className = 'skill-row';
+  const info = document.createElement('div');
+  info.className = 'skill-info';
+  const head = document.createElement('div');
+  head.className = 'skill-head';
+  const name = document.createElement('span');
+  name.className = 'skill-name';
+  name.textContent = s.name;
+  // Provenance badge: where the skill came from. Shipped skills are "built-in";
+  // imported ones show their origin ("Anthropic", "obra/superpowers",
+  // "awesomeskill.ai", "custom"); legacy imports with no recorded origin fall
+  // back to "imported". Agent-scoped skills get a scope pill instead — the
+  // room's name when the agent serves exactly one room, otherwise the
+  // agent's name (a room name would be ambiguous, a count says nothing) —
+  // plus their origin badge when recorded (learned skills carry one).
+  let badge;
+  if (s.source === 'scoped') {
+    badge = document.createElement('span');
+    badge.className = 'skill-badge skill-badge-scope';
+    badge.textContent = s.rooms && s.rooms.length === 1 ? s.rooms[0].name : s.agentName;
+  } else if (s.source === 'shipped') {
+    badge = document.createElement('span');
+    badge.className = 'skill-badge';
+    badge.textContent = 'built-in';
+  } else if (s.origin && s.origin.label) {
+    badge = originBadgeEl(s.origin);
+  } else {
+    badge = document.createElement('span');
+    badge.className = 'skill-badge skill-badge-user';
+    badge.textContent = 'imported';
+  }
+  head.append(name, badge);
+  if (s.source === 'scoped' && s.origin && s.origin.label) head.appendChild(originBadgeEl(s.origin));
+  const desc = document.createElement('span');
+  desc.className = 'skill-desc';
+  desc.textContent = s.description || '';
+  info.append(head, desc);
+  // Click the row to open the SKILL.md viewer/editor (user skills editable).
+  // Scoped rows open the agent's own copy via the scoped content endpoint.
+  const open = () =>
+    s.source === 'scoped' ? openScopedSkillEditor(s.agentGroupId, s.name) : openSkillEditor(s.name);
+  info.style.cursor = 'pointer';
+  info.setAttribute('role', 'button');
+  info.setAttribute('tabindex', '0');
+  info.addEventListener('click', open);
+  info.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      open();
+    }
+  });
+  li.appendChild(info);
+  if (s.source === 'user') {
+    li.dataset.skill = s.name;
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'skill-delete';
+    del.textContent = 'Remove';
+    del.addEventListener('click', () => deleteSkill(s.name));
+    li.appendChild(del);
+  } else if (s.source === 'scoped') {
+    // 'View history': jump to Journey pre-filtered to this skill (same
+    // affordance weight as the row's other secondary actions).
+    const hist = document.createElement('button');
+    hist.type = 'button';
+    hist.className = 'btn btn-ghost skill-history-btn';
+    hist.textContent = 'History';
+    hist.addEventListener('click', () =>
+      openJourney({ agentGroupId: s.agentGroupId, agentName: s.agentName, skill: s.name }),
+    );
+    li.appendChild(hist);
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'skill-delete';
+    del.textContent = 'Remove';
+    del.addEventListener('click', () => removeAgentScopedSkill(s.agentGroupId, s.name, del, renderSkillsRegistry));
+    li.appendChild(del);
+  }
+  li.dataset.section = sectionKey;
+  li.dataset.search = (s.name + ' ' + (s.description || '')).toLowerCase();
+  list.appendChild(li);
 }
 
 // Update checks ride AFTER render (one GitHub probe per pinned import, cached
@@ -8758,9 +9191,7 @@ async function markSkillUpdates(list) {
       btn.disabled = true;
       btn.textContent = 'Updating…';
       try {
-        const res = await authFetch(`/api/skills/${encodeURIComponent(u.name)}/update`, { method: 'POST' });
-        const body = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(body.error || res.statusText);
+        const body = await apiJson(`/api/skills/${encodeURIComponent(u.name)}/update`, { method: 'POST' });
         showToast(`Updated ${u.name}`, { kind: 'success' });
         for (const w of body.warnings || []) showToast(`⚠ ${w}`, { kind: 'error' });
         renderSkillsRegistry();
@@ -8980,29 +9411,6 @@ async function renderSkillPool() {
   }
 }
 
-// Import + swap the button to an "added" badge. Shared by every pool row.
-async function importSkillInto(importBody, btn) {
-  btn.disabled = true;
-  btn.textContent = 'Importing…';
-  try {
-    const res = await authFetch('/api/skills/import', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(importBody),
-    });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || res.statusText);
-    showToast(`Added ${body.name}`, { kind: 'success' });
-    const got = document.createElement('span');
-    got.className = 'skill-badge skill-badge-user';
-    got.textContent = 'added';
-    btn.replaceWith(got);
-  } catch (err) {
-    showToast('Import failed: ' + (err?.message || err), { kind: 'error' });
-    btn.disabled = false;
-    btn.textContent = 'Add';
-  }
-}
 
 // Adding a skill asks WHICH agents up front — the same multi-select attach picker
 // MCP uses. Each toggle wires the skill to just that agent (per-agent scoped
@@ -9023,22 +9431,18 @@ async function openWireToAgentsPicker(importBody, displayName, opts = {}) {
     isAttached: (a) => wireSkillState.wired.has(a.id),
     onToggle: async (a, add) => {
       if (add) {
-        const res = await authFetch(`/api/agents/${encodeURIComponent(a.id)}/skills/import`, {
+        const body = await apiJson(`/api/agents/${encodeURIComponent(a.id)}/skills/import`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(importBody),
+          body: importBody,
         });
-        const body = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(body.error || res.statusText);
         wireSkillState.name = body.name;
         wireSkillState.wired.add(a.id);
         showToast(`Wired ${body.name} to ${a.name}`, { kind: 'success' });
       } else {
-        const res = await authFetch(
+        await apiJson(
           `/api/agents/${encodeURIComponent(a.id)}/skills/scoped/${encodeURIComponent(wireSkillState.name)}`,
           { method: 'DELETE' },
         );
-        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
         wireSkillState.wired.delete(a.id);
         showToast(`Unwired from ${a.name}`, { kind: 'success' });
       }
@@ -9047,13 +9451,7 @@ async function openWireToAgentsPicker(importBody, displayName, opts = {}) {
       // "Wire to all agents" = the shared pool (every 'all' agent picks it up).
       closeAttachPicker();
       try {
-        const res = await authFetch('/api/skills/import', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(importBody),
-        });
-        const body = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(body.error || res.statusText);
+        const body = await apiJson('/api/skills/import', { method: 'POST', body: importBody });
         showToast(`Added ${body.name} to all agents`, { kind: 'success' });
       } catch (err) {
         showToast('Import failed: ' + (err?.message || err), { kind: 'error' });
@@ -9155,13 +9553,7 @@ async function saveSkillEditor() {
     const save = $('#skill-editor-save');
     save.disabled = true;
     try {
-      const res = await authFetch(`/api/skill-drafts/${encodeURIComponent(d.id)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ body }),
-      });
-      const out = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(out.error || res.statusText);
+      await apiJson(`/api/skill-drafts/${encodeURIComponent(d.id)}`, { method: 'PUT', body: { body } });
       d.body = body;
       showToast('Draft updated — Keep applies this version', { kind: 'success' });
       renderSkillDrafts();
@@ -9179,13 +9571,7 @@ async function saveSkillEditor() {
   const save = $('#skill-editor-save');
   save.disabled = true;
   try {
-    const res = await authFetch(`/api/skills/${encodeURIComponent(name)}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
-    });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || res.statusText);
+    const body = await apiJson(`/api/skills/${encodeURIComponent(name)}`, { method: 'PUT', body: { content } });
     showToast(`Saved ${body.name} — applies on each agent's next spawn`, { kind: 'success' });
     showSkillEditor(false);
     await renderSkillsRegistry();
@@ -9202,8 +9588,102 @@ $('#skill-discover-search')?.addEventListener('input', () => {
   poolSearchTimer = setTimeout(() => renderSkillPool(), 400);
 });
 $('#skills-add-back')?.addEventListener('click', () => renderSkillsRegistry()); // re-render → lands on browse with fresh list
+
+// Filter-as-you-type over the rendered sections — a pure visibility pass, so
+// a light debounce is plenty even with a large registry.
+let skillsFilterTimer = 0;
+$('#skills-filter')?.addEventListener('input', () => {
+  clearTimeout(skillsFilterTimer);
+  skillsFilterTimer = setTimeout(applySkillsSections, 100);
+});
 $('#skills-trust-official')?.addEventListener('click', () => setSkillTrust('official'));
 $('#skills-trust-community')?.addEventListener('click', () => setSkillTrust('community'));
+
+// ── 'Add from link…' — learn a skill from a URL, run by an agent ───────────
+// /learn is room-mediated by design: the command must run IN a session of the
+// chosen agent, so we resolve one of its webchat rooms, join it, and send
+// `/learn <url>` as the user — the command and the draft card that follows are
+// visible in the room, exactly like typing it there.
+async function pickLearnTarget() {
+  let agents = [];
+  try {
+    agents = await apiJson('/api/agents');
+  } catch (err) {
+    toastError(err, 'Could not load agents');
+    return null;
+  }
+  if (!Array.isArray(agents) || agents.length === 0) {
+    showToast('No agents you administer', { kind: 'error' });
+    return null;
+  }
+  // Rooms per agent (webchat only). /api/agents already returns only the
+  // agents the caller administers, so these reads succeed for every entry.
+  const roomsByAgent = new Map();
+  await Promise.all(
+    agents.map(async (a) => {
+      try {
+        const r = await authFetch(`/api/agents/${encodeURIComponent(a.id)}/rooms`);
+        roomsByAgent.set(a.id, r.ok ? await r.json() : []);
+      } catch {
+        roomsByAgent.set(a.id, []);
+      }
+    }),
+  );
+  const firstWithRoom = agents.find((a) => (roomsByAgent.get(a.id) || []).length > 0);
+  if (!firstWithRoom) {
+    showToast('No agent has a room — wire one to a room first', { kind: 'error' });
+    return null;
+  }
+  const body = document.createElement('div');
+  body.className = 'learn-target-picker';
+  const agentSel = document.createElement('select');
+  agentSel.className = 'confirm-input';
+  agentSel.setAttribute('aria-label', 'Agent');
+  for (const a of agents) {
+    const opt = new Option(a.name, a.id);
+    if ((roomsByAgent.get(a.id) || []).length === 0) {
+      opt.disabled = true;
+      opt.title = 'No room';
+    }
+    agentSel.appendChild(opt);
+  }
+  agentSel.value = firstWithRoom.id;
+  const roomSel = document.createElement('select');
+  roomSel.className = 'confirm-input';
+  roomSel.setAttribute('aria-label', 'Room');
+  const syncRooms = () => {
+    const rooms = roomsByAgent.get(agentSel.value) || [];
+    roomSel.innerHTML = '';
+    for (const r of rooms) roomSel.appendChild(new Option(r.name, r.id));
+    // The room pick only appears when the agent serves several rooms.
+    roomSel.hidden = rooms.length <= 1;
+  };
+  agentSel.addEventListener('change', syncRooms);
+  syncRooms();
+  body.append(agentSel, roomSel);
+  const ok = await showConfirmModal({ title: 'Learn with which agent?', body, confirmLabel: 'Learn' });
+  if (!ok) return null;
+  const rooms = roomsByAgent.get(agentSel.value) || [];
+  const room = rooms.length > 1 ? rooms.find((r) => r.id === roomSel.value) : rooms[0];
+  return room || null;
+}
+
+$('#skills-learn-link')?.addEventListener('click', async () => {
+  const v = await promptLearnSource({
+    title: 'Learn from a link',
+    placeholder: 'https://…',
+    check: isLearnUrlToken,
+    invalid: 'Start with a full link (http:// or https://)',
+  });
+  if (!v) return;
+  const room = await pickLearnTarget();
+  if (!room) return;
+  closeView('manage'); // unwind the Skills view's history entry before the room takes over
+  joinRoom(room.id, room.name);
+  // Sent by the 'history' handler once the room's transcript is in — sending
+  // now would lose the optimistic bubble to the history render.
+  pendingSendAfterJoin = '/learn ' + v;
+});
 
 // ── Settings: skill-collections registry (global admin) ────────────────────
 // Owners/global admins manage the Skills tab's catalog sources: label + a
@@ -9272,8 +9752,7 @@ async function renderSkillSourcesSettings() {
       });
       if (!ok) return;
       try {
-        const res = await authFetch(`/api/skills/sources/${encodeURIComponent(s.id)}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+        await apiJson(`/api/skills/sources/${encodeURIComponent(s.id)}`, { method: 'DELETE' });
         renderSkillSourcesSettings();
       } catch (err) {
         showToast('Remove failed: ' + (err?.message || err), { kind: 'error' });
@@ -9334,13 +9813,7 @@ $('#skill-source-save')?.addEventListener('click', async () => {
   if (!id) return showToast('Expected a GitHub repo or folder URL', { kind: 'error' });
   save.disabled = true;
   try {
-    const res = await authFetch(`/api/skills/sources/${encodeURIComponent(id)}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
-    });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || res.statusText);
+    const body = await apiJson(`/api/skills/sources/${encodeURIComponent(id)}`, { method: 'PUT', body: { url } });
     showToast(`Added ${body.source?.label || 'collection'}`, { kind: 'success' });
     $('#skill-source-url').value = '';
     save.textContent = 'Add';
@@ -9375,9 +9848,7 @@ async function deleteSkill(name) {
   });
   if (!ok) return;
   try {
-    const res = await authFetch(`/api/skills/${encodeURIComponent(name)}`, { method: 'DELETE' });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || res.statusText);
+    await apiJson(`/api/skills/${encodeURIComponent(name)}`, { method: 'DELETE' });
     showToast(`Deleted ${name}`, { kind: 'success' });
     await renderSkillsRegistry();
   } catch (err) {
@@ -9625,6 +10096,10 @@ function hideOtherFullViews(keep) {
     topologyActive = false;
     $('#topology').hidden = true;
   }
+  if (keep !== 'journey' && journeyActive) {
+    journeyActive = false;
+    $('#journey').hidden = true;
+  }
   if (keep !== 'matrix' && matrixActive) {
     matrixActive = false;
     $('#matrix').hidden = true;
@@ -9693,6 +10168,278 @@ function toggleTopology() {
 }
 $('#topology-back')?.addEventListener('click', toggleTopology);
 $('#topology-refresh')?.addEventListener('click', refreshTopology);
+
+// ── Journey (learning timeline) ─────────────────────────────────────────────
+// A day-grouped, newest-first feed of what each agent learned: proposed /
+// kept / discarded / revised / archived. Data: GET /api/learning/timeline
+// (admin-scoped server-side, cursor-paged). Kept and revised rows open the
+// existing scoped SKILL.md editor; the newest revision of a live skill offers
+// Revert through the existing revert endpoint. Everything else is a record.
+let journeyActive = false;
+// Client-side visibility filters over the loaded events (same posture as the
+// Skills search — no refetch). Transient view state: reset on every open, not
+// persisted. `preset` (agentGroupId/agentName/skill) is the 'View history'
+// deep-link — views aren't URL-routed, so it travels as in-memory args.
+const journeyFilter = { agent: '', kind: '', skill: '' };
+const journeyAgents = new Map(); // agentGroupId → agentName, from loaded events
+function setJourneyPreset(preset) {
+  journeyFilter.agent = preset?.agentGroupId || '';
+  journeyFilter.kind = '';
+  journeyFilter.skill = preset?.skill || '';
+  if (journeyFilter.agent && !journeyAgents.has(journeyFilter.agent)) {
+    const known = typeof allAgents !== 'undefined' && allAgents.find?.((a) => a.id === journeyFilter.agent);
+    journeyAgents.set(journeyFilter.agent, preset?.agentName || (known && known.name) || journeyFilter.agent);
+  }
+  renderJourneyFilterControls();
+}
+function openJourney(preset) {
+  if (journeyActive) {
+    // Already open (e.g. History from a skill editor launched off a Journey
+    // row): just retarget the filters — no second view-stack entry.
+    setJourneyPreset(preset);
+    applyJourneyFilters();
+    return;
+  }
+  openFullView(() => {
+    hideOtherFullViews('journey');
+    journeyActive = true;
+    $('#chat').hidden = true;
+    $('#journey').hidden = false;
+    $('#app').classList.add('in-dashboard'); // reuse the full-view mobile layout
+    $('#app').classList.remove('in-room');
+    journeyAgents.clear();
+    setJourneyPreset(preset);
+    void refreshJourney(true);
+    openView('journey', teardownJourney);
+  });
+}
+function teardownJourney() {
+  journeyActive = false;
+  $('#chat').hidden = false;
+  $('#journey').hidden = true;
+  $('#app').classList.remove('in-dashboard');
+}
+function toggleJourney() {
+  if (journeyActive) closeView('journey');
+  else openJourney();
+}
+$('#journey-back')?.addEventListener('click', toggleJourney);
+$('#journey-refresh')?.addEventListener('click', () => void refreshJourney(true));
+$('#journey-more')?.addEventListener('click', () => void refreshJourney(false));
+
+let journeyCursor = null;
+let journeyLastDay = '';
+async function refreshJourney(reset) {
+  const list = $('#journey-list');
+  if (!list) return;
+  if (reset) {
+    journeyCursor = null;
+    journeyLastDay = '';
+    list.textContent = 'Loading…';
+  }
+  const more = $('#journey-more');
+  try {
+    const q = !reset && journeyCursor ? `&before=${journeyCursor}` : '';
+    const data = await apiJson(`/api/learning/timeline?limit=100${q}`);
+    const events = data.events || [];
+    if (reset) list.innerHTML = '';
+    renderJourneyEvents(list, events);
+    journeyCursor = data.nextBefore || null;
+    if (more) more.hidden = !journeyCursor;
+    if (reset && !events.length) {
+      list.innerHTML = '<div class="journey-empty">Nothing learned yet.</div>';
+    }
+    renderJourneyFilterControls(); // newly loaded events may add agents
+    applyJourneyFilters(); // 'Load more' rows obey the active filters too
+  } catch (err) {
+    if (reset) list.textContent = 'Could not load the timeline.';
+    else toastError(err, 'Could not load more');
+  }
+}
+
+const JOURNEY_VERBS = {
+  proposed: 'Proposed',
+  kept: 'Kept',
+  discarded: 'Discarded',
+  revised: 'Revised',
+  archived: 'Archived',
+};
+function journeyMeta(ev) {
+  const bits = [];
+  if (ev.kind === 'kept' && ev.by === 'auto-keep') bits.push('kept automatically');
+  else if (ev.kind === 'discarded' && ev.by === 'expired') bits.push('expired unreviewed');
+  else if (ev.kind === 'discarded' && ev.by === 'superseded') bits.push('replaced by a newer draft');
+  else if (ev.kind === 'archived') bits.push('unused, moved to the archive');
+  if (ev.roomName) bits.push(ev.roomName);
+  return bits.join(' · ');
+}
+function renderJourneyEvents(list, events) {
+  const now = new Date();
+  for (const ev of events) {
+    const d = new Date(ev.ts);
+    const day = d.toDateString();
+    if (day !== journeyLastDay) {
+      journeyLastDay = day;
+      const h = document.createElement('div');
+      h.className = 'journey-day';
+      h.textContent =
+        day === now.toDateString()
+          ? 'Today'
+          : d.toLocaleDateString(
+              [],
+              d.getFullYear() === now.getFullYear()
+                ? { month: 'long', day: 'numeric' }
+                : { year: 'numeric', month: 'long', day: 'numeric' },
+            );
+      list.appendChild(h);
+    }
+    const row = document.createElement('div');
+    row.className = 'journey-row';
+    // Filter facets (client-side visibility — see applyJourneyFilters).
+    row.dataset.kind = ev.kind;
+    row.dataset.agent = ev.agentGroupId || '';
+    row.dataset.skill = ev.skillName || '';
+    if (ev.agentGroupId && !journeyAgents.has(ev.agentGroupId)) {
+      journeyAgents.set(ev.agentGroupId, ev.agentName || ev.agentGroupId);
+    }
+    const verb = document.createElement('span');
+    verb.className = `journey-verb journey-verb-${ev.kind}`;
+    verb.textContent = JOURNEY_VERBS[ev.kind] || ev.kind;
+    const name = document.createElement('span');
+    name.className = 'journey-skill';
+    name.textContent = ev.skillName;
+    const pill = document.createElement('span');
+    pill.className = 'skill-badge skill-badge-scope';
+    pill.textContent = ev.agentName;
+    const meta = document.createElement('span');
+    meta.className = 'journey-meta';
+    meta.textContent = journeyMeta(ev);
+    const time = document.createElement('span');
+    time.className = 'journey-time';
+    time.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (ev.description) row.title = ev.description;
+    row.append(verb, name, pill, meta, time);
+    if ((ev.kind === 'kept' || ev.kind === 'revised') && ev.skillExists) {
+      row.classList.add('journey-linked');
+      row.setAttribute('role', 'button');
+      row.setAttribute('tabindex', '0');
+      const open = () => openScopedSkillEditor(ev.agentGroupId, ev.skillName);
+      row.addEventListener('click', open);
+      row.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          open();
+        }
+      });
+    }
+    if (ev.canRevert) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn btn-secondary';
+      btn.textContent = 'Revert';
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const ok = await showConfirmModal({
+          title: `Revert ${ev.skillName}?`,
+          body: 'Restores the previous version. The current version is kept in history.',
+          confirmLabel: 'Revert',
+          destructive: true,
+        });
+        if (!ok) return;
+        btn.disabled = true;
+        try {
+          await apiJson(
+            `/api/agents/${encodeURIComponent(ev.agentGroupId)}/skills/scoped/${encodeURIComponent(ev.skillName)}/revert`,
+            { method: 'POST' },
+          );
+          showToast(`Reverted ${ev.skillName}`, { kind: 'success' });
+          void refreshJourney(true);
+        } catch (err) {
+          toastError(err, 'Revert failed');
+          btn.disabled = false;
+        }
+      });
+      row.appendChild(btn);
+    }
+    list.appendChild(row);
+  }
+}
+
+// ── Journey filters ─────────────────────────────────────────────────────────
+// Agent select options come from the loaded feed (plus a deep-linked agent),
+// so no extra endpoint is needed; they grow as 'Load more' pages in.
+function renderJourneyFilterControls() {
+  const sel = $('#journey-agent-filter');
+  if (sel) {
+    sel.innerHTML = '';
+    sel.appendChild(new Option('All agents', ''));
+    for (const [id, name] of [...journeyAgents].sort((a, b) => a[1].localeCompare(b[1]))) {
+      sel.appendChild(new Option(name, id));
+    }
+    sel.value = journeyFilter.agent;
+    if (sel.value !== journeyFilter.agent) journeyFilter.agent = ''; // option vanished
+  }
+  for (const b of document.querySelectorAll('#journey-kind-filter .setting-option')) {
+    const active = (b.dataset.kind || '') === journeyFilter.kind;
+    b.classList.toggle('active', active);
+    b.setAttribute('aria-pressed', String(active));
+  }
+  const chip = $('#journey-skill-chip');
+  if (chip) {
+    chip.hidden = !journeyFilter.skill;
+    if (journeyFilter.skill) chip.textContent = `skill: ${journeyFilter.skill} ✕`;
+  }
+}
+
+function applyJourneyFilters() {
+  const list = $('#journey-list');
+  if (!list) return;
+  let curDay = null;
+  let dayShown = 0;
+  let shown = 0;
+  let total = 0;
+  const flushDay = () => {
+    if (curDay) curDay.hidden = dayShown === 0;
+  };
+  for (const el of list.children) {
+    if (el.classList.contains('journey-day')) {
+      flushDay();
+      curDay = el;
+      dayShown = 0;
+    } else if (el.classList.contains('journey-row')) {
+      total++;
+      const show =
+        (!journeyFilter.agent || el.dataset.agent === journeyFilter.agent) &&
+        (!journeyFilter.kind || el.dataset.kind === journeyFilter.kind) &&
+        (!journeyFilter.skill || el.dataset.skill === journeyFilter.skill);
+      el.hidden = !show;
+      if (show) {
+        dayShown++;
+        shown++;
+      }
+    }
+  }
+  flushDay();
+  const none = $('#journey-no-match');
+  if (none) none.hidden = !(total > 0 && shown === 0);
+}
+
+$('#journey-agent-filter')?.addEventListener('change', (e) => {
+  journeyFilter.agent = e.target.value;
+  applyJourneyFilters();
+});
+$('#journey-kind-filter')?.addEventListener('click', (e) => {
+  const btn = e.target.closest('.setting-option');
+  if (!btn) return;
+  journeyFilter.kind = btn.dataset.kind || '';
+  renderJourneyFilterControls();
+  applyJourneyFilters();
+});
+$('#journey-skill-chip')?.addEventListener('click', () => {
+  journeyFilter.skill = '';
+  renderJourneyFilterControls();
+  applyJourneyFilters();
+});
 
 async function refreshTopology() {
   const canvas = $('#topology-canvas');
@@ -10306,6 +11053,9 @@ async function probeIsOwner() {
       // response — isOwnerView must stay owner-only since it gates owner-only
       // write controls (e.g. room assignment).
       $('#overflow-permissions').hidden = false;
+      // Journey (the learning timeline) is admin-tier like the drafts list it
+      // mirrors — not marketplace-gated; the server 403s non-admins anyway.
+      $('#overflow-journey')?.removeAttribute('hidden');
       // /api/users success = admin+ → gates the admin-only slash menu.
       isAdminView = true;
       // MCP + skills registries are admin-only AND can be turned off workspace-
@@ -10371,10 +11121,6 @@ function populatePermsAgentDropdowns() {
   });
 }
 
-function agentLabel(agentGroupId) {
-  const a = permsAgents.find((x) => x.id === agentGroupId);
-  return a ? a.name || a.id : agentGroupId;
-}
 
 function userDisplayName(u) {
   // Prefer the channel-supplied display name, else extract a readable token
@@ -10788,32 +11534,6 @@ async function grantPerm(targetUserId, kind, agentGroupId) {
   }
 }
 
-async function revokePerm(targetUserId, kind, agentGroupId) {
-  const label = `${kind}${agentGroupId ? ' · ' + agentLabel(agentGroupId) : ''}`;
-  const confirmed = await showConfirmModal({
-    title: 'Revoke access',
-    body: `Revoke ${label} from ${targetUserId}?`,
-    confirmLabel: 'Revoke',
-    destructive: true,
-  });
-  if (!confirmed) return;
-  try {
-    const r = await authFetch('/api/permissions/revoke', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Webchat-CSRF': '1' },
-      body: JSON.stringify({ userId: targetUserId, kind, agentGroupId }),
-    });
-    if (!r.ok) {
-      const err = await r.json().catch(() => ({}));
-      showToast('Revoke failed: ' + (err.error || r.statusText), { kind: 'error' });
-      return;
-    }
-    showToast(`Revoked ${label} from ${targetUserId}.`, { kind: 'success' });
-    refreshPermissions();
-  } catch (err) {
-    showToast('Revoke failed: ' + err.message, { kind: 'error' });
-  }
-}
 
 // Wiring
 $('#perms-exit').addEventListener('click', togglePermissions);
@@ -11004,22 +11724,22 @@ function renderMetrics(snap) {
   const el = $('#dash-graph');
   const num = (v) => esc(String(Number(v) || 0));
 
-  const agentsLabel = snap.restricted ? 'Visible Agents' : 'Agents';
+  const agentsLabel = snap.restricted ? 'Visible agents' : 'Agents';
   const agentsCount = snap.restricted ? snap.agents.visible : snap.agents.total;
-  const agentsCard = `<div class="metric-card clickable" onclick="showAgentsDetail()">
+  const agentsCard = `<div class="metric-card clickable" data-detail="agents">
     <div class="metric-value">${num(agentsCount)}</div>
     <div class="metric-label">${esc(agentsLabel)}</div>
   </div>`;
 
   const sessionsCard = `<div class="metric-card">
     <div class="metric-value">${num(snap.sessions.active)}</div>
-    <div class="metric-label">Active Sessions</div>
+    <div class="metric-label">Active sessions</div>
     <div class="metric-sub">${num(snap.sessions.total)} total</div>
   </div>`;
 
-  const messagesCard = `<div class="metric-card clickable" onclick="showMessagesDetail()">
+  const messagesCard = `<div class="metric-card clickable" data-detail="messages">
     <div class="metric-value">${num(snap.messages.webchat_24h)}</div>
-    <div class="metric-label">Webchat Msgs (24h)</div>
+    <div class="metric-label">Webchat messages (24h)</div>
   </div>`;
 
   let containersCard;
@@ -11029,9 +11749,9 @@ function renderMetrics(snap) {
       <div class="metric-label">Containers</div>
     </div>`;
   } else {
-    containersCard = `<div class="metric-card clickable" onclick="showContainersDetail()">
+    containersCard = `<div class="metric-card clickable" data-detail="containers">
       <div class="metric-value">${num(snap.active_containers)}</div>
-      <div class="metric-label">Active Containers</div>
+      <div class="metric-label">Active containers</div>
     </div>`;
   }
 
@@ -11102,7 +11822,7 @@ function renderMetrics(snap) {
             )
             .join('');
     busiestCard = `<div class="metric-card">
-      <div class="metric-label">Busiest Rooms (24h)</div>
+      <div class="metric-label">Busiest rooms (24h)</div>
       ${rows}
     </div>`;
   } else {
@@ -11114,6 +11834,12 @@ function renderMetrics(snap) {
     : `<div class="metrics-grid two-col">${channelsCard}</div>`;
 
   el.innerHTML = topRow + systemCards + breakdownRow;
+  // Wire the clickable cards here rather than inline onclick= — inline handlers
+  // force these functions global and break under a stricter CSP.
+  const details = { agents: showAgentsDetail, messages: showMessagesDetail, containers: showContainersDetail };
+  el.querySelectorAll('[data-detail]').forEach((card) => {
+    card.addEventListener('click', details[card.dataset.detail]);
+  });
 }
 
 // ── Dashboard detail panels ───────────────────────────────────────────────
@@ -11176,7 +11902,7 @@ async function showMessagesDetail() {
 
 async function showContainersDetail() {
   showDetail(
-    'Active Containers',
+    'Active containers',
     `<div class="metric-sub">Run <code>docker ps --filter name=nanoclaw-</code> on the host to see container details. The number on the card reflects what was running at the moment of the last refresh.</div>`,
   );
 }
@@ -11411,7 +12137,7 @@ $('#agent-status-control').addEventListener('click', async (e) => {
     renderAgents();
   } catch (err) {
     console.error('Failed to set agent status:', err);
-    showToast('Could not change status');
+    showToast('Could not change status', { kind: 'error' });
     if (agent) setAgentStatusControl(agent.status); // revert
   }
 });
@@ -11762,13 +12488,10 @@ async function importAgentScopedSkill(agentId, btn, urlInput) {
   btn.disabled = true;
   btn.textContent = 'Importing…';
   try {
-    const res = await authFetch(`/api/agents/${encodeURIComponent(agentId)}/skills/import`, {
+    const body = await apiJson(`/api/agents/${encodeURIComponent(agentId)}/skills/import`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
+      body: { url },
     });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || res.statusText);
     showToast(`Wired ${body.name} to this agent — applies on its next turn`, { kind: 'success' });
     if (urlInput) urlInput.value = '';
     renderAgentSkills(agentId);
@@ -11780,16 +12503,16 @@ async function importAgentScopedSkill(agentId, btn, urlInput) {
   }
 }
 
-async function removeAgentScopedSkill(agentId, name, btn) {
+async function removeAgentScopedSkill(agentId, name, btn, onDone) {
   if (!(await showConfirmModal({ title: `Remove ${name}?`, body: 'Unwires it from this agent.', confirmLabel: 'Remove', destructive: true }))) return;
   btn.disabled = true;
   try {
-    const res = await authFetch(`/api/agents/${encodeURIComponent(agentId)}/skills/scoped/${encodeURIComponent(name)}`, {
+    await apiJson(`/api/agents/${encodeURIComponent(agentId)}/skills/scoped/${encodeURIComponent(name)}`, {
       method: 'DELETE',
     });
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
     showToast(`Removed ${name}`, { kind: 'success' });
-    renderAgentSkills(agentId);
+    if (onDone) onDone();
+    else renderAgentSkills(agentId);
   } catch (err) {
     showToast('Remove failed: ' + (err?.message || err), { kind: 'error' });
     btn.disabled = false;
@@ -11803,13 +12526,10 @@ async function saveAgentSkills(agentId) {
     .map((t) => t.dataset.skill);
   if (saveBtn) saveBtn.disabled = true;
   try {
-    const res = await authFetch(`/api/agents/${encodeURIComponent(agentId)}/skills`, {
+    const body = await apiJson(`/api/agents/${encodeURIComponent(agentId)}/skills`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ skills }),
+      body: { skills },
     });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || res.statusText);
     showToast(body.restarted ? 'Skills saved — agent restarting' : 'Skills saved (applies on next message)', {
       kind: 'success',
     });
@@ -11823,28 +12543,40 @@ async function saveAgentSkills(agentId) {
 // Learning defaults (agent-level layer): two On/Off pill pairs backed by the
 // per-agent API. Room 🎓 settings override these — the section says so. The
 // whole accordion hides for non-admins (the GET 403s).
+/** Confirm modal with one switch option — the modal twin of .setting-toggle
+ * (DESIGN.md §2b: binary choices are switches, never raw checkboxes). */
+async function confirmWithToggle({ title, toggleLabel, note, confirmLabel }) {
+  const el = document.createElement('div');
+  const lbl = document.createElement('label');
+  lbl.className = 'setting-toggle';
+  const txt = document.createElement('span');
+  txt.textContent = toggleLabel;
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  lbl.append(txt, cb);
+  el.appendChild(lbl);
+  if (note) {
+    const n = document.createElement('div');
+    n.className = 'import-note';
+    n.textContent = note;
+    el.appendChild(n);
+  }
+  const ok = await showConfirmModal({ title, body: el, confirmLabel });
+  return { ok, checked: cb.checked };
+}
+
 // ── Agent export / import (backup Phase 1) ──────────────────────────────
 $('#agent-export-btn')?.addEventListener('click', async () => {
   if (!selectedAgentId) return;
-  const el = document.createElement('div');
-  const lbl = document.createElement('label');
-  lbl.style.display = 'flex';
-  lbl.style.gap = '8px';
-  lbl.style.alignItems = 'center';
-  const cb = document.createElement('input');
-  cb.type = 'checkbox';
-  const txt = document.createElement('span');
-  txt.textContent = 'Include conversations (larger; briefly stops this agent)';
-  lbl.append(cb, txt);
-  el.appendChild(lbl);
-  const note = document.createElement('div');
-  note.className = 'import-note';
-  note.textContent = 'Credentials never export — the bundle lists what to reconnect on import.';
-  el.appendChild(note);
-  const ok = await showConfirmModal({ title: 'Export this agent?', body: el, confirmLabel: 'Export' });
+  const { ok, checked } = await confirmWithToggle({
+    title: 'Export this agent?',
+    toggleLabel: 'Include conversations (larger; briefly stops this agent)',
+    note: 'Credentials never export — the bundle lists what to reconnect on import.',
+    confirmLabel: 'Export',
+  });
   if (!ok) return;
   const a = document.createElement('a');
-  a.href = `/api/agents/${encodeURIComponent(selectedAgentId)}/export${cb.checked ? '?conversations=1' : ''}`;
+  a.href = `/api/agents/${encodeURIComponent(selectedAgentId)}/export${checked ? '?conversations=1' : ''}`;
   a.download = '';
   document.body.appendChild(a);
   a.click();
@@ -11940,13 +12672,7 @@ async function continueRoomImport(up) {
   const ok = await showConfirmModal({ title: 'Import this room?', body: el, confirmLabel: 'Import' });
   if (!ok) return;
   try {
-    const res = await authFetch('/api/rooms/import/apply', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: up.token }),
-    });
-    const out = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(out.error || res.statusText);
+    const out = await apiJson('/api/rooms/import/apply', { method: 'POST', body: { token: up.token } });
     showToast(`Imported #${out.roomId} — ${out.messages} messages`, { kind: 'success' });
   } catch (err) {
     showToast('Import failed: ' + (err?.message || err), { kind: 'error' });
@@ -11955,25 +12681,15 @@ async function continueRoomImport(up) {
 
 // ── System backup (Phase 2) ──
 $('#system-export-btn')?.addEventListener('click', async () => {
-  const el = document.createElement('div');
-  const lbl = document.createElement('label');
-  lbl.style.display = 'flex';
-  lbl.style.gap = '8px';
-  lbl.style.alignItems = 'center';
-  const cb = document.createElement('input');
-  cb.type = 'checkbox';
-  const txt = document.createElement('span');
-  txt.textContent = 'Lean (skip conversation history — much smaller)';
-  lbl.append(cb, txt);
-  el.appendChild(lbl);
-  const note = document.createElement('div');
-  note.className = 'import-note';
-  note.textContent = 'Secrets and host identity never travel; a restored install keeps its own credentials.';
-  el.appendChild(note);
-  const ok = await showConfirmModal({ title: 'Download system backup?', body: el, confirmLabel: 'Download' });
+  const { ok, checked } = await confirmWithToggle({
+    title: 'Download system backup?',
+    toggleLabel: 'Lean (skip conversation history — much smaller)',
+    note: 'Secrets and host identity never travel; a restored install keeps its own credentials.',
+    confirmLabel: 'Download',
+  });
   if (!ok) return;
   const a = document.createElement('a');
-  a.href = `/api/system/export${cb.checked ? '?lean=1' : ''}`;
+  a.href = `/api/system/export${checked ? '?lean=1' : ''}`;
   a.download = '';
   document.body.appendChild(a);
   a.click();
@@ -12013,13 +12729,7 @@ $('#system-import-file')?.addEventListener('change', async (e) => {
   const ok = await showConfirmModal({ title: 'Restore this backup?', body: el, confirmLabel: 'Restore and restart', destructive: true });
   if (!ok) return;
   try {
-    const res = await authFetch('/api/system/import/apply', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: up.token }),
-    });
-    const out = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(out.error || res.statusText);
+    await apiJson('/api/system/import/apply', { method: 'POST', body: { token: up.token } });
     showToast('Restoring — the host is restarting…', { kind: 'info' });
   } catch (err) {
     showToast('Restore failed: ' + (err?.message || err), { kind: 'error' });
@@ -12068,13 +12778,7 @@ async function continueAgentImport(up) {
   const ok = await showConfirmModal({ title: 'Import this agent?', body: el, confirmLabel: 'Import' });
   if (!ok) return;
   try {
-    const res = await authFetch('/api/agents/import/apply', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: up.token }),
-    });
-    const out = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(out.error || res.statusText);
+    const out = await apiJson('/api/agents/import/apply', { method: 'POST', body: { token: up.token } });
     showToast(`Imported ${out.name}`, { kind: 'success' });
     await fetchAgents();
     renderAgents();
@@ -12123,13 +12827,85 @@ async function renderAgentLearning(agentId) {
           paint(groupEl, on);
           showToast('Learning defaults saved');
         } catch (err) {
-          showToast(err.message || 'Could not save', 'error');
+          toastError(err, 'Could not save');
         }
       };
     });
   };
   wire($('#agent-learning-distill'), 'autoTrigger');
   wire($('#agent-learning-keep'), 'autoKeep');
+
+  const put = async (patch) => {
+    const res = await authFetch(`/api/agents/${encodeURIComponent(agentId)}/learning`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Failed');
+  };
+
+  // Review model — the agent's own model by default, or a roster entry / a
+  // fixed Claude id (so Claude-only installs with an empty roster still have
+  // choices). Roster options carry the roster id; the fixed entries carry
+  // the raw Claude model id. Dormant until the digest review lands (#353).
+  const reviewSel = $('#agent-learning-review-model');
+  if (reviewSel) {
+    reviewSel.innerHTML = '';
+    const addOpt = (value, label) => {
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = label;
+      reviewSel.appendChild(opt);
+    };
+    addOpt('', "Agent's model");
+    try {
+      const models = await (await authFetch('/api/models')).json();
+      for (const m of models) addOpt(m.id, `${m.name} (${m.model_id})`);
+    } catch {
+      /* roster unavailable — the default + Claude entries still render */
+    }
+    for (const id of ['claude-haiku-4-5', 'claude-sonnet-5']) {
+      if (![...reviewSel.options].some((o) => o.value === id)) addOpt(id, id);
+    }
+    let stored = cfg.reviewModel || '';
+    // A stored value no longer in the roster still shows as itself rather
+    // than silently reading as the default.
+    if (stored && ![...reviewSel.options].some((o) => o.value === stored)) addOpt(stored, stored);
+    reviewSel.value = stored;
+    reviewSel.onchange = async () => {
+      try {
+        await put({ reviewModel: reviewSel.value || null });
+        stored = reviewSel.value;
+        showToast('Learning defaults saved');
+      } catch (err) {
+        toastError(err, 'Could not save');
+        reviewSel.value = stored;
+      }
+    };
+  }
+
+  // Review input — digest (default) or replay the full turn.
+  const inputGroup = $('#agent-learning-review-input');
+  if (inputGroup) {
+    const paintInput = (replay) => {
+      inputGroup.querySelectorAll('.setting-option').forEach((b) => {
+        b.classList.toggle('active', b.dataset.value === (replay ? 'replay' : 'digest'));
+      });
+    };
+    paintInput(cfg.replayReview === true);
+    inputGroup.querySelectorAll('.setting-option').forEach((b) => {
+      b.onclick = async () => {
+        const replay = b.dataset.value === 'replay';
+        try {
+          await put({ replayReview: replay });
+          paintInput(replay);
+          showToast('Learning defaults saved');
+        } catch (err) {
+          toastError(err, 'Could not save');
+        }
+      };
+    });
+  }
 }
 
 async function renderAgentMcp(agentId) {
@@ -12175,12 +12951,7 @@ async function renderAgentMcp(agentId) {
 }
 
 async function setAgentMcp(agentId, body, okMsg) {
-  const res = await authFetch(`/api/agents/${encodeURIComponent(agentId)}/mcp-servers`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+  await apiJson(`/api/agents/${encodeURIComponent(agentId)}/mcp-servers`, { method: 'PUT', body });
   showToast(okMsg, { kind: 'success' });
   await renderAgentMcp(agentId);
 }
@@ -12527,12 +13298,7 @@ $('#agent-create-form').addEventListener('submit', async (e) => {
     if (checked.length) showToast(`Adding ${checked.length} suggested skill(s)…`, { kind: 'info' });
     for (const c of checked) {
       try {
-        const ir = await authFetch('/api/skills/import', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: c.dataset.url }),
-        });
-        if (!ir.ok) throw new Error((await ir.json().catch(() => ({}))).error || ir.statusText);
+        await apiJson('/api/skills/import', { method: 'POST', body: { url: c.dataset.url } });
         showToast(`Added skill ${c.dataset.name}`, { kind: 'success' });
       } catch (err) {
         showToast(`Skill ${c.dataset.name} failed: ` + (err?.message || err), { kind: 'error' });
@@ -12660,7 +13426,7 @@ async function openRoomDetail(roomId) {
   const archiveBtn = $('#room-archive-toggle');
   if (room && room.canArchive) {
     archiveBtn.hidden = false;
-    archiveBtn.textContent = room.archived ? 'Unarchive Room' : 'Archive Room';
+    archiveBtn.textContent = room.archived ? 'Unarchive room' : 'Archive room';
   } else {
     archiveBtn.hidden = true;
   }
@@ -12728,12 +13494,7 @@ async function saveRoomName() {
     return;
   }
   try {
-    const r = await authFetch(`/api/rooms/${encodeURIComponent(id)}/name`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
-    });
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+    await apiJson(`/api/rooms/${encodeURIComponent(id)}/name`, { method: 'PUT', body: { name } });
     showToast('Room renamed', { kind: 'success' });
   } catch (err) {
     showToast('Rename failed: ' + (err.message || err), { kind: 'error' });
@@ -12843,8 +13604,12 @@ async function renderRoomSkills() {
     keep.className = 'btn btn-primary';
     keep.textContent = 'Keep';
     keep.title = `Wire to ${d.agentName || nameOf(d.agentGroupId)}`;
+    keep.dataset.draftId = d.id;
+    // A re-render mid-review must not resurrect a clickable Keep.
+    if (reviewingDrafts.has(d.id)) markDraftReviewing(keep, true);
     keep.addEventListener('click', () =>
-      armUndo(actions, `Keeping ${d.skillName}…`, UNDO_SECONDS, async () => {
+      armUndo(actions, `Keeping ${d.skillName}…`, UNDO_SECONDS, async (restore) => {
+        restore(); // the row lives on through 'Keeping…' → 'Reviewing…'
         await keepSkillDraft({ id: d.id, agentGroupId: d.agentGroupId, agentName: d.agentName }, keep);
         void renderRoomSkills();
       }),
@@ -12909,7 +13674,7 @@ async function renderRoomSkills() {
           showToast(`Reverted ${s.name}`);
           void renderRoomSkills();
         } catch (err) {
-          showToast(err.message || 'Could not revert', 'error');
+          toastError(err, 'Could not revert');
         }
       });
       head.appendChild(revert);
@@ -12937,7 +13702,7 @@ async function renderRoomSkills() {
         showToast(`Removed ${s.name}`);
         void renderRoomSkills();
       } catch (err) {
-        showToast(err.message || 'Failed to remove skill', 'error');
+        toastError(err, 'Failed to remove skill');
       }
     });
     li.append(head, del);
@@ -12972,7 +13737,7 @@ async function renderRoomSkills() {
         showToast(`Restored ${s.name}`);
         void renderRoomSkills();
       } catch (err) {
-        showToast(err.message || 'Could not restore', 'error');
+        toastError(err, 'Could not restore');
       }
     });
     li.append(head, restore);
@@ -13627,12 +14392,46 @@ const TOOL_LABELS = {
 // ── Learn surfaces ───────────────────────────────────────────────────────────
 // One path for every learn trigger (composer 🎓, nudge chip, room-settings
 // button, typing /learn): set the input and send. No second implementation.
-function triggerLearn() {
+// `command` lets source-directed callers send `/learn <url|path>` through the
+// exact same gate (in a room, composer enabled) and send path.
+function triggerLearn(command = '/learn') {
   const input = $('#message-input');
   if (!input || input.disabled || !currentRoom) return;
   hideLearnNudge();
-  input.value = '/learn';
+  input.value = command;
   sendCurrentMessage();
+}
+
+// Client-side mirror of classifyLearnHint's first-token rule (container/
+// agent-runner/src/learning-loop.ts): only the FIRST token decides whether the
+// hint is a source; anything after it is focus text. Pre-validating here keeps
+// a typo from silently degrading into a free-text steering hint.
+function learnSourceFirstToken(value) {
+  return value.trim().split(/\s+/)[0] || '';
+}
+function isLearnUrlToken(tok) {
+  if (!/^https?:\/\/\S+$/i.test(tok)) return false;
+  try {
+    new URL(tok);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function isLearnPathToken(tok) {
+  return tok === '~' || tok === '.' || tok === '..' || /^(\/|\.\/|\.\.\/|~\/)/.test(tok);
+}
+
+// Shared source prompt: one input — the source first, optional focus text
+// after it — composed into `/learn <value>` and sent through triggerLearn.
+async function promptLearnSource({ title, placeholder, check, invalid }) {
+  const v = await showInputModal({
+    title,
+    placeholder,
+    confirmLabel: 'Learn',
+    validate: (val) => (val && check(learnSourceFirstToken(val)) ? null : invalid),
+  });
+  return v; // trimmed source (+ optional focus), or null on cancel
 }
 
 // The nudge: Hermes' bare heuristic (a tool-heavy turn), but human-gated — it
@@ -13677,21 +14476,50 @@ async function toggleLearnMenu() {
   const menu = $('#learn-menu');
   if (!menu) return;
   if (!menu.hidden) {
-    menu.hidden = true;
+    closeLearnMenu();
     return;
   }
   if (!currentRoom) return;
   menu.innerHTML = '';
 
-  const now = document.createElement('button');
-  now.type = 'button';
-  now.className = 'learn-menu-item';
-  now.innerHTML = '<svg class="icon" aria-hidden="true"><use href="#i-sparkles"></use></svg><span class="learn-menu-key">Distill a skill now</span>';
-  now.addEventListener('click', () => {
-    menu.hidden = true;
-    triggerLearn();
-  });
-  menu.appendChild(now);
+  const item = (icon, label, onPick) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'learn-menu-item';
+    b.setAttribute('role', 'menuitem');
+    b.innerHTML = `<svg class="icon" aria-hidden="true"><use href="#${icon}"></use></svg><span class="learn-menu-key">${label}</span>`;
+    b.addEventListener('click', () => {
+      closeLearnMenu();
+      onPick();
+    });
+    return b;
+  };
+  menu.appendChild(item('i-sparkles', 'This session', () => triggerLearn()));
+  // Source-directed learning: one input (source first, optional focus text
+  // after), composed into `/learn <value>` — the same message the user could
+  // type; the container-side classifier does the rest.
+  menu.appendChild(
+    item('i-link', 'From a link…', async () => {
+      const v = await promptLearnSource({
+        title: 'Learn from a link',
+        placeholder: 'https://…',
+        check: isLearnUrlToken,
+        invalid: 'Start with a full link (http:// or https://)',
+      });
+      if (v) triggerLearn('/learn ' + v);
+    }),
+  );
+  menu.appendChild(
+    item('i-folder', 'From a folder…', async () => {
+      const v = await promptLearnSource({
+        title: 'Learn from a folder',
+        placeholder: '/workspace/…',
+        check: isLearnPathToken,
+        invalid: 'Start with a path (/, ./ or ~/)',
+      });
+      if (v) triggerLearn('/learn ' + v);
+    }),
+  );
 
   // ONE pair of toggles, scoped to THIS room — the room layer overrides the
   // wired agents' defaults, so many agents never means many switches.
@@ -13711,6 +14539,13 @@ async function toggleLearnMenu() {
     );
   }
   menu.hidden = false;
+  $('#learn-btn')?.setAttribute('aria-expanded', 'true');
+}
+
+function closeLearnMenu() {
+  const menu = $('#learn-menu');
+  if (menu) menu.hidden = true;
+  $('#learn-btn')?.setAttribute('aria-expanded', 'false');
 }
 
 async function putRoomLearning(patch) {
@@ -13725,7 +14560,7 @@ async function putRoomLearning(patch) {
     void refreshRoomAutoLearn(currentRoom);
     return true;
   } catch (err) {
-    showToast(err.message || 'Could not save', 'error');
+    toastError(err, 'Could not save');
     return false;
   }
 }
@@ -13734,6 +14569,8 @@ function learnToggleRow(label, on, onChange) {
   const row = document.createElement('button');
   row.type = 'button';
   row.className = 'learn-menu-item';
+  row.setAttribute('role', 'menuitemcheckbox');
+  row.setAttribute('aria-checked', String(!!on));
   const state = document.createElement('span');
   state.className = 'learn-menu-state' + (on ? ' on' : '');
   state.textContent = on ? 'on' : 'off';
@@ -13746,6 +14583,7 @@ function learnToggleRow(label, on, onChange) {
     if (ok) {
       state.textContent = next ? 'on' : 'off';
       state.classList.toggle('on', next);
+      row.setAttribute('aria-checked', String(next));
     }
   });
   return row;
@@ -13784,10 +14622,15 @@ $('#learn-btn')?.addEventListener('click', toggleLearnMenu);
 document.addEventListener('click', (e) => {
   const menu = $('#learn-menu');
   if (menu && !menu.hidden && !menu.contains(e.target) && e.target.closest('#learn-btn') === null) {
-    menu.hidden = true;
+    closeLearnMenu();
   }
 });
-$('#learn-nudge-go')?.addEventListener('click', triggerLearn);
+// Escape closes the 🎓 popover (bubble phase — the capture-phase view handler
+// yields via blockingOverlayOpen while the menu is open).
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !($('#learn-menu')?.hidden ?? true)) closeLearnMenu();
+});
+$('#learn-nudge-go')?.addEventListener('click', () => triggerLearn());
 $('#learn-nudge-dismiss')?.addEventListener('click', hideLearnNudge);
 
 function handleStatusEvent(msg) {
@@ -14752,7 +15595,10 @@ $('#router-select')?.addEventListener('change', (e) => {
 });
 
 $('#router-new-btn')?.addEventListener('click', async () => {
-  const name = (prompt('New routing profile name (letters, digits, dash):', '') || '').trim();
+  const name = await showInputModal({
+    title: 'New routing profile',
+    placeholder: 'letters, digits, dash',
+  });
   if (!name) return;
   try {
     const res = await authFetch('/api/router/routers', {
@@ -15123,6 +15969,14 @@ $('#route-detail-form')?.addEventListener('submit', async (e) => {
 $('#route-delete')?.addEventListener('click', async () => {
   const r = routingDraft.routes[selectedRouteIdx];
   if (!r) return;
+  // Destructive + persisted immediately — the confirm modal is universal at
+  // delete sites (DESIGN.md §5); this was the one that slipped through.
+  const ok = await showConfirmModal({
+    title: `Delete the route "${r.name || r.model || 'unnamed'}"?`,
+    confirmLabel: 'Delete',
+    destructive: true,
+  });
+  if (!ok) return;
   routingDraft.routes.splice(selectedRouteIdx, 1);
   try {
     await saveRoutingConfig();
@@ -15931,7 +16785,7 @@ async function renderMcpSources() {
         void renderMcpSources();
         applyMcpCatalogVisibility();
       } catch (err) {
-        showToast(err.message || 'Could not update the source', 'error');
+        toastError(err, 'Could not update the source');
       }
     });
     li.appendChild(toggle);
@@ -15941,7 +16795,7 @@ async function renderMcpSources() {
 }
 
 /**
- * The learning loop's explicit trigger (docs/design/learning-loop.md §1): reviews
+ * The learning loop's explicit trigger (docs/webchat/design/learning-loop.md §1): reviews
  * THIS session and drafts a skill only if it taught something. It just sends
  * `/learn` — one path, the same one the slash command takes, so there's no second
  * implementation to keep in step.
@@ -15984,9 +16838,7 @@ async function loadMcpCatalog(q = '') {
   status.textContent = '';
   let servers = [];
   try {
-    const res = await authFetch(`/api/mcp-catalog${q ? `?q=${encodeURIComponent(q)}` : ''}`);
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
-    const payload = await res.json();
+    const payload = await apiJson(`/api/mcp-catalog${q ? `?q=${encodeURIComponent(q)}` : ''}`);
     if (payload.disabled) {
       mcpRegistryDisabled = true;
       applyMcpCatalogVisibility();
@@ -16272,8 +17124,7 @@ function renderMcpHardening(server) {
       });
       if (!ok) return;
       try {
-        const res = await authFetch(`/api/mcp-servers/${encodeURIComponent(server.id)}/repin`, { method: 'POST' });
-        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+        await apiJson(`/api/mcp-servers/${encodeURIComponent(server.id)}/repin`, { method: 'POST' });
         showToast('Tool surface re-approved', { kind: 'success' });
         await fetchMcpServers();
         openMcpDetail(server.id);
@@ -16319,12 +17170,7 @@ function renderMcpHardening(server) {
       const chosen = boxes.filter((b) => b.checked).map((b) => b.dataset.tool);
       const body = { enabled: chosen.length === boxes.length ? null : chosen };
       try {
-        const res = await authFetch(`/api/mcp-servers/${encodeURIComponent(server.id)}/tools`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+        await apiJson(`/api/mcp-servers/${encodeURIComponent(server.id)}/tools`, { method: 'PUT', body });
         showToast(
           body.enabled ? `${chosen.length} of ${boxes.length} tools enabled` : 'All tools enabled',
           { kind: 'success' },
@@ -16576,13 +17422,7 @@ $('#mcp-create-form').addEventListener('submit', async (e) => {
 async function createMcpServer(body, btn) {
   btn.disabled = true;
   try {
-    const res = await authFetch('/api/mcp-servers', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
-    const created = await res.json().catch(() => ({}));
+    const created = await apiJson('/api/mcp-servers', { method: 'POST', body });
     showToast(`Added ${body.name}`, { kind: 'success' });
     closeMcpDetail();
     await fetchMcpServers();
@@ -16611,19 +17451,9 @@ $('#mcp-detail-form').addEventListener('submit', async (e) => {
   // relay injects it per request) — never into headers/container.json.
   const token = server.transport !== 'stdio' ? $('#mcp-token').value.trim() : '';
   try {
-    const res = await authFetch(`/api/mcp-servers/${encodeURIComponent(selectedMcpId)}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    await apiJson(`/api/mcp-servers/${encodeURIComponent(selectedMcpId)}`, { method: 'PUT', body });
     if (token) {
-      const ar = await authFetch(`/api/mcp-servers/${encodeURIComponent(selectedMcpId)}/auth`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token }),
-      });
-      if (!ar.ok) throw new Error((await ar.json().catch(() => ({}))).error || ar.statusText);
+      await apiJson(`/api/mcp-servers/${encodeURIComponent(selectedMcpId)}/auth`, { method: 'PUT', body: { token } });
     }
     showToast('Saved', { kind: 'success' });
     closeMcpDetail();

@@ -230,12 +230,12 @@ export function getPendingApproval(approvalId: string): PendingApproval | undefi
 
 /** Pending approvals created before `cutoffMs` (epoch) — the TTL sweep's feed. */
 export function getExpiredPendingApprovals(cutoffMs: number): PendingApproval[] {
-  return (getDb().prepare(`SELECT * FROM pending_approvals WHERE status = 'pending'`).all() as PendingApproval[]).filter(
-    (a) => {
-      const t = Date.parse(a.created_at);
-      return Number.isFinite(t) && t <= cutoffMs;
-    },
-  );
+  return (
+    getDb().prepare(`SELECT * FROM pending_approvals WHERE status = 'pending'`).all() as PendingApproval[]
+  ).filter((a) => {
+    const t = Date.parse(a.created_at);
+    return Number.isFinite(t) && t <= cutoffMs;
+  });
 }
 
 export function updatePendingApprovalStatus(approvalId: string, status: PendingApproval['status']): void {
@@ -268,16 +268,12 @@ export function deletePendingApproval(approvalId: string): void {
   getDb().prepare('DELETE FROM pending_approvals WHERE approval_id = ?').run(approvalId);
 }
 
-/**
- * Atomically claim a pending approval: delete it and report whether THIS call
- * removed the row. Returns false if the row was already gone — a concurrent or
- * repeat response delivery claimed it first. Lets the approve path run its
- * (possibly slow) handler exactly once even when the same Approve click is
- * delivered more than once.
- */
-export function claimPendingApproval(approvalId: string): boolean {
-  return getDb().prepare('DELETE FROM pending_approvals WHERE approval_id = ?').run(approvalId).changes > 0;
-}
+// NOTE: the old destructive `claimPendingApproval` (DELETE-then-report) was
+// removed. Deleting the row up-front broke approved cli_command replays, whose
+// guard re-checks the row's liveness (grantSatisfies → getPendingApproval,
+// src/guard/guard.ts). The double-fire guard now lives in response-handler.ts as
+// an in-process claim, and the row is deleted AFTER the handler. Do not
+// reintroduce a delete-before-replay claim here.
 
 export function getPendingApprovalsByAction(action: string): PendingApproval[] {
   return getDb().prepare('SELECT * FROM pending_approvals WHERE action = ?').all(action) as PendingApproval[];

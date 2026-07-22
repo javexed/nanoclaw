@@ -70,10 +70,13 @@ marker.
 
 ## Community-scripts (Proxmox catalog) version
 
-A separate [community-scripts](https://github.com/community-scripts/ProxmoxVE)
-(Proxmox VE Helper-Scripts) version — a `ct/` + `install/` rewrite on their
-`build.func` framework — is maintained independently (root system service,
-`setup_docker`, no `install.sh`) and isn't kept here.
+For Proxmox VE, there's a separate [community-scripts](https://github.com/community-scripts/ProxmoxVE)
+(Proxmox VE Helper-Scripts) entry — a `ct/` + `install/` variant on their
+`build.func` framework (root system service, `setup_docker`, no `install.sh`),
+maintained at **[javexed/ProxmoxVED](https://github.com/javexed/ProxmoxVED)**. It
+creates a Debian 13 LXC and installs the release tarball. It's currently in
+testing (not yet submitted to the upstream community-scripts catalog); the
+invocation is in **[../docs/webchat/install.md](../docs/webchat/install.md)**.
 
 ### Updating a tarball (community-scripts) install
 

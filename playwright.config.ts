@@ -12,4 +12,12 @@ export default defineConfig({
   workers: 1,
   reporter: [['list']],
   use: { headless: true },
+  // Two projects, one testDir: the smoke suite boots the server with BEARER
+  // auth, and auth.ts reads WEBCHAT_TOKEN at module load — so it must run in a
+  // worker process where dist/ hasn't been imported yet. Worker processes never
+  // span projects, so the split guarantees the fresh import.
+  projects: [
+    { name: 'e2e', testIgnore: /webchat\.smoke\.spec\.ts/ },
+    { name: 'smoke', testMatch: /webchat\.smoke\.spec\.ts/ },
+  ],
 });

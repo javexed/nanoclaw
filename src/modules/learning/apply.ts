@@ -1,6 +1,6 @@
 /**
  * Applying a kept skill draft — the one write path, shared by the webchat Keep
- * button and the auto-keep option (docs/learning-loop.md §4).
+ * button and the auto-keep option (docs/webchat/learning-loop.md §4).
  *
  * Two callers, one implementation, because this is the security-sensitive
  * write: a kept skill becomes agent context on the next spawn. Extracted from
@@ -119,7 +119,12 @@ export function applySkillDraft(draft: SkillDraft, restartReason: string): Apply
 /** Copy the CURRENT version of a skill into its revision history. */
 export function snapshotRevision(skillsDir: string, name: string): string {
   const src = path.join(skillsDir, name);
-  const dest = path.join(skillsDir, '.history', name, String(Date.now()));
+  // Millisecond names collide when two snapshots land in the same ms (e.g. a
+  // revert-of-a-revert): the second copy would merge into the first's dir and
+  // corrupt both. Bump until unique — ordering stays newest-first by number.
+  let ts = Date.now();
+  while (fs.existsSync(path.join(skillsDir, '.history', name, String(ts)))) ts++;
+  const dest = path.join(skillsDir, '.history', name, String(ts));
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.cpSync(src, dest, { recursive: true });
   return dest;

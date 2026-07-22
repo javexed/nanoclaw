@@ -122,7 +122,7 @@ export interface QueryInput {
   };
 
   /**
-   * Run this query as a LEARNING REVIEW (docs/design/learning-loop.md §2): the
+   * Run this query as a LEARNING REVIEW (docs/webchat/design/learning-loop.md §2): the
    * session's transcript in context, but a toolset restricted to draft_skill
    * alone — no destinations, no a2a, no self-mod, no shell — and a session FORK,
    * so nothing the review does disturbs the main conversation. Providers that
@@ -130,6 +130,23 @@ export interface QueryInput {
    * the runner then falls back to an ordinary in-turn review.
    */
   learningReview?: boolean;
+
+  /**
+   * Per-query model override (alias or full ID). Currently honored for
+   * learningReview queries only — carries the learning config's `reviewModel`
+   * so the review pass can run on a cheaper model. Providers fall back to
+   * their own review-model default (e.g. NANOCLAW_LEARNING_MODEL), then the
+   * configured turn model. Absent = no override.
+   */
+  model?: string;
+  /**
+   * Extra READ-ONLY tools for a source-directed learning review (`/learn
+   * <url>` / `/learn <path>` — learning-loop.ts). The review agent must fetch
+   * or read the source itself, which the single-tool restriction would
+   * forbid. Only meaningful when learningReview is true; absent = draft_skill
+   * alone. Providers must still exclude shell/write/send tools.
+   */
+  learningReviewTools?: string[];
 }
 
 /**

@@ -67,7 +67,7 @@ export function isClearCommand(msg: MessageInRow): boolean {
 }
 
 /**
- * `/learn` — the learning loop's EXPLICIT trigger (docs/design/learning-loop.md §1).
+ * `/learn` — the learning loop's EXPLICIT trigger (docs/webchat/design/learning-loop.md §1).
  *
  * Explicit-first, by design: zero false positives, and it never surprise-costs the
  * operator. Heuristic and classifier triggers come later; this is the one that has

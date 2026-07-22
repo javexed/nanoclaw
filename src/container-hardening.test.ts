@@ -1,5 +1,5 @@
 /**
- * Container hardening baseline (docs/SECURITY.md §Container Hardening):
+ * Container hardening baseline (docs/webchat/security.md §Container hardening):
  * cap-drop ALL with the minimal file-ownership adds, no-new-privileges, and
  * a pids limit — always on unless the explicit escape hatch is set.
  */

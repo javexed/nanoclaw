@@ -1,13 +1,18 @@
 /**
- * The isolated learning review (docs/design/learning-loop.md §2).
+ * The isolated learning review (docs/webchat/design/learning-loop.md §2).
  *
  * /learn must NOT become an ordinary turn when the provider can do better: it
  * runs as a second query flagged `learningReview` — which the claude provider
- * translates into "draft_skill only + forked session". These tests pin the
- * runner-side contract: the flag is set, the prompt is the authoring
- * instruction, the trigger message is consumed, and a reply still reaches the
- * room. Providers that can't restrict get the fallback: the same review as a
- * normal turn with the prompt swapped in.
+ * translates into "draft_skill only". These tests pin the runner-side
+ * contract: the flag is set, the prompt is the authoring instruction, the
+ * trigger message is consumed, and a reply still reaches the room. Providers
+ * that can't restrict get the fallback: the same review as a normal turn with
+ * the prompt swapped in.
+ *
+ * Context: when the container has seen exchanges, the review runs FRESH over
+ * a bounded digest of them (no continuation — nothing replayed); with no
+ * exchanges yet (e.g. /learn as the container's first message), it falls back
+ * to the old replay path. See learning-digest.test.ts for the digest bounds.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
@@ -106,5 +111,40 @@ describe('isolated learning review', () => {
     expect(inputs[0].prompt).toContain('<message');
     expect(inputs[0].prompt).toContain('DO NOT draft a skill for');
     expect(getPendingMessages()).toHaveLength(0);
+  });
+
+  it('reviews over the exchange digest — fresh query, prior turn in the prompt, nothing replayed', async () => {
+    // A real turn first, so the exchange log has something to digest.
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, thread_id, content)
+         VALUES ('m1', 'chat', datetime('now'), 'pending', 'room-1', 'webchat', 'main', ?)`,
+      )
+      .run(JSON.stringify({ sender: 'Op', text: 'please fix the rsync flags' }));
+
+    const inputs: QueryInput[] = [];
+    const provider = new RestrictedMock({}, (_prompt, input) => {
+      inputs.push(input);
+      return input.learningReview
+        ? { result: '<message to="room-1">Nothing worth keeping.</message>' }
+        : { result: '<message to="room-1">rsync fixed with -aHAX</message>' };
+    });
+
+    const controller = new AbortController();
+    const loop = runPollLoop({ provider, providerName: 'mock', cwd: '/tmp', signal: controller.signal });
+    await waitFor(() => getUndeliveredMessages().length > 0, 3000);
+    insertLearn('learn-2');
+    await waitFor(() => inputs.some((i) => i.learningReview === true), 3000);
+    controller.abort();
+    await loop.catch(() => {});
+
+    const review = inputs.find((i) => i.learningReview === true)!;
+    // Fresh query: the stored continuation from the first turn is NOT replayed…
+    expect(review.continuation).toBeUndefined();
+    // …because the digest carries the context instead: both sides of the turn.
+    expect(review.prompt).toContain('<session-digest>');
+    expect(review.prompt).toContain('please fix the rsync flags');
+    expect(review.prompt).toContain('rsync fixed with -aHAX');
+    expect(review.prompt).toContain('DO NOT draft a skill for');
   });
 });

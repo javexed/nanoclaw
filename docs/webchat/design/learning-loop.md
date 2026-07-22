@@ -1,7 +1,7 @@
 # Learning loop — design
 
 > **Built.** This is the design rationale; the operator guide to the shipped
-> system is [docs/learning-loop.md](../learning-loop.md).
+> system is [docs/webchat/learning-loop.md](../learning-loop.md).
 
 *Proposed design (not yet built) for auto-generating skills from experience.
 The premise, validated by reading Nous Research's Hermes Agent
@@ -85,7 +85,7 @@ toolset gating instead of their `_persist_disabled` / `_session_db=None` flags.
 - **Cheaper model** — `learning.model` may be smaller than the turn model, like
   Hermes' `auxiliary.background_review.model`.
 - **Authoring prompt** — copy Hermes' proven shape: front-matter (`name`,
-  one-line `description` per [DESIGN.md](../../public/webchat/DESIGN.md)'s prose
+  one-line `description` per [DESIGN.md](../../../public/webchat/DESIGN.md)'s prose
   budget, `version`), a fixed section order (When to use → Prerequisites →
   Procedure → Pitfalls → Verification), and **"never invent flags, paths, or
   APIs."**
@@ -105,7 +105,7 @@ toolset gating instead of their `_persist_disabled` / `_session_db=None` flags.
 
 `draft_skill` writes a **`propose_skill` system action into `outbound.db`** — the
 same mechanism `schedule` and `approvals` already use (see
-[delivery.ts](../../src/delivery.ts)). The host's delivery poll materializes it
+[delivery.ts](../../../src/delivery.ts)). The host's delivery poll materializes it
 into a **`skill_drafts`** row plus `data/skill-drafts/<id>/SKILL.md`. Nothing is
 mounted into any agent until approved — this is Hermes'
 `~/.hermes/pending/skills/` + `/skills approve`, mapped onto nanoclaw's approval

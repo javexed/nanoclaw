@@ -220,20 +220,6 @@ export function surfaceA2aMessage(fromAgentGroupId: string, toAgentGroupId: stri
   }
 }
 
-export function setAgentPresence(roomId: string, identity: string, active: boolean): void {
-  const wasBefore = activeAgents.has(roomId);
-  if (active) activeAgents.set(roomId, identity);
-  else activeAgents.delete(roomId);
-  const isNow = activeAgents.has(roomId);
-  if (wasBefore !== isNow) {
-    broadcast(roomId, {
-      type: 'members',
-      room_id: roomId,
-      members: getMemberList(roomId),
-    });
-  }
-}
-
 /**
  * Send a payload to every connected client matching `userId`. Used by
  * webchat's approval-inbox delivery path — when an admin/owner has an

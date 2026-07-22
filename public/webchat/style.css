@@ -206,23 +206,6 @@ body {
   fill: currentColor;
 }
 
-.login-help {
-  color: var(--text-dim);
-  font-size: 0.8rem;
-  line-height: 1.5;
-  margin: 12px 0 0;
-}
-.login-help-dim {
-  display: block;
-  margin-top: 2px;
-  opacity: 0.7;
-}
-.login-help code {
-  background: var(--surface2);
-  border-radius: 4px;
-  padding: 1px 4px;
-  font-size: 0.733rem;
-}
 .login-form {
   display: flex;
   flex-direction: column;
@@ -304,34 +287,6 @@ body {
   text-overflow: ellipsis;
 }
 /* Sidebar tabs */
-.sidebar-tabs {
-  display: flex;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-.sidebar-tab {
-  flex: 1;
-  padding: 8px 0;
-  background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
-  color: var(--text-dim);
-  font-size: 0.8rem;
-  font-weight: 600;
-  cursor: pointer;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  transition:
-    color 0.15s,
-    border-color 0.15s;
-}
-.sidebar-tab:hover {
-  color: var(--text);
-}
-.sidebar-tab.active {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
-}
 .tab-content {
   display: none;
   flex: 1;
@@ -563,7 +518,7 @@ body {
 #room-list li .room-kebab {
   background: transparent;
   border: none;
-  color: var(--text-muted);
+  color: var(--text-dim);
   cursor: pointer;
   padding: 0 4px;
   font-size: 1.2rem;
@@ -703,7 +658,7 @@ body {
   flex-shrink: 0;
   background: transparent;
   border: none;
-  color: var(--text-muted);
+  color: var(--text-dim);
   cursor: pointer;
   font-size: 0.8rem;
   padding: 8px 16px;
@@ -781,20 +736,6 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-#agent-list li .agent-info-channel {
-  display: block;
-  font-size: 0.667rem;
-  color: var(--text-dim);
-}
-#agent-list li .agent-main-tag {
-  font-size: 0.6rem;
-  background: var(--agent);
-  color: #000;
-  padding: 1px 5px;
-  border-radius: 3px;
-  font-weight: 600;
-  flex-shrink: 0;
-}
 
 /* Chat area */
 #chat {
@@ -841,6 +782,7 @@ body {
 #perms-exit,
 #topology-back,
 #matrix-back,
+#journey-back,
 #help-back {
   display: inline-flex;
   align-items: center;
@@ -1414,34 +1356,6 @@ button:focus-visible {
   color: var(--text);
   border: 1px solid var(--border);
 }
-.room-oauth-allowed-label {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  font-size: 12px;
-  line-height: 1.4;
-  margin-top: 4px;
-}
-.room-oauth-allowed-label input {
-  flex: none;
-  margin-top: 2px;
-}
-.room-credential-mode-section {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 12px 0 4px;
-  border-top: 1px solid var(--border);
-}
-.room-credential-mode-select {
-  width: 100%;
-  background: var(--surface2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  color: var(--text);
-  font-size: var(--fs-sm);
-  padding: 6px 8px;
-}
 
 /* Mobile */
 @media (max-width: 600px) {
@@ -1566,9 +1480,6 @@ button:focus-visible {
   }
   #agent-list li {
     font-size: 0.85em;
-  }
-  .sidebar-tabs {
-    font-size: 0.733rem;
   }
   #message-form {
     padding: 8px 12px;
@@ -2062,11 +1973,11 @@ a.lightbox-btn {
   border: 1px solid var(--border);
 }
 .msg .bubble pre .code-btn:hover {
-  background: var(--surface1);
+  background: var(--surface2);
 }
 .msg .bubble pre .code-btn.active {
   background: var(--accent);
-  color: var(--accent-contrast, #fff);
+  color: var(--on-accent);
   border-color: var(--accent);
 }
 .msg .bubble pre .code-btn.copied {
@@ -2817,18 +2728,6 @@ a.lightbox-btn {
   color: var(--text-dim);
   cursor: default;
 }
-.checkbox-label {
-  flex-direction: row !important;
-  align-items: center;
-  gap: 8px !important;
-  font-size: 0.867rem;
-  cursor: pointer;
-}
-.checkbox-label input[type='checkbox'] {
-  accent-color: var(--accent);
-  width: 16px;
-  height: 16px;
-}
 .agent-detail-actions {
   display: flex;
   gap: 8px;
@@ -2844,53 +2743,6 @@ a.lightbox-btn {
 }
 .room-cred-section[hidden] {
   display: none;
-}
-.room-cred-title {
-  margin: 0;
-  font-size: var(--fs-sm);
-  font-weight: 600;
-}
-/* Mode as inline radios (all three on one row). */
-.room-cred-modes {
-  display: flex;
-  flex-direction: row;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 18px;
-  font-size: var(--fs-sm);
-}
-.room-cred-opt {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-}
-.room-cred-opt input {
-  flex: none;
-  margin: 0;
-}
-/* OAuth allowances as label-left / control-right toggle rows. */
-.room-cred-toggles {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding-top: 8px;
-  margin-top: 4px;
-  border-top: 1px solid var(--border);
-  font-size: var(--fs-sm);
-}
-.room-cred-toggle {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  cursor: pointer;
-}
-.room-cred-toggle input {
-  flex: none;
-  margin: 0;
 }
 /* ── Buttons — role-based set: .btn base + four role modifiers. See DESIGN.md §2.
    Icon buttons (.lightbox-btn, .settings-btn, .file-picker-btn) and the
@@ -3438,30 +3290,6 @@ a.lightbox-btn {
    header icons so it reads as "privileged action" at a glance — gold
    accent borrowed from the owner-crown palette, key glyph SVG instead
    of an emoji to avoid font-rendering inconsistencies. */
-.admin-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  padding: 4px 8px;
-  background: color-mix(in srgb, var(--agent) 15%, transparent);
-  border: 1px solid color-mix(in srgb, var(--agent) 50%, transparent);
-  color: var(--agent-strong);
-  border-radius: 999px;
-}
-.admin-btn:hover {
-  background: color-mix(in srgb, var(--agent) 28%, transparent);
-  border-color: var(--agent);
-  color: var(--agent-strong);
-}
-.admin-btn.active {
-  background: color-mix(in srgb, var(--agent) 32%, transparent);
-  border-color: var(--agent);
-  color: var(--agent-strong);
-}
-.admin-btn svg {
-  display: block;
-}
 
 /* Sidebar overflow menu — one labeled menu replacing the ▦/key/⚙ glyphs. */
 .overflow-wrap {
@@ -4018,6 +3846,124 @@ a.lightbox-btn {
 #matrix[hidden] {
   display: none;
 }
+/* Journey — the learning timeline: a vertical, day-grouped feed of what each
+   agent learned (proposed / kept / discarded / revised / archived). */
+#journey {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+#journey[hidden] {
+  display: none;
+}
+.journey-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 18px;
+  max-width: 640px;
+}
+.journey-day {
+  margin: 14px 0 6px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.journey-day:first-child {
+  margin-top: 0;
+}
+.journey-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+}
+.journey-row.journey-linked {
+  cursor: pointer;
+}
+.journey-row.journey-linked:hover {
+  background: var(--surface2);
+}
+.journey-verb {
+  flex-shrink: 0;
+  min-width: 72px;
+  color: var(--text-dim);
+}
+.journey-verb-kept {
+  color: var(--success);
+}
+.journey-skill {
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.journey-meta {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.journey-time {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+}
+.journey-empty {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  padding: 8px;
+}
+/* Client-side filters (agent select + kind segmented + skill chip). Rows and
+   day headers set display, so hidden-attr filtering needs the restate. */
+.journey-row[hidden],
+.journey-day[hidden] {
+  display: none;
+}
+.journey-filters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.journey-filters select {
+  padding: 7px 10px;
+  background: var(--surface2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
+}
+.journey-filters .setting-options {
+  flex: 0 0 auto;
+}
+.journey-filters .setting-option {
+  flex: 0 0 auto;
+  padding: 7px 12px;
+}
+.journey-skill-chip {
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  border-radius: var(--radius-pill);
+  padding: 4px 10px;
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+.journey-skill-chip:hover {
+  border-color: var(--text-dim);
+}
+.journey-skill-chip[hidden] {
+  display: none;
+}
 #help {
   flex: 1;
   display: flex;
@@ -4401,13 +4347,6 @@ a.lightbox-btn {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.detail-table .status-badge {
-  display: inline-block;
-  padding: 1px 6px;
-  border-radius: 3px;
-  font-size: 0.667rem;
-  font-weight: 600;
-}
 .status-active {
   background: color-mix(in srgb, var(--success) 14%, transparent);
   color: var(--success-strong);
@@ -4637,11 +4576,6 @@ a.lightbox-btn {
   border-radius: var(--radius-md);
   font-size: var(--fs-sm);
 }
-.skills-import-hint {
-  margin: 8px 0 12px;
-  font-size: var(--fs-xs);
-  color: var(--text-dim);
-}
 #skills-list {
   list-style: none;
   margin: 0;
@@ -4659,6 +4593,66 @@ a.lightbox-btn {
   color: var(--text-dim);
   font-size: var(--fs-sm);
   padding: 8px 2px;
+}
+/* ── Skills page sections: collapsible Workspace + per-agent headers ────── */
+.skills-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 2px;
+  cursor: pointer;
+  user-select: none;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+.skills-section-chevron {
+  color: var(--text-dim);
+  font-weight: 700;
+  transition: transform var(--transition);
+}
+.skills-section-head.open .skills-section-chevron {
+  transform: rotate(90deg);
+}
+.skills-section-count {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  font-weight: 400;
+}
+/* The section filter — the browse twin of #skill-discover-search. */
+#skills-filter {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 12px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+}
+#skills-filter[hidden] {
+  display: none;
+}
+/* Filter + 'Add from link…' share one toolbar row above the sections. */
+.skills-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.skills-toolbar #skills-filter {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+}
+.skills-toolbar .btn {
+  flex-shrink: 0;
+}
+/* .skill-row / .skills-section-head set display:flex, which outranks the UA's
+   [hidden] rule — collapse and filtering hide via the hidden attribute. */
+#skills-list li[hidden] {
+  display: none;
 }
 .skill-row {
   display: flex;
@@ -4696,6 +4690,19 @@ a.lightbox-btn {
 .skill-badge-user {
   color: var(--accent);
   border-color: var(--accent);
+}
+/* Scope pill on agent-scoped skills: carries a room or agent name, so it keeps
+   normal case (like origin badges) and truncates rather than wrapping. */
+.skill-badge-scope {
+  color: var(--accent);
+  border-color: var(--accent);
+  text-transform: none;
+  letter-spacing: normal;
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 /* Provenance badges carry paths/domains ("obra/superpowers", "awesomeskill.ai"),
    which read better in normal case than the uppercased status badges. Each
@@ -4757,6 +4764,13 @@ a.skill-badge-origin:hover {
 }
 .skill-delete:hover {
   border-color: var(--delete-color, #e5484d);
+}
+/* 'History' on scoped rows — same compact footprint as the row's Remove. */
+.skill-history-btn {
+  flex-shrink: 0;
+  font-size: var(--fs-xs);
+  padding: 3px 10px;
+  margin-right: 6px;
 }
 #skills-browse {
   display: flex;
@@ -5424,11 +5438,6 @@ a.skill-badge-origin:hover {
   font-weight: 600;
   margin-bottom: 6px;
 }
-.approval-card .approval-question {
-  color: var(--text-dim);
-  white-space: pre-wrap;
-  margin-bottom: 8px;
-}
 .approval-card .approval-payload {
   font-family: ui-monospace, Menlo, monospace;
   font-size: 0.733rem;
@@ -5588,6 +5597,37 @@ a.skill-badge-origin:hover {
   font-size: 0.933rem;
   line-height: 1.5;
   color: var(--text);
+}
+/* Text field inside showInputModal — the modal twin of the standard input. */
+.confirm-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: var(--fs-base);
+}
+/* Inline field validation (DESIGN §5): invalid state + one-line message. */
+.confirm-input.invalid {
+  border-color: var(--danger);
+}
+.confirm-input-error {
+  margin-top: 6px;
+  color: var(--danger);
+  font-size: var(--fs-xs);
+}
+.confirm-input-error[hidden] {
+  display: none;
+}
+/* Agent (+ room) pick for 'Add from link…' — stacked selects in the modal. */
+.learn-target-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.learn-target-picker select[hidden] {
+  display: none;
 }
 .confirm-actions {
   display: flex;
@@ -5770,20 +5810,6 @@ a.skill-badge-origin:hover {
   border-radius: 4px;
   padding: 8px 10px;
 }
-.perms-detail-add-form {
-  margin-top: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  border-top: 1px solid var(--border);
-  padding-top: 16px;
-}
-.perms-detail-add-row {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 8px;
-}
-.perms-detail-add-row select,
 .perms-create-form input,
 .perms-create-form select,
 #perms-create-form input,
@@ -5798,50 +5824,6 @@ a.skill-badge-origin:hover {
 }
 
 /* Chips */
-.perms-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.perms-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border-radius: 14px;
-  font-size: 0.8rem;
-  font-weight: 600;
-  background: rgba(127, 127, 127, 0.12);
-  color: var(--text);
-}
-.perms-chip.owner {
-  background: color-mix(in srgb, var(--agent) 30%, transparent);
-  color: var(--agent-strong);
-}
-.perms-chip.admin {
-  background: color-mix(in srgb, var(--accent) 30%, transparent);
-  color: var(--accent-strong);
-}
-.perms-chip.member {
-  background: color-mix(in srgb, var(--accent2) 30%, transparent);
-  color: var(--accent2-strong);
-}
-.perms-chip button {
-  background: none;
-  border: none;
-  color: inherit;
-  cursor: pointer;
-  font-size: 1.067rem;
-  font-weight: 700;
-  line-height: 1;
-  padding: 0 0 0 2px;
-  /* Mobile-friendly tap target without changing visual size much */
-  min-width: 18px;
-  min-height: 18px;
-}
-.perms-chip button:hover {
-  color: var(--delete-color);
-}
 .perms-empty {
   color: var(--text-dim);
   font-size: 0.8rem;
@@ -6581,10 +6563,6 @@ a.skill-badge-origin:hover {
   border-radius: var(--radius-sm);
   padding: 0 5px;
 }
-.ollama-register-btn {
-  font-size: var(--fs-xs);
-  padding: 1px 8px;
-}
 .ollama-muted {
   color: var(--text-dim);
   font-size: var(--fs-sm);
@@ -6688,13 +6666,6 @@ a.skill-badge-origin:hover {
   border-color: var(--accent);
   color: var(--text);
 }
-.ollama-model-list li.linkable {
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-}
-.ollama-model-list li.linkable:hover {
-  background: var(--pre-bg);
-}
 
 #model-detail .agent-detail-header #model-detail-title {
   flex: 1;
@@ -6730,9 +6701,6 @@ a.skill-badge-origin:hover {
 .ollama-card-action {
   font-size: var(--fs-xs);
   padding: 1px 8px;
-}
-.ollama-card-note {
-  margin: 2px 0 4px;
 }
 
 /* ── Server card accordion ───────────────────────────────────────────── */
@@ -6811,35 +6779,6 @@ a.skill-badge-origin:hover {
 }
 
 /* ── Routing aside (routes editor + bench + decisions) ───────────────── */
-.routing-body {
-  padding: 10px 14px;
-  overflow-y: auto;
-  min-height: 0;
-  flex: 1;
-}
-.routing-live-row {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: var(--fs-sm);
-  margin-bottom: 10px;
-}
-.routing-timeout-label input {
-  width: 80px;
-  margin: 0 4px;
-}
-.routing-save-note {
-  font-size: var(--fs-xs);
-  color: var(--text-dim);
-  margin-left: 8px;
-}
-.routing-section-title {
-  font-size: var(--fs-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-dim);
-  margin: 14px 0 6px;
-}
 .routing-bench-row {
   display: flex;
   gap: 6px;
@@ -6874,15 +6813,6 @@ a.skill-badge-origin:hover {
 }
 
 /* ── Routing tab: sections below the route list ──────────────────────── */
-.routing-sections {
-  margin-top: 18px;
-}
-.routing-sections .ollama-hosts-title {
-  margin-top: 16px;
-}
-.routing-sections .ollama-hosts-title:first-child {
-  margin-top: 0;
-}
 .routing-section-head {
   display: flex;
   align-items: baseline;
@@ -7201,7 +7131,6 @@ body {
 .approvals-banner-list,
 .perms-user-list,
 .perms-detail-body,
-.routing-body,
 .routing-decisions-list,
 .routing-subpane,
 .slash-menu,
@@ -7420,17 +7349,6 @@ body {
   border-color: var(--accent2);
 }
 /* Small inline spinner for busy buttons ("Probing…", "Saving…"). */
-.btn-spinner {
-  display: inline-block;
-  width: 12px;
-  height: 12px;
-  margin-right: 7px;
-  vertical-align: -1px;
-  border: 2px solid color-mix(in srgb, currentColor 35%, transparent);
-  border-top-color: currentColor;
-  border-radius: 50%;
-  animation: lightbox-spin 0.8s linear infinite;
-}
 .wizard-connected {
   display: flex;
   align-items: center;
@@ -7910,6 +7828,20 @@ body {
   min-width: 0;
   flex: 1;
 }
+/* armUndo freezes its container's width, so inside a narrow stacked action
+   column (the Skills-panel draft rows) the widget must wrap into that
+   footprint instead of overflowing it — sibling text never reflows. */
+.skill-draft-actions .undo-timer,
+.room-skill-actions .undo-timer {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+/* A draft's Keep button cycles Keep → Keeping… → Reviewing…; reserve the
+   widest label so the state change never resizes the control (and with it
+   the row). ch tracks the font-size setting. */
+button[data-draft-id] {
+  min-width: 15.5ch;
+}
 .undo-timer-label {
   font-size: var(--fs-sm);
   color: var(--text-dim);
@@ -8053,6 +7985,28 @@ body {
   flex: 0 0 auto;
   width: 110px;
 }
+/* Review-model picker in the learning rows: cap it so a long roster label
+   shrinks and ellipsizes instead of pushing the row label off-screen. */
+.agent-learning-row select {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 60%;
+}
+/* Approval pre-judge (Settings, owner-only): the action opt-ins are a stack
+   of switches; never-listed rows render disabled + dimmed (always human). */
+.prejudge-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.prejudge-actions .setting-toggle input[type='checkbox']:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.prejudge-actions .setting-toggle.prejudge-never {
+  color: var(--text-dim);
+  cursor: default;
+}
 /* Long names must never push the row actions (kebab, +) out of reach — the
    name is the flexible element, and IT ellipsizes; actions never shrink. */
 .room-row-name {
@@ -8165,8 +8119,7 @@ body {
   min-width: 0;
   box-sizing: border-box;
 }
-.approval-card .approval-title,
-.approval-card .approval-question {
+.approval-card .approval-title {
   overflow-wrap: anywhere;
 }
 .approval-card .approval-payload {
@@ -8201,8 +8154,6 @@ body {
   color: var(--text-dim);
 }
 
-
-
 /* Settings → Features: one block per installable capability. Single column in
    the drawer and on phones; flows to two only if the pane ever grows wide. */
 .settings-features-grid {
@@ -8228,7 +8179,7 @@ body {
   border: none;
   border-radius: 50%;
   background: none;
-  color: var(--text-muted);
+  color: var(--text-dim);
   cursor: pointer;
   transition: var(--transition);
 }

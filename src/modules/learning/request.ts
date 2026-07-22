@@ -1,6 +1,6 @@
 /**
  * Learning loop — host side of the `propose_skill` system action
- * (see docs/design/learning-loop.md).
+ * (see docs/webchat/design/learning-loop.md).
  *
  * A container agent's `draft_skill` MCP tool emits a `propose_skill` action to
  * outbound.db. This stages it as a DRAFT (never live) for review in the webchat
@@ -88,7 +88,7 @@ export async function handleProposeSkill(
     session,
   });
 
-  // Auto-keep (docs/learning-loop.md §4) — OFF unless an owner/global admin
+  // Auto-keep (docs/webchat/learning-loop.md §4) — OFF unless an owner/global admin
   // switched it on for this agent. It reuses the exact same apply path as the
   // human Keep, so the only thing autonomy removes is the wait, never a rule.
   if (isAutoKeepEnabled(session)) {

@@ -89,6 +89,7 @@ describe('moduleWebchat migration', () => {
       name: string;
     }[];
     expect(rows.map((r) => r.name)).toEqual([
+      'webchat-approval-prejudge',
       'webchat-approvals-index',
       'webchat-approvals-index-fanout',
       'webchat-archive-split',

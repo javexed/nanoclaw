@@ -988,6 +988,27 @@ export const moduleWebchatSttPrompt: Migration = {
 };
 
 /**
+ * Approval pre-judge (fork): optional LLM triage tier in front of human
+ * approvals. Two settings columns, both defaulting to OFF: the roster model
+ * that judges (NULL = feature off) and the JSON array of opted-in action
+ * names (NULL/empty = nothing pre-judged even with a model set). See
+ * src/modules/approvals/prejudge.ts.
+ */
+export const moduleWebchatApprovalPrejudge: Migration = {
+  version: 207,
+  name: 'webchat-approval-prejudge',
+  up(db: Database.Database) {
+    const cols = db.prepare("PRAGMA table_info('webchat_settings')").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === 'approval_prejudge_model_id')) {
+      db.exec(`ALTER TABLE webchat_settings ADD COLUMN approval_prejudge_model_id TEXT`);
+    }
+    if (!cols.some((c) => c.name === 'approval_prejudge_actions')) {
+      db.exec(`ALTER TABLE webchat_settings ADD COLUMN approval_prejudge_actions TEXT`);
+    }
+  },
+};
+
+/**
  * Workspace DEFAULT model — the roster model (webchat_models.id, ollama kind)
  * that any claude-family agent WITHOUT its own assigned model falls back to.
  * The model analogue of the workspace default credential: the wizard's

@@ -2,7 +2,7 @@ import type { Migration } from './index.js';
 
 /**
  * `skill_drafts` — staged, not-yet-live skills proposed by the learning loop
- * (see docs/design/learning-loop.md). A container agent emits a `propose_skill`
+ * (see docs/webchat/design/learning-loop.md). A container agent emits a `propose_skill`
  * system action; the host stages it here (+ the SKILL.md body under
  * data/skill-drafts/<id>/) and surfaces it in the webchat "Proposed skills"
  * review. Nothing runs in any agent until an admin keeps + wires it.
