@@ -1,6 +1,6 @@
 /**
  * skill_drafts CRUD — staged proposals from the learning loop
- * (see docs/design/learning-loop.md). The SKILL.md body lives on disk at
+ * (see docs/webchat/design/learning-loop.md). The SKILL.md body lives on disk at
  * data/skill-drafts/<id>/SKILL.md; this table holds the metadata + status.
  */
 import fs from 'node:fs';

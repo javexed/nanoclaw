@@ -30,6 +30,7 @@ import { writeSessionMessage } from '../../session-manager.js';
 import type { MessagingGroup, PendingApproval, Session } from '../../types.js';
 import { getAdminsOfAgentGroup, getGlobalAdmins, getOwners } from '../permissions/db/user-roles.js';
 import { ensureUserDm } from '../permissions/user-dm.js';
+import { maybePrejudgeApproval } from './prejudge.js';
 
 /**
  * Card value for the "Reject with reason…" button. Selecting it doesn't
@@ -83,6 +84,16 @@ export function registerApprovalHandler(action: string, handler: ApprovalHandler
 
 export function getApprovalHandler(action: string): ApprovalHandler | undefined {
   return approvalHandlers.get(action);
+}
+
+/**
+ * Every action a consumer has registered a handler for — the set of holds
+ * that can exist in this install. Used by the webchat approval pre-judge
+ * settings to enumerate opt-in candidates (`onecli_credential` never appears
+ * here: it resolves via a separate in-memory path and is never-listed anyway).
+ */
+export function listRegisteredApprovalActions(): string[] {
+  return [...approvalHandlers.keys()].sort();
 }
 
 // ── Approval-resolved callbacks ──
@@ -309,6 +320,11 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
     options_json: JSON.stringify(normalizedOptions),
     approver_user_id: approverUserId ?? null,
   });
+
+  // Fork: optional LLM pre-judge. May auto-approve an opted-in low-stakes
+  // action through the same dispatch a human Approve takes; anything else
+  // (off by default) falls through to normal delivery. See prejudge.ts.
+  if (await maybePrejudgeApproval(approvalId, session, question)) return;
 
   // Fire the requested-event so a channel can surface an ACTIONABLE card into
   // the agent's own room (in addition to the per-approver inboxes below).

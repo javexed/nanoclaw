@@ -1,6 +1,6 @@
 import { describe, expect, it, mock, afterEach } from 'bun:test';
 
-import { classifyWorthReviewing } from './poll-loop.js';
+import { classifyWorthReviewing } from './learning-loop.js';
 
 const CLF = { url: 'http://clf.local/v1/chat/completions', model: 'tiny' };
 const MSGS = [{ content: 'set up a deploy pipeline' }] as any;

@@ -94,7 +94,6 @@ HOOK_FILES=(
   container/agent-runner/src/mcp-tools/index.ts
   container/agent-runner/src/formatter.ts
   container/agent-runner/src/formatter.test.ts
-  docs/SECURITY.md
   src/backfill-container-configs.ts
   src/container-runner.test.ts
   src/egress-lockdown.ts
@@ -183,22 +182,31 @@ rm -rf \
   src/db/migrations/module-mcp-hardening.ts \
   container/agent-runner/src/mcp-tools/draft-skill.ts \
   container/agent-runner/src/mcp-tools/draft-skill.test.ts \
+  container/agent-runner/src/learning-loop.ts \
   container/agent-runner/src/auto-review.test.ts \
   container/agent-runner/src/learn-command.test.ts \
   container/agent-runner/src/learning-review.test.ts \
+  container/agent-runner/src/learning-classifier.test.ts \
+  container/agent-runner/src/learning-digest.test.ts \
+  container/agent-runner/src/learn-source.test.ts \
   container/agent-runner/src/providers/rate-limit.test.ts \
-  docs/learning-loop.md \
-  docs/design/learning-loop.md \
+  docs/webchat/learning-loop.md \
+  docs/webchat/design/learning-loop.md \
   src/modules/transfer \
   src/modules/approvals/expiry.ts \
   src/db/migrations/module-learning-room-settings.ts \
   src/db/migrations/module-container-egress.ts \
+  docs/webchat/security.md \
   src/container-hardening.test.ts \
   src/db/agent-delete-coverage.test.ts \
   src/group-init.test.ts \
   scripts/renew-webchat-cert.sh \
   setup/webchat-tailscale-https.sh \
-  container/agent-runner/src/mcp-tools/registration.test.ts
+  container/agent-runner/src/mcp-tools/registration.test.ts \
+  src/modules/approvals/prejudge.ts \
+  src/modules/approvals/prejudge.test.ts \
+  src/container-warm.ts \
+  src/container-warm.test.ts
 
 # HTTPS cert-renewal timer (installed by setup/webchat-tailscale-https.sh).
 # Cert files under data/tls are left in place, like the rest of data/.

@@ -210,6 +210,99 @@ function invalidateTransportCache(): void {
 }
 
 /**
+ * One Anthropic Messages call routed through the OneCLI proxy — the shared
+ * host-side credentialed path (the host never holds a raw Anthropic key).
+ * Used by the drafter below and by the approval pre-judge
+ * (src/modules/approvals/prejudge.ts) for anthropic-kind judge models.
+ * Reuses the drafter's OneCLI identity + transport cache; throws DraftError
+ * on any failure (callers either surface it or fail safe). Returns the
+ * response's joined text content.
+ *
+ * Deliberately no sampling params: current Claude models (Sonnet 5,
+ * Opus 4.7+) reject non-default `temperature` with a 400.
+ */
+export interface AnthropicMessagesCall {
+  model: string;
+  system: string;
+  user: string;
+  maxTokens: number;
+  timeoutMs: number;
+}
+
+export async function anthropicMessagesViaOneCLI(call: AnthropicMessagesCall): Promise<string> {
+  await ensureDrafterIdentity();
+  const { dispatcher, authHeaders } = await buildDrafterTransport();
+
+  const body = {
+    model: call.model,
+    max_tokens: call.maxTokens,
+    system: call.system,
+    messages: [{ role: 'user', content: call.user }],
+  };
+
+  let res: Response;
+  try {
+    res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'anthropic-version': '2023-06-01',
+        ...authHeaders,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(call.timeoutMs),
+      // Type cast: undici's dispatcher option isn't in the standard fetch
+      // typings, but Node's global fetch accepts it at runtime.
+      dispatcher,
+    } as RequestInit & { dispatcher: ProxyAgent });
+  } catch (err) {
+    // Log full detail server-side so an operator can debug; surface a
+    // generic message to the caller so internal IPs / proxy URLs don't
+    // leak through the error response. undici wraps the real network
+    // error in `err.cause` — surface it so "fetch failed" isn't opaque.
+    const cause = (err as { cause?: unknown }).cause;
+    log.warn('Anthropic-via-OneCLI call: fetch threw', { err, cause });
+    if (err instanceof OneCLIRequestError) {
+      throw new DraftError('Anthropic call failed (OneCLI gateway error)', err.statusCode || 503);
+    }
+    throw new DraftError('Anthropic call failed (see server logs)', 503);
+  }
+
+  if (res.status === 401) {
+    // Stale auth — drop cache so the next attempt rebuilds the transport.
+    invalidateTransportCache();
+    throw new DraftError(
+      'OneCLI rejected the call (401). The webchat-drafter agent likely starts in selective secret mode — find its internal id with `onecli agents list` and run: onecli agents set-secret-mode --id <internal-id> --mode all',
+      503,
+    );
+  }
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    log.warn('Anthropic-via-OneCLI call: non-OK response', { status: res.status, detail: detail.slice(0, 500) });
+    throw new DraftError(`Anthropic upstream returned ${res.status}`, 502);
+  }
+
+  // Read response as text first so we can size-cap before JSON.parse.
+  // 16 KB is far above what these small max_tokens budgets can produce,
+  // but caps a misbehaving upstream from filling memory if it ever happens.
+  const rawResponseText = await res.text();
+  if (rawResponseText.length > MAX_RESPONSE_BYTES) {
+    throw new DraftError('Anthropic upstream returned an oversized response', 502);
+  }
+  let responseBody: { content?: Array<{ type: string; text?: string }> };
+  try {
+    responseBody = JSON.parse(rawResponseText);
+  } catch {
+    throw new DraftError('Anthropic upstream returned non-JSON response', 502);
+  }
+  return (responseBody.content ?? [])
+    .filter((b) => b.type === 'text' && typeof b.text === 'string')
+    .map((b) => b.text as string)
+    .join('')
+    .trim();
+}
+
+/**
  * Run a draft request through the queue. Serialized — concurrent callers
  * wait their turn so we don't fan out parallel Anthropic calls under one
  * proxy slot.
@@ -244,76 +337,13 @@ async function runDraft(prompt: string): Promise<DraftedAgent> {
     return runDraftViaModel(prompt, defaultModel);
   }
 
-  await ensureDrafterIdentity();
-  const { dispatcher, authHeaders } = await buildDrafterTransport();
-
-  const body = {
+  const text = await anthropicMessagesViaOneCLI({
     model: DRAFTER_MODEL,
-    max_tokens: DRAFTER_MAX_TOKENS,
     system: DRAFTER_SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: prompt }],
-  };
-
-  let res: Response;
-  try {
-    res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'anthropic-version': '2023-06-01',
-        ...authHeaders,
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      // Type cast: undici's dispatcher option isn't in the standard fetch
-      // typings, but Node's global fetch accepts it at runtime.
-      dispatcher,
-    } as RequestInit & { dispatcher: ProxyAgent });
-  } catch (err) {
-    // Log full detail server-side so an operator can debug; surface a
-    // generic message to the caller so internal IPs / proxy URLs don't
-    // leak through the error response. undici wraps the real network
-    // error in `err.cause` — surface it so "fetch failed" isn't opaque.
-    const cause = (err as { cause?: unknown }).cause;
-    log.warn('Webchat drafter: fetch threw', { err, cause });
-    if (err instanceof OneCLIRequestError) {
-      throw new DraftError('Drafter call failed (OneCLI gateway error)', err.statusCode || 503);
-    }
-    throw new DraftError('Drafter call failed (see server logs)', 503);
-  }
-
-  if (res.status === 401) {
-    // Stale auth — drop cache so the next attempt rebuilds the transport.
-    invalidateTransportCache();
-    throw new DraftError(
-      'OneCLI rejected the drafter call (401). The drafter agent likely starts in selective secret mode — find its internal id with `onecli agents list` and run: onecli agents set-secret-mode --id <internal-id> --mode all',
-      503,
-    );
-  }
-  if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    log.warn('Webchat drafter: non-OK response', { status: res.status, detail: detail.slice(0, 500) });
-    throw new DraftError(`Drafter upstream returned ${res.status}`, 502);
-  }
-
-  // Read response as text first so we can size-cap before JSON.parse.
-  // 16 KB is far above what max_tokens=2048 can produce, but caps a
-  // misbehaving upstream from filling memory if it ever happens.
-  const rawResponseText = await res.text();
-  if (rawResponseText.length > MAX_RESPONSE_BYTES) {
-    throw new DraftError('Drafter upstream returned an oversized response', 502);
-  }
-  let responseBody: { content?: Array<{ type: string; text?: string }> };
-  try {
-    responseBody = JSON.parse(rawResponseText);
-  } catch {
-    throw new DraftError('Drafter upstream returned non-JSON response', 502);
-  }
-  const text = (responseBody.content ?? [])
-    .filter((b) => b.type === 'text' && typeof b.text === 'string')
-    .map((b) => b.text as string)
-    .join('')
-    .trim();
+    user: prompt,
+    maxTokens: DRAFTER_MAX_TOKENS,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+  });
   if (!text) throw new DraftError('Drafter returned empty content', 502);
   return parseDraftResponse(text);
 }

@@ -29,4 +29,25 @@ export default [
       '@typescript-eslint/no-explicit-any': 'warn',
     },
   },
+  {
+    // Webchat PWA frontend — browser runtime, no build step, vendored globals.
+    files: ['public/webchat/app.js', 'public/webchat/sw.js'],
+    languageOptions: {
+      globals: { ...globals.browser, marked: 'readonly', DOMPurify: 'readonly' },
+    },
+    rules: {
+      '@typescript-eslint/no-unused-vars': 'off',
+      'no-unused-vars': ['error', { args: 'none', varsIgnorePattern: '^_', caughtErrors: 'none' }],
+      'no-empty': ['error', { allowEmptyCatch: true }],
+      // The error-toast bug class: showToast(msg, 'error') destructures a string
+      // and silently renders as info. Kind must ride an options object.
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: "CallExpression[callee.name='showToast'][arguments.1.type='Literal']",
+          message: "showToast's 2nd arg must be an options object ({ kind: … }) — or use toastError().",
+        },
+      ],
+    },
+  },
 ]

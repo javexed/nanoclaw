@@ -75,7 +75,7 @@ if [ "$INSTALL_DEPS" = 1 ]; then
   # Ubuntu 24.04 ship Node 18 — too old — so fail clearly rather than deploy a
   # tree that won't run. Remedy: install Node 22 your way (nvm, a distro backport,
   # or the NodeSource apt repo) and re-run WITHOUT --install-deps.
-  # Keeping these version pins current: docs/dependency-review.md (reviewed quarterly).
+  # Keeping these version pins current: docs/webchat/dependency-review.md (reviewed quarterly).
   NODE_MAJOR="$(node -v 2>/dev/null | sed 's/v//; s/\..*//')"
   if [ -z "$NODE_MAJOR" ] || [ "$NODE_MAJOR" -lt 20 ]; then
     echo "" >&2

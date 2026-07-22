@@ -36,6 +36,16 @@ import {
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 import { LEARNING_REVIEW_PROMPT } from './mcp-tools/draft-skill.js';
+import {
+  buildLearnReview,
+  buildReviewDigest,
+  createAutoReviewHook,
+  createAutoReviewState,
+  createExchangeLog,
+  runLearningReview,
+  wrapExchangeHook,
+  type LearningConfig,
+} from './learning-loop.js';
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
@@ -84,15 +94,8 @@ export interface PollLoopConfig {
   systemContext?: {
     instructions?: string;
   };
-  /** Learning-loop behavior from container.json (see docs/learning-loop.md). */
-  learning?: {
-    autoTrigger?: boolean;
-    autoKeep?: boolean;
-    cooldownMinutes?: number;
-    rooms?: Record<string, { autoTrigger?: boolean; autoKeep?: boolean }>;
-    /** Classifier gate — {url, model}: consulted before an auto-review. */
-    classifier?: { url: string; model: string };
-  };
+  /** Learning-loop behavior from container.json (see docs/webchat/learning-loop.md). */
+  learning?: LearningConfig;
   /**
    * Optional stop signal. In production the loop runs until the container
    * dies; tests pass a signal so an abandoned loop actually exits instead of
@@ -118,11 +121,13 @@ export interface PollLoopConfig {
  * 6. Loop
  */
 export async function runPollLoop(config: PollLoopConfig): Promise<void> {
-  // Auto-trigger state (learning loop). Container-scoped on purpose: a
-  // container that idles out and respawns starts a fresh window, which at worst
-  // means one extra review per respawn — bounded, and stateless.
-  let lastAutoReviewAt: number | null = null;
-  let autoReviewInFlight = false;
+  // Auto-trigger state (learning loop) — container-scoped; see learning-loop.ts.
+  const autoReviewState = createAutoReviewState();
+  // Exchange log (learning loop) — bounded in-memory record of recent
+  // prompt/result pairs; the review digests this instead of replaying the
+  // whole session. Fed by wrapping the provider's per-exchange hook.
+  const exchangeLog = createExchangeLog();
+  const exchangeHook = wrapExchangeHook(exchangeLog, config.provider.onExchangeComplete?.bind(config.provider));
   // Resume the agent's prior session from a previous container run if one
   // was persisted. The continuation is opaque to the poll-loop — the
   // provider decides how to use it (Claude resumes a .jsonl transcript,
@@ -206,6 +211,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const commandIds: string[] = [];
     let learnReviewRequested = false;
     let learnReviewPrompt = LEARNING_REVIEW_PROMPT;
+    let learnReviewTools: string[] | undefined;
 
     for (const msg of messages) {
       if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && isClearCommand(msg)) {
@@ -223,25 +229,19 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         commandIds.push(msg.id);
         continue;
       }
-      // `/learn` — the learning loop's explicit trigger. Where the provider can,
-      // the review runs ISOLATED (design §2): a fork of this session with
-      // draft_skill as its only tool — the transcript is in context, but the
-      // review can neither touch the conversation nor reach any other tool.
-      // Providers that can't restrict fall back to an ordinary turn whose prompt
-      // is the authoring instruction — same review, full toolset, main session.
+      // `/learn` — the learning loop's explicit trigger (learning-loop.ts):
+      // isolated restricted review where the provider supports it, ordinary
+      // full-toolset turn on the review prompt otherwise.
       if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && isLearnCommand(msg)) {
-        // Anything after `/learn` is the user steering the review ("/learn the
-        // rsync part", "/learn keep it even though it's well-known") — replacing
-        // it wholesale with the authoring prompt would throw their words away.
         const parsed = JSON.parse(msg.content) as Record<string, unknown>;
-        const hint = String(parsed.text || '').replace(/^\s*\/learn\b/i, '').trim();
-        const reviewPrompt = hint
-          ? `${LEARNING_REVIEW_PROMPT}\n\nThe user added, when asking for this review: "${hint}". Treat that as direct guidance about what to keep — the user overrides the "well-known" bar, but never the denylist or the no-invention rule.`
-          : LEARNING_REVIEW_PROMPT;
+        // Classification (session vs URL vs path source) happens inside the
+        // builder — the hint flows through unchanged (learning-loop.ts).
+        const { prompt: reviewPrompt, reviewTools } = buildLearnReview(String(parsed.text || ''));
         if (config.provider.supportsRestrictedReview) {
           log('Learning review requested (/learn) — isolated restricted pass');
           learnReviewRequested = true;
           learnReviewPrompt = reviewPrompt;
+          learnReviewTools = reviewTools;
           commandIds.push(msg.id);
         } else {
           log('Learning review requested (/learn) — inline fallback (provider cannot restrict)');
@@ -275,10 +275,15 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // Isolated learning review (design §2), run to completion at the idle point.
     // Must sit BEFORE the empty-batch early-exit below: /learn usually arrives
     // alone, which makes normalMessages empty — exactly the batch shape that
-    // early-exit skips. The review resumes this session as a FORK, so nothing
-    // it does touches the conversation the next real turn resumes.
+    // early-exit skips. The review runs FRESH on the exchange-log digest by
+    // default (or forks this session when replaying), so nothing it does
+    // touches the conversation the next real turn resumes.
     if (learnReviewRequested) {
-      await runLearningReview(config, routing, messages, continuation, learnReviewPrompt);
+      autoReviewState.dryStreak = 0; // an explicit /learn resets the dry-streak cadence backoff
+      await runLearningReview(config, routing, messages, continuation, learnReviewPrompt, {
+        digest: buildReviewDigest(exchangeLog),
+        reviewTools: learnReviewTools,
+      });
     }
 
     if (normalMessages.length === 0) {
@@ -332,43 +337,17 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // Rooms this batch came from — a reply defaults back here (origin guard in
     // dispatchResultText pins a misaddressed lone reply to the originating room).
     const originDests = resolveOriginDestinations(messages);
-    // Per-turn auto-trigger (docs/learning-loop.md §1). Invoked from INSIDE the
-    // open query at each result — hub sessions hold the query for hours, so a
-    // post-query hook would never fire. Fire-and-forget with an in-flight
-    // guard: the event drain never stalls, and reviews never stack.
-    const maybeAutoReview = (toolCount: number): void => {
-      if (autoReviewInFlight) return;
-      if (
-        !shouldAutoReview({
-          learning: resolveRoomLearning(config.learning, routing),
-          supportsRestrictedReview: config.provider.supportsRestrictedReview === true,
-          toolCount,
-          hadLearnCommand: learnReviewRequested,
-          lastAutoReviewAt,
-          now: Date.now(),
-        })
-      )
-        return;
-      autoReviewInFlight = true;
-      lastAutoReviewAt = Date.now();
-      const clf = config.learning?.classifier;
-      void (async () => {
-        try {
-          if (clf?.url && clf?.model && !(await classifyWorthReviewing(clf, messages, toolCount))) {
-            log(`Learning classifier: turn not skill-worthy — skipping review`);
-            return;
-          }
-          log(`Auto learning review (turn used ${toolCount} tools)`);
-          await runLearningReview(config, routing, messages, continuation, LEARNING_REVIEW_PROMPT, {
-            announceDecline: false,
-          });
-        } catch (err) {
-          log(`Auto learning review failed: ${err instanceof Error ? err.message : String(err)}`);
-        } finally {
-          autoReviewInFlight = false;
-        }
-      })();
-    };
+    // Per-turn auto-trigger (docs/webchat/learning-loop.md §1) — fires from
+    // INSIDE the open query at each result; see learning-loop.ts.
+    const maybeAutoReview = createAutoReviewHook({
+      state: autoReviewState,
+      config,
+      routing,
+      messages,
+      hadLearnCommand: learnReviewRequested,
+      getContinuation: () => continuation,
+      exchangeLog,
+    });
 
     const query = config.provider.query({
       prompt,
@@ -382,7 +361,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         routing,
         processingIds,
         config.providerName,
-        config.provider.onExchangeComplete?.bind(config.provider),
+        exchangeHook,
         prompt,
         continuation,
         originDests,
@@ -452,11 +431,6 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
             'configuration problem; an admin may need to check this agent.',
         );
       }
-
-        // Auto-trigger (docs/learning-loop.md §1): a busy turn just finished —
-        // run the isolated review WITHOUT waiting for a human tap. Decline stays
-        // silent; only a real draft announces itself (the in-room card). Errors
-        // never disturb the turn that already completed.
     } catch (err) {
       // Same shutdown guard as the result path — an abort-induced throw is
       // teardown, not a provider failure to report.
@@ -833,7 +807,7 @@ export async function processQuery(
         // next follow-up re-seeds 'start'. Pairs with the reset at the push.
         appendStatusEvent('done', null);
         // Read the count NOW — a follow-up push re-seeds 'start' and zeroes it.
-        if (onTurnComplete) onTurnComplete(getTurnToolCount());
+        const turnToolCount = getTurnToolCount();
         if (event.text) {
           const { sent, hasUnwrapped, taskBlocks } = dispatchResultText(event.text, routing, originDests, lenient);
           const willRetryTaskBlocks = shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
@@ -886,6 +860,10 @@ export async function processQuery(
             if (!willRetryWrapping && !willRetryTaskBlocks) archivePrompts.shift();
           }
         } else archivePrompts.shift();
+        // Fired AFTER the exchange hook above, so a learning review this
+        // triggers digests the very turn that tripped the busy heuristic
+        // (the hook body runs synchronously up to its first await).
+        if (onTurnComplete) onTurnComplete(turnToolCount);
       }
     }
   } catch (err) {
@@ -955,192 +933,6 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  * This is the same user-facing write the outer catch block does, minus the
  * `Error:` prefix — the provider's text is already a user-facing message.
  */
-/**
- * The isolated learning review (docs/design/learning-loop.md §2).
- *
- * A second provider query at the idle point, on a FORK of the session: the whole
- * transcript is in context (no cold start, nothing re-read), but the toolset is
- * draft_skill alone and the fork's continuation is deliberately discarded — the
- * review can propose a skill and say one sentence, and can do nothing else to
- * anything. This is Hermes' spawn_background_review, expressed as provider
- * options instead of their _persist_disabled/_session_db=None flags.
- */
-/**
- * The auto-trigger decision (docs/learning-loop.md §1), pure.
- *
- * Auto-trigger is ON unless explicitly disabled — it only ever STAGES a draft,
- * so the human gate survives at Keep. The guards are about cost and noise:
- *   - the turn must have been busy (Hermes' bare heuristic: ≥5 tool calls);
- *   - a per-container cooldown (default 30 min) bounds spend on chatty rooms;
- *   - a turn that was itself a /learn never re-triggers (the review is done);
- *   - the provider must support the RESTRICTED pass — auto mode never falls
- *     back to the full-toolset in-turn review, because nobody is watching it.
- */
-export const AUTO_REVIEW_MIN_TOOLS = 5;
-/**
- * Room override wins over the agent level: the rooms map is keyed by the
- * "<channel_type>:<platform_id>" pair the batch's routing context carries.
- * A room with no entry inherits the agent-level settings untouched.
- */
-export function resolveRoomLearning(
-  learning: PollLoopConfig['learning'],
-  routing: { channelType: string | null; platformId: string | null },
-): PollLoopConfig['learning'] {
-  const room =
-    routing.channelType && routing.platformId
-      ? learning?.rooms?.[`${routing.channelType}:${routing.platformId}`]
-      : undefined;
-  return room ? { ...learning, ...room } : learning;
-}
-
-export function shouldAutoReview(args: {
-  learning: PollLoopConfig['learning'];
-  supportsRestrictedReview: boolean;
-  toolCount: number;
-  hadLearnCommand: boolean;
-  lastAutoReviewAt: number | null;
-  now: number;
-}): boolean {
-  const { learning, supportsRestrictedReview, toolCount, hadLearnCommand, lastAutoReviewAt, now } = args;
-  if (learning?.autoTrigger === false) return false;
-  if (!supportsRestrictedReview) return false;
-  if (hadLearnCommand) return false;
-  if (toolCount < AUTO_REVIEW_MIN_TOOLS) return false;
-  const cooldownMs = (learning?.cooldownMinutes ?? 30) * 60_000;
-  if (lastAutoReviewAt !== null && now - lastAutoReviewAt < cooldownMs) return false;
-  return true;
-}
-
-/**
- * Classifier gate: ask a small local model whether a busy turn is actually
- * worth distilling into a skill, before spending the (expensive) review on the
- * agent's own model. Best-effort — any failure (unreachable, timeout, bad
- * response) returns true so a classifier hiccup never SILENTLY drops a review
- * the heuristic already flagged. The endpoint is container-reachable (resolved
- * host-side at pick time).
- */
-export async function classifyWorthReviewing(
-  classifier: { url: string; model: string },
-  messages: MessageInRow[],
-  toolCount: number,
-): Promise<boolean> {
-  const asks = messages
-    .map((m) => (m.content || '').trim())
-    .filter(Boolean)
-    .join('\n')
-    .slice(0, 2000);
-  const system =
-    'You gate a skill-learning loop. Given what a user asked and how much tool ' +
-    'work an assistant did, decide if this turn performed a REUSABLE procedure ' +
-    'worth saving as a skill (a repeatable workflow, a non-obvious setup, a ' +
-    'multi-step task likely to recur). One-off chit-chat, simple lookups, or ' +
-    'unique/personal requests are NOT skill-worthy. Answer with ONLY "yes" or "no".';
-  const user = `User request(s):\n${asks || '(none captured)'}\n\nAssistant used ${toolCount} tools this turn.\n\nSkill-worthy? yes or no:`;
-  try {
-    const res = await fetch(classifier.url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: classifier.model,
-        temperature: 0,
-        max_tokens: 4,
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: user },
-        ],
-      }),
-      signal: AbortSignal.timeout(6000),
-    });
-    if (!res.ok) return true;
-    const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-    const answer = (body.choices?.[0]?.message?.content ?? '').trim().toLowerCase();
-    // Default to reviewing unless the model clearly said no.
-    return !/^\s*no\b/.test(answer);
-  } catch {
-    return true;
-  }
-}
-
-async function runLearningReview(
-  config: PollLoopConfig,
-  routing: RoutingContext,
-  messages: MessageInRow[],
-  continuation: string | undefined,
-  reviewPrompt: string = LEARNING_REVIEW_PROMPT,
-  opts: { announceDecline?: boolean } = {},
-): Promise<void> {
-  const announceDecline = opts.announceDecline !== false;
-  appendStatusEvent('start', null);
-  const originDests = resolveOriginDestinations(messages);
-  const query = config.provider.query({
-    prompt: reviewPrompt,
-    continuation,
-    cwd: config.cwd,
-    systemContext: config.systemContext,
-    learningReview: true,
-  });
-  try {
-    for await (const event of query.events) {
-      if (event.type !== 'activity') {
-        log(`Learning review: ${event.type}${event.type === 'error' ? ` — ${event.message}` : ''}`);
-      }
-      if (event.type === 'result') {
-        // The one-sentence outcome ("drafted X" / "nothing worth keeping") goes
-        // back to the room like any turn reply. The draft itself — if any —
-        // already traveled via propose_skill when the tool fired.
-        if (event.text) {
-          // Auto-triggered reviews stay SILENT unless they found something —
-          // the in-room draft card is the announcement. Posting "nothing worth
-          // keeping" after every busy turn is noise nobody asked for.
-          if (!announceDecline) {
-            query.end();
-            continue;
-          }
-          const { sent } = dispatchResultText(event.text, routing, originDests, config.lenientOutput ?? false);
-          if (sent === 0) {
-            // A review's outcome is ALWAYS for the room that pressed /learn — an
-            // unwrapped one-liner here is the normal shape, not scratchpad. (The
-            // decline case hit exactly this: a correct "nothing worth keeping"
-            // that the user never saw.)
-            writeMessageOut({
-              id: generateId(),
-              kind: 'chat',
-              platform_id: routing.platformId,
-              channel_type: routing.channelType,
-              thread_id: routing.threadId,
-              content: JSON.stringify({ text: event.text }),
-            });
-          }
-        }
-        query.end(); // no follow-ups ever — let the SDK wind down
-      } else if (event.type === 'init') {
-        // The fork's session id. NOT saved, on purpose: the next real turn must
-        // resume the main conversation, unaware the review ever happened.
-      } else if (event.type === 'error' && !event.retryable) {
-        // Say so in the room. Silently logging leaves the user a thinking bubble
-        // that ends in nothing — and a rate-limited review is worth retrying.
-        log(`Learning review failed: ${event.message}`);
-        writeMessageOut({
-          id: generateId(),
-          kind: 'chat',
-          platform_id: routing.platformId,
-          channel_type: routing.channelType,
-          thread_id: routing.threadId,
-          content: JSON.stringify({
-            text: `Couldn't run the skill review (${event.message}). Nothing was lost — send /learn again in a bit.`,
-          }),
-        });
-        break;
-      }
-    }
-  } catch (err) {
-    log(`Learning review error: ${err instanceof Error ? err.message : String(err)}`);
-    query.abort();
-  } finally {
-    appendStatusEvent('done', null);
-  }
-}
-
 function deliverErrorResult(text: string, routing: RoutingContext): void {
   log('Error result with no <message> envelope — delivering to channel');
   text = redactSecrets(text);
@@ -1170,7 +962,7 @@ function deliverErrorResult(text: string, routing: RoutingContext): void {
  * agent-shared session can batch messages from several rooms, and a reply to
  * ANY of them is a legitimate origin.
  */
-function resolveOriginDestinations(messages: MessageInRow[]): DestinationEntry[] {
+export function resolveOriginDestinations(messages: MessageInRow[]): DestinationEntry[] {
   const seen = new Set<string>();
   const dests: DestinationEntry[] = [];
   for (const m of messages) {

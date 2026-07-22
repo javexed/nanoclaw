@@ -14,7 +14,7 @@ Keyed cloud backends are an explicit opt-in (below). Deliberately minimal —
 no classifier, no routing policy. Dependent skills (classifier routing,
 escalation) layer on top of this.
 
-Design: [docs/design/add-litellm.md](../../../docs/design/add-litellm.md).
+Design: [docs/webchat/design/add-litellm.md](../../../docs/webchat/design/add-litellm.md).
 
 ## Prerequisites
 

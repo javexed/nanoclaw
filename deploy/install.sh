@@ -85,7 +85,7 @@ log "installing OS packages…"
 export DEBIAN_FRONTEND=noninteractive
 APT_OPTS="-o DPkg::Lock::Timeout=300"
 apt-get $APT_OPTS update -qq
-apt-get $APT_OPTS install -y -qq git curl ca-certificates build-essential python3 zstd sudo >/dev/null
+apt-get $APT_OPTS install -y -qq git curl ca-certificates gnupg build-essential python3 zstd sudo >/dev/null
 
 # ── 2. Service user ─────────────────────────────────────────────────────────
 if ! id "$RUN_USER" >/dev/null 2>&1; then
@@ -105,7 +105,16 @@ loginctl enable-linger "$RUN_USER" || log "warn: could not enable linger (system
 # installer once the repo is cloned; bootstrap Node here so the clone can build.
 if ! command -v node >/dev/null 2>&1; then
   log "installing Node 22…"
-  curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null
+  # Add the NodeSource apt repo via a pinned keyring instead of piping their
+  # setup_22.x script to bash. apt then verifies `nodejs` against the signed
+  # repo — no arbitrary remote code runs as root. (curl feeds gpg here, not sh.)
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key |
+    gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+  chmod a+r /etc/apt/keyrings/nodesource.gpg
+  echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+    >/etc/apt/sources.list.d/nodesource.list
+  apt-get $APT_OPTS update -qq
   apt-get install -y -qq nodejs >/dev/null
 fi
 corepack enable >/dev/null 2>&1 || npm install -g corepack >/dev/null 2>&1 || true
@@ -113,7 +122,27 @@ corepack enable >/dev/null 2>&1 || npm install -g corepack >/dev/null 2>&1 || tr
 # ── 4. Docker (agent containers) ────────────────────────────────────────────
 if ! command -v docker >/dev/null 2>&1; then
   log "installing Docker…"
-  curl -fsSL https://get.docker.com | sh >/dev/null
+  # Add Docker's official apt repo via a pinned keyring instead of piping
+  # get.docker.com to sh — same docker-ce, but apt-signature-verified. On a
+  # brand-new distro codename Docker hasn't published a repo for yet, fall back
+  # to the distro's own signed docker.io (the path webchat-deploy.sh uses).
+  . /etc/os-release
+  DOCKER_ID="${ID:-debian}"
+  [ "$DOCKER_ID" = ubuntu ] || DOCKER_ID=debian # debian/raspbian/other → debian
+  install -m 0755 -d /etc/apt/keyrings
+  if curl -fsSL "https://download.docker.com/linux/${DOCKER_ID}/gpg" -o /etc/apt/keyrings/docker.asc &&
+    chmod a+r /etc/apt/keyrings/docker.asc &&
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${DOCKER_ID} ${VERSION_CODENAME:-} stable" \
+      >/etc/apt/sources.list.d/docker.list &&
+    apt-get $APT_OPTS update -qq &&
+    apt-get install -y -qq docker-ce docker-ce-cli containerd.io >/dev/null; then
+    log "installed docker-ce from Docker's signed apt repo"
+  else
+    log "Docker CE repo unavailable for this release; falling back to distro docker.io…"
+    rm -f /etc/apt/sources.list.d/docker.list
+    apt-get $APT_OPTS update -qq
+    apt-get install -y -qq docker.io >/dev/null
+  fi
   systemctl enable --now docker >/dev/null 2>&1 || true
 fi
 # Ensure the service user can reach the daemon socket (idempotent — runs even

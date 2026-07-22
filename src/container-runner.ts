@@ -511,10 +511,10 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
     }
     if (current === target) continue; // already correct
     if (isRealEntry) {
-      log.warn(
-        'Skill not symlinked: real entry occupies the path (template overlay or stale pre-refactor copy)',
-        { skill, path: linkPath },
-      );
+      log.warn('Skill not symlinked: real entry occupies the path (template overlay or stale pre-refactor copy)', {
+        skill,
+        path: linkPath,
+      });
       continue;
     }
     try {
@@ -641,6 +641,15 @@ async function buildContainerArgs(
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Persist bun's transpiler cache across container spawns. By default it
+  // lives in the container's ephemeral tmpdir, so every cold spawn re-parses
+  // the agent-runner dependency graph (~130ms measured warm, more cold). The
+  // per-group .claude-shared dir is RW-mounted at /home/node/.claude for
+  // default-surface providers, so the cache survives there; when that mount
+  // is absent the path is just an in-container dir and behavior is unchanged.
+  // Per-group, same trust domain — never share this dir across groups.
+  args.push('-e', 'BUN_RUNTIME_TRANSPILER_CACHE_PATH=/home/node/.claude/.bun-transpiler-cache');
 
   // Raise the SDK's 32000 output-token cap to the model's real ceiling. Claude
   // provider only — the var is read by the Claude Agent SDK and means nothing to

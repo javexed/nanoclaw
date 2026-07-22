@@ -7,15 +7,15 @@ produces ever runs without a human approving it first.
 
 This is the *operator's guide to the shipped system*. The rationale and the
 prior art (Hermes Agent's skill generation) live in the design doc:
-[docs/design/learning-loop.md](design/learning-loop.md).
+[docs/webchat/design/learning-loop.md](design/learning-loop.md).
 
 ```
 trigger (/learn · 🎓 · nudge)          human review                curator
         │                                   │                         │
         ▼                                   ▼                         ▼
  isolated review pass ──► staged draft ──► Keep ──► scoped skill ──► archive
- (fork, draft_skill only)  (never live)   /Discard  (this agent      when unused
-                                                     only)           for 90 days
+ (digest, draft_skill      (never live)   /Discard  (this agent      when unused
+  only)                                              only)           for 90 days
 ```
 
 ## 1. Triggering a review
@@ -24,7 +24,7 @@ Four surfaces, one code path — every trigger just sends `/learn`:
 
 | Surface | Where | Notes |
 |---|---|---|
-| `/learn` | any channel | Trailing text steers the review: `/learn keep the rsync part even though it's well-known`. In webchat it's in the slash menu. |
+| `/learn` | any channel | Trailing text steers the review: `/learn keep the rsync part even though it's well-known`. A leading URL or path makes it a source-directed review (§1a). In webchat it's in the slash menu. |
 | 🎓 button | webchat composer, beside send | Always visible, enabled whenever the input is. |
 | Nudge chip | above the composer | *"✨ Worth keeping? Distill a skill"* — appears only after a turn with **≥ 5 tool calls** (counted off the thinking-feed status events; no new wire data). Dismiss hides it until the next qualifying turn; switching rooms clears it. Suppressed in rooms where a wired agent has **auto-trigger on** — nudging a human to press the button the machine already presses is noise. |
 | "Distill a skill…" | room settings → Skills | Same action, next to the room's proposals and learned skills. |
@@ -36,6 +36,13 @@ are **silent on decline**; only a real draft announces itself (the in-room
 card). It never uses the unrestricted fallback — no restricted pass, no auto
 review. Toggle per agent from the 🎓 popover (admin tier: it spends tokens but
 only ever *stages*).
+
+**Adaptive cadence** (dry-streak backoff): every consecutive auto-review that
+produces **no** proposal doubles the effective cooldown — 30 → 60 → 120 → 240
+min, capped at **8×** the base. A room that is busy but unremarkable stops
+paying for reviews it never keeps. Any proposal, or an explicit `/learn`,
+resets the streak (a review that *errored* leaves it untouched). The state is
+container-scoped, like the cooldown itself.
 
 **Auto-keep** (default **off**, admin tier — same as the manual Keep it
 automates): a staged draft is
@@ -49,21 +56,62 @@ reaches.
 The user's trailing text may override the reviewer's "too well-known to keep"
 judgment, but never the denylist or the no-invention rule (below).
 
+### 1a. Learning from a source (`/learn <url|path>`)
+
+The hint after `/learn` can be a **source** instead of steering text — the
+review then distills a skill from that source, not from the session:
+
+```
+/learn https://docs.example.com/guides/retries
+/learn https://x.com/guide focus on the retry strategy   ← source + focus hint
+/learn /workspace/project/scripts
+/learn ./deploy just the rollout part
+/learn ~/notes/backup-runbook.md
+```
+
+Detection is deliberately narrow: the hint must **start** with the source — a
+`http(s)://` URL, or a path shape (`/…`, `./…`, `../…`, `~/…`, bare `~`/`.`).
+Anything else — a bare filename, a URL mentioned mid-sentence — stays an
+ordinary steering hint, byte-identical to plain `/learn`. Trailing words after
+the source become a focus hint, passed alongside it.
+
+The reviewer fetches or reads the source **itself**: URL mode adds `WebFetch`
+to the restricted pass; path mode adds `Read`/`Glob`/`Grep` (bounded
+exploration — top-level listing plus the load-bearing files). Still no shell,
+no writes, no destinations — draft_skill remains the only way anything leaves
+the review. A path the container can't reach simply fails in the review: the
+agent says it can't read it, and stops.
+
+**Source content is untrusted reference material.** The prompt instructs the
+reviewer to never follow instructions found *inside* the page or files, never
+copy secrets or credentials into the skill, and to describe the technique in
+its own words — a procedure, not a mirror of the page's marketing copy. The
+focus hint can steer what to keep, but never overrides those rules.
+
 ## 2. The review pass
 
 `/learn` does **not** become an ordinary agent turn. On providers that support
 it (Claude today — `supportsRestrictedReview` in the provider), the poll-loop
 runs a **second, isolated query** at the idle point:
 
-- **A fork of the session** (SDK `resume` + `forkSession`): the entire
-  transcript is in context — no cold start, nothing re-read — but the fork's
-  continuation is discarded. The next real turn resumes the main conversation
-  unaware the review happened.
+- **A digest, not a replay** (default): the runner keeps a bounded in-memory
+  log of the session's recent exchanges (last 12 prompt/result pairs, ≤4k
+  chars per field with head/tail truncation, ≤24k chars total). The review
+  runs as a **fresh query** over that digest — nothing is replayed, so it
+  costs a few thousand tokens instead of the whole transcript at main-model
+  price. The main conversation is untouched by construction (there is no
+  continuation to disturb). Set `learning.replayReview: true` to restore the
+  old full-context behavior — a fork of the session (SDK `resume` +
+  `forkSession`) with the entire transcript in context and the fork's
+  continuation discarded. A fresh container with an empty exchange log (e.g.
+  `/learn` as its first message) also falls back to the replay path.
 - **One tool**: `allowedTools` drops to `mcp__nanoclaw__draft_skill`. No
   destinations, no a2a, no self-mod, no shell. The review can propose a skill
-  and say one sentence; it can do nothing else.
-- **Optionally cheaper**: set `NANOCLAW_LEARNING_MODEL` to run reviews on a
-  smaller model than the turns that produced the transcript.
+  and say one sentence; it can do nothing else. (Source-directed reviews —
+  §1a — add only the read-only tools needed to reach the source.)
+- **Optionally cheaper still**: set `learning.reviewModel` (per agent) or
+  `NANOCLAW_LEARNING_MODEL` (container env; the config key wins) to run
+  reviews on a smaller model than the turns that produced the exchanges.
 
 Providers that can't restrict the toolset fall back to an in-turn review (the
 authoring prompt replaces the message text; full toolset, main session). A
@@ -215,7 +263,7 @@ pooled version.
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `NANOCLAW_LEARNING_MODEL` | (turn model) | Model for the isolated review pass. |
+| `NANOCLAW_LEARNING_MODEL` | (turn model) | Model for the isolated review pass (`learning.reviewModel` wins over it). |
 | `NANOCLAW_CURATOR_ARCHIVE_DAYS` | `90` | Archive a scoped skill unused this long. `0` or negative disables the curator. |
 
 **Per-room first (the 🎓 popover):** the toggles you see in a room set THAT
@@ -232,7 +280,9 @@ Per-agent defaults (stored in `container_configs.learning`, API-only:
 |---|---|---|---|
 | `autoTrigger` | `true` | room (🎓) or per-agent API | Busy turns (≥5 tools) auto-run the review. |
 | `autoKeep` | `false` | room (🎓) or per-agent API | Apply drafts immediately, no human review. |
-| `cooldownMinutes` | `30` | per-agent admin (API only) | Minimum gap between auto reviews per container. |
+| `cooldownMinutes` | `30` | per-agent admin (API only) | Minimum gap between auto reviews per container. Dry reviews stretch it (backoff, §1) up to 8×. |
+| `reviewModel` | (turn model) | per-agent admin (API only) | Model for the review pass. Wins over `NANOCLAW_LEARNING_MODEL`. |
+| `replayReview` | `false` | per-agent admin (API only) | Escape hatch: review on a full-transcript session fork instead of the bounded exchange digest. Costlier, maximally informed. |
 
 ## 7. Where things live
 
@@ -256,8 +306,9 @@ Per-agent defaults (stored in `container_configs.learning`, API-only:
 
 - **Staged, not live** — nothing runs until an owner/admin keeps it.
 - **Scoped by default** — a kept skill lands on the learning agent only.
-- **The review can't act** — draft_skill is its only tool; the session fork
-  can't touch the main conversation.
+- **The review can't act** — draft_skill is its only tool; it runs on a
+  bounded digest (or a discarded fork in replay mode) and can't touch the
+  main conversation.
 - **Gated cost** — no tokens spent unless a human triggers a review (the nudge
   is a suggestion, not a trigger).
 - **Provenance-badged** — `learned` skills stay visually distinct from vetted

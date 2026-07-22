@@ -66,7 +66,7 @@ describe('per-container resource limits (structural)', () => {
   });
 
   it('memory defaults to a hard 8g cap; the literal "none" restores unbounded', () => {
-    // Policy change (docs/SECURITY.md §Container Hardening): unbounded-by-
+    // Policy change (docs/webchat/security.md §Container hardening): unbounded-by-
     // default privileged the failure case — a runaway agent has OOM-killed
     // real installs. CONTAINER_MEMORY_LIMIT overrides; 'none' disables.
     const src = fs.readFileSync(path.join(process.cwd(), 'src', 'container-runner.ts'), 'utf-8');

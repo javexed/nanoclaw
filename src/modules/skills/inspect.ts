@@ -3,7 +3,7 @@
  * of a skill, produce the "what's inside" inventory and lint warnings shown
  * BEFORE anything is written. Pure functions — the fetch happens in the caller.
  *
- * The threat model this serves (docs/learning-loop.md §8 + market survey):
+ * The threat model this serves (docs/webchat/learning-loop.md §8 + market survey):
  *   - skills with scripts execute code in agent containers — that must be
  *     visible at the moment of decision, not discovered later;
  *   - hidden/bidirectional Unicode is a documented instruction-smuggling vector

@@ -1,6 +1,6 @@
 /**
  * draft_skill MCP tool — the learning loop's authoring surface
- * (see docs/design/learning-loop.md).
+ * (see docs/webchat/design/learning-loop.md).
  *
  * When you've just worked out a reusable, non-obvious procedure, call this to
  * DRAFT a skill from it. Fire-and-forget: it writes a `propose_skill` system
@@ -187,7 +187,7 @@ export const draftSkill: McpToolDefinition = {
 registerTools([draftSkill]);
 
 /**
- * The authoring prompt for a learning review (docs/design/learning-loop.md §2).
+ * The authoring prompt for a learning review (docs/webchat/design/learning-loop.md §2).
  *
  * Shape copied from Hermes' _SKILL_REVIEW_PROMPT, because the two quality-critical
  * parts are what stop the library filling with noise:

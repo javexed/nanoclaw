@@ -1,6 +1,6 @@
 {
   "name": "nanoclaw",
-  "version": "2.1.53",
+  "version": "2.2.0",
   "description": "Personal Claude assistant. Lightweight, secure, customizable.",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
@@ -21,11 +21,12 @@
     "setup:auto": "tsx setup/auto.ts",
     "ncl": "tsx src/cli/client.ts",
     "chat": "tsx scripts/chat.ts",
-    "lint": "eslint src/",
+    "lint": "eslint src/ public/webchat/app.js public/webchat/sw.js",
     "lint:fix": "eslint src/ --fix",
     "test": "vitest run",
     "test:watch": "vitest",
-    "e2e": "pnpm run build && playwright test"
+    "e2e": "pnpm run build && playwright test",
+    "test:e2e": "pnpm run e2e"
   },
   "dependencies": {
     "@clack/core": "^1.2.0",

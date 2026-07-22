@@ -3,7 +3,7 @@
  * gen-config.mjs — generate the LiteLLM config.yaml from live local model
  * server rosters, plus optional declared keyed backends.
  *
- * Minimal by design (docs/design/add-litellm.md): model_list only — one
+ * Minimal by design (docs/webchat/design/add-litellm.md): model_list only — one
  * deployment per (host, model), shared model_name across hosts for load
  * balancing, streaming-safe agentic timeouts. No routing/classifier
  * coupling — dependent skills import generate() and post-process.
@@ -165,10 +165,10 @@ export async function generate({ hosts = HOSTS, fixtures = null, backends = null
     lines.push('  # port would be a free credential proxy. Value comes from the env file.');
     lines.push('  master_key: os.environ/LITELLM_MASTER_KEY');
     lines.push('');
-    lines.push('# Keyed mode (docs/design/add-litellm.md): key VALUES live only in the');
+    lines.push('# Keyed mode (docs/webchat/design/add-litellm.md): key VALUES live only in the');
     lines.push("# installer's env file (mode 600) — never in this file. No DATABASE_URL.");
   } else {
-    lines.push('# Keyless v1 (docs/design/add-litellm.md): no master_key, no DATABASE_URL.');
+    lines.push('# Keyless v1 (docs/webchat/design/add-litellm.md): no master_key, no DATABASE_URL.');
   }
   lines.push('# The installer binds the proxy to localhost + the docker bridge — never public.');
   return lines.join('\n') + '\n';

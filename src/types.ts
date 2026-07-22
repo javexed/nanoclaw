@@ -40,7 +40,7 @@ export interface ContainerConfigRow {
   additional_mounts: string; // JSON: AdditionalMountConfig[]
   cli_scope: string; // 'disabled' | 'group' | 'global'
   egress: string | null; // 'open' (null) | 'host-only' | 'none' — container network reach
-  learning?: string | null; // JSON: { autoTrigger?, autoKeep?, cooldownMinutes? } — see docs/learning-loop.md
+  learning?: string | null; // JSON: { autoTrigger?, autoKeep?, cooldownMinutes?, reviewModel?, replayReview? } — see docs/webchat/learning-loop.md
   updated_at: string;
 }
 

@@ -196,15 +196,24 @@ NEW_PATHS=(
   src/db/skill-drafts.ts
   src/db/migrations/module-learning-skill-drafts.ts
   src/db/migrations/module-learning-config.ts
+  # Auto-learn master switch + classifier gate — register via step 4a; keep
+  # this relative order (config → master → classifier → mcp-hardening), it
+  # matches the channel branch's migrations array.
+  src/db/migrations/module-learning-master.ts
+  src/db/migrations/module-learning-classifier.ts
   src/db/migrations/module-mcp-hardening.ts
   container/agent-runner/src/mcp-tools/draft-skill.ts
   container/agent-runner/src/mcp-tools/draft-skill.test.ts
+  container/agent-runner/src/learning-loop.ts
   container/agent-runner/src/auto-review.test.ts
   container/agent-runner/src/learn-command.test.ts
   container/agent-runner/src/learning-review.test.ts
+  container/agent-runner/src/learning-classifier.test.ts
+  container/agent-runner/src/learning-digest.test.ts
+  container/agent-runner/src/learn-source.test.ts
   container/agent-runner/src/providers/rate-limit.test.ts
-  docs/learning-loop.md
-  docs/design/learning-loop.md
+  docs/webchat/learning-loop.md
+  docs/webchat/design/learning-loop.md
   # Backup/import (transfer bundles) + security batch (approval TTL, per-group
   # egress, hardening/coverage tests). Migration files register via step 4a;
   # keep them in version order (203 before 204).
@@ -212,6 +221,7 @@ NEW_PATHS=(
   src/modules/approvals/expiry.ts
   src/db/migrations/module-learning-room-settings.ts
   src/db/migrations/module-container-egress.ts
+  docs/webchat/security.md
   src/container-hardening.test.ts
   src/db/agent-delete-coverage.test.ts
   src/group-init.test.ts
@@ -224,6 +234,14 @@ NEW_PATHS=(
   # Install button runs this; without it only the ElevenLabs cloud path works.
   .claude/skills/add-webchat-dictation
   container/agent-runner/src/mcp-tools/registration.test.ts
+  # Optional LLM pre-judge tier for approval holds (off by default; owner-only
+  # /api/approvals/prejudge configures it).
+  src/modules/approvals/prejudge.ts
+  src/modules/approvals/prejudge.test.ts
+  # Startup image warmer — fires once at service start, primes page cache for
+  # the first cold container spawn after a restart/rebuild.
+  src/container-warm.ts
+  src/container-warm.test.ts
 )
 echo "→ Copying webchat-owned files …"
 git checkout "$BR" -- "${NEW_PATHS[@]}"
@@ -295,13 +313,14 @@ HOOK_FILES=(
   container/agent-runner/src/mcp-tools/index.ts
   container/agent-runner/src/formatter.ts
   container/agent-runner/src/formatter.test.ts
-  docs/SECURITY.md
   src/backfill-container-configs.ts
   src/container-runner.test.ts
   src/egress-lockdown.ts
   src/group-init.ts
   container/agent-runner/src/mcp-tools/server.ts
   container/agent-runner/src/mcp-tools/core.instructions.md
+  eslint.config.js
+  src/host-sweep.test.ts
 )
 CONFLICTS=()
 echo "→ Applying webchat core-file hooks …"

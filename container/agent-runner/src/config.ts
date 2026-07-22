@@ -42,6 +42,10 @@ export interface RunnerConfig {
     rooms?: Record<string, { autoTrigger?: boolean; autoKeep?: boolean }>;
     /** Classifier gate — {url, model}: consulted before an auto-review. */
     classifier?: { url: string; model: string };
+    /** Model for the review pass (overrides NANOCLAW_LEARNING_MODEL). */
+    reviewModel?: string;
+    /** Escape hatch: full-transcript fork replay instead of the digest. */
+    replayReview?: boolean;
   };
 }
 
