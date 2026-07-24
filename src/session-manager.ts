@@ -42,6 +42,110 @@ import { log } from './log.js';
 import type { Session } from './types.js';
 
 /** Root directory for all session data. */
+// ── Module seams for session resolution ──────────────────────────────────────
+
+/** Session keying mode (mirrors sessions.session_mode). */
+export type SessionMode = 'shared' | 'per-thread' | 'agent-shared';
+
+/**
+ * Optional per-message session-key override, registered by an installed
+ * module. Given the messaging group + agent + resolved sender, it can
+ * redirect the turn to a different session (mode + threadId) — e.g. a
+ * per-member session keyed by userId, so each person's turns run in a
+ * container bearing their own credential identity. Core ships with no
+ * resolver (null → unchanged keying).
+ */
+export interface SessionKeyOverride {
+  sessionMode: SessionMode;
+  threadId: string | null;
+}
+type SessionKeyResolver = (
+  mg: { id: string; channel_type: string; platform_id: string; is_group?: number },
+  agentGroupId: string,
+  userId: string | null,
+) => SessionKeyOverride | null;
+let sessionKeyResolver: SessionKeyResolver | null = null;
+export function registerSessionKeyResolver(fn: SessionKeyResolver): void {
+  sessionKeyResolver = fn;
+}
+export function resolveSessionKeyOverride(
+  mg: { id: string; channel_type: string; platform_id: string; is_group?: number },
+  agentGroupId: string,
+  userId: string | null,
+): SessionKeyOverride | null {
+  try {
+    return sessionKeyResolver ? sessionKeyResolver(mg, agentGroupId, userId) : null;
+  } catch {
+    return null; // a resolver bug must never break routing
+  }
+}
+
+/**
+ * Turn gates: a module may VETO a delivery before a session is resolved
+ * (e.g. a policy that requires per-user setup before an agent may act for
+ * this sender). Deliberately separate from the session-key resolver so the
+ * veto power is visible in the API. On veto the router records a dropped
+ * message with the module's `reason`; any user-facing notice is the vetoing
+ * module's own responsibility (it knows its surface). First veto wins; a
+ * throwing gate is skipped. Core ships none.
+ */
+export interface TurnVeto {
+  /** Machine-readable reason recorded on the dropped message. */
+  reason: string;
+}
+type TurnGate = (
+  mg: { id: string; channel_type: string; platform_id: string; is_group?: number },
+  agentGroupId: string,
+  userId: string | null,
+) => TurnVeto | null;
+const turnGates: TurnGate[] = [];
+export function registerTurnGate(fn: TurnGate): void {
+  turnGates.push(fn);
+}
+export function consultTurnGates(
+  mg: { id: string; channel_type: string; platform_id: string; is_group?: number },
+  agentGroupId: string,
+  userId: string | null,
+): TurnVeto | null {
+  for (const fn of turnGates) {
+    try {
+      const veto = fn(mg, agentGroupId, userId);
+      if (veto) return veto;
+    } catch {
+      // a gate bug must never break routing — skip it
+    }
+  }
+  return null;
+}
+
+/**
+ * Optional session inbound writer. For a key-overridden session's wake turn,
+ * the module may write the inbound itself (e.g. syncing the full shared-room
+ * transcript into the per-member session so the responding agent has the
+ * whole conversation: current message → trigger=1, the rest → trigger=0
+ * context). Returns true if it handled the write; the router then skips its
+ * normal single-message write. Core ships with no writer.
+ */
+export interface SessionInboundWriterArgs {
+  agentGroupId: string;
+  session: Session;
+  roomId: string;
+  currentMessageId: string;
+  deliveryAddr: { platformId: string | null; channelType: string | null; threadId: string | null };
+}
+type SessionInboundWriter = (args: SessionInboundWriterArgs) => boolean;
+let sessionInboundWriter: SessionInboundWriter | null = null;
+export function registerSessionInboundWriter(fn: SessionInboundWriter): void {
+  sessionInboundWriter = fn;
+}
+export function runSessionInboundWriter(args: SessionInboundWriterArgs): boolean {
+  try {
+    return sessionInboundWriter ? sessionInboundWriter(args) : false;
+  } catch {
+    return false; // fall back to the normal single-message write
+  }
+}
+
 export function sessionsBaseDir(): string {
   return path.join(DATA_DIR, 'v2-sessions');
 }

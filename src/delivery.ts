@@ -69,6 +69,9 @@ export interface ChannelDeliveryAdapter {
     /** Delivering adapter instance (defaults to channelType downstream).
      *  Host-internal only — containers never see instance. */
     instance?: string,
+    /** Producing session/agent — adapters that attribute or loop back agent
+     *  posts read this (see OutboundMessage.senderSessionId). */
+    source?: { sessionId: string; agentGroupId: string },
   ): Promise<string | undefined>;
   setTyping?(channelType: string, platformId: string, threadId: string | null, instance?: string): Promise<void>;
   /**
@@ -440,6 +443,7 @@ async function deliverMessage(
     msg.content,
     files,
     deliverInstance,
+    { sessionId: session.id, agentGroupId: session.agent_group_id },
   );
   log.info('Message delivered', {
     id: msg.id,
