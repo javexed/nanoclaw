@@ -73,7 +73,15 @@ export interface ChannelDeliveryAdapter {
      *  posts read this (see OutboundMessage.senderSessionId). */
     source?: { sessionId: string; agentGroupId: string },
   ): Promise<string | undefined>;
-  setTyping?(channelType: string, platformId: string, threadId: string | null, instance?: string): Promise<void>;
+  setTyping?(
+    channelType: string,
+    platformId: string,
+    threadId: string | null,
+    instance?: string,
+    /** Which agent is typing (display name) — multi-agent surfaces render one
+     *  indicator per agent. Optional, like the params before it. */
+    agentName?: string,
+  ): Promise<void>;
   /**
    * Optional, like setTyping: forward live agent-activity status to a channel
    * that can render it. Channels with no status surface simply omit it.
