@@ -25,6 +25,7 @@ import {
   type RoutingContext,
 } from './formatter.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
+import { notifyProviderMessage } from './providers/hooks.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
@@ -156,6 +157,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const ids = messages.map((m) => m.id);
     markProcessing(ids);
 
+    // Tell observers a fresh batch was accepted (hooks.ts) — e.g. an activity
+    // feed resets its display here. Inert when nothing registered.
+    notifyProviderMessage({ kind: 'batch_start' });
+
     const routing = extractRouting(messages);
 
     // Command handling: the host router gates filtered and unauthorized
@@ -249,6 +254,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
     // can stamp it on outbound rows — needed for a2a return-path routing.
     setCurrentInReplyTo(routing.inReplyTo);
+    // A real query runs from here — observers see the turn start (and the
+    // matching turn_done after completion below).
+    notifyProviderMessage({ kind: 'turn_start' });
     try {
       const result = await processQuery(
         query,
@@ -298,6 +306,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // (e.g. stream closed unexpectedly).
     markCompleted(processingIds);
     log(`Completed ${ids.length} message(s)`);
+
+    // Observers see the turn end even when it produced no user-facing message.
+    notifyProviderMessage({ kind: 'turn_done' });
   }
 }
 
@@ -441,6 +452,9 @@ export async function processQuery(
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
         taskBlockNudged = false;
+        // A follow-up pushed into the active query is a new sub-turn for
+        // observers; resetFeed tells a feed consumer to cycle its display.
+        notifyProviderMessage({ kind: 'turn_start', resetFeed: true });
         query.push(prompt);
         archivePrompts.push(prompt);
         markCompleted(keptIds);
@@ -504,6 +518,11 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        // Settle the sub-turn for observers: interim results inside a
+        // still-open query never reach the outer-loop turn_done (that fires
+        // only when the whole query ends). The next follow-up re-seeds
+        // turn_start above.
+        notifyProviderMessage({ kind: 'turn_done' });
         if (event.text) {
           const { sent, hasUnwrapped, taskBlocks } = dispatchResultText(event.text, routing);
           const willRetryTaskBlocks = shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
@@ -604,6 +623,13 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
       break;
     case 'progress':
       log(`Progress: ${event.message}`);
+      // Forward milestones to observers (activity feeds; cosmetic).
+      notifyProviderMessage({ kind: 'progress', text: event.message });
+      break;
+    case 'reasoning':
+      // A provider's reasoning line — forward to observers (cosmetic; never
+      // logged here, it can be voluminous).
+      notifyProviderMessage({ kind: 'reasoning', text: event.message });
       break;
   }
 }

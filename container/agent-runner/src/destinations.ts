@@ -136,7 +136,34 @@ function buildDestinationsSection(mode: SessionMode): string {
   lines.push(
     'For a short turn, do not narrate. For longer work, send one acknowledgment and then updates only at meaningful milestones, especially before slow operations. Never narrate micro-steps; finish with the outcome, not a play-by-play.',
   );
+  for (const section of resolvePromptSections(all)) {
+    lines.push('', section);
+  }
   return lines.join('\n');
+}
+
+/**
+ * Prompt-section contributors: installed modules append sections to the
+ * destinations prompt based on what's wired — e.g. a chat channel's module
+ * adds a file-delivery hint when a channel destination is present. Inert when
+ * nothing registers; a throwing contributor is skipped.
+ */
+type PromptSectionContributor = (destinations: DestinationEntry[]) => string | null;
+const promptSectionContributors: PromptSectionContributor[] = [];
+export function registerPromptSectionContributor(fn: PromptSectionContributor): void {
+  promptSectionContributors.push(fn);
+}
+function resolvePromptSections(destinations: DestinationEntry[]): string[] {
+  const sections: string[] = [];
+  for (const fn of promptSectionContributors) {
+    try {
+      const s = fn(destinations);
+      if (s) sections.push(s);
+    } catch {
+      // A contributor bug must never break prompt composition.
+    }
+  }
+  return sections;
 }
 
 function destinationLabel(d: DestinationEntry): string {
