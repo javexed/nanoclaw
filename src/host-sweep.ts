@@ -120,6 +120,19 @@ export function decideStuckAction(args: {
 
 let running = false;
 
+/**
+ * Module-contributed sweep tasks — the registry form of the MODULE-HOOK
+ * fences in sweep(): an installed module contributes work on the sweep
+ * cadence (TTL expiries, periodic curation, …) without this file importing
+ * it. Tasks run at the top of every tick; each is isolated so a failure never
+ * blocks the rest of the sweep. Inert when nothing registers.
+ */
+type SweepTask = { name: string; fn: () => Promise<void> };
+const sweepTasks: SweepTask[] = [];
+export function registerSweepTask(name: string, fn: () => Promise<void>): void {
+  sweepTasks.push({ name, fn });
+}
+
 export function startHostSweep(): void {
   if (running) return;
   running = true;
@@ -131,6 +144,14 @@ export function stopHostSweep(): void {
 }
 
 async function sweep(): Promise<void> {
+  // Module-contributed sweep tasks (see registerSweepTask above).
+  for (const { name, fn } of sweepTasks) {
+    try {
+      await fn();
+    } catch (err) {
+      log.warn('Sweep task failed', { task: name, err: String(err) });
+    }
+  }
   if (!running) return;
 
   // Re-heal the egress network so already-running agents keep their gateway hop

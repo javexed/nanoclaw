@@ -26,7 +26,15 @@ import {
 import { materializeContainerJson } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
-import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
+import {
+  CONTAINER_RUNTIME_BIN,
+  hostGatewayArgs,
+  readonlyMountArgs,
+  resolveAgentIdentity,
+  resolveContainerEnv,
+  runSessionPrepareHooks,
+  stopContainer,
+} from './container-runtime.js';
 import { EGRESS_NETWORK, egressNetworkArgs, ensureEgressNetwork } from './egress-lockdown.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
@@ -57,6 +65,29 @@ const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
 
 /** Active containers tracked by session ID. */
 const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();
+
+/**
+ * Observers fired when a session's container exits or fails to spawn. An
+ * installed module reacts to the session going away (e.g. reconcile UI state
+ * it derived from the running container). Fire-and-forget and isolated: a
+ * throwing observer can never affect container lifecycle. Core ships none.
+ */
+type ContainerExitObserver = (session: Session) => void | Promise<void>;
+const containerExitObservers: ContainerExitObserver[] = [];
+export function registerContainerExitObserver(fn: ContainerExitObserver): void {
+  containerExitObservers.push(fn);
+}
+function notifyContainerExit(session: Session): void {
+  for (const fn of containerExitObservers) {
+    try {
+      void Promise.resolve(fn(session)).catch((err) =>
+        log.warn('Container exit observer failed', { sessionId: session.id, err: String(err) }),
+      );
+    } catch (err) {
+      log.warn('Container exit observer failed', { sessionId: session.id, err: String(err) });
+    }
+  }
+}
 
 /**
  * In-flight wake promises, keyed by session id. Deduplicates concurrent
@@ -146,9 +177,15 @@ async function spawnContainer(session: Session): Promise<void> {
 
   const mounts = buildMounts(agentGroup, session, containerConfig, provider, contribution);
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
-  // OneCLI agent identifier is always the agent group id — stable across
-  // sessions and reversible via getAgentGroup() for approval routing.
-  const agentIdentifier = agentGroup.id;
+  // Module pre-spawn hooks run BEFORE identity/env resolution so anything a
+  // hook provisions (e.g. per-session credentials) is ready for the resolvers.
+  await runSessionPrepareHooks(agentGroup.id, session.thread_id);
+  // OneCLI agent identifier defaults to the agent group id — stable across
+  // sessions and reversible via getAgentGroup() for approval routing. An
+  // installed module may override it per session (see container-runtime.ts).
+  const agentIdentifier = resolveAgentIdentity(agentGroup.id, session.thread_id) ?? agentGroup.id;
+  // Module-contributed env for this session; empty when nothing registers.
+  const extraEnv = resolveContainerEnv(agentGroup.id, session.thread_id);
   const args = await buildContainerArgs(
     mounts,
     containerName,
@@ -157,6 +194,7 @@ async function spawnContainer(session: Session): Promise<void> {
     provider,
     contribution,
     agentIdentifier,
+    extraEnv,
   );
 
   log.info('Spawning container', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
@@ -197,6 +235,7 @@ async function spawnContainer(session: Session): Promise<void> {
     activeContainers.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
+    notifyContainerExit(session);
     // code null = killed by signal (normal shutdown path), not a boot failure.
     if (code !== 0 && code !== null && stderrTail.length > 0) {
       log.warn('Container exited non-zero', { sessionId: session.id, code, containerName, stderrTail });
@@ -209,6 +248,7 @@ async function spawnContainer(session: Session): Promise<void> {
     activeContainers.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
+    notifyContainerExit(session);
     log.error('Container spawn error', { sessionId: session.id, err });
   });
 }
@@ -463,6 +503,7 @@ async function buildContainerArgs(
   _provider: string,
   providerContribution: ProviderContainerContribution,
   agentIdentifier?: string,
+  extraEnv?: Record<string, string>,
 ): Promise<string[]> {
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
 
@@ -534,6 +575,14 @@ async function buildContainerArgs(
     throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
   }
   log.info('OneCLI gateway applied', { containerName });
+
+  // Module-contributed env. Applied AFTER the gateway env so it wins on key
+  // collisions (last `-e` wins).
+  if (extraEnv) {
+    for (const [key, value] of Object.entries(extraEnv)) {
+      args.push('-e', `${key}=${value}`);
+    }
+  }
 
   // Override entrypoint: run v2 entry point directly via Bun (no tsc, no stdin).
   args.push('--entrypoint', 'bash');

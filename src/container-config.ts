@@ -13,6 +13,7 @@ import path from 'path';
 
 import { GROUPS_DIR, TIMEZONE } from './config.js';
 import { getContainerConfig } from './db/container-configs.js';
+import { resolveContainerConfigAugmentation } from './container-runtime.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { isValidTimezone } from './timezone.js';
 import type { AgentGroup, ContainerConfigRow } from './types.js';
@@ -92,7 +93,9 @@ export function materializeContainerJson(agentGroupId: string): ContainerConfig 
   const row = getContainerConfig(agentGroupId);
   if (!row) throw new Error(`Container config not found for agent group: ${agentGroupId}`);
 
-  const config = configFromDb(row, group);
+  // Module-contributed fields merge over the DB-backed config (see the
+  // augmentor registry in container-runtime.ts). {} when nothing registers.
+  const config = { ...configFromDb(row, group), ...resolveContainerConfigAugmentation(agentGroupId) };
 
   const p = path.join(GROUPS_DIR, group.folder, 'container.json');
   const dir = path.dirname(p);
