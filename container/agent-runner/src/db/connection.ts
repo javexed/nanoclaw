@@ -75,6 +75,31 @@ export function getInboundDb(): Database {
   return _inbound;
 }
 
+/**
+ * Module-contributed schema for the OUTBOUND session DB (the file this
+ * container owns). Lets an installed module declare a side-table it owns
+ * (e.g. a live activity feed) without editing core schema in three places.
+ * DDL must be idempotent (CREATE TABLE IF NOT EXISTS …): it runs when the DB
+ * opens — and immediately if it is already open — and older session DBs get
+ * it on their next open, the same forward-compat contract the built-in
+ * on-demand tables use. A failing extension is logged and skipped; it must
+ * never take the session DB down.
+ */
+const outboundSchemaExtensions: string[] = [];
+export function registerOutboundSchemaExtension(ddl: string): void {
+  outboundSchemaExtensions.push(ddl);
+  if (_outbound) applyOutboundSchemaExtensions(_outbound);
+}
+function applyOutboundSchemaExtensions(db: Database): void {
+  for (const ddl of outboundSchemaExtensions) {
+    try {
+      db.exec(ddl);
+    } catch (err) {
+      console.error(`[connection] outbound schema extension failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+}
+
 /** Outbound DB — container owns this file (sole writer). */
 export function getOutboundDb(): Database {
   if (!_outbound) {
@@ -112,6 +137,7 @@ export function getOutboundDb(): Database {
         updated_at               TEXT NOT NULL
       );
     `);
+    applyOutboundSchemaExtensions(_outbound);
   }
   return _outbound;
 }
@@ -254,6 +280,7 @@ export function initTestSessionDb(): { inbound: Database; outbound: Database } {
     );
   `);
 
+  applyOutboundSchemaExtensions(_outbound);
   return { inbound: _inbound, outbound: _outbound };
 }
 
