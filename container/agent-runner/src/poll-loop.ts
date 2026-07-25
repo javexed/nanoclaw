@@ -25,7 +25,15 @@ import {
   type RoutingContext,
 } from './formatter.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
-import { notifyProviderMessage } from './providers/hooks.js';
+import { notifyProviderMessage, notifyProviderExchange } from './providers/hooks.js';
+import {
+  matchRunnerCommand,
+  classifyRunnerCommand,
+  runDeferredRunnerCommand,
+  notifyTurnCompletion,
+  type RunnerCommandSpec,
+  type RunnerTurnContext,
+} from './runner-hooks.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
@@ -61,6 +69,20 @@ function log(msg: string): void {
 
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Parse a chat/chat-sdk row's JSON content for the command scan. Returns the
+ * parsed object plus its trimmed text, or null on malformed JSON (the row
+ * then flows through as a normal message).
+ */
+function parseChatContent(msg: MessageInRow): { content: Record<string, unknown>; text: string } | null {
+  try {
+    const content = JSON.parse(msg.content) as Record<string, unknown>;
+    return { content, text: String(content.text ?? '').trim() };
+  } catch {
+    return null;
+  }
 }
 
 export interface PollLoopConfig {
@@ -168,6 +190,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // the runner handles directly is /clear (session reset).
     const normalMessages: MessageInRow[] = [];
     const commandIds: string[] = [];
+    const deferredCommands: Array<{ spec: RunnerCommandSpec; text: string }> = [];
 
     for (const msg of messages) {
       if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && isClearCommand(msg)) {
@@ -198,11 +221,54 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         commandIds.push(msg.id);
         continue;
       }
+      // Module-registered commands (runner-hooks.ts), consulted after the
+      // built-ins decline. `defer` consumes the row now and runs execute()
+      // at the idle point below; `rewrite` keeps the row in the batch with
+      // its text replaced. Nothing registered → match is null and every row
+      // flows through untouched.
+      if (msg.kind === 'chat' || msg.kind === 'chat-sdk') {
+        const parsed = parseChatContent(msg);
+        if (parsed && parsed.text.startsWith('/')) {
+          const spec = matchRunnerCommand(parsed.text);
+          if (spec) {
+            const decision = classifyRunnerCommand(spec, parsed.text, { provider: config.provider });
+            if (decision?.action === 'defer') {
+              log(`Deferred runner command: ${parsed.text.split(/\s/)[0]}`);
+              deferredCommands.push({ spec, text: parsed.text });
+              commandIds.push(msg.id);
+              continue;
+            }
+            if (decision?.action === 'rewrite') {
+              normalMessages.push({ ...msg, content: JSON.stringify({ ...parsed.content, text: decision.text }) });
+              continue;
+            }
+            // classify() threw — fall through as a normal message.
+          }
+        }
+      }
       normalMessages.push(msg);
     }
 
     if (commandIds.length > 0) {
       markCompleted(commandIds);
+    }
+
+    // Batch context handed to seam hooks: deferred commands now, per-turn
+    // observers inside processQuery. The continuation is read lazily — the
+    // loop reassigns it as turn results land.
+    const turnContext: RunnerTurnContext = {
+      routing,
+      batchMessages: messages,
+      getContinuation: () => continuation,
+      config,
+    };
+
+    // Deferred module commands run to completion at the idle point — BEFORE
+    // the empty-batch early-exit below, because such commands usually arrive
+    // alone, which makes normalMessages empty: exactly the batch shape the
+    // early-exit skips.
+    for (const d of deferredCommands) {
+      await runDeferredRunnerCommand(d.spec, d.text, turnContext);
     }
 
     if (normalMessages.length === 0) {
@@ -266,6 +332,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         config.provider.onExchangeComplete?.bind(config.provider),
         prompt,
         continuation,
+        turnContext,
       );
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
@@ -358,6 +425,13 @@ export async function processQuery(
   onExchangeComplete: ((exchange: ProviderExchange) => void) | undefined,
   initialPrompt: string,
   initialContinuation: string | undefined,
+  /**
+   * Batch context for per-turn seam observers (runner-hooks.ts). When set,
+   * notifyTurnCompletion(turnContext) fires at each result event — hub-style
+   * sessions hold the query open for hours, so per-turn reactions must hook
+   * here rather than after processQuery returns.
+   */
+  turnContext?: RunnerTurnContext,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -577,6 +651,10 @@ export async function processQuery(
             if (!willRetryWrapping && !willRetryTaskBlocks) archivePrompts.shift();
           }
         } else archivePrompts.shift();
+        // Per-turn seam notification (runner-hooks.ts) — AFTER the exchange
+        // hook above, so an observer reacting to this turn already sees the
+        // exchange recorded. Not awaited: the event drain must never stall.
+        if (turnContext) notifyTurnCompletion(turnContext);
       }
     }
   } catch (err) {
@@ -600,6 +678,9 @@ function notifyExchangeComplete(
   hook: ((exchange: ProviderExchange) => void) | undefined,
   exchange: ProviderExchange,
 ): void {
+  // Seam observers first (providers/hooks.ts) — a throwing provider hook must
+  // never cost an installed module its record of the exchange.
+  notifyProviderExchange(exchange);
   if (!hook) return;
   try {
     hook(exchange);

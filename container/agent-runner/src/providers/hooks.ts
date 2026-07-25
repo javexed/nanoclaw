@@ -14,10 +14,10 @@
  *  - Contributions merge in registration order (later wins per key), same as
  *    the host-side container-config augmentors.
  */
-import type { QueryInput } from './types.js';
+import type { ProviderExchange, QueryInput } from './types.js';
 
 /** Bumped when a registry signature changes — external consumers pin a range. */
-export const SEAM_API_VERSION = 1;
+export const SEAM_API_VERSION = 2;
 
 // ── R2: per-query options contributor ────────────────────────────────────────
 
@@ -99,10 +99,36 @@ export function notifyProviderMessage(ev: ProviderMessageEvent): void {
   }
 }
 
+// ── R3: provider exchange observer ───────────────────────────────────────────
+
+/**
+ * Fires once per completed exchange — a prompt and the result text that
+ * answered it, with the continuation as of that result. Notified alongside
+ * the provider's own onExchangeComplete hook; observers run FIRST, so a
+ * throwing provider hook can never cost a module its record of the exchange.
+ */
+type ProviderExchangeObserver = (exchange: ProviderExchange) => void;
+
+const exchangeObservers: ProviderExchangeObserver[] = [];
+
+export function registerProviderExchangeObserver(fn: ProviderExchangeObserver): void {
+  exchangeObservers.push(fn);
+}
+
+export function notifyProviderExchange(exchange: ProviderExchange): void {
+  for (const fn of exchangeObservers) {
+    try {
+      fn(exchange);
+    } catch {
+      // An observer bug must never break the exchange it observes.
+    }
+  }
+}
+
 // ── test support ──────────────────────────────────────────────────────────────
 
 /**
- * Snapshot both registries and return a restore function. bun runs every test
+ * Snapshot the registries and return a restore function. bun runs every test
  * file in ONE process, so a test must never wipe registrations other modules
  * made at import time (status feed, learning loop) — it snapshots, registers
  * its own hooks, and restores. Not for runtime use.
@@ -110,10 +136,13 @@ export function notifyProviderMessage(ev: ProviderMessageEvent): void {
 export function __snapshotProviderHooksForTest(): () => void {
   const contributors = [...queryOptionsContributors];
   const observers = [...messageObservers];
+  const exchange = [...exchangeObservers];
   return () => {
     queryOptionsContributors.length = 0;
     queryOptionsContributors.push(...contributors);
     messageObservers.length = 0;
     messageObservers.push(...observers);
+    exchangeObservers.length = 0;
+    exchangeObservers.push(...exchange);
   };
 }
