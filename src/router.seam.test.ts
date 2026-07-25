@@ -236,16 +236,16 @@ describe('turn gate + session-key override', () => {
 
     await router.routeInbound(makeEvent());
 
-    const cSessions = getDb()
-      .prepare(`SELECT thread_id FROM sessions WHERE agent_group_id = 'ag-c'`)
-      .all() as Array<{ thread_id: string | null }>;
+    const cSessions = getDb().prepare(`SELECT thread_id FROM sessions WHERE agent_group_id = 'ag-c'`).all() as Array<{
+      thread_id: string | null;
+    }>;
     expect(cSessions).toHaveLength(1);
     expect(cSessions[0].thread_id).toBe('member:alice');
 
     // Un-overridden agents keep the stock null-thread session.
-    const aSessions = getDb()
-      .prepare(`SELECT thread_id FROM sessions WHERE agent_group_id = 'ag-a'`)
-      .all() as Array<{ thread_id: string | null }>;
+    const aSessions = getDb().prepare(`SELECT thread_id FROM sessions WHERE agent_group_id = 'ag-a'`).all() as Array<{
+      thread_id: string | null;
+    }>;
     expect(aSessions).toHaveLength(1);
     expect(aSessions[0].thread_id).toBeNull();
 
