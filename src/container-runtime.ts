@@ -40,19 +40,36 @@ export function resolveAgentIdentity(agentGroupId: string, threadId: string | nu
 /**
  * Extra container env vars contributed by an installed module for a specific
  * (agent group, session). Applied AFTER the core env so they take precedence
- * (last `-e` wins). Core ships with no resolver → {}.
+ * (last `-e` wins). Resolvers compose — registration order, later wins per
+ * key. Core ships with none → {}.
  */
 type ContainerEnvResolver = (agentGroupId: string, threadId: string | null) => Record<string, string>;
-let containerEnvResolver: ContainerEnvResolver | null = null;
+const containerEnvResolvers: ContainerEnvResolver[] = [];
 export function registerContainerEnvResolver(fn: ContainerEnvResolver): void {
-  containerEnvResolver = fn;
+  containerEnvResolvers.push(fn);
 }
 export function resolveContainerEnv(agentGroupId: string, threadId: string | null): Record<string, string> {
-  try {
-    return containerEnvResolver ? containerEnvResolver(agentGroupId, threadId) : {};
-  } catch {
-    return {}; // a resolver bug must never break spawning
+  // Resolvers compose like the config augmentors below: registration order,
+  // later wins per key. A throwing resolver loses only its own contribution —
+  // a module bug must never break spawning.
+  const merged: Record<string, string> = {};
+  for (const fn of containerEnvResolvers) {
+    try {
+      Object.assign(merged, fn(agentGroupId, threadId));
+    } catch {
+      // skip this resolver's contribution
+    }
   }
+  return merged;
+}
+
+/** Test support: snapshot + restore the env-resolver registry (vitest runs share module state). */
+export function __snapshotContainerEnvResolversForTest(): () => void {
+  const saved = [...containerEnvResolvers];
+  return () => {
+    containerEnvResolvers.length = 0;
+    containerEnvResolvers.push(...saved);
+  };
 }
 
 /**
