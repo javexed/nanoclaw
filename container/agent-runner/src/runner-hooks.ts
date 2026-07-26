@@ -104,7 +104,13 @@ export async function runDeferredRunnerCommand(
   text: string,
   ctx: RunnerTurnContext,
 ): Promise<void> {
-  if (!spec.execute) return;
+  if (!spec.execute) {
+    // A defer with no execute() consumes the row and does nothing — almost
+    // certainly a module bug (rewrite is the no-execute path). Make the
+    // black hole visible in the container log.
+    log(`deferred runner command consumed with no execute(): ${text.split(/\s/)[0]}`);
+    return;
+  }
   try {
     await spec.execute(text, ctx);
   } catch (err) {
