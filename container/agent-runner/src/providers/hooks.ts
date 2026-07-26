@@ -17,7 +17,7 @@
 import type { ProviderExchange, QueryInput } from './types.js';
 
 /** Bumped when a registry signature changes — external consumers pin a range. */
-export const SEAM_API_VERSION = 2;
+export const SEAM_API_VERSION = 3;
 
 // ── R2: per-query options contributor ────────────────────────────────────────
 
