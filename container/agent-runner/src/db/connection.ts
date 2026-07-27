@@ -83,7 +83,23 @@ export function getInboundDb(): Database {
  * opens — and immediately if it is already open — and older session DBs get
  * it on their next open, the same forward-compat contract the built-in
  * on-demand tables use. A failing extension is logged and skipped; it must
- * never take the session DB down.
+ * never take the session DB down (a module's feature goes dark; the turn does
+ * not).
+ *
+ * OUTBOUND-ONLY, deliberately — there is no inbound counterpart. The two-DB
+ * split's core invariant is exactly one writer per file: the host writes
+ * inbound.db, this container writes outbound.db. A module table in inbound
+ * would hand the container a write surface on a host-owned file and break
+ * that invariant. Scoped here, the hook changes no trust boundary: it lets a
+ * module own a table in the file this process already writes.
+ *
+ * Why it exists: before it, a module's side-table (the webchat activity feed's
+ * `status_events`) had its DDL in core's connection.ts and its readers in the
+ * host's session-db.ts — core carrying schema knowledge for a feature it does
+ * not own. Now the runner module declares the table and owns its writers, the
+ * host module owns the readers, and core knows only that a mechanism exists.
+ * Host-side readers of a module table must tolerate its absence (older image,
+ * module not installed, DDL skipped after a failure).
  */
 const outboundSchemaExtensions: string[] = [];
 export function registerOutboundSchemaExtension(ddl: string): void {

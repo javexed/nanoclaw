@@ -27,6 +27,30 @@ export const SEAM_API_VERSION = 3;
  * providers: an allowlist REPLACES the provider's default toolset; `model`
  * overrides the configured turn model; `forkSession` asks session-forking
  * providers to keep the query off the main transcript.
+ *
+ * SECURITY — `allowedTools` replaces, so it can widen as well as narrow. Two
+ * bounds make that acceptable, and neither is obvious from the call site:
+ *
+ *  1. It is not reachable by untrusted input. Contributors are registered by
+ *     host-installed module code running in the same trust domain as the
+ *     provider itself — code that could already edit the provider directly.
+ *     Chat messages, container escapes and network peers cannot register one.
+ *  2. The provider's `disallowedTools` floor still applies on top, so a
+ *     contribution cannot re-enable something the provider forbids outright.
+ *
+ * This is a SHAPING mechanism, not a sandbox. The residual risk is a buggy
+ * contributor widening a query it meant to restrict — a correctness bug in
+ * the module, not a privilege boundary crossing.
+ *
+ * The shipped consumer only ever NARROWS: a learning review contributes
+ * `['mcp__nanoclaw__draft_skill']` (plus read-only source tools for
+ * `/learn <url|path>`), so that pass can propose a skill and do nothing else
+ * — no shell, no writes, no sends, no self-mod. That guarantee matters most
+ * because the review can fire from a heuristic auto-trigger rather than an
+ * explicit user instruction: restricting its blast radius is the difference
+ * between a background feature and a background feature with shell access.
+ * Expressed as provider options it is structural; expressed as a prompt
+ * instruction it would be advisory.
  */
 export interface ProviderQueryOptionsContribution {
   allowedTools?: string[];
