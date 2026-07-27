@@ -25,16 +25,43 @@ export const CONTAINER_RUNTIME_BIN = 'docker';
  * identity stays `agentGroup.id`.
  */
 type AgentIdentityResolver = (agentGroupId: string, threadId: string | null) => string | null;
-let agentIdentityResolver: AgentIdentityResolver | null = null;
+const agentIdentityResolvers: AgentIdentityResolver[] = [];
 export function registerAgentIdentityResolver(fn: AgentIdentityResolver): void {
-  agentIdentityResolver = fn;
+  agentIdentityResolvers.push(fn);
 }
 export function resolveAgentIdentity(agentGroupId: string, threadId: string | null): string | null {
-  try {
-    return agentIdentityResolver ? agentIdentityResolver(agentGroupId, threadId) : null;
-  } catch {
-    return null; // a resolver bug must never break spawning
+  // Decision chain: resolvers are asked in registration order and the first
+  // non-null claim wins. (The old single-slot shape let a later registration
+  // silently REPLACE an earlier module's resolver — for the credential
+  // boundary that meant sessions the first module would have claimed fell
+  // back to the workspace identity: a quiet credential-scope downgrade.)
+  for (const fn of agentIdentityResolvers) {
+    let id: string | null;
+    try {
+      id = fn(agentGroupId, threadId);
+    } catch {
+      continue; // a resolver bug must never break spawning
+    }
+    if (id == null) continue;
+    // OneCLI identifiers are lowercase [a-z0-9-]. Reject a malformed claim
+    // HERE as a named module bug — otherwise it surfaces later as a
+    // confusing gateway error mid-spawn.
+    if (!/^[a-z0-9-]+$/.test(id)) {
+      log.warn('agent identity resolver returned a malformed identifier — ignoring', { agentGroupId, threadId, id });
+      continue;
+    }
+    return id;
   }
+  return null;
+}
+
+/** Test support: snapshot + restore the identity-resolver chain. */
+export function __snapshotAgentIdentityResolversForTest(): () => void {
+  const saved = [...agentIdentityResolvers];
+  return () => {
+    agentIdentityResolvers.length = 0;
+    agentIdentityResolvers.push(...saved);
+  };
 }
 
 /**
