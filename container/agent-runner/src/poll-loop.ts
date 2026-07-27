@@ -31,6 +31,7 @@ import {
   classifyRunnerCommand,
   runDeferredRunnerCommand,
   notifyTurnCompletion,
+  runTurnRetryHandlers,
   type RunnerCommandSpec,
   type RunnerTurnContext,
 } from './runner-hooks.js';
@@ -349,6 +350,68 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         log(`Stale session detected (${continuation}) — clearing for next retry`);
         continuation = undefined;
         clearContinuation(config.providerName);
+      }
+
+      // Turn-retry seam (runner-hooks.ts): a module may re-run this turn on a
+      // different provider — e.g. a routing module escalating a turn its
+      // cheap provider failed. Core owns the query lifecycle via retryWith
+      // below; the handler only picks the provider (and owns its own spend
+      // cap). A claimed retry that produced output replaces the error path.
+      const retried = (await runTurnRetryHandlers({
+        failure: { message: errMsg },
+        prompt,
+        routing,
+        config,
+        retryWith: async (provider, providerName) => {
+          log(`Turn retry on ${providerName} (fresh session, single turn)`);
+          const q = provider.query({
+            prompt,
+            continuation: undefined,
+            cwd: config.cwd,
+            systemContext: config.systemContext,
+          });
+          // Single-turn wrapper: stop at the first result so a retry can
+          // never hold the loop open the way a normal hub query does.
+          const singleTurn: AgentQuery = {
+            push: (m) => q.push(m),
+            end: () => q.end(),
+            abort: () => q.abort(),
+            events: (async function* () {
+              for await (const ev of q.events) {
+                yield ev;
+                if (ev.type === 'result') break;
+              }
+              q.end();
+            })(),
+          };
+          try {
+            return await processQuery(
+              singleTurn,
+              routing,
+              processingIds,
+              providerName,
+              provider.onExchangeComplete?.bind(provider),
+              prompt,
+              undefined,
+              turnContext,
+            );
+          } catch (retryErr) {
+            log(
+              `Retry on ${providerName} failed too: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`,
+            );
+            return null;
+          }
+        },
+      })) as QueryResult | null;
+      if (retried) {
+        if (retried.continuation && retried.continuation !== continuation) {
+          continuation = retried.continuation;
+          setContinuation(config.providerName, continuation);
+        }
+        markCompleted(processingIds);
+        log(`Turn recovered by a retry handler — ${processingIds.length} message(s) completed`);
+        notifyProviderMessage({ kind: 'turn_done' });
+        continue;
       }
 
       // Write error response so the user knows something went wrong

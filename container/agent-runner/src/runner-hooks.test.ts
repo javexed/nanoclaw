@@ -7,6 +7,8 @@ import { registerProviderExchangeObserver, __snapshotProviderHooksForTest } from
 import {
   registerRunnerCommand,
   registerTurnCompletionObserver,
+  registerTurnRetryHandler,
+  runTurnRetryHandlers,
   matchRunnerCommand,
   classifyRunnerCommand,
   runDeferredRunnerCommand,
@@ -247,5 +249,80 @@ describe('turn-completion + exchange observers (poll loop)', () => {
     expect(exchanges.length).toBeGreaterThanOrEqual(1);
     expect(exchanges[0].prompt).toContain('ping');
     expect(exchanges[0].result).toContain('Mock response');
+  });
+});
+
+describe('turn-retry handlers (R5)', () => {
+  it('first non-null claims the failure; throwing handlers are skipped', async () => {
+    restoreRunnerHooks = __snapshotRunnerHooksForTest();
+    const calls: string[] = [];
+    registerTurnRetryHandler(async () => {
+      calls.push('throws');
+      throw new Error('handler bug');
+    });
+    registerTurnRetryHandler(async () => {
+      calls.push('declines');
+      return null;
+    });
+    registerTurnRetryHandler(async () => {
+      calls.push('claims');
+      return { continuation: 'retry-session' };
+    });
+    registerTurnRetryHandler(async () => {
+      calls.push('never');
+      return { continuation: 'nope' };
+    });
+
+    const out = await runTurnRetryHandlers({
+      failure: { message: 'primary exploded' },
+      prompt: 'p',
+      routing: { platformId: null, channelType: null, threadId: null, inReplyTo: null, taskRun: false },
+      config: { provider: new MockProvider(), providerName: 'mock', cwd: '/tmp' },
+      retryWith: async () => null,
+    });
+
+    expect(out).toEqual({ continuation: 'retry-session' });
+    expect(calls).toEqual(['throws', 'declines', 'claims']);
+  });
+
+  it('returns null when nobody claims — core falls through to its error path', async () => {
+    restoreRunnerHooks = __snapshotRunnerHooksForTest();
+    registerTurnRetryHandler(async () => null);
+    const out = await runTurnRetryHandlers({
+      failure: { message: 'boom', classification: 'network' },
+      prompt: 'p',
+      routing: { platformId: null, channelType: null, threadId: null, inReplyTo: null, taskRun: false },
+      config: { provider: new MockProvider(), providerName: 'mock', cwd: '/tmp' },
+      retryWith: async () => null,
+    });
+    expect(out).toBeNull();
+  });
+
+  it('a handler can cap its own spend across turns (the documented pattern)', async () => {
+    restoreRunnerHooks = __snapshotRunnerHooksForTest();
+    // Module-scope streak + cap: exactly what an escalating module must do,
+    // since core cannot know what a retry costs.
+    let consecutive = 0;
+    const CAP = 2;
+    const attempted: number[] = [];
+    registerTurnRetryHandler(async (ctx) => {
+      if (consecutive >= CAP) return null; // over cap → let the error surface
+      consecutive += 1;
+      attempted.push(consecutive);
+      return await ctx.retryWith(new MockProvider(), 'fallback');
+    });
+
+    const ctxBase = {
+      failure: { message: 'primary failed' },
+      prompt: 'p',
+      routing: { platformId: null, channelType: null, threadId: null, inReplyTo: null, taskRun: false },
+      config: { provider: new MockProvider(), providerName: 'mock', cwd: '/tmp' },
+      retryWith: async () => ({ continuation: 'fallback-session' }),
+    };
+    expect(await runTurnRetryHandlers(ctxBase)).toEqual({ continuation: 'fallback-session' });
+    expect(await runTurnRetryHandlers(ctxBase)).toEqual({ continuation: 'fallback-session' });
+    // third consecutive failure is over the cap — no retry, error surfaces
+    expect(await runTurnRetryHandlers(ctxBase)).toBeNull();
+    expect(attempted).toEqual([1, 2]);
   });
 });

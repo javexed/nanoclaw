@@ -145,6 +145,69 @@ export function notifyTurnCompletion(ctx: RunnerTurnContext): void {
   }
 }
 
+// ── R5: turn-retry handlers ──────────────────────────────────────────────────
+
+/**
+ * A turn that failed. `message` is the failure text as the user would see it;
+ * `classification` carries the provider's own label when it supplies one
+ * ('config', 'network', 'quota', …).
+ */
+export interface TurnFailure {
+  message: string;
+  classification?: string;
+}
+
+/**
+ * Context for a retry decision. `retryWith` re-runs THIS turn on a different
+ * provider — fresh session, single turn — with core owning the query
+ * lifecycle; the handler only chooses the provider. Returns the retry's
+ * result, or null if the retry itself failed to produce one.
+ */
+export interface TurnRetryContext {
+  failure: TurnFailure;
+  /** The prompt the failed turn was given, verbatim. */
+  prompt: string;
+  routing: RoutingContext;
+  /** The loop's config (provider, cwd, systemContext, …). Read-only by contract. */
+  config: PollLoopConfig;
+  retryWith(provider: AgentProvider, providerName: string): Promise<unknown | null>;
+}
+
+/**
+ * Handlers consulted when a turn fails. Returning a non-null result claims the
+ * failure — the loop uses that result instead of surfacing the error, and no
+ * further handler runs. Returning null (or throwing — isolated, logged) falls
+ * through to the next handler and then to core's normal error path.
+ *
+ * The shipped consumer is provider escalation: a routing module retries a
+ * turn its cheap/local provider failed on a stronger fallback. Note what the
+ * seam deliberately does NOT decide — whether retrying is worth the money.
+ * Retries cost real quota and a crafted prompt stream can fail a primary
+ * model on purpose, so a handler that spends must impose its own cap
+ * (a consecutive-failure counter in module scope, reset on a clean turn).
+ * Core cannot know a provider's price; the module can.
+ */
+type TurnRetryHandler = (ctx: TurnRetryContext) => Promise<unknown | null>;
+
+const turnRetryHandlers: TurnRetryHandler[] = [];
+
+export function registerTurnRetryHandler(fn: TurnRetryHandler): void {
+  turnRetryHandlers.push(fn);
+}
+
+/** First handler to return non-null claims the failure; a thrower is skipped. */
+export async function runTurnRetryHandlers(ctx: TurnRetryContext): Promise<unknown | null> {
+  for (const fn of turnRetryHandlers) {
+    try {
+      const out = await fn(ctx);
+      if (out) return out;
+    } catch (err) {
+      log(`turn retry handler failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return null;
+}
+
 // ── test support ──────────────────────────────────────────────────────────────
 
 /**
@@ -156,10 +219,13 @@ export function notifyTurnCompletion(ctx: RunnerTurnContext): void {
 export function __snapshotRunnerHooksForTest(): () => void {
   const specs = [...commandSpecs];
   const observers = [...turnObservers];
+  const retries = [...turnRetryHandlers];
   return () => {
     commandSpecs.length = 0;
     commandSpecs.push(...specs);
     turnObservers.length = 0;
     turnObservers.push(...observers);
+    turnRetryHandlers.length = 0;
+    turnRetryHandlers.push(...retries);
   };
 }
