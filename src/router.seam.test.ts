@@ -44,7 +44,24 @@ function now() {
 
 const TEST_DIR = '/tmp/nanoclaw-test-router-seam';
 
+// Chain-era registries accumulate for the process lifetime (no unregister),
+// so each hook gets ONE registration driven by these per-test knobs.
+let planForTest: (() => import('./router.js').InboundDeliveryPlan | null) | null = null;
+let keyOverrideForTest: ((agentGroupId: string) => import('./session-manager.js').SessionKeyOverride | null) | null =
+  null;
+let hooksRegistered = false;
+async function registerTestHooks() {
+  if (hooksRegistered) return;
+  hooksRegistered = true;
+  const router = await import('./router.js');
+  const sm = await import('./session-manager.js');
+  router.registerInboundDeliveryPlanResolver(() => (planForTest ? planForTest() : null));
+  sm.registerSessionKeyResolver((_mg, agentGroupId) => (keyOverrideForTest ? keyOverrideForTest(agentGroupId) : null));
+}
+
 beforeEach(() => {
+  planForTest = null;
+  keyOverrideForTest = null;
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
   const db = initTestDb();
@@ -130,13 +147,14 @@ describe('inbound delivery plan', () => {
     const { wakeContainer } = await import('./container-runner.js');
     vi.mocked(wakeContainer).mockClear();
 
-    router.registerInboundDeliveryPlanResolver(() => ({
+    await registerTestHooks();
+    planForTest = () => ({
       participants: ['ag-a', 'ag-b'],
       perAgent: new Map([
         ['ag-a', 'expected'],
         ['ag-b', 'defer'],
       ]),
-    }));
+    });
 
     await router.routeInbound(makeEvent());
 
@@ -165,14 +183,15 @@ describe('inbound delivery plan', () => {
   it('excludes the producing agent from its own looped-back message', async () => {
     const router = await import('./router.js');
 
-    router.registerInboundDeliveryPlanResolver(() => ({
+    await registerTestHooks();
+    planForTest = () => ({
       participants: ['ag-a', 'ag-b'],
       perAgent: new Map([
         ['ag-a', 'expected'], // even though the plan names it...
         ['ag-b', 'defer'],
       ]),
       isPeerReply: true,
-    }));
+    });
 
     // ...the event was AUTHORED by ag-a (loop-back), so ag-a must be skipped.
     await router.routeInbound(makeEvent({ senderAgentGroupId: 'ag-a' }));
@@ -185,9 +204,10 @@ describe('inbound delivery plan', () => {
 
   it('a throwing resolver falls back to stock wiring evaluation', async () => {
     const router = await import('./router.js');
-    router.registerInboundDeliveryPlanResolver(() => {
+    await registerTestHooks();
+    planForTest = () => {
       throw new Error('resolver bug');
-    });
+    };
 
     await router.routeInbound(makeEvent());
 
@@ -210,7 +230,7 @@ describe('turn gate + session-key override', () => {
       agentGroupId === 'ag-b' ? { reason: 'test-policy-requires-setup' } : null,
     );
 
-    router.registerInboundDeliveryPlanResolver(() => null); // stock routing
+    await registerTestHooks(); // stock routing: no plan, no override
     await router.routeInbound(makeEvent());
 
     // ag-b vetoed: no inbound rows; drop recorded with the module's reason.
@@ -230,9 +250,9 @@ describe('turn gate + session-key override', () => {
     const router = await import('./router.js');
     const sm = await import('./session-manager.js');
 
-    sm.registerSessionKeyResolver((mg, agentGroupId) =>
-      agentGroupId === 'ag-c' ? { sessionMode: 'per-thread', threadId: 'member:alice' } : null,
-    );
+    await registerTestHooks();
+    keyOverrideForTest = (agentGroupId) =>
+      agentGroupId === 'ag-c' ? { sessionMode: 'per-thread', threadId: 'member:alice' } : null;
 
     await router.routeInbound(makeEvent());
 
@@ -248,8 +268,5 @@ describe('turn gate + session-key override', () => {
     }>;
     expect(aSessions).toHaveLength(1);
     expect(aSessions[0].thread_id).toBeNull();
-
-    // Reset the single-slot resolver for any later test in this process.
-    sm.registerSessionKeyResolver(() => null);
   });
 });

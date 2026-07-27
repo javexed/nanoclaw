@@ -64,20 +64,38 @@ type SessionKeyResolver = (
   agentGroupId: string,
   userId: string | null,
 ) => SessionKeyOverride | null;
-let sessionKeyResolver: SessionKeyResolver | null = null;
+const sessionKeyResolvers: SessionKeyResolver[] = [];
 export function registerSessionKeyResolver(fn: SessionKeyResolver): void {
-  sessionKeyResolver = fn;
+  sessionKeyResolvers.push(fn);
 }
 export function resolveSessionKeyOverride(
   mg: { id: string; channel_type: string; platform_id: string; is_group?: number },
   agentGroupId: string,
   userId: string | null,
 ): SessionKeyOverride | null {
-  try {
-    return sessionKeyResolver ? sessionKeyResolver(mg, agentGroupId, userId) : null;
-  } catch {
-    return null; // a resolver bug must never break routing
+  // Decision chain: first non-null override wins; a throwing resolver is
+  // skipped (a resolver bug must never break routing).
+  for (const fn of sessionKeyResolvers) {
+    let override: SessionKeyOverride | null;
+    try {
+      override = fn(mg, agentGroupId, userId);
+    } catch {
+      continue;
+    }
+    if (!override) continue;
+    // Reserved namespace guard: the router strips event-derived thread ids
+    // that collide with 'system:%' (task sessions) — an override must not
+    // reopen that door. Ignore the claim and fall through.
+    if (override.threadId && override.threadId.startsWith('system:')) {
+      log.warn('session-key override targeted the reserved system:% namespace — ignoring', {
+        agentGroupId,
+        threadId: override.threadId,
+      });
+      continue;
+    }
+    return override;
   }
+  return null;
 }
 
 /**
@@ -134,16 +152,22 @@ export interface SessionInboundWriterArgs {
   deliveryAddr: { platformId: string | null; channelType: string | null; threadId: string | null };
 }
 type SessionInboundWriter = (args: SessionInboundWriterArgs) => boolean;
-let sessionInboundWriter: SessionInboundWriter | null = null;
+const sessionInboundWriters: SessionInboundWriter[] = [];
 export function registerSessionInboundWriter(fn: SessionInboundWriter): void {
-  sessionInboundWriter = fn;
+  sessionInboundWriters.push(fn);
 }
 export function runSessionInboundWriter(args: SessionInboundWriterArgs): boolean {
-  try {
-    return sessionInboundWriter ? sessionInboundWriter(args) : false;
-  } catch {
-    return false; // fall back to the normal single-message write
+  // First writer to return true claims the write (writers decline sessions
+  // they don't own); a throwing writer falls through to the next, and to the
+  // router's normal single-message write if none claim it.
+  for (const fn of sessionInboundWriters) {
+    try {
+      if (fn(args)) return true;
+    } catch {
+      /* fall through */
+    }
   }
+  return false;
 }
 
 export function sessionsBaseDir(): string {

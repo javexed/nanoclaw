@@ -198,12 +198,30 @@ export type InboundDeliveryPlanResolver = (
   /** The producing agent for agent-authored (looped-back) messages. */
   senderAgentGroupId: string | undefined,
 ) => InboundDeliveryPlan | null;
-let deliveryPlanResolver: InboundDeliveryPlanResolver | null = null;
+const deliveryPlanResolvers: InboundDeliveryPlanResolver[] = [];
 export function registerInboundDeliveryPlanResolver(fn: InboundDeliveryPlanResolver): void {
-  if (deliveryPlanResolver) {
-    log.warn('Inbound delivery-plan resolver overwritten');
+  deliveryPlanResolvers.push(fn);
+}
+/**
+ * Decision chain: resolvers are asked in registration order; the first
+ * non-null plan wins. A registering module can never un-register another —
+ * each surface's planner returns null for events it doesn't manage.
+ */
+export function resolveInboundDeliveryPlan(
+  mg: MessagingGroup,
+  threadId: string | null,
+  messageText: string,
+  senderAgentGroupId: string | undefined,
+): InboundDeliveryPlan | null {
+  for (const fn of deliveryPlanResolvers) {
+    try {
+      const plan = fn(mg, threadId, messageText, senderAgentGroupId);
+      if (plan) return plan;
+    } catch (err) {
+      log.warn('Inbound delivery-plan resolver threw — skipping it', { err: String(err) });
+    }
   }
-  deliveryPlanResolver = fn;
+  return null;
 }
 
 export async function routeInbound(event: InboundEvent): Promise<void> {
@@ -359,14 +377,12 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   // Module delivery plan (see registerInboundDeliveryPlanResolver). Resolved
   // once per event; a resolver bug must never break routing.
   const senderAgentGroupId = event.message.senderAgentGroupId;
-  let plan: InboundDeliveryPlan | null = null;
-  if (deliveryPlanResolver) {
-    try {
-      plan = deliveryPlanResolver(mg, event.threadId, messageText, senderAgentGroupId);
-    } catch (err) {
-      log.warn('Inbound delivery-plan resolver threw — falling back to wiring evaluation', { err: String(err) });
-    }
-  }
+  const plan: InboundDeliveryPlan | null = resolveInboundDeliveryPlan(
+    mg,
+    event.threadId,
+    messageText,
+    senderAgentGroupId,
+  );
 
   for (const agent of agents) {
     const agentGroup = getAgentGroup(agent.agent_group_id);
