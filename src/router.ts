@@ -591,7 +591,10 @@ async function deliverToAgent(
   // Module session-key override: redirect this turn to a different session
   // (e.g. per-member). Default (no resolver / null) leaves keying unchanged.
   let sessionThreadId = effectiveThreadId;
-  const keyOverride = resolveSessionKeyOverride(mg, agent.agent_group_id, userId);
+  // Pass the PRE-override thread: a resolver that re-keys by user needs it to
+  // key by (user, thread) rather than collapsing a room's threads into one
+  // session.
+  const keyOverride = resolveSessionKeyOverride(mg, agent.agent_group_id, userId, sessionThreadId);
   if (keyOverride) {
     effectiveSessionMode = keyOverride.sessionMode;
     sessionThreadId = keyOverride.threadId;

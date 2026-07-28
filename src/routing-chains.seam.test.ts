@@ -33,6 +33,41 @@ describe('session-key resolvers — first-non-null chain + namespace guard', () 
     });
   });
 
+  it('passes the pre-override thread so a resolver can key by (user, thread)', () => {
+    // Without this a resolver that re-keys by user collapses every thread in a
+    // room into one session: the room's and a topic thread's messages share a
+    // queue, and replies come back on the wrong thread.
+    // Scoped to one user: resolvers accumulate for the whole FILE and the chain
+    // is first-non-null, so a resolver that claims every user would hijack the
+    // tests below it.
+    const seen: (string | null | undefined)[] = [];
+    registerSessionKeyResolver((_m, _ag, userId, threadId) => {
+      if (userId !== 'webchat:threadkey') return null;
+      seen.push(threadId);
+      return { sessionMode: 'per-thread' as const, threadId: `${userId}::${threadId ?? 'main'}` };
+    });
+    expect(resolveSessionKeyOverride(mg, 'ag-t', 'webchat:threadkey', 'topic-1')).toEqual({
+      sessionMode: 'per-thread',
+      threadId: 'webchat:threadkey::topic-1',
+    });
+    expect(resolveSessionKeyOverride(mg, 'ag-t', 'webchat:threadkey', null)).toEqual({
+      sessionMode: 'per-thread',
+      threadId: 'webchat:threadkey::main',
+    });
+    expect(seen).toEqual(['topic-1', null]);
+  });
+
+  it('gives a resolver null (not undefined) when the caller omits the thread', () => {
+    // Older callers pass three args; the resolver must still see a definite value.
+    let got: unknown = 'unset';
+    registerSessionKeyResolver((_m, _ag, userId, threadId) => {
+      if (userId === 'webchat:omitted') got = threadId;
+      return null;
+    });
+    resolveSessionKeyOverride(mg, 'ag-t', 'webchat:omitted');
+    expect(got).toBeNull();
+  });
+
   it('rejects an override into the reserved system:% namespace and falls through', () => {
     registerSessionKeyResolver((_m, _ag, userId) =>
       userId === 'webchat:bob' ? { sessionMode: 'per-thread' as const, threadId: 'system:tasks:hijack' } : null,

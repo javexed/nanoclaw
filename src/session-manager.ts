@@ -63,6 +63,15 @@ type SessionKeyResolver = (
   mg: { id: string; channel_type: string; platform_id: string; is_group?: number },
   agentGroupId: string,
   userId: string | null,
+  /**
+   * The thread this turn arrived on, BEFORE any override (null = the room's
+   * main thread). A resolver that re-keys by user needs it to key by
+   * (user, thread) instead of collapsing every thread in a room into one
+   * session — without it, messages from the room and from a topic thread
+   * share one queue and replies come back on the wrong one. Additive and
+   * last, so existing resolvers are unaffected.
+   */
+  threadId?: string | null,
 ) => SessionKeyOverride | null;
 const sessionKeyResolvers: SessionKeyResolver[] = [];
 export function registerSessionKeyResolver(fn: SessionKeyResolver): void {
@@ -72,13 +81,14 @@ export function resolveSessionKeyOverride(
   mg: { id: string; channel_type: string; platform_id: string; is_group?: number },
   agentGroupId: string,
   userId: string | null,
+  threadId?: string | null,
 ): SessionKeyOverride | null {
   // Decision chain: first non-null override wins; a throwing resolver is
   // skipped (a resolver bug must never break routing).
   for (const fn of sessionKeyResolvers) {
     let override: SessionKeyOverride | null;
     try {
-      override = fn(mg, agentGroupId, userId);
+      override = fn(mg, agentGroupId, userId, threadId ?? null);
     } catch {
       continue;
     }
