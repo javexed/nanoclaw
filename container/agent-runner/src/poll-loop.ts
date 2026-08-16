@@ -25,6 +25,16 @@ import {
   type RoutingContext,
 } from './formatter.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
+import { notifyProviderMessage, notifyProviderExchange } from './providers/hooks.js';
+import {
+  matchRunnerCommand,
+  classifyRunnerCommand,
+  runDeferredRunnerCommand,
+  notifyTurnCompletion,
+  runTurnRetryHandlers,
+  type RunnerCommandSpec,
+  type RunnerTurnContext,
+} from './runner-hooks.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
@@ -60,6 +70,20 @@ function log(msg: string): void {
 
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Parse a chat/chat-sdk row's JSON content for the command scan. Returns the
+ * parsed object plus its trimmed text, or null on malformed JSON (the row
+ * then flows through as a normal message).
+ */
+function parseChatContent(msg: MessageInRow): { content: Record<string, unknown>; text: string } | null {
+  try {
+    const content = JSON.parse(msg.content) as Record<string, unknown>;
+    return { content, text: String(content.text ?? '').trim() };
+  } catch {
+    return null;
+  }
 }
 
 export interface PollLoopConfig {
@@ -156,6 +180,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const ids = messages.map((m) => m.id);
     markProcessing(ids);
 
+    // Tell observers a fresh batch was accepted (hooks.ts) — e.g. an activity
+    // feed resets its display here. Inert when nothing registered.
+    notifyProviderMessage({ kind: 'batch_start' });
+
     const routing = extractRouting(messages);
 
     // Command handling: the host router gates filtered and unauthorized
@@ -163,6 +191,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // the runner handles directly is /clear (session reset).
     const normalMessages: MessageInRow[] = [];
     const commandIds: string[] = [];
+    const deferredCommands: Array<{ spec: RunnerCommandSpec; text: string }> = [];
 
     for (const msg of messages) {
       if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && isClearCommand(msg)) {
@@ -193,11 +222,54 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         commandIds.push(msg.id);
         continue;
       }
+      // Module-registered commands (runner-hooks.ts), consulted after the
+      // built-ins decline. `defer` consumes the row now and runs execute()
+      // at the idle point below; `rewrite` keeps the row in the batch with
+      // its text replaced. Nothing registered → match is null and every row
+      // flows through untouched.
+      if (msg.kind === 'chat' || msg.kind === 'chat-sdk') {
+        const parsed = parseChatContent(msg);
+        if (parsed && parsed.text.startsWith('/')) {
+          const spec = matchRunnerCommand(parsed.text);
+          if (spec) {
+            const decision = classifyRunnerCommand(spec, parsed.text, { provider: config.provider });
+            if (decision?.action === 'defer') {
+              log(`Deferred runner command: ${parsed.text.split(/\s/)[0]}`);
+              deferredCommands.push({ spec, text: parsed.text });
+              commandIds.push(msg.id);
+              continue;
+            }
+            if (decision?.action === 'rewrite') {
+              normalMessages.push({ ...msg, content: JSON.stringify({ ...parsed.content, text: decision.text }) });
+              continue;
+            }
+            // classify() threw — fall through as a normal message.
+          }
+        }
+      }
       normalMessages.push(msg);
     }
 
     if (commandIds.length > 0) {
       markCompleted(commandIds);
+    }
+
+    // Batch context handed to seam hooks: deferred commands now, per-turn
+    // observers inside processQuery. The continuation is read lazily — the
+    // loop reassigns it as turn results land.
+    const turnContext: RunnerTurnContext = {
+      routing,
+      batchMessages: messages,
+      getContinuation: () => continuation,
+      config,
+    };
+
+    // Deferred module commands run to completion at the idle point — BEFORE
+    // the empty-batch early-exit below, because such commands usually arrive
+    // alone, which makes normalMessages empty: exactly the batch shape the
+    // early-exit skips.
+    for (const d of deferredCommands) {
+      await runDeferredRunnerCommand(d.spec, d.text, turnContext);
     }
 
     if (normalMessages.length === 0) {
@@ -259,6 +331,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const abortActiveQuery = () => query.abort();
     if (config.signal?.aborted) abortActiveQuery();
     else config.signal?.addEventListener('abort', abortActiveQuery, { once: true });
+
+    // A real query runs from here — observers see the turn start (and the
+    // matching turn_done after completion below).
+    notifyProviderMessage({ kind: 'turn_start' });
     try {
       const result = await processQuery(
         query,
@@ -268,6 +344,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         config.provider.onExchangeComplete?.bind(config.provider),
         prompt,
         continuation,
+        turnContext,
       );
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
@@ -284,6 +361,68 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         log(`Stale session detected (${continuation}) — clearing for next retry`);
         continuation = undefined;
         clearContinuation(config.providerName);
+      }
+
+      // Turn-retry seam (runner-hooks.ts): a module may re-run this turn on a
+      // different provider — e.g. a routing module escalating a turn its
+      // cheap provider failed. Core owns the query lifecycle via retryWith
+      // below; the handler only picks the provider (and owns its own spend
+      // cap). A claimed retry that produced output replaces the error path.
+      const retried = (await runTurnRetryHandlers({
+        failure: { message: errMsg },
+        prompt,
+        routing,
+        config,
+        retryWith: async (provider, providerName) => {
+          log(`Turn retry on ${providerName} (fresh session, single turn)`);
+          const q = provider.query({
+            prompt,
+            continuation: undefined,
+            cwd: config.cwd,
+            systemContext: config.systemContext,
+          });
+          // Single-turn wrapper: stop at the first result so a retry can
+          // never hold the loop open the way a normal hub query does.
+          const singleTurn: AgentQuery = {
+            push: (m) => q.push(m),
+            end: () => q.end(),
+            abort: () => q.abort(),
+            events: (async function* () {
+              for await (const ev of q.events) {
+                yield ev;
+                if (ev.type === 'result') break;
+              }
+              q.end();
+            })(),
+          };
+          try {
+            return await processQuery(
+              singleTurn,
+              routing,
+              processingIds,
+              providerName,
+              provider.onExchangeComplete?.bind(provider),
+              prompt,
+              undefined,
+              turnContext,
+            );
+          } catch (retryErr) {
+            log(
+              `Retry on ${providerName} failed too: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`,
+            );
+            return null;
+          }
+        },
+      })) as QueryResult | null;
+      if (retried) {
+        if (retried.continuation && retried.continuation !== continuation) {
+          continuation = retried.continuation;
+          setContinuation(config.providerName, continuation);
+        }
+        markCompleted(processingIds);
+        log(`Turn recovered by a retry handler — ${processingIds.length} message(s) completed`);
+        notifyProviderMessage({ kind: 'turn_done' });
+        continue;
       }
 
       // Write error response so the user knows something went wrong
@@ -309,6 +448,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // (e.g. stream closed unexpectedly).
     markCompleted(processingIds);
     log(`Completed ${ids.length} message(s)`);
+
+    // Observers see the turn end even when it produced no user-facing message.
+    notifyProviderMessage({ kind: 'turn_done' });
   }
 }
 
@@ -358,6 +500,13 @@ export async function processQuery(
   onExchangeComplete: ((exchange: ProviderExchange) => void) | undefined,
   initialPrompt: string,
   initialContinuation: string | undefined,
+  /**
+   * Batch context for per-turn seam observers (runner-hooks.ts). When set,
+   * notifyTurnCompletion(turnContext) fires at each result event — hub-style
+   * sessions hold the query open for hours, so per-turn reactions must hook
+   * here rather than after processQuery returns.
+   */
+  turnContext?: RunnerTurnContext,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -452,6 +601,9 @@ export async function processQuery(
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
         taskBlockNudged = false;
+        // A follow-up pushed into the active query is a new sub-turn for
+        // observers; resetFeed tells a feed consumer to cycle its display.
+        notifyProviderMessage({ kind: 'turn_start', resetFeed: true });
         query.push(prompt);
         archivePrompts.push(prompt);
         markCompleted(keptIds);
@@ -515,6 +667,11 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        // Settle the sub-turn for observers: interim results inside a
+        // still-open query never reach the outer-loop turn_done (that fires
+        // only when the whole query ends). The next follow-up re-seeds
+        // turn_start above.
+        notifyProviderMessage({ kind: 'turn_done' });
         if (event.text) {
           const { sent, hasUnwrapped, taskBlocks } = dispatchResultText(event.text, routing);
           const willRetryTaskBlocks = shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
@@ -569,6 +726,10 @@ export async function processQuery(
             if (!willRetryWrapping && !willRetryTaskBlocks) archivePrompts.shift();
           }
         } else archivePrompts.shift();
+        // Per-turn seam notification (runner-hooks.ts) — AFTER the exchange
+        // hook above, so an observer reacting to this turn already sees the
+        // exchange recorded. Not awaited: the event drain must never stall.
+        if (turnContext) notifyTurnCompletion(turnContext);
       }
     }
   } catch (err) {
@@ -592,6 +753,9 @@ function notifyExchangeComplete(
   hook: ((exchange: ProviderExchange) => void) | undefined,
   exchange: ProviderExchange,
 ): void {
+  // Seam observers first (providers/hooks.ts) — a throwing provider hook must
+  // never cost an installed module its record of the exchange.
+  notifyProviderExchange(exchange);
   if (!hook) return;
   try {
     hook(exchange);
@@ -615,6 +779,13 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
       break;
     case 'progress':
       log(`Progress: ${event.message}`);
+      // Forward milestones to observers (activity feeds; cosmetic).
+      notifyProviderMessage({ kind: 'progress', text: event.message });
+      break;
+    case 'reasoning':
+      // A provider's reasoning line — forward to observers (cosmetic; never
+      // logged here, it can be voluminous).
+      notifyProviderMessage({ kind: 'reasoning', text: event.message });
       break;
   }
 }

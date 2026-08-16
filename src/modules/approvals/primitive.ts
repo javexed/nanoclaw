@@ -226,6 +226,74 @@ export interface RequestApprovalOptions {
  * caller's perspective — the admin's response kicks off the registered
  * approval handler for this action via the response dispatcher.
  */
+/**
+ * Every action a consumer has registered a handler for — the set of holds
+ * that can exist in this install. Lets a surface enumerate candidates (e.g.
+ * for per-action policy settings) without hardcoding action names.
+ */
+export function listRegisteredApprovalActions(): string[] {
+  return [...approvalHandlers.keys()].sort();
+}
+
+// ── Approval-requested listeners ──
+// Fired when an approval is created (after any intercept declines to resolve
+// it), so an installed surface can mirror an actionable card wherever it
+// wants — in addition to the approver delivery below. Best-effort: exceptions
+// are logged and swallowed.
+
+export interface ApprovalRequestedEvent {
+  approvalId: string;
+  session: Session;
+  action: string;
+  title: string;
+  question: string;
+  options: RawOption[];
+  /** Eligible approver user IDs — a surface uses this to gate who can act. */
+  approvers: string[];
+  agentName?: string;
+}
+export type ApprovalRequestedListener = (e: ApprovalRequestedEvent) => void;
+
+const approvalRequestedListeners: ApprovalRequestedListener[] = [];
+
+export function registerApprovalRequestedListener(cb: ApprovalRequestedListener): void {
+  approvalRequestedListeners.push(cb);
+}
+
+export function notifyApprovalRequested(e: ApprovalRequestedEvent): void {
+  for (const cb of approvalRequestedListeners) {
+    try {
+      cb(e);
+    } catch (err) {
+      log.error('approvalRequested listener threw', { approvalId: e.approvalId, err });
+    }
+  }
+}
+
+/**
+ * Approval intercepts: run after the hold is recorded but before any card is
+ * delivered. An intercept may fully RESOLVE the approval (e.g. an opt-in
+ * policy engine auto-approving a low-stakes action through the same dispatch
+ * a human Approve takes) by returning true, which skips delivery entirely.
+ * Returning false (or throwing — isolated, logged) falls through to the next
+ * intercept and then to normal delivery. Inert when nothing registers.
+ */
+export type ApprovalIntercept = (approvalId: string, session: Session, question?: string) => Promise<boolean>;
+const approvalIntercepts: ApprovalIntercept[] = [];
+export function registerApprovalIntercept(fn: ApprovalIntercept): void {
+  approvalIntercepts.push(fn);
+}
+async function runApprovalIntercepts(approvalId: string, session: Session, question?: string): Promise<boolean> {
+  for (const fn of approvalIntercepts) {
+    try {
+      if (await fn(approvalId, session, question)) return true;
+    } catch (err) {
+      log.error('Approval intercept threw — falling through to delivery', { approvalId, err });
+    }
+  }
+  return false;
+}
+
 export async function requestApproval(opts: RequestApprovalOptions): Promise<void> {
   const { session, action, payload, title, question, agentName, approverUserId } = opts;
 
@@ -258,6 +326,22 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
     question,
     options_json: JSON.stringify(normalizedOptions),
     approver_user_id: approverUserId ?? null,
+  });
+
+  // Intercepts may fully resolve the hold; anything unresolved falls through
+  // to normal delivery.
+  if (await runApprovalIntercepts(approvalId, session, question)) return;
+
+  // Let installed surfaces mirror an actionable card wherever they want.
+  notifyApprovalRequested({
+    approvalId,
+    session,
+    action,
+    title,
+    question,
+    options: APPROVAL_OPTIONS,
+    approvers,
+    agentName,
   });
 
   const adapter = getDeliveryAdapter();

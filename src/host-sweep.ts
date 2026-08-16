@@ -120,6 +120,20 @@ export function decideStuckAction(args: {
 
 let running = false;
 
+/**
+ * Module-contributed sweep tasks — the registry form of the MODULE-HOOK
+ * fences in sweep(): an installed module contributes work on the sweep
+ * cadence (TTL expiries, periodic curation, …) without this file importing
+ * it. Tasks run at the END of every tick (after core duties — they can never
+ * delay ack sync / stale detection / due wakes); each is isolated so a failure never
+ * blocks the rest of the sweep. Inert when nothing registers.
+ */
+type SweepTask = { name: string; fn: () => Promise<void> };
+const sweepTasks: SweepTask[] = [];
+export function registerSweepTask(name: string, fn: () => Promise<void>): void {
+  sweepTasks.push({ name, fn });
+}
+
 export function startHostSweep(): void {
   if (running) return;
   running = true;
@@ -131,8 +145,6 @@ export function stopHostSweep(): void {
 }
 
 async function sweep(): Promise<void> {
-  if (!running) return;
-
   // Re-heal the egress network so already-running agents keep their gateway hop
   // if it was detached out-of-band. Best-effort here: a heal failure isn't a
   // leak (agents stay on the internal net), so log and continue. No-op when
@@ -163,6 +175,18 @@ async function sweep(): Promise<void> {
     log.error('Reject-with-reason sweep failed', { err });
   }
   // MODULE-HOOK:approvals-reason-sweep:end
+
+  // Module-contributed sweep tasks (see registerSweepTask above) run AFTER
+  // the core duties: a slow module task must never delay ack sync, stale
+  // detection, or due-message wake — module housekeeping rides the tail of
+  // the tick, core owns the head.
+  for (const { name, fn } of sweepTasks) {
+    try {
+      await fn();
+    } catch (err) {
+      log.warn('Sweep task failed', { task: name, err: String(err) });
+    }
+  }
 
   setTimeout(sweep, SWEEP_INTERVAL_MS);
 }

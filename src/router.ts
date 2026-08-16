@@ -30,7 +30,14 @@ import {
 import { findSessionForAgent } from './db/sessions.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
-import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
+import {
+  consultTurnGates,
+  resolveSession,
+  resolveSessionKeyOverride,
+  runSessionInboundWriter,
+  writeSessionMessage,
+  writeOutboundDirect,
+} from './session-manager.js';
 import { wakeContainer } from './container-runner.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
@@ -160,6 +167,63 @@ function safeParseContent(raw: string): { text?: string; sender?: string; sender
  * Route an inbound message from a channel adapter to the correct session.
  * Creates messaging group + session if they don't exist yet.
  */
+/**
+ * Inbound delivery-plan resolver: an installed module may decide, per event,
+ * exactly which wired agents wake, which receive the message silently as
+ * context, and which are skipped — replacing wiring-level engage evaluation
+ * for that event. Powers multi-agent conversation surfaces (per-thread
+ * participant sets; an agent's reply fanned to the other participants as
+ * context so they stay in sync).
+ *
+ * Contract, applied by the fan-out loop below when a plan is returned:
+ *  - perAgent 'expected' → the agent wakes (trigger=1); access/scope gates
+ *    still apply. 'defer' → delivered silently (trigger=0). Absent → skipped.
+ *  - The hints (responseExpectation, participants, isPeerReply) are merged
+ *    into the message content JSON — readers that don't know them ignore
+ *    them.
+ *  - A null plan (or no resolver) leaves routing exactly as today.
+ */
+export interface InboundDeliveryPlan {
+  /** All participating agent_group_ids (forwarded to containers as a hint). */
+  participants: string[];
+  /** Per-agent delivery. Agents absent from the map are skipped entirely. */
+  perAgent: Map<string, 'expected' | 'defer'>;
+  /** True when this event is an agent's reply fanned to peers (context only). */
+  isPeerReply?: boolean;
+}
+export type InboundDeliveryPlanResolver = (
+  mg: MessagingGroup,
+  threadId: string | null,
+  messageText: string,
+  /** The producing agent for agent-authored (looped-back) messages. */
+  senderAgentGroupId: string | undefined,
+) => InboundDeliveryPlan | null;
+const deliveryPlanResolvers: InboundDeliveryPlanResolver[] = [];
+export function registerInboundDeliveryPlanResolver(fn: InboundDeliveryPlanResolver): void {
+  deliveryPlanResolvers.push(fn);
+}
+/**
+ * Decision chain: resolvers are asked in registration order; the first
+ * non-null plan wins. A registering module can never un-register another —
+ * each surface's planner returns null for events it doesn't manage.
+ */
+export function resolveInboundDeliveryPlan(
+  mg: MessagingGroup,
+  threadId: string | null,
+  messageText: string,
+  senderAgentGroupId: string | undefined,
+): InboundDeliveryPlan | null {
+  for (const fn of deliveryPlanResolvers) {
+    try {
+      const plan = fn(mg, threadId, messageText, senderAgentGroupId);
+      if (plan) return plan;
+    } catch (err) {
+      log.warn('Inbound delivery-plan resolver threw — skipping it', { err: String(err) });
+    }
+  }
+  return null;
+}
+
 export async function routeInbound(event: InboundEvent): Promise<void> {
   // Pre-route interceptors — let modules consume messages before any routing
   // (e.g. free-text DM replies during multi-step approval flows). They run in
@@ -310,6 +374,16 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   let accumulatedCount = 0;
   let subscribed = false;
 
+  // Module delivery plan (see registerInboundDeliveryPlanResolver). Resolved
+  // once per event; a resolver bug must never break routing.
+  const senderAgentGroupId = event.message.senderAgentGroupId;
+  const plan: InboundDeliveryPlan | null = resolveInboundDeliveryPlan(
+    mg,
+    event.threadId,
+    messageText,
+    senderAgentGroupId,
+  );
+
   for (const agent of agents) {
     const agentGroup = getAgentGroup(agent.agent_group_id);
     if (!agentGroup) continue;
@@ -328,6 +402,31 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       supportsThreads,
     );
     const effectiveThreadId = threadsEnabled ? event.threadId : null;
+
+    // Self-exclusion: an agent's own looped-back message never re-engages it.
+    if (senderAgentGroupId && agent.agent_group_id === senderAgentGroupId) continue;
+
+    // A module plan replaces wiring-level engage evaluation for this event:
+    // 'expected' wakes (gates still apply), 'defer' delivers as silent
+    // context, absent skips. Hints ride in the content JSON.
+    if (plan) {
+      const expectation = plan.perAgent.get(agent.agent_group_id);
+      if (!expectation) continue;
+      const planWake = expectation === 'expected';
+      if (planWake) {
+        const pAccessOk = !accessGate || accessGate(event, userId, mg, agent.agent_group_id).allowed;
+        const pScopeOk = !senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed;
+        if (!pAccessOk || !pScopeOk) continue;
+      }
+      await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, planWake, {
+        responseExpectation: expectation,
+        participants: plan.participants,
+        ...(plan.isPeerReply ? { isPeerReply: true } : {}),
+      });
+      if (planWake) engagedCount++;
+      else accumulatedCount++;
+      continue;
+    }
 
     const engages = evaluateEngage(agent, messageText, isMention, mg, effectiveThreadId);
 
@@ -455,6 +554,10 @@ async function deliverToAgent(
   threadsEnabled: boolean,
   effectiveThreadId: string | null,
   wake: boolean,
+  // Optional routing hints merged into the message content JSON (delivery
+  // plan: responseExpectation / participants / isPeerReply). Ignored by
+  // readers that don't look for them.
+  hints?: Record<string, unknown>,
 ): Promise<void> {
   // Apply the resolved thread policy (wiring override AND channel declaration
   // AND adapter capability — resolveThreadPolicy at fanout): thread-enabled
@@ -467,7 +570,37 @@ async function deliverToAgent(
     effectiveSessionMode = 'per-thread';
   }
 
-  const { session, created } = resolveSession(agent.agent_group_id, mg.id, effectiveThreadId, effectiveSessionMode);
+  // Module turn gate: a registered gate may veto this delivery before any
+  // session exists (e.g. per-user setup required). Core records the drop with
+  // the module's reason; the user-facing notice is the module's own job.
+  const veto = consultTurnGates(mg, agent.agent_group_id, userId);
+  if (veto) {
+    recordDroppedMessage({
+      channel_type: event.channelType,
+      platform_id: event.platformId,
+      user_id: userId,
+      sender_name: null,
+      reason: veto.reason,
+      messaging_group_id: mg.id,
+      agent_group_id: agent.agent_group_id,
+    });
+    log.info('Turn vetoed by module gate', { agentGroupId: agent.agent_group_id, userId, reason: veto.reason });
+    return;
+  }
+
+  // Module session-key override: redirect this turn to a different session
+  // (e.g. per-member). Default (no resolver / null) leaves keying unchanged.
+  let sessionThreadId = effectiveThreadId;
+  // Pass the PRE-override thread: a resolver that re-keys by user needs it to
+  // key by (user, thread) rather than collapsing a room's threads into one
+  // session.
+  const keyOverride = resolveSessionKeyOverride(mg, agent.agent_group_id, userId, sessionThreadId);
+  if (keyOverride) {
+    effectiveSessionMode = keyOverride.sessionMode;
+    sessionThreadId = keyOverride.threadId;
+  }
+
+  const { session, created } = resolveSession(agent.agent_group_id, mg.id, sessionThreadId, effectiveSessionMode);
 
   // The inbound row's (channel_type, platform_id, thread_id) is the address
   // the agent's reply will be delivered to. Normally it mirrors the source
@@ -504,16 +637,41 @@ async function deliverToAgent(
     }
   }
 
-  writeSessionMessage(session.agent_group_id, session.id, {
-    id: messageIdForAgent(event.message.id, agent.agent_group_id),
-    kind: event.message.kind,
-    timestamp: event.message.timestamp,
-    platformId: deliveryAddr.platformId,
-    channelType: deliveryAddr.channelType,
-    threadId: deliveryAddr.threadId,
-    content: event.message.content,
-    trigger: wake ? 1 : 0,
-  });
+  // A key-overridden wake turn may be written by the module's inbound writer
+  // (e.g. full room-transcript sync into the per-member session).
+  const handledByWriter =
+    keyOverride && wake
+      ? runSessionInboundWriter({
+          agentGroupId: agent.agent_group_id,
+          session,
+          roomId: mg.platform_id,
+          currentMessageId: event.message.id,
+          deliveryAddr,
+        })
+      : false;
+
+  if (!handledByWriter) {
+    // Merge any routing hints into the content JSON (best-effort — leave
+    // as-is if content isn't parseable JSON).
+    let content = event.message.content;
+    if (hints) {
+      try {
+        content = JSON.stringify({ ...JSON.parse(content), ...hints });
+      } catch {
+        /* non-JSON content — deliver without hints */
+      }
+    }
+    writeSessionMessage(session.agent_group_id, session.id, {
+      id: messageIdForAgent(event.message.id, agent.agent_group_id),
+      kind: event.message.kind,
+      timestamp: event.message.timestamp,
+      platformId: deliveryAddr.platformId,
+      channelType: deliveryAddr.channelType,
+      threadId: deliveryAddr.threadId,
+      content,
+      trigger: wake ? 1 : 0,
+    });
+  }
 
   log.info('Message routed', {
     sessionId: session.id,

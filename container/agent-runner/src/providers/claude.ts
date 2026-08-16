@@ -8,6 +8,7 @@ import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/conn
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
 import { shimCwd } from './cwd-shim.js';
+import { notifyProviderMessage, resolveProviderQueryOptions } from './hooks.js';
 import { registerProvider } from './provider-registry.js';
 import type {
   AgentProvider,
@@ -252,6 +253,10 @@ const preToolUseHook: HookCallback = async (input) => {
   } catch (err) {
     log(`PreToolUse: failed to record container_state: ${err instanceof Error ? err.message : String(err)}`);
   }
+  // Surface the tool call to registered observers (activity feeds, skill
+  // telemetry — whatever an installed module wants). Inert when nothing
+  // registered; a throwing observer is isolated by the notify wrapper.
+  if (toolName) notifyProviderMessage({ kind: 'tool_use', toolName, toolInput: i.tool_input });
   return { continue: true };
 };
 
@@ -538,20 +543,26 @@ export class ClaudeProvider implements AgentProvider {
 
     const instructions = input.systemContext?.instructions;
 
+    // Installed modules may contribute per-query options (hooks.ts): an
+    // allowlist REPLACES the default toolset, `model` overrides the configured
+    // turn model, `forkSession` keeps the query off the main transcript. With
+    // nothing registered this is {} and the defaults below stand.
+    const contrib = resolveProviderQueryOptions(input);
     const sdkResult = sdkQuery({
       prompt: stream,
       options: {
         cwd: input.cwd,
         additionalDirectories: this.additionalDirectories,
         resume: input.continuation,
+        forkSession: contrib.forkSession,
         pathToClaudeCodeExecutable: '/pnpm/claude',
         systemPrompt: instructions
           ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions }
           : undefined,
-        allowedTools: [...TOOL_ALLOWLIST, ...Object.keys(this.mcpServers).map(mcpAllowPattern)],
+        allowedTools: contrib.allowedTools ?? [...TOOL_ALLOWLIST, ...Object.keys(this.mcpServers).map(mcpAllowPattern)],
         disallowedTools: SDK_DISALLOWED_TOOLS,
         env: this.env,
-        model: this.model,
+        model: contrib.model ?? this.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         effort: this.effort as any,
         permissionMode: 'bypassPermissions',

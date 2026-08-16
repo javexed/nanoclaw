@@ -79,6 +79,14 @@ export interface ProviderOptions {
 }
 
 export interface QueryInput {
+  /**
+   * Module-owned per-query markers (seam R2). A module that constructs its own
+   * query can attach data here for its registered query-options contributor to
+   * read on the way into the provider — core never interprets the contents.
+   * Namespace keys by module and keep values JSON-serializable.
+   */
+  moduleInput?: Record<string, unknown>;
+
   /** Initial prompt (already formatted by agent-runner). */
   prompt: string;
 
@@ -148,6 +156,12 @@ export type ProviderEvent =
   | { type: 'result'; text: string | null; isError?: boolean }
   | { type: 'error'; message: string; retryable: boolean; classification?: string }
   | { type: 'progress'; message: string }
+  /**
+   * A line of the agent's reasoning/thinking, surfaced to observers via the
+   * poll-loop's provider-message forward (see providers/hooks.ts). Cosmetic;
+   * providers without thinking output simply never yield it.
+   */
+  | { type: 'reasoning'; message: string }
   /**
    * Liveness signal. Providers MUST yield this on every underlying SDK
    * event (tool call, thinking, partial message, anything) so the

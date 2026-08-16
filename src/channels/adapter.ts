@@ -61,6 +61,12 @@ export interface InboundEvent {
     isMention?: boolean;
     /** True when the source is a group/channel thread, false for DMs. */
     isGroup?: boolean;
+    /**
+     * Set when this inbound was authored by an agent — loop-back fan-out from
+     * an adapter that re-routes agent posts through onInbound. See
+     * `InboundMessage.senderAgentGroupId` for rationale.
+     */
+    senderAgentGroupId?: string;
   };
   replyTo?: DeliveryAddress;
 }
@@ -89,6 +95,14 @@ export interface InboundMessage {
   isMention?: boolean;
   /** True when the source is a group/channel thread, false for DMs. */
   isGroup?: boolean;
+  /**
+   * When set, this inbound was authored by an agent (loop-back fan-out from
+   * an adapter that re-routes agent posts through onInbound). The value is
+   * the producing agent's `agent_group_id`. The router uses it for
+   * self-exclusion and passes it to the inbound delivery-plan resolver.
+   * Adapters that don't loop back leave it undefined.
+   */
+  senderAgentGroupId?: string;
 }
 
 /** A file attachment to deliver alongside a message. */
@@ -102,6 +116,41 @@ export interface OutboundMessage {
   kind: string;
   content: unknown; // parsed JSON from messages_out
   files?: OutboundFile[]; // file attachments from the session outbox
+  /**
+   * Producing session's id. Threaded through delivery so adapters that need
+   * to know exactly who emitted the message (e.g. for sender attribution or
+   * loop-back fan-out) don't have to fall back to most-recently-active
+   * heuristics that race under concurrent containers.
+   */
+  senderSessionId?: string;
+  /** Producing session's agent_group_id (correlates with `senderSessionId`). */
+  senderAgentGroupId?: string;
+}
+
+/**
+ * Fine-grained agent activity status for the current turn, surfaced to rich
+ * clients for a live "thinking"/activity display. Cosmetic; carries no routing
+ * data.
+ *   - start:     a turn began; show the bubble and keep it until done/stalled
+ *   - tool:      `text` = tool name, `detail` = target (file/command/query)
+ *   - progress:  `text` = milestone message
+ *   - reasoning: `text` = a reasoning summary line
+ *   - done:      the turn finished cleanly; clear the activity display
+ *   - stalled:   the turn ended abnormally (container died/killed mid-turn);
+ *                `text` = a short human notice. Host-generated, not from the
+ *                container's status feed.
+ */
+export interface AgentActivityStatus {
+  kind: 'start' | 'tool' | 'progress' | 'reasoning' | 'done' | 'stalled';
+  text: string | null;
+  detail: string | null;
+  /**
+   * Which agent this activity is from — its display name (the agent group's
+   * name). Lets a multi-agent room render one thinking bubble per agent instead
+   * of interleaving everyone's activity into one. Null on the rare frame where
+   * the agent group can't be resolved (renders under a generic label).
+   */
+  agentName?: string | null;
 }
 
 /** Discovered conversation info (from syncConversations). */

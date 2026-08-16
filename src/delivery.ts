@@ -33,7 +33,7 @@ import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
-import type { OutboundFile } from './channels/adapter.js';
+import type { AgentActivityStatus, OutboundFile } from './channels/adapter.js';
 import type { PendingApproval, Session } from './types.js';
 
 const ACTIVE_POLL_MS = 1000;
@@ -69,8 +69,30 @@ export interface ChannelDeliveryAdapter {
     /** Delivering adapter instance (defaults to channelType downstream).
      *  Host-internal only — containers never see instance. */
     instance?: string,
+    /** Producing session/agent — adapters that attribute or loop back agent
+     *  posts read this (see OutboundMessage.senderSessionId). */
+    source?: { sessionId: string; agentGroupId: string },
   ): Promise<string | undefined>;
-  setTyping?(channelType: string, platformId: string, threadId: string | null, instance?: string): Promise<void>;
+  setTyping?(
+    channelType: string,
+    platformId: string,
+    threadId: string | null,
+    instance?: string,
+    /** Which agent is typing (display name) — multi-agent surfaces render one
+     *  indicator per agent. Optional, like the params before it. */
+    agentName?: string,
+  ): Promise<void>;
+  /**
+   * Optional, like setTyping: forward live agent-activity status to a channel
+   * that can render it. Channels with no status surface simply omit it.
+   */
+  sendStatus?(
+    channelType: string,
+    platformId: string,
+    threadId: string | null,
+    status: AgentActivityStatus,
+    instance?: string,
+  ): Promise<void>;
 }
 
 let deliveryAdapter: ChannelDeliveryAdapter | null = null;
@@ -101,6 +123,28 @@ export function onDeliveryAdapterReady(cb: AdapterReadyCallback): void {
     void Promise.resolve()
       .then(() => cb(deliveryAdapter as ChannelDeliveryAdapter))
       .catch((err) => log.error('onDeliveryAdapterReady callback threw', { err }));
+  }
+}
+
+/**
+ * Per-session observers run by both delivery polls after a session's messages
+ * are delivered. An installed module reads its own per-session side-state
+ * here (e.g. forwarding activity status to rich clients). Inert when nothing
+ * registers; a throwing observer is isolated so it can never disrupt message
+ * delivery.
+ */
+type SessionDeliveryObserver = (session: Session) => Promise<void>;
+const sessionDeliveryObservers: SessionDeliveryObserver[] = [];
+export function registerSessionDeliveryObserver(fn: SessionDeliveryObserver): void {
+  sessionDeliveryObservers.push(fn);
+}
+async function runSessionDeliveryObservers(session: Session): Promise<void> {
+  for (const fn of sessionDeliveryObservers) {
+    try {
+      await fn(session);
+    } catch (err) {
+      log.warn('Session delivery observer failed', { sessionId: session.id, err: String(err) });
+    }
   }
 }
 
@@ -137,6 +181,7 @@ async function pollActive(): Promise<void> {
     const sessions = getRunningSessions();
     for (const session of sessions) {
       await deliverSessionMessages(session);
+      await runSessionDeliveryObservers(session);
     }
   } catch (err) {
     log.error('Active delivery poll error', { err });
@@ -152,6 +197,10 @@ async function pollSweep(): Promise<void> {
     const sessions = getActiveSessions();
     for (const session of sessions) {
       await deliverSessionMessages(session);
+      // Observers run here too: pollActive only covers RUNNING sessions, so a
+      // module reconciling state for a session whose container already exited
+      // needs the sweep's all-active pass.
+      await runSessionDeliveryObservers(session);
     }
   } catch (err) {
     log.error('Sweep delivery poll error', { err });
@@ -402,6 +451,7 @@ async function deliverMessage(
     msg.content,
     files,
     deliverInstance,
+    { sessionId: session.id, agentGroupId: session.agent_group_id },
   );
   log.info('Message delivered', {
     id: msg.id,

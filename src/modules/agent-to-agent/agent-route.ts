@@ -170,6 +170,32 @@ export function forwardAttachedFiles(
   return attachments;
 }
 
+/**
+ * Observers of performed agent-to-agent routes. An installed module gets
+ * read-only visibility into each route (e.g. mirroring the exchange into a
+ * human-visible surface). Inert when nothing registers; a throwing observer
+ * is isolated so it can never block routing.
+ */
+export interface A2aRouteInfo {
+  fromAgentGroupId: string;
+  toAgentGroupId: string;
+  content: string;
+}
+type A2aRouteObserver = (info: A2aRouteInfo) => void;
+const a2aRouteObservers: A2aRouteObserver[] = [];
+export function registerA2aRouteObserver(fn: A2aRouteObserver): void {
+  a2aRouteObservers.push(fn);
+}
+function notifyA2aRouteObservers(info: A2aRouteInfo): void {
+  for (const fn of a2aRouteObservers) {
+    try {
+      fn(info);
+    } catch (err) {
+      log.warn('a2a route observer failed', { err: err instanceof Error ? err.message : String(err) });
+    }
+  }
+}
+
 export interface RoutableAgentMessage {
   id: string;
   platform_id: string | null;
@@ -353,6 +379,13 @@ async function performAgentRoute(
     a2aMsgId,
     forwardedFileCount: countForwardedFiles(forwardedContent),
   });
+  // Observers see every performed route; best-effort, never blocks routing.
+  notifyA2aRouteObservers({
+    fromAgentGroupId: session.agent_group_id,
+    toAgentGroupId: targetAgentGroupId,
+    content: msg.content,
+  });
+
   const fresh = getSession(targetSession.id);
   if (fresh) await wakeContainer(fresh);
 }
