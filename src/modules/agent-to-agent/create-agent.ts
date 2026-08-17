@@ -77,14 +77,29 @@ export async function requestCreateAgentHold(content: Record<string, unknown>, s
   });
 }
 
+export interface CreateAgentOptions {
+  /**
+   * Suppress the terminal `Agent "<name>" created…` success notify. Error
+   * notifies (collision, invalid path) still fire. For wrappers whose own
+   * completion text is the requester's only "done" signal — e.g.
+   * slack-agent-flow, where Slack provisioning runs AFTER this returns and
+   * relaying the upstream text would report "done" ~a minute early.
+   */
+  suppressCreatedNotify?: boolean;
+}
+
 /** Guard allow body: performs the creation (fresh global-scope call or approved replay). */
-export async function createAgent(content: Record<string, unknown>, session: Session): Promise<void> {
+export async function createAgent(
+  content: Record<string, unknown>,
+  session: Session,
+  options?: CreateAgentOptions,
+): Promise<void> {
   const name = typeof content.name === 'string' ? content.name : '';
   const instructions = typeof content.instructions === 'string' ? content.instructions : null;
   const sourceGroup = getAgentGroup(session.agent_group_id);
   if (!name || !sourceGroup) return; // precheck already answered the requester
 
-  await performCreateAgent(name, instructions, session, sourceGroup, (text) => notifyAgent(session, text));
+  await performCreateAgent(name, instructions, session, sourceGroup, (text) => notifyAgent(session, text), options);
 }
 
 /**
@@ -101,6 +116,7 @@ async function performCreateAgent(
   session: Session,
   sourceGroup: AgentGroup,
   notify: (text: string) => void,
+  options?: CreateAgentOptions,
 ): Promise<void> {
   const localName = normalizeName(name);
 
@@ -179,6 +195,8 @@ async function performCreateAgent(
   // tries to send to the newly-created child.
   writeDestinations(session.agent_group_id, session.id);
 
-  notify(`Agent "${localName}" created. You can now message it with send_message({ to: "${localName}", ... }).`);
+  if (!options?.suppressCreatedNotify) {
+    notify(`Agent "${localName}" created. You can now message it with send_message({ to: "${localName}", ... }).`);
+  }
   log.info('Agent group created', { agentGroupId, name, localName, folder, parent: sourceGroup.id });
 }

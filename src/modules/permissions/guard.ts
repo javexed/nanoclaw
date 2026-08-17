@@ -4,7 +4,9 @@
  *
  * senders.admit — the `unknown_sender_policy` switch moved verbatim out of
  * handleUnknownSender: `public` allows (short-circuited before the gate
- * anyway), `request_approval` holds, `strict` denies. The hold is executed by
+ * anyway), `request_approval` holds, `strict` and `decline_notify` deny
+ * (decline_notify's decline + owner-FYI side effects are the caller's — the
+ * message stays dropped either way). The hold is executed by
  * the caller through the module's own pending_sender_approvals flow (card,
  * in-flight dedup) — not the approvals primitive — so this entry has no
  * grantActionName: the approve continuation adds the member and replays
@@ -32,6 +34,11 @@ export const sendersAdmit = defineGuardedAction({
       return HOLD(
         `unknown sender requires admin approval on messaging group ${String(input.payload.messagingGroupId)}`,
       );
+    }
+    if (policy === 'decline_notify') {
+      // Deny, not hold: nothing pends and no grant path exists — the caller
+      // sends the polite decline + owner FYI itself (sender-approval.ts).
+      return DENY('unknown sender declined (decline-and-notify policy)');
     }
     return DENY('unknown sender on a strict messaging group');
   },

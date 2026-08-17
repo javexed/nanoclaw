@@ -55,6 +55,14 @@ const SKILLS = readdirSync(SKILLS_DIR).filter((n) => {
   return existsSync(p) && /^```nc:/m.test(readFileSync(p, 'utf8'));
 });
 
+// Every prose doc a skill ships — install and removal both, since a retired
+// mechanism outlives its install step in the matching REMOVE.md.
+const SKILL_DOCS = readdirSync(SKILLS_DIR).flatMap((n) =>
+  ['SKILL.md', 'REMOVE.md']
+    .filter((f) => existsSync(join(SKILLS_DIR, n, f)))
+    .map((f) => ({ doc: `${n}/${f}`, text: readFileSync(join(SKILLS_DIR, n, f), 'utf8') })),
+);
+
 // ---------------------------------------------------------------------------
 // Fixtures: .claude/skills/<name>/apply-fixtures.json, colocated so a skill
 // edit and its fixture update land in one diff. Prompt-less skills fall back
@@ -161,6 +169,22 @@ describe('skill discovery', () => {
     expect(SKILLS).toContain('add-slack');
     expect(SKILLS).toContain('add-whatsapp');
     expect(SKILLS.length).toBeGreaterThanOrEqual(10);
+  });
+
+  it('finds the prose docs', () => {
+    expect(SKILL_DOCS.map((d) => d.doc)).toContain('add-slack/REMOVE.md');
+    expect(SKILL_DOCS.length).toBeGreaterThanOrEqual(30);
+  });
+});
+
+describe('retired mechanisms', () => {
+  it('no skill doc walks the reader into the data/env mirror', () => {
+    // nc:env-sync is retired: nothing reads data/env/env, and copying .env
+    // there put live tokens in a second place. validate() rejects the fence
+    // form, but the same instruction spelled out as prose and a bash block is
+    // invisible to it — which is how it survived in a dozen REMOVE.md files.
+    const offenders = SKILL_DOCS.filter((d) => d.text.includes('data/env')).map((d) => d.doc);
+    expect(offenders).toEqual([]);
   });
 });
 

@@ -24,10 +24,73 @@ import * as setupLog from '../logs.js';
 import { BACK_TO_CHANNEL_SELECTION, backGate, type ChannelFlowResult } from '../lib/back-nav.js';
 import { askOperatorRole, type OperatorRole } from '../lib/role-prompt.js';
 import { ensureAnswer, fail, runQuietChild } from '../lib/runner.js';
-import { runSkill, type RunSkillOptions } from '../lib/skill-driver.js';
+import { hostExec, runSkill, type RunSkillOptions } from '../lib/skill-driver.js';
 import { clearTemplatePick } from '../templates.js';
+import { getChannelPreStep, getCompanionSkills } from './companions.js';
 
 const DEFAULT_AGENT_NAME = 'Nano';
+
+/**
+ * Apply a channel's declared companion skills (setup/channels/companions.ts)
+ * after its main install skill. Some channel payloads are bigger than the
+ * adapter install itself — capabilities that live in their own skills and
+ * used to be applied by hand, which is exactly how a fresh install ships a
+ * half-working channel. Applying the declared list here makes finishing setup
+ * mean the whole payload actually works.
+ *
+ * Per-skill restarts are skipped and ONE deferred restart runs after all of
+ * them — MANDATORY, and the reason `skipEffects: ['restart']` is safe: the
+ * main channel skill restarts the host BEFORE the companions run, so without
+ * a restart HERE nothing ever reloads after them. That failure mode is
+ * invisible on disk and brutal to diagnose — every file is correct, but the
+ * live process still holds the ESM-cached pre-edit modules.
+ *
+ * A companion that doesn't fully apply degrades, not fails: the channel's
+ * main install still works, so warn with the exact re-apply command instead
+ * of aborting setup.
+ */
+async function applyCompanionSkills(
+  channel: string,
+  projectRoot: string,
+  overrides: ChannelSkillOverrides,
+): Promise<void> {
+  const companions = getCompanionSkills(channel);
+  let applied = false;
+  for (const skill of companions) {
+    const res = await runSkill(`.claude/skills/${skill}`, {
+      projectRoot,
+      exec: overrides.exec,
+      resolveRemote: overrides.resolveRemote,
+      // Skip per-skill restarts; this function performs ONE after all, below.
+      skipEffects: overrides.skipEffects ?? ['restart'],
+      onEvent: overrides.onEvent,
+      confirm: overrides.confirm,
+      openUrl: overrides.openUrl,
+      step: `${channel}-${skill}`,
+    });
+    if (fullyApplied(res)) {
+      applied = true;
+      continue;
+    }
+    // Degraded, not fatal: the main channel install still works. Name the
+    // skill and the exact re-apply command so the warning is actionable.
+    p.log.warn(
+      `Couldn't fully apply companion skill ${skill}. The ${channel} channel works, but the ` +
+        `capability that skill adds stays degraded until you re-apply it: ` +
+        `pnpm exec tsx scripts/skill-apply.ts .claude/skills/${skill}`,
+    );
+  }
+
+  if (!applied) return;
+  try {
+    await (overrides.exec ?? hostExec(projectRoot))('bash setup/lib/restart.sh');
+  } catch {
+    p.log.warn(
+      'Applied the companion skills but could not restart the service. Their changes stay ' +
+        'inactive until you restart it: bash setup/lib/restart.sh',
+    );
+  }
+}
 
 interface WireArgs {
   channel: string;
@@ -41,7 +104,7 @@ interface WireArgs {
   engagePattern?: string;
 }
 
-async function resolveAgentName(): Promise<string> {
+export async function resolveAgentName(): Promise<string> {
   const preset = process.env.NANOCLAW_AGENT_NAME?.trim();
   if (preset) return preset;
   const answer = ensureAnswer(
@@ -189,6 +252,11 @@ export async function runChannelSkill(
     );
   }
 
+  // Declared companion skills: apply the rest of the channel's payload (see
+  // setup/channels/companions.ts). After the main install, so files the
+  // companions edit or import already exist.
+  await applyCompanionSkills(channel, projectRoot, overrides);
+
   // Identity confirmation captured by the skill (e.g. add-slack's auth.test).
   if (res.vars.connected_as) p.log.success(`Connected to ${channel} as ${res.vars.connected_as}.`);
 
@@ -238,4 +306,41 @@ export async function runChannelSkill(
   // setup run re-enter template setup. Pinned by run-channel-skill.test.ts
   // ("clears the template pick…").
   if (templateAgentGroupId) (overrides.clearTemplatePick ?? clearTemplatePick)();
+}
+
+/**
+ * The wizard's channel entry point: consult the channel's registered
+ * auto-provision pre-step (setup/channels/companions.ts) before its install
+ * skill. No registration ⇒ exactly runChannelSkill — the common case, and
+ * every channel's behavior today.
+ *
+ * With a pre-step, the opening order mirrors runChannelSkill's own: the back
+ * gate first (before any side effect — the pre-step owns prompts of its own),
+ * then the agent name — resolved up front because it doubles as the
+ * provisioned app's name — then the pre-step. Whatever inputs it returns
+ * pre-bind the skill's prompts; undefined means the manual path, and the
+ * skill flow prompts as usual. Explicit `overrides.inputs` win over pre-bound
+ * values.
+ */
+export async function runChannelSkillWithPreStep(
+  channel: string,
+  displayName: string,
+  overrides: ChannelSkillOverrides = {},
+): Promise<ChannelFlowResult> {
+  const preStep = getChannelPreStep(channel);
+  if (!preStep) return runChannelSkill(channel, displayName, overrides);
+
+  if (overrides.offerBack) {
+    const label = channel.charAt(0).toUpperCase() + channel.slice(1);
+    const gate = await (overrides.backGate ?? backGate)(label);
+    if (gate === BACK_TO_CHANNEL_SELECTION) return BACK_TO_CHANNEL_SELECTION;
+  }
+  const agentName = overrides.agentName ?? (await resolveAgentName());
+  const preBound = await preStep(agentName);
+  return runChannelSkill(channel, displayName, {
+    ...overrides,
+    offerBack: false,
+    agentName,
+    inputs: { ...preBound, ...overrides.inputs },
+  });
 }

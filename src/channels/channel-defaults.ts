@@ -82,7 +82,7 @@ export function resolveUnknownSenderPolicy(
   channelKey: string,
   isGroup: boolean,
   channelType?: string,
-): 'strict' | 'request_approval' | 'public' {
+): 'strict' | 'request_approval' | 'decline_notify' | 'public' {
   const decl = getChannelDefaults(channelKey, channelType);
   return (isGroup ? decl.group : decl.dm).unknownSenderPolicy;
 }

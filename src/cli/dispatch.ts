@@ -6,7 +6,7 @@
  * Every command passes the guard before its handler runs — the decision
  * (allow / hold / deny) comes from the command's catalog entry, derived at
  * registration (see cli/guard.ts). Dispatch keeps the mechanics: arg
- * auto-fill, the sessions-get existence oracle, `--help` interception,
+ * auto-fill, the sessions-get/-history existence-oracle guard, `--help` interception,
  * parseArgs, and post-handler row filtering. An approved replay re-enters
  * here carrying the verified approval row as its grant — the guard re-checks
  * the structural checks live, and the `approved: true` boolean no longer
@@ -98,10 +98,15 @@ export async function dispatch(
       }
       req = { ...req, args: { ...req.args, ...fill } };
 
-      // Fail-closed pre-handler check for sessions-get: returns "not found"
-      // regardless of whether the UUID exists in another group, preventing an
-      // existence oracle across group boundaries.
-      if (cmd.resource === 'sessions' && req.command === 'sessions-get' && req.args.id) {
+      // Fail-closed pre-handler check for sessions-get/-history: returns
+      // "not found" regardless of whether the UUID exists in another group,
+      // preventing an existence oracle across group boundaries. (history
+      // also self-scopes in its handler — this is defense-in-depth.)
+      if (
+        cmd.resource === 'sessions' &&
+        (req.command === 'sessions-get' || req.command === 'sessions-history') &&
+        req.args.id
+      ) {
         const s = getSession(req.args.id as string);
         if (!s || s.agent_group_id !== ctx.agentGroupId) {
           return err(req.id, 'handler-error', `session not found: ${req.args.id}`);

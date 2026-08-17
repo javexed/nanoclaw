@@ -56,11 +56,11 @@ interface RegisterArgs {
   /** Explicit engage mode override; omitted = channel declaration / heuristic */
   engageMode?: 'pattern' | 'mention' | 'mention-sticky';
   /** Explicit unknown_sender_policy override; omitted = channel declaration / 'strict' */
-  unknownSenderPolicy?: 'strict' | 'request_approval' | 'public';
+  unknownSenderPolicy?: 'strict' | 'request_approval' | 'decline_notify' | 'public';
 }
 
 const ENGAGE_MODES = ['pattern', 'mention', 'mention-sticky'] as const;
-const SENDER_POLICIES = ['strict', 'request_approval', 'public'] as const;
+const SENDER_POLICIES = ['strict', 'request_approval', 'decline_notify', 'public'] as const;
 
 function parseArgs(args: string[]): RegisterArgs {
   const result: RegisterArgs = {

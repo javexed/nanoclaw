@@ -19,16 +19,22 @@ import {
 import { appendRunLog } from './modules/scheduling/run-log.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
-import { getMessagingGroup, getMessagingGroupByPlatform } from './db/messaging-groups.js';
+import {
+  getMessagingGroup,
+  getMessagingGroupByPlatform,
+  getMessagingGroupForOwnDestination,
+} from './db/messaging-groups.js';
 import {
   getDueOutboundMessages,
   getDeliveredIds,
   markDelivered,
   markDeliveryFailed,
   migrateDeliveredTable,
+  type OutboundMessage,
 } from './db/session-db.js';
 import { runGuarded, type DeliveryGuardSpec, type GuardedDeliveryHandler } from './delivery-guard.js';
 import { isUnguarded, type Unguarded } from './guard/index.js';
+import { fanOutboundMessage } from './modules/cross-session-context/index.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
@@ -78,6 +84,12 @@ export interface ChannelDeliveryAdapter {
     platformId: string,
     threadId: string | null,
     instance?: string,
+    // Upstream's status pair keeps positions 5 and 6: the registry
+    // implementation below already passes them through in that order, and
+    // reordering would silently mis-bind every caller. The seam's agentName
+    // therefore lands last — it has no caller yet, so the position is free.
+    status?: string,
+    statusKind?: 'auto' | 'agent',
     /** Which agent is typing (display name) — multi-agent surfaces render one
      *  indicator per agent. Optional, like the params before it. */
     agentName?: string,
@@ -248,10 +260,32 @@ async function drainSession(session: Session): Promise<void> {
     // Ensure platform_message_id column exists (migration for existing sessions)
     migrateDeliveredTable(inDb);
 
+    // Batch preview: registered modules peek at the whole undelivered batch
+    // before rows are processed one-by-one — e.g. a module prefetching an
+    // expensive per-message resource in parallel when the batch contains
+    // several rows that would otherwise each pay the cost sequentially.
+    // Hooks see kind+content only, must be fast, and must never break
+    // delivery.
+    for (const hook of batchPreviewHooks) {
+      try {
+        hook(
+          undelivered.map((m) => ({ kind: m.kind, content: m.content })),
+          session,
+        );
+      } catch (err) {
+        log.warn('Delivery batch-preview hook failed', { sessionId: session.id, err });
+      }
+    }
+
     for (const msg of undelivered) {
       try {
         const platformMsgId = await deliverMessage(msg, session, inDb);
         markDelivered(inDb, msg.id, platformMsgId ?? null);
+        // firstDelivery: nothing had ever been delivered in this session
+        // before this row. Computed before the row joins the local
+        // delivered set, so exactly one row per session carries the flag.
+        const firstDelivery = delivered.size === 0;
+        delivered.add(msg.id);
         deliveryAttempts.delete(msg.id);
 
         // Pause the typing indicator after a real user-facing message
@@ -262,6 +296,24 @@ async function drainSession(session: Session): Promise<void> {
         // shouldn't get a gap in their typing indicator for them.
         if (msg.kind !== 'system' && msg.channel_type !== 'agent') {
           pauseTypingRefreshAfterDelivery(session.id);
+          // Cross-session context: fan the agent's own user-facing message
+          // into the sessions of the conversation it was delivered to.
+          // task_log rows are series bookkeeping (one-door delivery), not
+          // user-facing — excluded. Runs after markDelivered so a delivery
+          // retry never double-fans.
+          if (msg.kind !== 'task_log') {
+            fanOutboundMessage(msg, session, agentGroup);
+            // Post-delivery hooks: user-facing rows only, same exclusions
+            // as the fan above. Hooks are decoration: failures log and can
+            // never affect delivery or retries.
+            for (const hook of postDeliveryHooks) {
+              try {
+                hook(msg, session, { firstDelivery });
+              } catch (err) {
+                log.warn('Post-delivery hook failed', { messageId: msg.id, sessionId: session.id, err });
+              }
+            }
+          }
         }
       } catch (err) {
         const attempts = (deliveryAttempts.get(msg.id) ?? 0) + 1;
@@ -371,14 +423,27 @@ async function deliverMessage(
     // targets the session's own chat address, the origin row wins even if
     // sibling instances share the same (channel_type, platform_id) — so the
     // reply goes out through the instance the message came in on. Otherwise
-    // fall back to the by-platform lookup (default-instance-first).
+    // prefer the sender's own destination-mapped instance (correct even when
+    // sibling instances share the same channel address), falling back to the
+    // by-platform lookup (default-instance-first) when the sender has no
+    // matching destination.
     const originMg = session.messaging_group_id ? getMessagingGroup(session.messaging_group_id) : undefined;
     const mg =
       originMg && originMg.channel_type === msg.channel_type && originMg.platform_id === msg.platform_id
         ? originMg
-        : getMessagingGroupByPlatform(msg.channel_type, msg.platform_id);
+        : (getMessagingGroupForOwnDestination(session.agent_group_id, msg.channel_type, msg.platform_id) ??
+          getMessagingGroupByPlatform(msg.channel_type, msg.platform_id));
     if (!mg) {
       throw new Error(`unknown messaging group for ${msg.channel_type}/${msg.platform_id} (message ${msg.id})`);
+    }
+    if (mg.detached_at) {
+      // The bot was removed from this conversation (a channel membership
+      // module stamps detached_at when the bot leaves). Fail into the retry
+      // path rather than sending into a channel that will reject us; rejoin
+      // clears the stamp.
+      throw new Error(
+        `messaging group ${mg.id} is detached (bot removed from ${mg.channel_type}/${mg.platform_id} at ${mg.detached_at})`,
+      );
     }
     const isOriginChat = session.messaging_group_id === mg.id;
     // Guarded: without the agent-to-agent module, `agent_destinations`
@@ -467,6 +532,37 @@ async function deliverMessage(
 }
 
 /**
+ * Post-delivery hooks.
+ *
+ * Registered modules observe each successfully delivered user-facing
+ * message (non-system, non-agent, non-task_log) right after it is marked
+ * delivered, with a first-delivery flag. This gives channel modules a
+ * supported seam for one-time follow-through on a session's first outbound
+ * message (e.g. onboarding affordances) without hardcoding platform
+ * behavior in the delivery core.
+ *
+ * Hooks are decoration only: each invocation is wrapped in try/catch, so a
+ * failing hook can never affect delivery, markDelivered, or retries.
+ */
+export interface PostDeliveryInfo {
+  /**
+   * True when this is the first message ever marked delivered in this
+   * session — exactly one row per session carries it. Every delivered row
+   * counts toward the flag (including system rows the hook itself never
+   * fires for); the hook only ever observes user-facing rows.
+   */
+  firstDelivery: boolean;
+}
+
+export type PostDeliveryHook = (msg: OutboundMessage, session: Session, info: PostDeliveryInfo) => void;
+
+const postDeliveryHooks: PostDeliveryHook[] = [];
+
+export function registerPostDeliveryHook(hook: PostDeliveryHook): void {
+  postDeliveryHooks.push(hook);
+}
+
+/**
  * Delivery action registry.
  *
  * Modules register handlers for system-kind outbound message actions via
@@ -498,6 +594,13 @@ const deliveryActions = new Map<string, DeliveryEntry>();
 
 function isUnguardedEntry(entry: DeliveryEntry): entry is Extract<DeliveryEntry, { guard: Unguarded }> {
   return isUnguarded(entry.guard);
+}
+
+/** See the batch-preview invocation in the delivery poll for semantics. */
+type DeliveryBatchPreviewHook = (batch: Array<{ kind: string; content: string }>, session: Session) => void;
+const batchPreviewHooks: DeliveryBatchPreviewHook[] = [];
+export function registerDeliveryBatchPreview(hook: DeliveryBatchPreviewHook): void {
+  batchPreviewHooks.push(hook);
 }
 
 export function registerDeliveryAction(action: string, handler: DeliveryActionHandler, unguardedDecl: Unguarded): void;

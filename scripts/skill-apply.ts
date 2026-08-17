@@ -394,7 +394,17 @@ function proseFor(md: string, fenceLine1: number): string {
 function headingAbove(md: string, fenceLine1: number): string {
   const lines = md.split('\n');
   for (let h = fenceLine1 - 2; h >= 0; h--) {
-    if (lines[h].startsWith('#')) return lines[h].replace(/^#+\s*/, '').trim();
+    if (lines[h].startsWith('#')) {
+      // Drop a leading authoring ordinal ("### 2. Copy the adapter" → "Copy the
+      // adapter"). Those numbers index the SKILL.md for a READER; as step
+      // captions they are actively wrong. A skipped step leaves a hole (1, 3,
+      // 4…), a heading with several directives repeats its number, headings
+      // without one render bare, and a flow that applies several skills in
+      // sequence restarts the count mid-run — so the operator sees
+      // "1, 3, 4, 4, Restart, 2, 4". The engine's own (i/n) suffix
+      // (labelOrdinals) already disambiguates repeats, and it stays correct.
+      return lines[h].replace(/^#+\s*/, '').replace(/^\d+[.)]\s+/, '').trim();
+    }
   }
   return '';
 }

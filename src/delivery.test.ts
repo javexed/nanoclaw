@@ -36,8 +36,14 @@ import {
 } from './db/index.js';
 import { getDeliveredIds } from './db/session-db.js';
 import { resolveSession, resolveTaskSession, outboundDbPath, openInboundDb } from './session-manager.js';
-import { deliverSessionMessages, setDeliveryAdapter } from './delivery.js';
+import {
+  deliverSessionMessages,
+  registerDeliveryBatchPreview,
+  registerPostDeliveryHook,
+  setDeliveryAdapter,
+} from './delivery.js';
 import { createChannelDeliveryAdapter } from './channels/channel-registry.js';
+import { createDestination } from './modules/agent-to-agent/db/agent-destinations.js';
 
 function now(): string {
   return new Date().toISOString();
@@ -375,6 +381,135 @@ describe('deliverSessionMessages — permission check', () => {
     inDb.close();
     expect(delivered.has('out-unauth')).toBe(true);
   });
+
+  it("authorizes and delivers via the sender's own instance when sibling instances share a platform address", async () => {
+    seedAgentAndChannel();
+
+    // Two sibling messaging groups share one physical channel address but
+    // belong to different adapter instances (e.g. two bot identities in the
+    // same multi-bot room). "alpha" sorts before "zulu" lexically, so a
+    // plain by-platform lookup with no instance hint would pick "alpha" —
+    // the wrong sibling for this sender.
+    createMessagingGroup({
+      id: 'mg-sib-alpha',
+      channel_type: 'discord',
+      platform_id: 'discord:999',
+      instance: 'alpha',
+      name: 'Shared Room',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+    createMessagingGroup({
+      id: 'mg-sib-zulu',
+      channel_type: 'discord',
+      platform_id: 'discord:999',
+      instance: 'zulu',
+      name: 'Shared Room',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+
+    // The sender is only authorized against its own ("zulu") sibling.
+    createDestination({
+      agent_group_id: 'ag-1',
+      local_name: 'room',
+      target_type: 'channel',
+      target_id: 'mg-sib-zulu',
+      created_at: now(),
+    });
+
+    // Session origin is mg-1 (telegram) — not the shared room, so the
+    // origin-session shortcut doesn't apply here.
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+
+    const outDb = new Database(outboundDbPath('ag-1', session.id));
+    outDb
+      .prepare(
+        `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
+       VALUES (?, datetime('now'), 'chat', 'discord:999', 'discord', ?)`,
+      )
+      .run('out-shared-room', JSON.stringify({ text: 'hello room' }));
+    outDb.close();
+
+    const calls: Array<{ content: string; instance: string | undefined }> = [];
+    setDeliveryAdapter({
+      async deliver(_ct, _pid, _tid, _kind, content, _files, instance) {
+        calls.push({ content, instance });
+        return 'plat-room';
+      },
+    });
+
+    await deliverSessionMessages(session);
+
+    // Delivered exactly once, through the sender's own ("zulu") instance —
+    // not the lexically-first ("alpha") sibling.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.instance).toBe('zulu');
+
+    const inDb = openInboundDb('ag-1', session.id);
+    const delivered = getDeliveredIds(inDb);
+    inDb.close();
+    expect(delivered.has('out-shared-room')).toBe(true);
+  });
+
+  it('still authorizes and delivers an ordinary single-instance non-origin channel destination', async () => {
+    seedAgentAndChannel();
+
+    // A second, single-instance channel the agent is legitimately wired to
+    // (the common case: broadcasting from a DM session to a wired channel —
+    // no sibling instances, no ambiguity, exactly one row for this address).
+    createMessagingGroup({
+      id: 'mg-broadcast',
+      channel_type: 'discord',
+      platform_id: 'discord:789',
+      name: 'Team Channel',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+    createDestination({
+      agent_group_id: 'ag-1',
+      local_name: 'team-channel',
+      target_type: 'channel',
+      target_id: 'mg-broadcast',
+      created_at: now(),
+    });
+
+    // Session is on mg-1 (telegram) — not the origin of the broadcast target.
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+
+    const outDb = new Database(outboundDbPath('ag-1', session.id));
+    outDb
+      .prepare(
+        `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
+       VALUES (?, datetime('now'), 'chat', 'discord:789', 'discord', ?)`,
+      )
+      .run('out-broadcast', JSON.stringify({ text: 'status update' }));
+    outDb.close();
+
+    const calls: Array<{ content: string; instance: string | undefined }> = [];
+    setDeliveryAdapter({
+      async deliver(_ct, _pid, _tid, _kind, content, _files, instance) {
+        calls.push({ content, instance });
+        return 'plat-broadcast';
+      },
+    });
+
+    await deliverSessionMessages(session);
+
+    // Unaffected by the destination-preferring resolution: single-instance
+    // installs have exactly one row per address, so behavior is unchanged —
+    // delivered once, through the channel's (default) instance.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.instance).toBe('discord');
+
+    const inDb = openInboundDb('ag-1', session.id);
+    const delivered = getDeliveredIds(inDb);
+    inDb.close();
+    expect(delivered.has('out-broadcast')).toBe(true);
+  });
 });
 
 describe('deliverSessionMessages — task_log rows (one-door task delivery)', () => {
@@ -406,5 +541,144 @@ describe('deliverSessionMessages — task_log rows (one-door task delivery)', ()
     // Marked delivered — the row is not retried.
     const delivered = getDeliveredIds(openInboundDb('ag-1', session.id));
     expect(delivered.has('log-1')).toBe(true);
+  });
+});
+
+describe('deliverSessionMessages — batch preview hooks', () => {
+  it('hooks see the whole undelivered batch before row processing; a throwing hook never breaks delivery', async () => {
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', session.id, 'bp-1');
+    insertOutbound('ag-1', session.id, 'bp-2');
+
+    const seen: Array<{ kinds: string[]; sessionId: string }> = [];
+    registerDeliveryBatchPreview((batch, s) => {
+      seen.push({ kinds: batch.map((m) => m.kind), sessionId: s.id });
+    });
+    registerDeliveryBatchPreview(() => {
+      throw new Error('hook exploded');
+    });
+
+    const sent: string[] = [];
+    setDeliveryAdapter({
+      async deliver(_channelType, _platformId, _threadId, _kind, content) {
+        sent.push(content);
+        return undefined;
+      },
+    });
+
+    await deliverSessionMessages(session);
+
+    expect(seen.length).toBe(1);
+    expect(seen[0].kinds).toEqual(['chat', 'chat']);
+    expect(seen[0].sessionId).toBe(session.id);
+    expect(sent.length).toBe(2); // the throwing hook did not block delivery
+  });
+});
+
+describe('deliverSessionMessages — post-delivery hooks', () => {
+  function insertOutboundRow(
+    agentGroupId: string,
+    sessionId: string,
+    msgId: string,
+    kind: string,
+    timestamp: string,
+    content: Record<string, unknown> = { text: 'hello' },
+  ): void {
+    const db = new Database(outboundDbPath(agentGroupId, sessionId));
+    db.prepare(
+      `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
+       VALUES (?, ?, ?, 'telegram:123', 'telegram', ?)`,
+    ).run(msgId, timestamp, kind, JSON.stringify(content));
+    db.close();
+  }
+
+  function passthroughAdapter(): void {
+    setDeliveryAdapter({
+      async deliver() {
+        return 'pm';
+      },
+    });
+  }
+
+  it('fires only for user-facing kinds — system and task_log rows are skipped', async () => {
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    // Unknown system action: handled internally, marked delivered, no hook.
+    insertOutboundRow('ag-1', session.id, 'pd-sys', 'system', '2026-01-01T00:00:01.000Z', { action: 'nope' });
+    // task_log outside a task session: ignored + marked delivered, no hook.
+    insertOutboundRow('ag-1', session.id, 'pd-log', 'task_log', '2026-01-01T00:00:02.000Z', { text: 'log line' });
+    insertOutboundRow('ag-1', session.id, 'pd-chat', 'chat', '2026-01-01T00:00:03.000Z');
+
+    const seen: string[] = [];
+    registerPostDeliveryHook((msg) => {
+      if (msg.id.startsWith('pd-')) seen.push(msg.id);
+    });
+    passthroughAdapter();
+
+    await deliverSessionMessages(session);
+
+    expect(seen).toEqual(['pd-chat']);
+    // All three rows were still marked delivered.
+    const delivered = getDeliveredIds(openInboundDb('ag-1', session.id));
+    expect(delivered.has('pd-sys')).toBe(true);
+    expect(delivered.has('pd-log')).toBe(true);
+    expect(delivered.has('pd-chat')).toBe(true);
+  });
+
+  it('firstDelivery is true exactly on the first delivered row of a fresh session', async () => {
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutboundRow('ag-1', session.id, 'fd-1', 'chat', '2026-01-01T00:00:01.000Z');
+    insertOutboundRow('ag-1', session.id, 'fd-2', 'chat', '2026-01-01T00:00:02.000Z');
+
+    const seen: Array<{ id: string; firstDelivery: boolean; sessionId: string }> = [];
+    registerPostDeliveryHook((msg, s, info) => {
+      if (msg.id.startsWith('fd-')) seen.push({ id: msg.id, firstDelivery: info.firstDelivery, sessionId: s.id });
+    });
+    passthroughAdapter();
+
+    await deliverSessionMessages(session);
+    expect(seen).toEqual([
+      { id: 'fd-1', firstDelivery: true, sessionId: session.id },
+      { id: 'fd-2', firstDelivery: false, sessionId: session.id },
+    ]);
+
+    // A later drain of the same session never reports firstDelivery again.
+    insertOutboundRow('ag-1', session.id, 'fd-3', 'chat', '2026-01-01T00:00:03.000Z');
+    await deliverSessionMessages(session);
+    expect(seen[2]).toEqual({ id: 'fd-3', firstDelivery: false, sessionId: session.id });
+  });
+
+  it('a throwing hook never breaks delivery or markDelivered', async () => {
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutboundRow('ag-1', session.id, 'th-1', 'chat', '2026-01-01T00:00:01.000Z');
+    insertOutboundRow('ag-1', session.id, 'th-2', 'chat', '2026-01-01T00:00:02.000Z');
+
+    registerPostDeliveryHook(() => {
+      throw new Error('hook exploded');
+    });
+    // A hook registered after the throwing one still runs.
+    const after: string[] = [];
+    registerPostDeliveryHook((msg) => {
+      if (msg.id.startsWith('th-')) after.push(msg.id);
+    });
+
+    const sent: string[] = [];
+    setDeliveryAdapter({
+      async deliver(_channelType, _platformId, _threadId, _kind, content) {
+        sent.push(content);
+        return 'pm';
+      },
+    });
+
+    await deliverSessionMessages(session);
+
+    expect(sent).toHaveLength(2); // the throwing hook did not block delivery
+    expect(after).toEqual(['th-1', 'th-2']);
+    const delivered = getDeliveredIds(openInboundDb('ag-1', session.id));
+    expect(delivered.has('th-1')).toBe(true);
+    expect(delivered.has('th-2')).toBe(true);
   });
 });
