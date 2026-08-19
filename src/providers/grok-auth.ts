@@ -50,6 +50,15 @@ export interface GrokCredentials {
   /** Carried through to the container file for parity with the CLI's own shape. */
   email?: string;
   userId?: string;
+  /**
+   * The CLI's `create_time` for this session.
+   *
+   * Not decoration — MEASURED as required: a container auth.json missing
+   * `create_time` (or `user_id`, or `auth_mode`) reads as "You are not
+   * authenticated" even when the access token is perfectly valid. Carried from
+   * the CLI's own file so the value we hand back is the one it minted.
+   */
+  createdAt?: string;
 }
 
 /**
@@ -165,12 +174,20 @@ export async function refreshCredentials(creds: GrokCredentials, deps: RefreshDe
 /**
  * The container-visible auth.json, in the CLI's own shape but WITHOUT the
  * refresh token. Keyed `<issuer>::<clientId>`, which is how the CLI indexes it.
+ *
+ * THE REQUIRED SET WAS MEASURED, not guessed, by dropping one field at a time
+ * from a known-good file and asking the CLI whether it was still signed in:
+ * `key`, `auth_mode`, `create_time`, `user_id`, `expires_at` and the two oidc_*
+ * fields are required; `refresh_token`, `email` and `principal_*` are not.
+ * That `refresh_token` is optional is what makes this whole split possible —
+ * the container is authenticated without ever holding the renewable credential.
  */
 export function containerAuthJson(creds: GrokCredentials): Record<string, unknown> {
   return {
     [`${creds.issuer}::${creds.clientId}`]: {
       key: creds.accessToken,
       auth_mode: 'oidc',
+      create_time: creds.createdAt ?? new Date().toISOString(),
       expires_at: creds.expiresAt,
       oidc_issuer: creds.issuer,
       oidc_client_id: creds.clientId,
@@ -206,6 +223,7 @@ export function importCliAuthJson(raw: Record<string, unknown>): GrokCredentials
       clientId: typeof entry.oidc_client_id === 'string' ? entry.oidc_client_id : (clientId ?? ''),
       ...(typeof entry.email === 'string' ? { email: entry.email } : {}),
       ...(typeof entry.user_id === 'string' ? { userId: entry.user_id } : {}),
+      ...(typeof entry.create_time === 'string' ? { createdAt: entry.create_time } : {}),
     };
   }
   return null;

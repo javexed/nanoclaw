@@ -62,6 +62,29 @@ describe('the refresh token never reaches the container', () => {
     expect(serialized).not.toMatch(/refresh_token/);
   });
 
+  it('carries every field the CLI requires to consider itself signed in', () => {
+    // MEASURED against grok 1.0.5 by dropping one field at a time from a
+    // known-good file: without any of these the CLI reports "You are not
+    // authenticated" even though the access token is valid. create_time was
+    // missing in the first cut of this module and cost a live debugging round.
+    const entry = containerAuthJson(creds())['https://auth.x.ai::client-1'] as Record<string, unknown>;
+    for (const required of ['key', 'auth_mode', 'create_time', 'expires_at', 'user_id', 'oidc_issuer', 'oidc_client_id']) {
+      expect(entry[required], `missing required field ${required}`).toBeDefined();
+    }
+  });
+
+  it('prefers the CLI\'s own create_time over a synthesised one', () => {
+    const entry = containerAuthJson(creds({ createdAt: '2026-08-18T23:11:24.793Z' }))[
+      'https://auth.x.ai::client-1'
+    ] as Record<string, unknown>;
+    expect(entry.create_time).toBe('2026-08-18T23:11:24.793Z');
+  });
+
+  it('synthesises create_time when the credential predates the field', () => {
+    const entry = containerAuthJson(creds())['https://auth.x.ai::client-1'] as Record<string, unknown>;
+    expect(() => new Date(entry.create_time as string).toISOString()).not.toThrow();
+  });
+
   it('keys the entry the way the CLI indexes it', () => {
     expect(Object.keys(containerAuthJson(creds()))).toEqual(['https://auth.x.ai::client-1']);
   });
@@ -167,6 +190,7 @@ describe('importing a CLI login', () => {
         email: 'someone@example.com',
         user_id: 'uid-9',
         auth_mode: 'oidc',
+        create_time: '2026-08-18T23:11:24.793137180Z',
       },
     });
     expect(imported).toMatchObject({
@@ -176,6 +200,7 @@ describe('importing a CLI login', () => {
       clientId: 'b1a00492',
       email: 'someone@example.com',
       userId: 'uid-9',
+      createdAt: '2026-08-18T23:11:24.793137180Z',
     });
   });
 
