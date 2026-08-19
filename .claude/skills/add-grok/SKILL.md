@@ -78,8 +78,14 @@ pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit
 pnpm vitest run src/providers/grok.test.ts src/providers/grok-auth.test.ts setup/providers/grok.test.ts container/grok-cli-pin.test.ts
 ```
 ```nc:run effect:test
-cd container/agent-runner && bun test src/providers/grok-acp.test.ts src/providers/grok.test.ts src/providers/grok-registration.test.ts
+cd container/agent-runner && bun install --frozen-lockfile && bun test src/providers/grok-acp.test.ts src/providers/grok.test.ts src/providers/grok-registration.test.ts
 ```
+
+The `bun install` is not redundant. The agent-runner tree is a separate package
+whose dependencies normally exist only inside the image, so on a host that has
+never run it the registration test fails to even load — it imports the real
+barrel, which imports `claude.ts`, which needs the Agent SDK. Installing first
+is idempotent and matches the documented container dev loop.
 
 `container/grok-cli-pin.test.ts` guards the packaging invariants that only fail at spawn time: the version stays pinned, the binary installs outside `~/.grok` (which the provider mounts over), and it is dereferenced into a file the unprivileged `node` user can execute.
 
