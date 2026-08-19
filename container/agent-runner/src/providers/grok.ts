@@ -37,11 +37,14 @@ const MESSAGE_KIND = 'agent_message_chunk';
 /**
  * Update kinds carrying the model's reasoning.
  *
- * Forwarded as `progress`, not `reasoning`: upstream's ProviderEvent has no
- * reasoning variant — that is an addition on this fork's seam. A payload branch
- * based on upstream has to compile against upstream, so thoughts ride the
- * progress channel. On a tree that HAS the seam event, switching this one line
- * is the whole change.
+ * Consumed for LIVENESS ONLY — deliberately not forwarded as content.
+ *
+ * ACP streams thinking one token per update, so forwarding them produced 145
+ * `progress` lines for a single short turn on a live agent, burying the actual
+ * signal. `progress` is for meaningful movement (a tool starting), not a token
+ * feed. Upstream has no `reasoning` variant to put them on — that is a seam
+ * addition — and no channel is better than the wrong channel at this volume.
+ * On a tree carrying the seam event, emitting `reasoning` here is the change.
  */
 const THOUGHT_KIND = 'agent_thought_chunk';
 /** Tool lifecycle: surfaced as progress so observers see movement during long runs. */
@@ -109,6 +112,8 @@ class GrokQuery implements AgentQuery {
   private ended = false;
   private aborted = false;
   private turnText = '';
+  /** Text streamed since the last line-boundary flush. */
+  private pending = '';
 
   constructor(
     private readonly input: QueryInput,
@@ -208,8 +213,15 @@ class GrokQuery implements AgentQuery {
   private async runTurn(prompt: string): Promise<void> {
     if (!this.client || !this.sessionId || this.aborted) return;
     this.turnText = '';
+    this.pending = '';
     const res = await this.client.prompt(this.sessionId, prompt);
     if (this.aborted) return;
+    // A turn whose last line has no trailing newline still has to reach the
+    // mid-turn door before the result closes it.
+    if (this.pending.length > 0) {
+      this.queue.push({ type: 'text', text: this.pending });
+      this.pending = '';
+    }
     const stopReason = typeof res?.stopReason === 'string' ? res.stopReason : undefined;
     this.queue.push({
       type: 'result',
@@ -228,13 +240,22 @@ class GrokQuery implements AgentQuery {
 
     if (update.kind === MESSAGE_KIND && update.text) {
       this.turnText += update.text;
-      this.queue.push({ type: 'text', text: update.text });
+      this.pending += update.text;
+      // Flush on line boundaries, not per token. The poll-loop scans these
+      // segments for complete <message> blocks and carries an unresolved tail
+      // between them; per-token events made it reassemble a block character by
+      // character. Blocks are line-oriented, so a newline is the natural seam —
+      // and anything still buffered is flushed when the turn ends, so nothing
+      // is withheld.
+      const cut = this.pending.lastIndexOf('\n');
+      if (cut >= 0) {
+        const segment = this.pending.slice(0, cut + 1);
+        this.pending = this.pending.slice(cut + 1);
+        this.queue.push({ type: 'text', text: segment });
+      }
       return;
     }
-    if (update.kind === THOUGHT_KIND && update.text) {
-      this.queue.push({ type: 'progress', message: update.text });
-      return;
-    }
+    if (update.kind === THOUGHT_KIND) return; // liveness only — see THOUGHT_KIND
     if (TOOL_KINDS.has(update.kind)) {
       this.queue.push({ type: 'progress', message: update.text ? `${update.kind}: ${update.text}` : update.kind });
     }

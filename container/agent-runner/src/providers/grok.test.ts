@@ -100,14 +100,31 @@ describe('sessions and continuation', () => {
 });
 
 describe('content mapping', () => {
-  it('streams text chunks and replays them as the result text', async () => {
+  it('coalesces token-level chunks instead of emitting one text event each', async () => {
     const p = new GrokProvider({}, scriptedAgent({ turns: [[chunk('3'), chunk('9'), chunk('1')]] }));
     const q = p.query({ prompt: '17*23', cwd: '/w' });
     const events = await collect(q, { stopAfterResult: true });
     q.abort();
 
-    expect(events.filter((e) => e.type === 'text').map((e) => (e as { text: string }).text)).toEqual(['3', '9', '1']);
+    // ACP streams one token per update. Forwarding each made the poll-loop
+    // reassemble a <message> block character by character.
+    expect(events.filter((e) => e.type === 'text').map((e) => (e as { text: string }).text)).toEqual(['391']);
     expect(events.at(-1)).toEqual({ type: 'result', text: '391' });
+  });
+
+  it('flushes on line boundaries, so a completed block reaches the mid-turn door promptly', async () => {
+    const p = new GrokProvider({}, scriptedAgent({ turns: [[chunk('line one\n'), chunk('tail'), chunk(' end')]] }));
+    const q = p.query({ prompt: 'x', cwd: '/w' });
+    const events = await collect(q, { stopAfterResult: true });
+    q.abort();
+
+    // First segment ships at the newline; the unterminated remainder is
+    // flushed when the turn ends rather than being withheld.
+    expect(events.filter((e) => e.type === 'text').map((e) => (e as { text: string }).text)).toEqual([
+      'line one\n',
+      'tail end',
+    ]);
+    expect(events.at(-1)).toEqual({ type: 'result', text: 'line one\ntail end' });
   });
 
   it('a turn that produced no text results in null, not an empty string', async () => {
@@ -118,10 +135,10 @@ describe('content mapping', () => {
     expect(events.at(-1)).toEqual({ type: 'result', text: null });
   });
 
-  it('thoughts and tool calls become progress, not user-visible text', async () => {
+  it('tool calls become progress; thinking does not', async () => {
     const p = new GrokProvider(
       {},
-      scriptedAgent({ turns: [[thought('thinking…'), { sessionUpdate: 'tool_call', title: 'run_terminal_command' }, chunk('done')]] }),
+      scriptedAgent({ turns: [[thought('think'), thought('ing'), { sessionUpdate: 'tool_call', title: 'run_terminal_command' }, chunk('done')]] }),
     );
     const q = p.query({ prompt: 'x', cwd: '/w' });
     const events = await collect(q, { stopAfterResult: true });
@@ -129,8 +146,12 @@ describe('content mapping', () => {
 
     expect(events.filter((e) => e.type === 'text').map((e) => (e as { text: string }).text)).toEqual(['done']);
     const progress = events.filter((e) => e.type === 'progress').map((e) => (e as { message: string }).message);
-    expect(progress).toContain('thinking…');
+    // Thinking streams one token per update; forwarding it buried the real
+    // signal under 145 progress lines on a single live turn.
+    expect(progress.some((m) => m.includes('think'))).toBe(false);
     expect(progress.some((m) => m.includes('run_terminal_command'))).toBe(true);
+    // …but it still counts as liveness.
+    expect(events.filter((e) => e.type === 'activity').length).toBe(4);
   });
 
   it('an error stopReason marks the result, so the loop surfaces it', async () => {
