@@ -7,7 +7,7 @@
  */
 import { describe, it, expect } from 'bun:test';
 
-import { AcpClient, extractText, pickAllowOption, type AcpTransport, type AcpUpdate } from './grok-acp.js';
+import { AcpClient, buildGrokArgs, extractText, pickAllowOption, type AcpTransport, type AcpUpdate } from './grok-acp.js';
 
 /** A stdio peer under test control: records our writes, injects agent lines. */
 function fakePeer() {
@@ -255,5 +255,20 @@ describe('helpers', () => {
     expect(pickAllowOption([{ optionId: 'no', kind: 'reject' }, { optionId: 'yes', kind: 'allow' }])).toBe('yes');
     expect(pickAllowOption([{ optionId: 'only' }])).toBe('only');
     expect(pickAllowOption([])).toBe('allow');
+  });
+});
+
+describe('spawn shape', () => {
+  it('flag order matches what the CLI accepts', () => {
+    // --no-auto-update is a ROOT flag and is rejected on the subcommand;
+    // --always-approve belongs to `agent`. Wrong order exits before the
+    // handshake and surfaces as an unexplained transport-closed.
+    expect(buildGrokArgs()).toEqual(['--no-auto-update', 'agent', '--always-approve', 'stdio']);
+  });
+
+  it('passes a model through before the stdio subcommand', () => {
+    expect(buildGrokArgs({ model: 'grok-4.6' })).toEqual([
+      '--no-auto-update', 'agent', '--always-approve', '--model', 'grok-4.6', 'stdio',
+    ]);
   });
 });

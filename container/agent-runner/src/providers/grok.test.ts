@@ -249,3 +249,27 @@ describe('error classification', () => {
     expect(isRetryable(new Error('session/prompt: {"message":"refused"}'))).toBe(false);
   });
 });
+
+describe('binary resolution', () => {
+  it('spawns via PATH, never from under the mounted grok home', async () => {
+    // Regression: the first cut defaulted to $HOME/.grok/bin/grok — the exact
+    // path the provider's own mount empties. Live smoke died with ENOENT there.
+    const { spawnGrokTransport } = await import('./grok-acp.js');
+    let seenBin = '';
+    const fakeSpawn = ((bin: string) => {
+      seenBin = bin;
+      return {
+        stdin: { write: () => {} },
+        stdout: { on: () => {} },
+        stderr: { on: () => {} },
+        on: () => {},
+        killed: false,
+        kill: () => {},
+      };
+    }) as unknown as typeof import('node:child_process').spawn;
+
+    await spawnGrokTransport({ spawnFn: fakeSpawn });
+    expect(seenBin).toBe('grok');
+    expect(seenBin).not.toContain('.grok/bin');
+  });
+});

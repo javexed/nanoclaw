@@ -308,7 +308,15 @@ export function pickAllowOption(options: AcpPermissionRequest['options']): strin
  * mechanism.
  */
 export interface GrokSpawnOptions {
-  /** Path to the grok binary. Defaults to the CLI's own install location. */
+  /**
+   * Path to the grok binary. Defaults to bare `grok` — resolved from PATH.
+   *
+   * MUST NOT default to ~/.grok/bin/grok, the installer's own default. The
+   * provider mounts a per-group host directory over ~/.grok for the session
+   * store, so that path is empty inside a running agent and the spawn dies with
+   * ENOENT. The image installs the binary to /usr/local/bin precisely so PATH
+   * resolves it independently of the mount.
+   */
   binPath?: string;
   model?: string;
   /** Extra args appended after the built-in ones. */
@@ -328,7 +336,7 @@ export function buildGrokArgs(options: GrokSpawnOptions = {}): string[] {
 
 export async function spawnGrokTransport(options: GrokSpawnOptions = {}): Promise<AcpTransport> {
   const { spawn } = options.spawnFn ? { spawn: options.spawnFn } : await import('node:child_process');
-  const bin = options.binPath ?? `${process.env.HOME ?? ''}/.grok/bin/grok`;
+  const bin = options.binPath ?? 'grok';
 
   const child = spawn(bin, buildGrokArgs(options), {
     stdio: ['pipe', 'pipe', 'pipe'],
