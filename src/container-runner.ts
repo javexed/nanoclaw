@@ -421,28 +421,48 @@ function selectedSkillNames(containerConfig: import('./container-config.js').Con
 }
 
 /**
- * Output-token ceiling for the Claude agent SDK.
+ * Output-token ceiling for the Claude agent SDK, or null if we cannot tell.
  *
  * Left unset, the SDK caps a turn at 32000 output tokens and kills it with
  * "Claude's response exceeded the 32000 output token maximum" — which killed real
- * turns (a long CAD/OpenSCAD answer in rolling-bench). Every current model's real
- * ceiling is far higher, so there's no reason to leave that headroom unused.
+ * turns (a long CAD/OpenSCAD answer in rolling-bench). Current models allow far
+ * more, so there is no reason to leave that headroom unused.
  *
- * Model-aware because the ceilings differ and overshooting is a 400:
- *   Haiku 4.5                                    →  64K
- *   Opus 4.6/4.7/4.8, Sonnet 4.6/5, Fable 5      → 128K
+ * Recognised ceilings:
+ *   Haiku 4.5                                    ->  64K
+ *   Opus 4.6+/5, Sonnet 4.6+/5, Fable 5          -> 128K
  *
- * Unknown/custom model strings fall back to 64K — the value every current model
- * accepts. Override with NANOCLAW_MAX_OUTPUT_TOKENS. This is a ceiling, not a
- * target: raising it costs nothing unless a turn actually needs the room.
+ * Anything else returns null and the caller leaves the variable UNSET, so the
+ * SDK keeps its own default. Guessing high is NOT a safe failure: overshooting a
+ * model's real ceiling is a 400, and older models sit far below these numbers
+ * (Claude 3 Opus is 4096). A substring match on "opus" also catches
+ * claude-3-opus-20240229 and would hand it 128000 — reintroducing exactly the
+ * killed-turn failure this function exists to prevent. Matching is therefore on
+ * family AND version, never on family alone.
+ *
+ * Override with NANOCLAW_MAX_OUTPUT_TOKENS. This is a ceiling, not a target:
+ * raising it costs nothing unless a turn actually needs the room.
  */
-function maxOutputTokensFor(model: string | null | undefined): number {
+const MAX_OUTPUT_TOKENS_BY_MODEL: { re: RegExp; max: number }[] = [
+  // Version-anchored on purpose — see the note about claude-3-opus above.
+  { re: /claude-haiku-4[.-]5/, max: 64_000 },
+  { re: /claude-(opus|sonnet)-(4[.-][6-9]|[5-9])/, max: 128_000 },
+  { re: /claude-fable-[5-9]/, max: 128_000 },
+];
+
+/**
+ * No model configured means the provider default, which is an Opus-class model.
+ * Named rather than inlined so the assumption is visible: if the default ever
+ * becomes a smaller model, this is the line that has to change.
+ */
+const DEFAULT_MODEL_MAX_OUTPUT_TOKENS = 128_000;
+
+export function maxOutputTokensFor(model: string | null | undefined): number | null {
   const override = Number(process.env.NANOCLAW_MAX_OUTPUT_TOKENS);
   if (Number.isFinite(override) && override > 0) return Math.floor(override);
-  const m = (model ?? '').toLowerCase();
-  if (m.includes('haiku')) return 64_000;
-  if (!m || m.includes('opus') || m.includes('sonnet') || m.includes('fable')) return 128_000;
-  return 64_000;
+  const m = (model ?? '').trim().toLowerCase();
+  if (!m) return DEFAULT_MODEL_MAX_OUTPUT_TOKENS;
+  return MAX_OUTPUT_TOKENS_BY_MODEL.find((e) => e.re.test(m))?.max ?? null;
 }
 
 async function buildContainerArgs(
@@ -471,7 +491,10 @@ async function buildContainerArgs(
   // provider only — the var is read by the Claude Agent SDK and means nothing to
   // opencode/ollama, whose own limits are configured elsewhere.
   if (provider === 'claude') {
-    args.push('-e', `CLAUDE_CODE_MAX_OUTPUT_TOKENS=${maxOutputTokensFor(containerConfig.model)}`);
+    // null = model not recognised: leave the var unset and let the SDK use its
+    // own default, rather than assert a ceiling the model may not have.
+    const maxOut = maxOutputTokensFor(containerConfig.model);
+    if (maxOut !== null) args.push('-e', `CLAUDE_CODE_MAX_OUTPUT_TOKENS=${maxOut}`);
   }
 
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
