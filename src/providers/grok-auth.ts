@@ -52,6 +52,26 @@ export interface GrokCredentials {
   userId?: string;
 }
 
+/**
+ * Install-wide credentials, used by every group that has no override.
+ *
+ * One xAI subscription is the normal case, and making each agent group repeat
+ * a device login would be busywork that also multiplies the number of live
+ * refresh tokens on disk. A per-group file still wins when present, which is
+ * what a second subscription (or a deliberately separated identity) needs.
+ */
+export function sharedCredentialsPath(): string {
+  return path.join(DATA_DIR, 'grok', 'credentials.json');
+}
+
+export function writeSharedCredentials(creds: GrokCredentials): void {
+  const dir = path.dirname(sharedCredentialsPath());
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(dir, 0o700);
+  fs.writeFileSync(sharedCredentialsPath(), JSON.stringify(creds, null, 2), { mode: 0o600 });
+  fs.chmodSync(sharedCredentialsPath(), 0o600);
+}
+
 /** Host-only credential directory. NOT the mounted `.grok-shared`. */
 export function grokHostDir(agentGroupId: string): string {
   return path.join(DATA_DIR, 'v2-sessions', agentGroupId, '.grok-host');
@@ -61,8 +81,7 @@ export function hostCredentialsPath(agentGroupId: string): string {
   return path.join(grokHostDir(agentGroupId), 'credentials.json');
 }
 
-export function readHostCredentials(agentGroupId: string): GrokCredentials | null {
-  const file = hostCredentialsPath(agentGroupId);
+function readCredentialFile(file: string): GrokCredentials | null {
   if (!fs.existsSync(file)) return null;
   try {
     return JSON.parse(fs.readFileSync(file, 'utf8')) as GrokCredentials;
@@ -71,6 +90,11 @@ export function readHostCredentials(agentGroupId: string): GrokCredentials | nul
     // whatever is already in the container and the operator re-authenticates.
     return null;
   }
+}
+
+/** Per-group credentials when present, otherwise the install-wide ones. */
+export function readHostCredentials(agentGroupId: string): GrokCredentials | null {
+  return readCredentialFile(hostCredentialsPath(agentGroupId)) ?? readCredentialFile(sharedCredentialsPath());
 }
 
 export function writeHostCredentials(agentGroupId: string, creds: GrokCredentials): void {
@@ -200,6 +224,12 @@ export function materializeContainerAuth(
 ): boolean {
   const creds = readHostCredentials(agentGroupId);
   if (!creds) return false;
+  // Write a refresh back to whichever file it came from: persisting a rotated
+  // token to the per-group path when it was read from the shared one would
+  // silently fork the identity and leave the shared file stale.
+  const persist = fs.existsSync(hostCredentialsPath(agentGroupId))
+    ? (next: GrokCredentials) => writeHostCredentials(agentGroupId, next)
+    : writeSharedCredentials;
 
   writeContainerAuth(grokSharedPath, creds);
 
@@ -208,7 +238,7 @@ export function materializeContainerAuth(
     // hot-reloads auth.json when the fresher token lands.
     void refreshCredentials(creds, deps)
       .then((next) => {
-        writeHostCredentials(agentGroupId, next);
+        persist(next);
         writeContainerAuth(grokSharedPath, next);
       })
       .catch((err) => deps.onError?.(err));
