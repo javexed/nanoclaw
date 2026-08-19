@@ -1,7 +1,7 @@
 # Switching an agent group between providers
 
 How an operator moves a live agent group between providers, for example Claude
-to Codex and back. The switch runs from the host.
+to Codex or Grok and back. The switch runs from the host.
 
 ## Preconditions
 
@@ -49,10 +49,34 @@ filesystem search (`rg`, `find`, and relative Markdown links).
 - **In-flight conversation context.** Continuations are provider-specific (a
   Claude SDK session, a Codex thread). The target provider starts a fresh
   context; the old continuation remains available if you switch back.
-- **Provider state directories.** `.claude-shared/` and `.codex-shared/` remain
-  separate and idle while their provider is not selected.
+- **Provider state directories.** `.claude-shared/`, `.codex-shared/`, and
+  `.grok-shared/` remain separate and idle while their provider is not selected.
 - **Provider-specific model settings.** Confirm the selected model and effort
   are valid for the target provider.
+
+## Grok specifics
+
+Grok reads `CLAUDE.md` and `AGENTS.md` from the workspace natively, so a group's
+composed project document carries over with no conversion step — unlike a
+provider needing its own translation of it. Verify what it actually loaded with
+`grok inspect` from the group's workspace.
+
+Two things differ from the Claude and Codex switches:
+
+- **The continuation is an ACP sessionId**, resolved by the CLI against its own
+  store under `~/.grok/sessions`. That store is mounted per agent group, so a
+  sessionId survives a container restart — but it lives with the provider, not
+  in nanoclaw's DB. Deleting `.grok-shared/` discards resumable history for that
+  group while leaving the durable `memory/` tree untouched.
+- **Credentials are subscription-only.** The device-code login stores a refresh
+  token on the host under `data/grok/`, outside every container mount; a
+  container only ever receives a short-lived access token, refreshed by the host
+  before expiry. There is no API-key path, so there is nothing to move into a
+  group's environment.
+
+Available models on a subscription are `grok-4.6` (default) and `grok-4.5`.
+Confirm the group's `--model` is one of them before switching; a model valid for
+another provider will not resolve.
 
 ## Rolling back
 

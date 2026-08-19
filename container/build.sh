@@ -142,6 +142,16 @@ if [ "${INSTALL_CJK_FONTS:-false}" = "true" ]; then
     fi
 fi
 
+# Grok CLI pin: the grok provider payload adds a GROK_VERSION ARG to the
+# Dockerfile. Caller's env wins, else .env, else the Dockerfile's own pin.
+if [ -z "${GROK_VERSION:-}" ] && [ -f "../.env" ]; then
+    GROK_VERSION="$(grep '^GROK_VERSION=' ../.env | tail -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d '[:space:]')"
+fi
+if [ -n "${GROK_VERSION:-}" ] && [ "$PULL" = "false" ]; then
+    echo "Grok CLI: pinned to ${GROK_VERSION}"
+    BUILD_ARGS+=(--build-arg "GROK_VERSION=${GROK_VERSION}")
+fi
+
 if [ -n "$LOCK_SHA" ]; then
     BUILD_ARGS+=(--build-arg "AGENT_RUNNER_LOCK_SHA256=$LOCK_SHA")
 fi

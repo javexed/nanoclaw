@@ -113,6 +113,38 @@ COPY cli-tools.json install-cli-tools.sh /tmp/
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     sh /tmp/install-cli-tools.sh /tmp/cli-tools.json
 
+# ---- Grok Build CLI (grok provider payload) -----------------------------------
+# NOT in cli-tools.json: that manifest is npm-shaped and installs through pnpm,
+# while grok ships as a native linux binary from x.ai. Pinned by ARG and never
+# `latest` — add-opencode records a breaking CLI/SDK skew from exactly that.
+#
+# TWO INSTALLER BEHAVIOURS MAKE THE OBVIOUS VERSION WRONG, both verified by
+# running it rather than reading it:
+#
+#   1. GROK_BIN_DIR only places a SYMLINK. The real binary lands in
+#      $HOME/.grok/downloads/, which as root means /root/.grok — a path the
+#      unprivileged `node` user cannot traverse. A plain install therefore
+#      builds cleanly and then fails at runtime with a permission error. We
+#      dereference the symlink into a real world-readable file and delete the
+#      root-owned tree.
+#   2. The env var must be set on the BASH side of the pipe. `VAR=x curl | bash`
+#      exports to curl, and the installer never sees it.
+#
+# The final `test` is the guard for why any of this matters: the grok provider
+# mounts a per-group host directory over ~/.grok so the ACP session store
+# survives a container restart. A binary under that path would be hidden by the
+# mount and every spawn would die with "grok: not found". Fail the BUILD instead.
+ARG GROK_VERSION=1.0.5
+RUN curl -fsSL https://x.ai/cli/install.sh \
+      | GROK_BIN_DIR=/usr/local/bin bash -s "${GROK_VERSION}" && \
+    cp "$(readlink -f /usr/local/bin/grok)" /tmp/grok.bin && \
+    rm -f /usr/local/bin/grok /usr/local/bin/agent && \
+    mv /tmp/grok.bin /usr/local/bin/grok && \
+    chmod 0755 /usr/local/bin/grok && \
+    rm -rf /root/.grok && \
+    /usr/local/bin/grok --version && \
+    test ! -e /home/node/.grok/bin/grok
+
 # ---- ncl CLI wrapper ----------------------------------------------------------
 # Actual script lives in the mounted source at /app/src/cli/ncl.ts.
 RUN printf '#!/bin/sh\nexec bun /app/src/cli/ncl.ts "$@"\n' > /usr/local/bin/ncl && \
