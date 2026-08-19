@@ -95,6 +95,25 @@ describe('formatter rendering', () => {
     expect(result).not.toContain('<message');
   });
 
+  it('renders channel-timeline backfill rows as <channel-history> (group-surface prelude)', () => {
+    insertMessage(
+      'bf-ch-1',
+      'chat',
+      {
+        text: 'earlier in the channel',
+        sender: 'Gavriel',
+        senderId: 'slack:U1',
+        echo: { surface: 'channel-timeline', label: 'this channel, just before this conversation' },
+      },
+      { trigger: 0, channelType: 'session-echo' },
+    );
+
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('<channel-history sender="Gavriel"');
+    expect(result).toContain('earlier in the channel</channel-history>');
+    expect(result).not.toContain('<message');
+  });
+
   it('XML-escapes label, sender, and text', () => {
     insertEcho('e1', { text: '<b>&"hi"</b>', sender: 'A & B', label: 'DM with <Gavriel>' });
 

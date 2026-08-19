@@ -32,6 +32,7 @@
  * For direct-addressable channels (telegram, whatsapp, etc.), --platform-id
  * is typically the same as the handle in --user-id, with the channel prefix.
  */
+import fs from 'fs';
 import net from 'net';
 import path from 'path';
 
@@ -77,6 +78,23 @@ interface Args {
 }
 
 const DEFAULT_WELCOME = 'System instruction: run /welcome to introduce yourself to the user on this new channel.';
+
+/**
+ * Channel-specific welcome addendum, matched HOST-SIDE: this composer knows
+ * the channel, so the welcome skill never scans for applicability — it just
+ * follows the pointer when one is present. Channel install skills drop
+ * `container/skills/welcome/addenda/<channel>.md`; with no file the default
+ * welcome is byte-identical to today's and the skill runs as written.
+ * An explicit --welcome override is always respected verbatim.
+ */
+function defaultWelcome(channel: string): string {
+  const hostPath = path.resolve(process.cwd(), 'container', 'skills', 'welcome', 'addenda', `${channel}.md`);
+  if (!fs.existsSync(hostPath)) return DEFAULT_WELCOME;
+  return (
+    `${DEFAULT_WELCOME} First read /app/skills/welcome/addenda/${channel}.md and follow it — ` +
+    'it adjusts the welcome for this channel.'
+  );
+}
 
 const DEFAULT_ROLE: Role = 'owner';
 
@@ -148,7 +166,7 @@ function parseArgs(argv: string[]): Args {
     displayName: out.displayName!,
     agentName: out.agentName?.trim() || out.displayName!,
     agentGroupId: out.agentGroupId?.trim() || undefined,
-    welcome: out.welcome?.trim() || DEFAULT_WELCOME,
+    welcome: out.welcome?.trim() || defaultWelcome(out.channel!),
     role: out.role ?? DEFAULT_ROLE,
     engagePattern: out.engagePattern?.trim() || undefined,
   };
@@ -168,20 +186,29 @@ function wireIfMissing(mg: MessagingGroup, ag: AgentGroup, now: string, label: s
     console.log(`Wiring already exists: ${existing.id} (${label})`);
     return;
   }
+  // Wiring defaults come from the channel's declaration when it has one
+  // (resolveWiringDefaults: engage fields + session_mode + the threads stamp
+  // derived from it — a context whose conversations are thread-rooted
+  // declares per-thread sessions and gets correct session identity from the
+  // first message); stale (undeclared) adapters keep the legacy behavior
+  // exactly: shared sessions, threads column NULL (inherit).
+  const isGroup = mg.is_group === 1;
+  const channelKey = mg.instance ?? mg.channel_type;
+  const resolved = hasDeclaredChannelDefaults(channelKey, mg.channel_type)
+    ? resolveWiringDefaults(channelKey, isGroup, ag.name, mg.channel_type)
+    : undefined;
   // Engage defaults, first hit wins: explicit --engage-pattern → the
   // channel's declared defaults → the legacy heuristic for stale
   // (undeclared) adapters: DMs (is_group=0) respond to everything via a '.'
   // regex, group chats are mention-only; admins can reconfigure via
-  // /manage-channels once the agent is in use.
-  const isGroup = mg.is_group === 1;
-  const channelKey = mg.instance ?? mg.channel_type;
+  // /manage-channels once the agent is in use. An explicit pattern only
+  // overrides the engage fields — the declared session defaults still apply.
   const engage = engagePattern
     ? { engage_mode: 'pattern' as const, engage_pattern: engagePattern }
-    : hasDeclaredChannelDefaults(channelKey, mg.channel_type)
-      ? resolveWiringDefaults(channelKey, isGroup, ag.name, mg.channel_type)
-      : isGroup
+    : (resolved ??
+      (isGroup
         ? { engage_mode: 'mention' as const, engage_pattern: null }
-        : { engage_mode: 'pattern' as const, engage_pattern: '.' };
+        : { engage_mode: 'pattern' as const, engage_pattern: '.' }));
   createMessagingGroupAgent({
     id: generateId('mga'),
     messaging_group_id: mg.id,
@@ -193,7 +220,8 @@ function wireIfMissing(mg: MessagingGroup, ag: AgentGroup, now: string, label: s
     // messages carry no value ('drop').
     sender_scope: 'all',
     ignored_message_policy: 'drop',
-    session_mode: 'shared',
+    session_mode: resolved?.session_mode ?? 'shared',
+    ...(resolved?.threads !== undefined && resolved?.threads !== null ? { threads: resolved.threads } : {}),
     priority: 0,
     created_at: now,
   });

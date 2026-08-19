@@ -1,10 +1,11 @@
 /**
  * New-session backfill (the pull half of cross-session context): a just-born
- * DM session is seeded with the DM's TOP-LEVEL timeline from sibling sessions
- * — each sibling's root user message + top-level agent posts (welcome-style),
- * never the interiors of other threads. Live-hit this guards against: the
- * user replies to the welcome tour offer, the reply roots a new thread, and
- * the fresh session knows nothing about the offer.
+ * session is seeded with its conversation's TOP-LEVEL timeline from sibling
+ * sessions — each sibling's root user message + top-level agent posts
+ * (welcome-style), never the interiors of other threads. DMs seed under the
+ * dm-timeline surface, group conversations under channel-timeline. Live-hit
+ * this guards against: the user replies to the welcome tour offer, the reply
+ * roots a new thread, and the fresh session knows nothing about the offer.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -42,7 +43,7 @@ vi.mock('../../db/sessions.js', () => ({
   isTaskThread: (t: string) => t.startsWith('system:tasks'),
 }));
 
-const { backfillNewDmSession, BACKFILL_LIMIT } = await import('./backfill.js');
+const { backfillNewSession, BACKFILL_LIMIT } = await import('./backfill.js');
 
 const AG = { id: 'ag-1', name: 'Pete', folder: 'pete', agent_provider: null, created_at: '' } as never;
 const DM_MG = { id: 'mg-dm', channel_type: 'slack', platform_id: 'slack:D1', is_group: 0 } as never;
@@ -67,14 +68,14 @@ beforeEach(() => {
   siblingSessions = [{ id: 'sess-old', status: 'active', messaging_group_id: 'mg-dm' }];
 });
 
-describe('backfillNewDmSession', () => {
+describe('backfillNewSession', () => {
   it('seeds the new session with sibling roots + top-level agent posts, ordered by time', () => {
     outboundRows = [
       { timestamp: '2026-08-01T19:14:00Z', content: JSON.stringify({ text: 'Hey Gavriel! I am Pete… tour?' }) },
     ];
     inboundRows = [{ timestamp: '2026-08-01T19:10:00Z', content: chat('hello there') }];
 
-    backfillNewDmSession(AG, NEW_SESSION, DM_MG);
+    backfillNewSession(AG, NEW_SESSION, DM_MG);
 
     expect(written).toHaveLength(2);
     expect(written[0]).toMatchObject({
@@ -94,19 +95,33 @@ describe('backfillNewDmSession', () => {
   });
 
   it('queries only conversation roots inbound and top-level outbound (SQL shape)', () => {
-    backfillNewDmSession(AG, NEW_SESSION, DM_MG);
+    backfillNewSession(AG, NEW_SESSION, DM_MG);
     expect(inboundSql[0]).toContain('ORDER BY seq ASC LIMIT 1');
     expect(inboundSql[0]).toContain('trigger = 1');
     expect(outboundSql[0]).toContain("thread_id IS NULL OR thread_id = '' OR thread_id LIKE '%:'");
     expect(outboundSql[0]).toContain("kind NOT IN ('system','task_log')");
   });
 
-  it('skips rooms, task sessions, and sessions without siblings', () => {
-    backfillNewDmSession(AG, NEW_SESSION, ROOM_MG);
-    backfillNewDmSession(AG, { ...(NEW_SESSION as object), thread_id: 'system:tasks:t-1' } as never, DM_MG);
+  it('skips task sessions and sessions without siblings', () => {
+    backfillNewSession(AG, { ...(NEW_SESSION as object), thread_id: 'system:tasks:t-1' } as never, DM_MG);
     siblingSessions = [];
-    backfillNewDmSession(AG, NEW_SESSION, DM_MG);
+    backfillNewSession(AG, NEW_SESSION, DM_MG);
     expect(written).toHaveLength(0);
+  });
+
+  it('seeds group-surface sessions with the channel timeline: channel-timeline surface + channel label', () => {
+    siblingSessions = [{ id: 'sess-room-t1', status: 'active', messaging_group_id: 'mg-room' }];
+    inboundRows = [{ timestamp: '2026-08-01T19:10:00Z', content: chat('thread root msg') }];
+    outboundRows = [{ timestamp: '2026-08-01T19:14:00Z', content: JSON.stringify({ text: 'top-level agent post' }) }];
+
+    backfillNewSession(AG, NEW_SESSION, ROOM_MG);
+
+    expect(written).toHaveLength(2);
+    const first = JSON.parse(written[0]!.content as string) as Record<string, unknown>;
+    expect((first.echo as Record<string, unknown>).surface).toBe('channel-timeline');
+    expect((first.echo as Record<string, unknown>).label).toBe('this channel, just before this conversation');
+    const second = JSON.parse(written[1]!.content as string) as Record<string, unknown>;
+    expect(second.self).toBe(true);
   });
 
   it('ignores system-sender roots and caps at BACKFILL_LIMIT newest rows', () => {
@@ -116,7 +131,7 @@ describe('backfillNewDmSession', () => {
       content: JSON.stringify({ text: `post ${i}` }),
     }));
 
-    backfillNewDmSession(AG, NEW_SESSION, DM_MG);
+    backfillNewSession(AG, NEW_SESSION, DM_MG);
 
     expect(written).toHaveLength(BACKFILL_LIMIT);
     const texts = written.map((w) => (JSON.parse(w.content as string) as { text: string }).text);
@@ -126,7 +141,7 @@ describe('backfillNewDmSession', () => {
 
   it('only considers siblings of the same messaging group', () => {
     siblingSessions = [{ id: 'sess-other-dm', status: 'active', messaging_group_id: 'mg-other' }];
-    backfillNewDmSession(AG, NEW_SESSION, DM_MG);
+    backfillNewSession(AG, NEW_SESSION, DM_MG);
     expect(written).toHaveLength(0);
   });
 });

@@ -2,12 +2,13 @@
  * New-session backfill — the pull half of cross-session context.
  *
  * The fan-out layer (fan.ts) pushes echoes only into sessions that EXIST at
- * delivery time, so a brand-new per-thread DM session is born blind: the user
- * replies to something the agent just said in another thread (live-hit: the
- * welcome message tour offer) and the fresh session has no idea. At session
- * birth we seed the new session with the most recent user-facing exchanges
- * from sibling sessions of the SAME messaging group — identical audience, so
- * the same privacy argument as the dm-thread fan applies.
+ * delivery time, so a brand-new per-thread session is born blind: the user
+ * replies to something said at the conversation's top level (live-hit: the
+ * welcome message tour offer in a DM) and the fresh session has no idea. At
+ * session birth we seed the new session with the most recent user-facing
+ * exchanges from sibling sessions of the SAME messaging group — identical
+ * audience, DM or group alike, so the same privacy argument as the sibling
+ * fan applies.
  *
  * Bounded: last BACKFILL_LIMIT rows across all siblings, echo truncation as
  * usual. Rows are trigger=0 session-echo rows written BEFORE the triggering
@@ -19,7 +20,7 @@ import { getSessionsByAgentGroup, isTaskThread } from '../../db/sessions.js';
 import { log } from '../../log.js';
 import { inboundDbPath, openOutboundDb, withInboundDb, writeSessionMessage } from '../../session-manager.js';
 import type { AgentGroup, MessagingGroup, Session } from '../../types.js';
-import { ECHO_CHANNEL_TYPE, ECHO_TIMELINE_SURFACE } from './config.js';
+import { ECHO_CHANNEL_TIMELINE_SURFACE, ECHO_CHANNEL_TYPE, ECHO_TIMELINE_SURFACE } from './config.js';
 import { truncateEchoText } from './fan.js';
 
 export const BACKFILL_LIMIT = 12;
@@ -112,13 +113,14 @@ function collectSiblingTopLevel(agentGroup: AgentGroup, sessionId: string, limit
 }
 
 /**
- * Seed a just-created DM session with recent sibling-thread context. Call
- * BEFORE the triggering message is written. Non-throwing; no-ops for rooms,
- * task sessions, and sessions with no siblings.
+ * Seed a just-created session with recent sibling context from the SAME
+ * conversation. Group surfaces can be per-thread like DMs, so both get the
+ * conversation's top-level timeline at thread birth — same messaging group
+ * means the same audience. Call BEFORE the triggering message is written.
+ * Non-throwing; no-ops for task sessions and sessions with no siblings.
  */
-export function backfillNewDmSession(agentGroup: AgentGroup, session: Session, mg: MessagingGroup): void {
+export function backfillNewSession(agentGroup: AgentGroup, session: Session, mg: MessagingGroup): void {
   try {
-    if (mg.is_group !== 0) return;
     if (session.thread_id !== null && isTaskThread(session.thread_id)) return;
 
     const siblings = getSessionsByAgentGroup(agentGroup.id).filter(
@@ -134,7 +136,11 @@ export function backfillNewDmSession(agentGroup: AgentGroup, session: Session, m
     const newest = rows.slice(-BACKFILL_LIMIT);
     if (newest.length === 0) return;
 
-    const label = 'this DM, just before this conversation';
+    const isGroupSurface = mg.is_group === 1;
+    const label = isGroupSurface
+      ? 'this channel, just before this conversation'
+      : 'this DM, just before this conversation';
+    const surface = isGroupSurface ? ECHO_CHANNEL_TIMELINE_SURFACE : ECHO_TIMELINE_SURFACE;
     newest.forEach((row, i) => {
       // The most recent entry is what a short opener ("sure") is usually
       // answering — deliver it whole; earlier entries get the normal cap.
@@ -149,12 +155,12 @@ export function backfillNewDmSession(agentGroup: AgentGroup, session: Session, m
           sender: row.sender,
           senderId: row.senderId,
           ...(row.self ? { self: true } : {}),
-          echo: { surface: ECHO_TIMELINE_SURFACE, label },
+          echo: { surface, label },
         }),
         trigger: 0,
       });
     });
-    log.debug('Backfilled new DM session with sibling context', {
+    log.debug('Backfilled new session with conversation timeline', {
       sessionId: session.id,
       rows: newest.length,
       siblings: siblings.length,

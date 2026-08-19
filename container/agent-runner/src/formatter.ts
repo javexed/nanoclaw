@@ -223,13 +223,15 @@ function formatEchoMessage(msg: MessageInRow): string {
   const label = content.echo?.label || 'another conversation';
   const sender = content.sender || 'Unknown';
   const time = formatLocalStamp(new Date(msg.timestamp), TIMEZONE);
-  // dm-timeline rows are the DM's own preceding timeline — FIRST-CLASS
-  // conversation history this thread continues from (the agent's own posts
-  // render as sender="you"), unlike cross-session-context ambient echoes
-  // from other live surfaces which must never be acted on in-place.
-  if (content.echo?.surface === 'dm-timeline') {
+  // Timeline rows are the conversation's own preceding history — FIRST-CLASS
+  // context this thread continues from (the agent's own posts render as
+  // sender="you"), unlike cross-session-context ambient echoes from other
+  // live surfaces which must never be acted on in-place. dm-timeline = a DM's
+  // timeline; channel-timeline = a group conversation's (per-thread groups).
+  if (content.echo?.surface === 'dm-timeline' || content.echo?.surface === 'channel-timeline') {
     const who = (content as { self?: boolean }).self ? 'you' : sender;
-    return `<dm-history sender="${escapeXml(who)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</dm-history>`;
+    const tag = content.echo.surface === 'channel-timeline' ? 'channel-history' : 'dm-history';
+    return `<${tag} sender="${escapeXml(who)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</${tag}>`;
   }
   return `<cross-session-context from="${escapeXml(label)}" sender="${escapeXml(sender)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</cross-session-context>`;
 }

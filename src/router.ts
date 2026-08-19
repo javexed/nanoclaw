@@ -28,7 +28,7 @@ import {
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
 import { findSessionForAgent } from './db/sessions.js';
-import { backfillNewDmSession, fanInboundMessage } from './modules/cross-session-context/index.js';
+import { backfillNewSession, fanInboundMessage } from './modules/cross-session-context/index.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import {
@@ -690,11 +690,11 @@ async function deliverToAgent(
   }
 
   if (wake && created) {
-    // New-session backfill (cross-session context): a just-born DM session is
-    // seeded with the DM's top-level timeline from sibling sessions BEFORE
-    // the triggering message is written, so replying to something said in
-    // another conversation thread lands with that context in view.
-    backfillNewDmSession(agentGroup, session, mg);
+    // New-session backfill (cross-session context): a just-born session is
+    // seeded with its conversation's top-level timeline from sibling
+    // sessions BEFORE the triggering message is written, so replying to
+    // something said in another thread lands with that context in view.
+    backfillNewSession(agentGroup, session, mg);
   }
 
   // A key-overridden wake turn may be written by the module's inbound writer
