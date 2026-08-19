@@ -25,9 +25,8 @@ interface AgentProvider {
    *  through raw. When false, the poll-loop formats them like any chat message. */
   readonly supportsNativeSlashCommands: boolean;
 
-  /** Opt-in: scaffold a persistent memory/ tree at boot. Providers with native
-   *  memory (Claude's CLAUDE.local.md) omit it. Never gated on a provider name. */
-  readonly usesMemoryScaffold?: boolean;
+  /** Register shared memory through the provider's native session-start mechanism. */
+  registerMemorySessionHook(hook: MemorySessionHookRegistration): void;
 
   /** Optional. Called after each completed exchange so providers whose harness
    *  keeps no on-disk transcript can persist it themselves. Claude (the SDK
@@ -72,11 +71,9 @@ interface QueryInput {
   systemContext?: { instructions?: string };
 }
 
-interface McpServerConfig {
-  command: string;
-  args: string[];
-  env: Record<string, string>;
-}
+type McpServerConfig =
+  | { type?: 'stdio'; command: string; args?: string[]; env?: Record<string, string> }
+  | { type: 'http'; url: string };
 
 interface AgentQuery {
   /** Push a follow-up message into the active query. */
@@ -426,12 +423,18 @@ themselves are never shown.
 
 - **`task`** — a `<task>` element, script output first when present:
   ```xml
-  <task from="scheduler" time="Jan 1, 9:00 AM">Script output:
+  <task from="scheduler" time="Jan 1, 9:00 AM" current_time="Thursday, January 1, 2026 at 9:01 AM">Script output:
   {"data": …}
 
   Instructions:
   Review open PRs</task>
   ```
+
+  `time` is the occurrence's effective scheduled time (`process_after`, falling
+  back to its creation timestamp for legacy rows). `current_time` is generated
+  when the task reaches the agent so relative instructions such as "today" stay
+  correct after pauses or delayed execution. Both render in the agent group's
+  timezone.
 
 - **`webhook`** — a `<webhook>` element wrapping the JSON payload:
   ```xml
@@ -782,7 +785,7 @@ The provider name comes from the `provider` key in `/workspace/agent/container.j
 
 ## Agent-Runner Properties
 
-- MCP server is a separate Node process spawned by the provider (via `mcpServers` config)
+- MCP servers are local processes or remote Streamable HTTP endpoints managed by the provider via `mcpServers`
 - The MCP server binary is shared across providers — same tools, same DB access
 - CLAUDE.md loading (global + per-group) — agent-runner reads and passes as `systemPrompt`
 - Additional directories discovery (`/workspace/extra/*`)

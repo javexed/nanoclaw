@@ -32,6 +32,7 @@ const TEST_DIR = '/tmp/nanoclaw-test-cli-groups';
 import { initTestDb, closeDb, runMigrations, createAgentGroup, getDb } from '../../db/index.js';
 import { createSession } from '../../db/sessions.js';
 import { dispatch } from '../dispatch.js';
+import { ensureContainerConfig, getContainerConfig } from '../../db/container-configs.js';
 // Side-effect import: registers the `groups-*` commands (including delete).
 import './groups.js';
 
@@ -216,5 +217,131 @@ describe('groups CLI delete cascades dependent rows (#2525)', () => {
     expect(resp.ok).toBe(false);
     expect((resp as { ok: false; error: { code: string; message: string } }).error.code).toBe('handler-error');
     expect((resp as { ok: false; error: { code: string; message: string } }).error.message).toMatch(/not found/i);
+  });
+});
+
+describe('groups config add-mount / remove-mount (host-only)', () => {
+  beforeEach(() => {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    runMigrations(initTestDb());
+  });
+  afterEach(() => {
+    closeDb();
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+  });
+
+  it('adds a mount idempotently and removes it (host caller)', async () => {
+    const GID = 'ag-mount';
+    createAgentGroup({ id: GID, name: 'm', folder: 'm', agent_provider: null, created_at: now() });
+    ensureContainerConfig(GID);
+    const args = { id: GID, host: '/data/.gmail-mcp', container: '/home/node/.gmail-mcp', ro: true };
+
+    const add = await dispatch({ id: 'r1', command: 'groups-config-add-mount', args }, { caller: 'host' });
+    expect(add.ok).toBe(true);
+    expect(JSON.parse(getContainerConfig(GID)!.additional_mounts)).toEqual([
+      { hostPath: '/data/.gmail-mcp', containerPath: '/home/node/.gmail-mcp', readonly: true },
+    ]);
+
+    // idempotent: a second add does not duplicate
+    await dispatch({ id: 'r2', command: 'groups-config-add-mount', args }, { caller: 'host' });
+    expect(JSON.parse(getContainerConfig(GID)!.additional_mounts)).toHaveLength(1);
+
+    const rm = await dispatch(
+      {
+        id: 'r3',
+        command: 'groups-config-remove-mount',
+        args: { id: GID, host: '/data/.gmail-mcp', container: '/home/node/.gmail-mcp' },
+      },
+      { caller: 'host' },
+    );
+    expect(rm.ok).toBe(true);
+    expect(JSON.parse(getContainerConfig(GID)!.additional_mounts)).toEqual([]);
+  });
+});
+
+describe('groups CLI MCP config', () => {
+  beforeEach(() => {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    runMigrations(initTestDb());
+    createAgentGroup({
+      id: 'ag-mcp',
+      name: 'mcp',
+      folder: 'mcp',
+      agent_provider: null,
+      created_at: now(),
+    });
+    ensureContainerConfig('ag-mcp');
+  });
+
+  afterEach(() => {
+    closeDb();
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+  });
+
+  it('adds stdio and HTTPS MCP servers through the same command', async () => {
+    const local = await dispatch(
+      {
+        id: 'req-local',
+        command: 'groups-config-add-mcp-server',
+        args: { id: 'ag-mcp', name: 'local', command: 'pnpm', args: '["dlx","server"]' },
+      },
+      { caller: 'host' },
+    );
+    const remote = await dispatch(
+      {
+        id: 'req-remote',
+        command: 'groups-config-add-mcp-server',
+        args: { id: 'ag-mcp', name: 'remote', url: 'https://mcp.example.com/mcp' },
+      },
+      { caller: 'host' },
+    );
+
+    expect(local.ok).toBe(true);
+    expect(remote.ok).toBe(true);
+    expect(JSON.parse(getContainerConfig('ag-mcp')!.mcp_servers)).toEqual({
+      local: { command: 'pnpm', args: ['dlx', 'server'], env: {} },
+      remote: { type: 'http', url: 'https://mcp.example.com/mcp' },
+    });
+  });
+
+  it('rejects ambiguous and insecure remote MCP config', async () => {
+    const both = await dispatch(
+      {
+        id: 'req-both',
+        command: 'groups-config-add-mcp-server',
+        args: { id: 'ag-mcp', name: 'bad', command: 'server', url: 'https://mcp.example.com/mcp' },
+      },
+      { caller: 'host' },
+    );
+    const insecure = await dispatch(
+      {
+        id: 'req-http',
+        command: 'groups-config-add-mcp-server',
+        args: { id: 'ag-mcp', name: 'bad', url: 'http://mcp.example.com/mcp' },
+      },
+      { caller: 'host' },
+    );
+
+    expect(both.ok).toBe(false);
+    expect(both.ok ? '' : both.error.message).toMatch(/exactly one/);
+    expect(insecure.ok).toBe(false);
+    expect(insecure.ok ? '' : insecure.error.message).toMatch(/HTTPS/);
+  });
+
+  it('rejects a server name that fails the shared name validation', async () => {
+    const badName = await dispatch(
+      {
+        id: 'req-bad-name',
+        command: 'groups-config-add-mcp-server',
+        args: { id: 'ag-mcp', name: 'docs]\n[mcp_servers.evil]', url: 'https://mcp.example.com/mcp' },
+      },
+      { caller: 'host' },
+    );
+
+    expect(badName.ok).toBe(false);
+    expect(badName.ok ? '' : badName.error.message).toMatch(/1-64 characters/);
+    expect(JSON.parse(getContainerConfig('ag-mcp')!.mcp_servers)).toEqual({});
   });
 });

@@ -18,38 +18,40 @@ import {
 import type { Session } from './types.js';
 
 const BASE = Date.parse('2026-04-20T12:00:00.000Z');
+const JUST_WITHIN_CEILING_MS = ABSOLUTE_CEILING_MS - 1;
+const JUST_OVER_CEILING_MS = ABSOLUTE_CEILING_MS + 1;
 
 function claim(id: string, offsetMs: number) {
   return { message_id: id, status_changed: new Date(BASE - offsetMs).toISOString() };
 }
 
 describe('decideStuckAction', () => {
-  it('returns ok when heartbeat is fresh and no claims', () => {
+  it('returns ok when heartbeat is within the absolute ceiling', () => {
     expect(
       decideStuckAction({
         now: BASE,
-        heartbeatMtimeMs: BASE - 5_000,
+        heartbeatMtimeMs: BASE - JUST_WITHIN_CEILING_MS,
         containerState: null,
         claims: [],
       }),
     ).toEqual({ action: 'ok' });
   });
 
-  it('returns kill-ceiling when heartbeat older than 30 min', () => {
-    const heartbeatMtimeMs = BASE - ABSOLUTE_CEILING_MS - 1_000;
+  it('returns kill-ceiling when heartbeat exceeds the absolute ceiling', () => {
     const res = decideStuckAction({
       now: BASE,
-      heartbeatMtimeMs,
+      heartbeatMtimeMs: BASE - JUST_OVER_CEILING_MS,
       containerState: null,
       claims: [],
     });
-    expect(res.action).toBe('kill-ceiling');
-    if (res.action !== 'kill-ceiling') return;
-    expect(res.ceilingMs).toBe(ABSOLUTE_CEILING_MS);
-    expect(res.heartbeatAgeMs).toBeGreaterThan(ABSOLUTE_CEILING_MS);
+    expect(res).toEqual({
+      action: 'kill-ceiling',
+      heartbeatAgeMs: JUST_OVER_CEILING_MS,
+      ceilingMs: ABSOLUTE_CEILING_MS,
+    });
   });
 
-  it('skips the ceiling check when no heartbeat file exists (fresh container not yet ticked)', () => {
+  it('skips the ceiling check when no heartbeat file exists and no fallback is known', () => {
     // A freshly-spawned container hasn't produced any SDK events yet, so no
     // heartbeat. Prior behavior treated this as infinitely stale and killed
     // every container within seconds of spawn. With no claims either, we
@@ -57,6 +59,46 @@ describe('decideStuckAction', () => {
     const res = decideStuckAction({
       now: BASE,
       heartbeatMtimeMs: 0,
+      containerState: null,
+      claims: [],
+    });
+    expect(res.action).toBe('ok');
+  });
+
+  it('does not kill a spawn within the absolute ceiling when heartbeat is absent', () => {
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: 0,
+      containerStartedAtMs: BASE - JUST_WITHIN_CEILING_MS,
+      containerState: null,
+      claims: [],
+    });
+    expect(res.action).toBe('ok');
+  });
+
+  it('kills on ceiling using container spawn time when heartbeat never ticked', () => {
+    // Regression: a container spawns, finds nothing that warrants an SDK
+    // event, and sits idle indefinitely with no heartbeat file ever created.
+    // Prior behavior exempted it from the ceiling check forever.
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: 0,
+      containerStartedAtMs: BASE - JUST_OVER_CEILING_MS,
+      containerState: null,
+      claims: [],
+    });
+    expect(res).toEqual({
+      action: 'kill-ceiling',
+      heartbeatAgeMs: JUST_OVER_CEILING_MS,
+      ceilingMs: ABSOLUTE_CEILING_MS,
+    });
+  });
+
+  it('prefers a heartbeat over the container spawn time', () => {
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - JUST_WITHIN_CEILING_MS,
+      containerStartedAtMs: BASE - JUST_OVER_CEILING_MS,
       containerState: null,
       claims: [],
     });

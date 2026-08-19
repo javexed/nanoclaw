@@ -25,8 +25,11 @@ Run `ncl help` for the full list. Common resources:
 | destinations | list, add, remove                                                                                                                         | Where an agent group can send messages                  |
 | members      | list, add, remove                                                                                                                         | Unprivileged access gate for an agent group             |
 | tasks        | list, get, create, update, cancel, pause, resume, delete, append-log                                                                      | Scheduled tasks for your agent group                    |
+| wirings      | get, update                                                                                                                               | Response policy for the current chat                    |
 
-Additional resources (available under `global` scope only): messaging-groups, wirings, users, roles, user-dms, dropped-messages, approvals.
+Additional resources (available under `global` scope only): messaging-groups, users, roles, user-dms, dropped-messages, approvals.
+
+Under `group` scope, `wirings get/update` always targets the current chat. Updates may only change `engage_mode` and `engage_pattern` and require human approval.
 
 ### When to use
 
@@ -34,7 +37,8 @@ Additional resources (available under `global` scope only): messaging-groups, wi
 - **Restarting your container** — `ncl groups restart` (with optional `--rebuild` and `--message`).
 - **Checking who's in your group** — `ncl members list`.
 - **Seeing your destinations** — `ncl destinations list`.
-- **Scheduling work** — `ncl tasks create`, then `ncl tasks list/get/update/cancel/pause/resume/delete`; `ncl tasks run <id>` fires one extra run now (testing) without changing the schedule. At the end of each task run, `ncl tasks append-log --msg "…"` to record what happened (host-timestamped, not a message).
+- **Scheduling work** — `ncl tasks create`, then `ncl tasks list/get/update/cancel/pause/resume/delete`; `ncl tasks run <id>` fires one extra run now (testing) without changing the schedule. Each task run auto-logs its final text to the run log; `ncl tasks append-log --msg "…"` is for extra mid-run notes (host-timestamped, not a message).
+- **Explaining or changing response behavior** — inspect `ncl wirings get`, then request an update.
 - **Answering questions about the system** — query `ncl` rather than guessing.
 
 ### Access rules
@@ -64,20 +68,23 @@ ncl sessions list
 ncl destinations list
 ncl members list
 ncl tasks list
+ncl wirings get
 # Always pass a short descriptive --name so the task id is readable (e.g. daily-briefing-a25c, not a long uuid).
 # For a recurring task, --recurrence alone sets the schedule (first run derived from it); add --process-after only for one-shots.
 ncl tasks create --name "daily briefing" --prompt "Send the daily briefing" --recurrence "0 9 * * *"
-# At the END of every task run, record one line of history. The host stamps the local time — you supply only the summary.
-# This is a LOG ENTRY, not a message: it sends nothing to anyone. Inside a task fire --id is auto-derived from your session.
-ncl tasks append-log --msg "posted the daily digest to slack; one feed returned 403, skipped"
+# Add an optional progress note during a task run. The final response is logged automatically; the host stamps the local time.
+# This is a LOG ENTRY, not a message: it sends nothing to anyone. Inside a task run --id is auto-derived.
+ncl tasks append-log --msg "one feed returned 403; continuing with the remaining feeds"
 
 # Write commands (approval required)
 ncl groups restart
 ncl groups restart --rebuild --message "Config updated."
 ncl groups config update --model claude-sonnet-4-5-20250514
 ncl groups config add-mcp-server --name rss --command npx --args '["some-rss-mcp"]'
+ncl groups config add-mcp-server --name remote --url https://example.com/mcp
 ncl groups config add-package --npm some-package
 ncl members add --user telegram:jane
+ncl wirings update --engage-mode pattern --engage-pattern "."
 ```
 
 ### Important

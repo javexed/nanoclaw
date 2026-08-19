@@ -28,12 +28,13 @@ import {
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
 import { findSessionForAgent } from './db/sessions.js';
+import { backfillNewSession, fanInboundMessage } from './modules/cross-session-context/index.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
 import { wakeContainer } from './container-runner.js';
 import { getSession } from './db/sessions.js';
-import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
+import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from './types.js';
 import type { InboundEvent } from './channels/adapter.js';
 
 function generateId(): string {
@@ -146,6 +147,57 @@ export function setChannelRequestGate(fn: ChannelRequestGateFn): void {
     log.warn('Channel-request gate overwritten');
   }
   channelRequestGate = fn;
+}
+
+/**
+ * Session-created hook. When an engaged (waking) message creates a
+ * brand-new session, registered hooks are notified after the triggering
+ * message is written to the session's inbound DB, with the resolved
+ * messaging group, thread id, session mode, and triggering message.
+ *
+ * Channel modules can use it for platform-specific conversation bootstrap
+ * (thread naming, retiring onboarding affordances) without the router
+ * carrying platform timing knowledge. The hook fires for every
+ * created+engaged session — is_group / session-mode filtering is the
+ * consumer's business.
+ *
+ * Fire-and-forget: hooks are try/caught (and async rejections logged), so
+ * a failing hook can never affect routing or the container wake. No-op
+ * when nothing is registered.
+ */
+export interface SessionCreatedEvent {
+  /** The just-created session. */
+  session: Session;
+  /** The messaging group the triggering message arrived on. */
+  mg: MessagingGroup;
+  /** Platform address of the triggering inbound event. */
+  platformId: string;
+  /** Resolved thread id after the wiring's thread policy (null = no thread). */
+  threadId: string | null;
+  /** Resolved session mode after the wiring's thread policy. */
+  sessionMode: MessagingGroupAgent['session_mode'];
+  /** The triggering inbound message as received from the adapter. */
+  message: { id: string; kind: string; content: string; timestamp: string };
+}
+
+export type SessionCreatedHook = (event: SessionCreatedEvent) => void | Promise<void>;
+
+const sessionCreatedHooks: SessionCreatedHook[] = [];
+
+export function registerSessionCreatedHook(hook: SessionCreatedHook): void {
+  sessionCreatedHooks.push(hook);
+}
+
+function dispatchSessionCreated(event: SessionCreatedEvent): void {
+  for (const hook of sessionCreatedHooks) {
+    try {
+      Promise.resolve(hook(event)).catch((err) =>
+        log.error('Session-created hook failed', { sessionId: event.session.id, err }),
+      );
+    } catch (err) {
+      log.error('Session-created hook threw', { sessionId: event.session.id, err });
+    }
+  }
 }
 
 function safeParseContent(raw: string): { text?: string; sender?: string; senderId?: string } {
@@ -504,8 +556,17 @@ async function deliverToAgent(
     }
   }
 
+  if (wake && created) {
+    // New-session backfill (cross-session context): a just-born session is
+    // seeded with its conversation's top-level timeline from sibling
+    // sessions BEFORE the triggering message is written, so replying to
+    // something said in another thread lands with that context in view.
+    backfillNewSession(agentGroup, session, mg);
+  }
+
+  const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
   writeSessionMessage(session.agent_group_id, session.id, {
-    id: messageIdForAgent(event.message.id, agent.agent_group_id),
+    id: messageId,
     kind: event.message.kind,
     timestamp: event.message.timestamp,
     platformId: deliveryAddr.platformId,
@@ -514,6 +575,40 @@ async function deliverToAgent(
     content: event.message.content,
     trigger: wake ? 1 : 0,
   });
+
+  if (wake) {
+    // Cross-session context: fan the triggering message into sibling
+    // sessions of the SAME conversation as trigger=0 'session-echo' rows.
+    // Only the engaged branch fans — the accumulate branch above (trigger=0)
+    // never does, so ambient backlog is never copied twice. Never throws.
+    fanInboundMessage({
+      session,
+      mg,
+      messageId,
+      kind: event.message.kind,
+      channelType: deliveryAddr.channelType,
+      content: event.message.content,
+      timestamp: event.message.timestamp,
+    });
+  }
+
+  if (wake && created) {
+    // A brand-new engaged session: notify registered modules with the
+    // resolved wiring context (fire-and-forget — see dispatchSessionCreated).
+    dispatchSessionCreated({
+      session,
+      mg,
+      platformId: event.platformId,
+      threadId: effectiveThreadId,
+      sessionMode: effectiveSessionMode,
+      message: {
+        id: event.message.id,
+        kind: event.message.kind,
+        content: event.message.content,
+        timestamp: event.message.timestamp,
+      },
+    });
+  }
 
   log.info('Message routed', {
     sessionId: session.id,

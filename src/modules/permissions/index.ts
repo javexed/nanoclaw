@@ -7,7 +7,7 @@
  *      sight. Returns null when the payload doesn't carry enough to identify
  *      a sender.
  *   2. setAccessGate — runs after agent resolution. Enforces the
- *      unknown_sender_policy (strict/request_approval/public) and the
+ *      unknown_sender_policy (strict/request_approval/decline_notify/public) and the
  *      owner/global-admin/scoped-admin/member access hierarchy. Records its
  *      own `dropped_messages` row on refusal (structural drops are recorded
  *      by core).
@@ -33,6 +33,8 @@ import { registerResponseHandler, type ResponsePayload } from '../../response-re
 import { getDeliveryAdapter } from '../../delivery.js';
 import { log } from '../../log.js';
 import type { MessagingGroup, MessagingGroupAgent } from '../../types.js';
+import { guard } from '../../guard/index.js';
+import { channelsRegister, sendersAdmit } from './guard.js';
 import { canAccessAgentGroup } from './access.js';
 import {
   buildAgentSelectionOptions,
@@ -53,7 +55,7 @@ import {
 import { deletePendingSenderApproval, getPendingSenderApproval } from './db/pending-sender-approvals.js';
 import { hasAdminPrivilege } from './db/user-roles.js';
 import { getUser, upsertUser } from './db/users.js';
-import { requestSenderApproval } from './sender-approval.js';
+import { declineAndNotify, requestSenderApproval } from './sender-approval.js';
 import { ensureUserDm } from './user-dm.js';
 
 // ── Free-text name input state ──
@@ -131,43 +133,78 @@ function handleUnknownSender(
     agent_group_id: agentGroupId,
   };
 
-  if (mg.unknown_sender_policy === 'strict') {
-    log.info('MESSAGE DROPPED — unknown sender (strict policy)', {
+  // The admission decision is the guard's senders.admit decision (./guard.ts)
+  // — unknown_sender_policy verbatim: strict → deny, request_approval → hold,
+  // public → allow (short-circuited before the gate). Drop-recording and the
+  // hold creation stay here.
+  const decision = guard(sendersAdmit, {
+    actor: userId ? { kind: 'human', userId } : { kind: 'system' },
+    payload: {
       messagingGroupId: mg.id,
       agentGroupId,
-      userId,
-      accessReason,
-    });
-    recordDroppedMessage(dropRecord);
-    return;
-  }
+      senderIdentity: userId,
+      policy: mg.unknown_sender_policy,
+    },
+  });
 
-  if (mg.unknown_sender_policy === 'request_approval') {
-    log.info('MESSAGE DROPPED — unknown sender (approval requested)', {
+  if (decision.effect === 'allow') return; // 'public' — handled before the gate; fall through silently.
+
+  const isDeclineNotify = mg.unknown_sender_policy === 'decline_notify';
+
+  log.info(
+    isDeclineNotify
+      ? 'MESSAGE DROPPED — unknown sender (decline-and-notify policy)'
+      : decision.effect === 'hold'
+        ? 'MESSAGE DROPPED — unknown sender (approval requested)'
+        : 'MESSAGE DROPPED — unknown sender (strict policy)',
+    {
       messagingGroupId: mg.id,
       agentGroupId,
       userId,
       accessReason,
-    });
-    recordDroppedMessage(dropRecord);
-    // Fire-and-forget; pick-approver + delivery + row-insert are all async.
-    // If it fails it logs internally — the user's message still stays dropped
-    // either way. Requires a resolved userId (senderResolver populates users
-    // row before the gate fires); if we got here without one, there's nothing
-    // to identify for approval and we just stay in the "silent strict" branch.
-    if (userId) {
-      requestSenderApproval({
+    },
+  );
+  recordDroppedMessage(dropRecord);
+
+  // decline_notify: polite in-DM decline + one-line owner FYI, no
+  // card. Fire-and-forget like the hold path — declineAndNotify dedupes
+  // itself (24h stamp) and logs failures internally; the sender's message
+  // stays dropped either way.
+  if (isDeclineNotify) {
+    // The decline copy assumes a 1:1 DM surface. The policy is
+    // settable on groups (ncl / setup register), where delivering it would
+    // post the decline publicly into the channel — treat groups as strict:
+    // the drop above stands, nothing is sent.
+    if (mg.is_group === 1) {
+      log.warn('decline_notify on a group messaging group — treated as strict (no public decline)', {
         messagingGroupId: mg.id,
-        agentGroupId,
-        senderIdentity: userId,
-        senderName,
-        event,
-      }).catch((err) => log.error('Sender-approval flow threw', { err }));
+      });
+      return;
     }
+    declineAndNotify({
+      messagingGroupId: mg.id,
+      agentGroupId,
+      senderIdentity: userId,
+      senderName,
+      event,
+    }).catch((err) => log.error('decline_notify flow threw', { err }));
     return;
   }
 
-  // 'public' should have been handled before the gate; fall through silently.
+  // Fire-and-forget; pick-approver + delivery + row-insert are all async.
+  // If it fails it logs internally — the user's message still stays dropped
+  // either way. Requires a resolved userId (senderResolver populates users
+  // row before the gate fires); if we got here without one, there's nothing
+  // to identify for approval and we just drop silently.
+  if (decision.effect === 'hold' && userId) {
+    requestSenderApproval({
+      messagingGroupId: mg.id,
+      agentGroupId,
+      senderIdentity: userId,
+      senderName,
+      event,
+    }).catch((err) => log.error('Sender-approval flow threw', { err }));
+  }
 }
 
 setSenderResolver(extractAndUpsertUser);
@@ -411,18 +448,23 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
   const row = getPendingChannelApproval(payload.questionId);
   if (!row) return false;
 
+  // Click authorization is the guard's channels.register decision (./guard.ts):
+  // the delivered approver, or an admin of the pending row's anchor agent group.
   const clickerId = payload.userId
     ? payload.userId.includes(':')
       ? payload.userId
       : `${payload.channelType}:${payload.userId}`
     : null;
-  const isAuthorized =
-    clickerId !== null && (clickerId === row.approver_user_id || hasAdminPrivilege(clickerId, row.agent_group_id));
-  if (!isAuthorized) {
+  const decision = guard(channelsRegister, {
+    actor: { kind: 'human', userId: clickerId ?? '' },
+    payload: { questionId: payload.questionId },
+  });
+  if (!clickerId || decision.effect !== 'allow') {
     log.warn('Channel registration click rejected — unauthorized clicker', {
       messagingGroupId: row.messaging_group_id,
       clickerId,
       expectedApprover: row.approver_user_id,
+      reason: decision.reason,
     });
     return true;
   }
@@ -456,7 +498,8 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
     const agentGroups = getAllAgentGroups();
     const options = buildAgentSelectionOptions(agentGroups, approverId);
     const title = '📋 Choose an agent';
-    updatePendingChannelApprovalCard(row.messaging_group_id, title, JSON.stringify(options));
+    const question = 'Which agent should handle this channel?';
+    updatePendingChannelApprovalCard(row.messaging_group_id, title, question, JSON.stringify(options));
 
     try {
       await adapter.deliver(
@@ -468,7 +511,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
           type: 'ask_question',
           questionId: row.messaging_group_id,
           title,
-          question: 'Which agent should handle this channel?',
+          question,
           options,
         }),
       );

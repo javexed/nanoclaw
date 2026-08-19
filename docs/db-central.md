@@ -226,6 +226,7 @@ CREATE TABLE pending_approvals (
   expires_at          TEXT,
   status              TEXT NOT NULL DEFAULT 'pending',
   title               TEXT NOT NULL DEFAULT '',
+  question            TEXT NOT NULL DEFAULT '',       -- added by migration 021
   options_json        TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX idx_pending_approvals_action_status ON pending_approvals(action, status);
@@ -303,7 +304,7 @@ CREATE TABLE schema_version (
 
 ### 1.15 `container_configs`
 
-Per-agent-group container runtime config. Source of truth for provider, model, packages, MCP servers, mounts, CLI scope, etc. Materialized to `groups/<folder>/container.json` at spawn time.
+Per-agent-group container runtime config. Source of truth for provider, model, packages, MCP servers, mounts, CLI scope, timezone, etc. Materialized to `groups/<folder>/container.json` at spawn time.
 
 ```sql
 CREATE TABLE container_configs (
@@ -320,9 +321,12 @@ CREATE TABLE container_configs (
   packages_npm           TEXT NOT NULL DEFAULT '[]',
   additional_mounts      TEXT NOT NULL DEFAULT '[]',
   cli_scope              TEXT NOT NULL DEFAULT 'group',   -- disabled | group | global
+  timezone               TEXT,                            -- IANA id; NULL = install-global TZ (added by migration 20)
   updated_at             TEXT NOT NULL
 );
 ```
+
+`timezone` overrides the install-global timezone for one agent group: host-side scheduling (cron interpretation, `--process-after`, run-log stamps) resolves it live via `resolveGroupTimezone` (`src/container-config.ts`); the container gets it as its `TZ` env on next respawn. Set via `ncl groups config update --timezone <IANA>` (`""` clears back to NULL) or `ncl groups create --timezone`.
 
 - **Readers:** `src/container-config.ts`, `src/container-runner.ts`, `src/cli/dispatch.ts` (scope enforcement), `src/claude-md-compose.ts`
 - **Writers:** `src/db/container-configs.ts`, `src/modules/self-mod/apply.ts`, `src/backfill-container-configs.ts`
@@ -342,6 +346,7 @@ CREATE TABLE pending_sender_approvals (
   approver_user_id   TEXT NOT NULL,
   created_at         TEXT NOT NULL,
   title              TEXT NOT NULL DEFAULT '',       -- added by migration 013
+  question           TEXT NOT NULL DEFAULT '',       -- added by migration 021
   options_json       TEXT NOT NULL DEFAULT '[]',     -- added by migration 013
   UNIQUE(messaging_group_id, sender_identity)
 );
@@ -366,6 +371,7 @@ CREATE TABLE pending_channel_approvals (
   approver_user_id   TEXT NOT NULL,
   created_at         TEXT NOT NULL,
   title              TEXT NOT NULL DEFAULT '',       -- added by migration 013
+  question           TEXT NOT NULL DEFAULT '',       -- added by migration 021
   options_json       TEXT NOT NULL DEFAULT '[]'      -- added by migration 013
 );
 ```
@@ -425,6 +431,9 @@ Several early migrations were later renamed/retired and replaced by "module" fil
 | 16 | `messaging-group-instance` | `016-messaging-group-instance.ts` | `messaging_groups` gets an `instance` column (adapter-instance dimension); table recreate (`disableForeignKeys: true`) backfills `instance = channel_type` on every existing row and relaxes the `UNIQUE` to `(channel_type, platform_id, instance)` |
 | 17 | `agent-message-policies` | `017-agent-message-policies.ts` | `agent_message_policies` (see §1.18) |
 | 18 | `approvals-approver-user-id` | `018-approvals-approver-user-id.ts` | `pending_approvals.approver_user_id` — names a single required approver for a2a message-gate policies |
+| 19 | `wiring-threads-override` | `019-wiring-threads.ts` | `messaging_group_agents.threads` — per-wiring thread-policy override (NULL = adapter default) |
+| 20 | `container-config-timezone` | `020-container-config-timezone.ts` | `container_configs.timezone` — per-agent-group timezone override (NULL = install-global) |
+| 21 | `approval-question-render-metadata` | `021-approval-question.ts` | `question` card-body column on all three approval tables so terminal edits retain the original request |
 
 Numbers 5 and 6 are intentionally absent — migrations were renumbered during early development.
 

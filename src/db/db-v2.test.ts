@@ -31,6 +31,8 @@ import {
   createPendingQuestion,
   getPendingQuestion,
   deletePendingQuestion,
+  getContainerConfig,
+  createContainerConfig,
 } from './index.js';
 
 function now() {
@@ -70,6 +72,17 @@ describe('migrations', () => {
     expect(col!.type).toBe('INTEGER');
     expect(col!.notnull).toBe(0);
     expect(col!.dflt_value).toBeNull();
+  });
+
+  it('persists approval card bodies for terminal rendering (021)', () => {
+    const db = initTestDb();
+    runMigrations(db);
+    for (const table of ['pending_approvals', 'pending_channel_approvals', 'pending_sender_approvals']) {
+      const col = db
+        .prepare(`SELECT type, "notnull", dflt_value FROM pragma_table_info(?) WHERE name = 'question'`)
+        .get(table) as { type: string; notnull: number; dflt_value: string } | undefined;
+      expect(col, table).toEqual({ type: 'TEXT', notnull: 1, dflt_value: "''" });
+    }
   });
 });
 
@@ -442,5 +455,33 @@ describe('pending questions', () => {
     });
     deletePendingQuestion('q-1');
     expect(getPendingQuestion('q-1')).toBeUndefined();
+  });
+});
+
+// ── Container Configs ──
+
+describe('container configs', () => {
+  it('createContainerConfig persists cli_scope', () => {
+    createAgentGroup({ id: 'ag-full', name: 'Full', folder: 'full', agent_provider: null, created_at: now() });
+    createContainerConfig({
+      agent_group_id: 'ag-full',
+      provider: null,
+      model: null,
+      effort: null,
+      image_tag: null,
+      assistant_name: null,
+      max_messages_per_prompt: null,
+      skills: '["all"]',
+      mcp_servers: '{}',
+      packages_apt: '[]',
+      packages_npm: '[]',
+      additional_mounts: '[]',
+      cli_scope: 'global',
+      timezone: null,
+      updated_at: now(),
+    });
+    const row = getContainerConfig('ag-full');
+    expect(row).toBeDefined();
+    expect(row!.cli_scope).toBe('global');
   });
 });

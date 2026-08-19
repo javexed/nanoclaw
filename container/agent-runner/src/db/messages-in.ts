@@ -56,41 +56,57 @@ function getMaxMessagesPerPrompt(): number {
  * Reads from inbound.db (read-only), filters against processing_ack in outbound.db
  * to skip messages already picked up by this or a previous container run.
  *
- * Returns the most recent `maxMessagesPerPrompt` pending rows in
- * chronological order, regardless of their `trigger` flag: accumulated
- * context (trigger=0) rides along with the wake-eligible rows so the agent
- * sees the prior context it missed. Host's countDueMessages gates waking on
- * trigger=1 separately (see src/db/session-db.ts).
+ * Selection is two-phase so accumulated context can never crowd a wake row
+ * out of the batch: all due trigger=1 rows come first (oldest-first, up to
+ * `maxMessagesPerPrompt`), then remaining slots fill with the NEWEST due
+ * trigger=0 rows. Without this, ≥cap accumulated context rows (e.g.
+ * non-engaged group messages) newer than a due task row would push the task
+ * itself out of the batch. The combined batch is returned in chronological
+ * order (oldest first). Host's countDueMessages gates waking on trigger=1
+ * separately (see src/db/session-db.ts).
+ *
+ * ORDER MATTERS: the processing_ack filter runs BEFORE the cap windowing.
+ * Rows this container already claimed stay status='pending' in inbound.db
+ * until the host sweep syncs the ack back (up to ~60s) — windowing first
+ * would let a cap-sized batch of those claimed rows fill the window, the
+ * ack filter would then empty it, and genuinely new rows beyond the window
+ * would be invisible for the rest of the turn.
  */
 export function getPendingMessages(isFirstPoll = false): MessageInRow[] {
   const inbound = openInboundDb();
   const outbound = getOutboundDb();
 
   try {
-    const onWakeFilter = hasOnWakeColumn(inbound) ? 'AND (on_wake = 0 OR ?1 = 1)' : '';
-    const pending = inbound
-      .prepare(
-        `SELECT * FROM messages_in
-         WHERE status = 'pending'
-           AND (process_after IS NULL OR datetime(process_after) <= datetime('now'))
-           ${onWakeFilter}
-         ORDER BY seq DESC
-         LIMIT ?2`,
-      )
-      .all(isFirstPoll ? 1 : 0, getMaxMessagesPerPrompt()) as MessageInRow[];
+    const cap = getMaxMessagesPerPrompt();
+    const hasOnWake = hasOnWakeColumn(inbound);
+    const stmt = inbound.prepare(
+      `SELECT * FROM messages_in
+       WHERE status = 'pending'
+         AND (process_after IS NULL OR datetime(process_after) <= datetime('now'))
+         ${hasOnWake ? 'AND (on_wake = 0 OR ?1 = 1)' : ''}
+       ORDER BY seq ASC`,
+    );
+    const due = (hasOnWake ? stmt.all(isFirstPoll ? 1 : 0) : stmt.all()) as MessageInRow[];
+    if (due.length === 0) return [];
 
-    if (pending.length === 0) return [];
-
-    // Filter out messages already acknowledged in outbound.db
+    // Drop rows already acknowledged in outbound.db (claimed by this or a
+    // previous container run) BEFORE windowing — see the doc comment above.
     const ackedIds = new Set(
       (outbound.prepare('SELECT message_id FROM processing_ack').all() as Array<{ message_id: string }>).map(
         (r) => r.message_id,
       ),
     );
+    const unclaimed = due.filter((m) => !ackedIds.has(m.id));
 
-    // Reverse: we fetched DESC to take the most recent N, but the agent
-    // should see them in chronological order (oldest first).
-    return pending.filter((m) => !ackedIds.has(m.id)).reverse();
+    // Phase 1: wake-eligible rows, oldest-first — these always make the batch.
+    const wakeRows = unclaimed.filter((m) => m.trigger === 1).slice(0, cap);
+    // Phase 2: fill remaining slots with the NEWEST context-only rows.
+    const remaining = cap - wakeRows.length;
+    const contextRows = remaining > 0 ? unclaimed.filter((m) => m.trigger === 0).slice(-remaining) : [];
+
+    // Merge oldest-first. JS sort is stable, so ties (null seq in tests)
+    // keep wake rows ahead of context rows.
+    return [...wakeRows, ...contextRows].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
   } finally {
     inbound.close();
   }

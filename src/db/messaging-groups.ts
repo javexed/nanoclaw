@@ -62,6 +62,42 @@ export function getMessagingGroupByPlatform(
 }
 
 /**
+ * Instance-exact messaging group for a channel a given agent group is
+ * sending to, resolved through THAT agent's own `agent_destinations` entry
+ * rather than by platform address alone.
+ *
+ * Needed because `getMessagingGroupByPlatform`'s no-instance fallback picks
+ * one row deterministically (default instance, else lexically-first named
+ * instance) when several sibling-instance rows share one `(channel_type,
+ * platform_id)` pair — i.e. multiple adapter instances sharing one channel
+ * address, each owning its own row for the same physical channel. That pick
+ * is arbitrary with respect to who's actually sending: it need not be the
+ * row the sending agent is wired to, which silently breaks both destination
+ * authorization (`src/delivery.ts`) and any per-instance state on the
+ * resolved row (e.g. the `instance` used to pick the delivering adapter).
+ * Every caller resolving a non-origin-chat send should prefer this over the
+ * platform-only lookup, falling back to it only when the sender has no
+ * matching destination (e.g. the agent-to-agent module isn't installed).
+ */
+export function getMessagingGroupForOwnDestination(
+  agentGroupId: string,
+  channelType: string,
+  platformId: string,
+): MessagingGroup | undefined {
+  if (!hasTable(getDb(), 'agent_destinations')) return undefined;
+  return getDb()
+    .prepare(
+      `SELECT mg.* FROM agent_destinations ad
+         JOIN messaging_groups mg ON mg.id = ad.target_id
+        WHERE ad.agent_group_id = ? AND ad.target_type = 'channel'
+          AND mg.channel_type = ? AND mg.platform_id = ?
+     ORDER BY ad.created_at ASC
+        LIMIT 1`,
+    )
+    .get(agentGroupId, channelType, platformId) as MessagingGroup | undefined;
+}
+
+/**
  * Combined lookup for the router's fast-drop path. Returns the messaging
  * group (if it exists) and a count of wired agents in one query — lets
  * `routeInbound` short-circuit messages for unwired / unknown channels
@@ -152,6 +188,26 @@ export function setMessagingGroupDeniedAt(id: string, deniedAt: string | null): 
   getDb().prepare('UPDATE messaging_groups SET denied_at = ? WHERE id = ?').run(deniedAt, id);
 }
 
+/**
+ * Mark a messaging group as detached — our own bot left the platform channel
+ * this row maps to (written by a channel membership module, migration 022).
+ * The wiring, sessions, and destinations all survive detachment;
+ * delivery/typing should skip the row until the bot rejoins. Passing null
+ * clears the flag (rejoin), restoring the room with zero re-setup.
+ */
+export function setMessagingGroupDetachedAt(id: string, detachedAt: string | null): void {
+  getDb().prepare('UPDATE messaging_groups SET detached_at = ? WHERE id = ?').run(detachedAt, id);
+}
+
+/** True when the bot has left this conversation (detached_at set). The check
+ *  delivery-side callers should consult before attempting a send. */
+export function isMessagingGroupDetached(id: string): boolean {
+  const row = getDb().prepare('SELECT detached_at FROM messaging_groups WHERE id = ?').get(id) as
+    | { detached_at: string | null }
+    | undefined;
+  return typeof row?.detached_at === 'string' && row.detached_at.length > 0;
+}
+
 // ── Messaging Group Agents ──
 
 /**
@@ -182,6 +238,14 @@ export function createMessagingGroupAgent(mga: MessagingGroupAgent): void {
        )`,
     )
     .run(mga);
+
+  // `threads` (migration 019) is written separately so existing callers that
+  // omit it keep passing named-param sets that match the INSERT exactly
+  // (better-sqlite3 rejects missing named params). Omitted/NULL = column
+  // stays NULL = inherit the channel declaration at fanout time.
+  if (mga.threads !== undefined && mga.threads !== null) {
+    getDb().prepare('UPDATE messaging_group_agents SET threads = ? WHERE id = ?').run(mga.threads, mga.id);
+  }
 
   ensureAgentDestinationForWiring(mga);
 }
@@ -265,7 +329,13 @@ export function updateMessagingGroupAgent(
   updates: Partial<
     Pick<
       MessagingGroupAgent,
-      'engage_mode' | 'engage_pattern' | 'sender_scope' | 'ignored_message_policy' | 'session_mode' | 'priority'
+      | 'engage_mode'
+      | 'engage_pattern'
+      | 'sender_scope'
+      | 'ignored_message_policy'
+      | 'session_mode'
+      | 'priority'
+      | 'threads'
     >
   >,
 ): void {

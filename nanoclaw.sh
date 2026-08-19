@@ -25,6 +25,36 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 
+# ─── --slack-agents: opt-in flag → env passthrough ─────────────────────
+# Consumed here rather than forwarded: setup:auto reads the env var
+# (NANOCLAW_SLACK_AGENTS=1, checked in setup/channels/slack-auto-register.ts).
+# Without the flag, nothing changes.
+_filtered_args=()
+for arg in "$@"; do
+  if [ "$arg" = "--slack-agents" ]; then
+    export NANOCLAW_SLACK_AGENTS=1
+  else
+    _filtered_args+=("$arg")
+  fi
+done
+set -- ${_filtered_args[@]+"${_filtered_args[@]}"}
+unset _filtered_args
+
+# ─── --help: show usage without bootstrapping ──────────────────────────
+for arg in "$@"; do
+  if [ "$arg" = "--help" ] || [ "$arg" = "-h" ]; then
+    if command -v node >/dev/null 2>&1 && [ -x "$PROJECT_ROOT/node_modules/.bin/tsx" ]; then
+      exec "$PROJECT_ROOT/node_modules/.bin/tsx" "$PROJECT_ROOT/setup/auto.ts" "$@"
+    fi
+    echo "Usage: bash nanoclaw.sh [options]"
+    echo ""
+    echo "  --template-path <ref>  Create the first agent from templates/<ref>"
+    echo "  --uninstall            Uninstall this NanoClaw copy"
+    echo "  --help, -h             Show this help without installing dependencies"
+    exit 0
+  fi
+done
+
 # ─── --uninstall: short-circuit before any setup work ──────────────────
 # Never install dependencies just to uninstall. With the TS toolchain
 # present, hand straight off to setup:auto (the flow lives in
@@ -57,6 +87,7 @@ for arg in "$@"; do
     echo "  $UNINSTALL_RUNTIME ps -aq --filter label=nanoclaw-install=$(_nanoclaw_install_slug) | xargs -r $UNINSTALL_RUNTIME rm -f"
     echo "  $UNINSTALL_RUNTIME rmi $(container_image_base):latest"
     echo "  rm -f ~/.local/bin/ncl    # only if it points at this folder"
+    echo "  rm -rf \"$(dirname "$PROJECT_ROOT")/.nanoclaw-updates/$(_nanoclaw_install_slug)\""
     echo ""
     echo "Then back up $PROJECT_ROOT/.env if you need the keys, and delete the folder."
     exit 1
@@ -407,5 +438,6 @@ fi
 # --silent suppresses pnpm's `> nanoclaw@2.0.0 setup:auto / > tsx setup/auto.ts`
 # preamble so the flow continues visually from "Basics installed" straight
 # into setup:auto's spinner. exec so signals (Ctrl-C) propagate directly.
-# `-- "$@"` forwards any flags (e.g. --onecli-api-host) to setup:auto.
-exec pnpm --silent run setup:auto -- "$@"
+# pnpm forwards arguments after the script name directly. Passing an extra
+# `--` would reach setup:auto and make its parser stop before our flags.
+exec pnpm --silent run setup:auto "$@"

@@ -16,13 +16,14 @@ import {
   CONTAINER_IMAGE_BASE,
   CONTAINER_INSTALL_LABEL,
   CONTAINER_MEMORY_LIMIT,
+  CONTAINER_PIDS_LIMIT,
   DATA_DIR,
   GROUPS_DIR,
   ONECLI_API_KEY,
   ONECLI_URL,
   TIMEZONE,
 } from './config.js';
-import { materializeContainerJson } from './container-config.js';
+import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
@@ -55,7 +56,7 @@ import type { AgentGroup, Session } from './types.js';
 const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
 
 /** Active containers tracked by session ID. */
-const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();
+const activeContainers = new Map<string, { process: ChildProcess; containerName: string; startedAtMs: number }>();
 
 /**
  * In-flight wake promises, keyed by session id. Deduplicates concurrent
@@ -73,6 +74,10 @@ export function getActiveContainerCount(): number {
 
 export function isContainerRunning(sessionId: string): boolean {
   return activeContainers.has(sessionId);
+}
+
+export function getContainerStartedAtMs(sessionId: string): number | undefined {
+  return activeContainers.get(sessionId)?.startedAtMs;
 }
 
 /**
@@ -117,7 +122,7 @@ async function spawnContainer(session: Session): Promise<void> {
     return;
   }
 
-  // Refresh the destination map and default reply routing so any admin
+  // Refresh the destination map and current-thread routing so any admin
   // changes take effect on wake. Destinations come from the agent-to-agent
   // module — skip when the module isn't installed (table absent).
   if (hasTable(getDb(), 'agent_destinations')) {
@@ -168,7 +173,7 @@ async function spawnContainer(session: Session): Promise<void> {
 
   const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
-  activeContainers.set(session.id, { process: container, containerName });
+  activeContainers.set(session.id, { process: container, containerName, startedAtMs: Date.now() });
   markContainerRunning(session.id);
 
   // Log stderr. A container that dies at boot (unknown provider, missing
@@ -245,6 +250,29 @@ export function resolveProviderName(
   return (sessionProvider || containerConfigProvider || 'claude').toLowerCase();
 }
 
+/**
+ * Container hardening flags. Applied to every agent container; no per-group or
+ * per-install override.
+ *
+ * cap-drop and no-new-privileges are inert while containers run under the
+ * `--user` mapping below (the capability sets are already empty and the image
+ * carries no file capabilities) — they are depth against a root-in-container
+ * path. `--init` is not optional: the `--entrypoint bash` override further down
+ * defeats the image's tini, leaving bun as PID 1 with no signal handler, and
+ * Linux discards default-action signals to PID 1. Without docker-init, SIGTERM
+ * is ignored and every stop ends in SIGKILL after the full grace period.
+ */
+export function hardeningArgs(pidsLimit: string): string[] {
+  const args = ['--cap-drop=ALL', '--security-opt', 'no-new-privileges', '--init'];
+
+  // Test >0, not truthiness: cgroups v2 rejects `--pids-limit 0` with EINVAL and
+  // fails the spawn, and '0' is a truthy string. Blank/unparseable means no cap.
+  const pids = Number(pidsLimit);
+  if (Number.isFinite(pids) && pids > 0) args.push('--pids-limit', String(Math.floor(pids)));
+
+  return args;
+}
+
 function resolveProviderContribution(
   session: Session,
   agentGroup: AgentGroup,
@@ -295,7 +323,7 @@ export function buildMounts(
   // Session folder at /workspace (contains inbound.db, outbound.db, outbox/, .claude/)
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false });
 
-  // Agent group folder at /workspace/agent (RW for working files + CLAUDE.local.md)
+  // Agent group folder at /workspace/agent (RW for working files + shared memory)
   mounts.push({ hostPath: groupDir, containerPath: '/workspace/agent', readonly: false });
 
   // container.json — nested RO mount on top of RW group dir so the agent
@@ -305,10 +333,16 @@ export function buildMounts(
     mounts.push({ hostPath: containerJsonPath, containerPath: '/workspace/agent/container.json', readonly: true });
   }
 
+  // Stamped plugin content is immutable at runtime (the Agent Plugins
+  // contract: writes go to plugin-data/, which stays RW via the group mount).
+  // Same nested-RO pattern as container.json; initGroupFilesystem creates the
+  // dir before mounts are built, so the mount is unconditional.
+  mounts.push({ hostPath: path.join(groupDir, 'plugins'), containerPath: CONTAINER_PLUGINS_DIR, readonly: true });
+
   // Composer-managed CLAUDE.md artifacts — nested RO mounts. These are
   // regenerated from the shared base + fragments on every spawn; any
-  // agent-side writes would be clobbered, so enforce read-only. Only
-  // CLAUDE.local.md (per-group memory) remains RW via the group-dir mount.
+  // agent-side writes would be clobbered, so enforce read-only. The shared
+  // memory tree and standing-instructions source remain RW via the group mount.
   // `.claude-shared.md` is a symlink whose target (`/app/CLAUDE.md`) is
   // already RO-mounted, so writes through it fail regardless — no need for
   // a nested mount there.
@@ -389,15 +423,26 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
   // Create symlinks for desired skills (container path targets)
   for (const skill of desired) {
     const linkPath = path.join(skillsDir, skill);
-    let exists = false;
+    let entry: fs.Stats | undefined;
     try {
-      fs.lstatSync(linkPath);
-      exists = true;
+      entry = fs.lstatSync(linkPath);
     } catch {
       /* missing */
     }
-    if (!exists) {
+    if (!entry) {
       fs.symlinkSync(`/app/skills/${skill}`, linkPath);
+    } else if (!entry.isSymbolicLink()) {
+      // A real entry here is either a template overlay (intentional; see
+      // src/group-skills.ts) or a stale pre-refactor skill copy that shadows
+      // the shared skill (#3001). No marker distinguishes them yet, so
+      // surface the skip instead of staying silent.
+      log.warn(
+        'Shared skill not symlinked: real entry occupies the path (template overlay or stale pre-refactor copy)',
+        {
+          skill,
+          path: linkPath,
+        },
+      );
     }
   }
 }
@@ -483,9 +528,16 @@ async function buildContainerArgs(
   if (CONTAINER_CPU_LIMIT) args.push('--cpus', CONTAINER_CPU_LIMIT);
   if (CONTAINER_MEMORY_LIMIT) args.push('--memory', CONTAINER_MEMORY_LIMIT);
 
+  // Docker defaults /dev/shm to 64m, which silently short-writes past that size.
+  // agent-browser passes --disable-dev-shm-usage, but a third-party puppeteer or
+  // Playwright launcher may not.
+  args.push('--shm-size=1g');
+
+  args.push(...hardeningArgs(CONTAINER_PIDS_LIMIT));
+
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
-  args.push('-e', `TZ=${TIMEZONE}`);
+  args.push('-e', `TZ=${containerConfig.timezone ?? TIMEZONE}`);
 
   // Raise the SDK's 32000 output-token cap to the model's real ceiling. Claude
   // provider only — the var is read by the Claude Agent SDK and means nothing to
@@ -575,6 +627,18 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
     throw new Error('No packages to install. Use install_packages first.');
   }
 
+  // Which bytes this is built on. Recorded on the derived image so an operator
+  // can tell which base a group's packages were layered onto — the image id
+  // rather than a RepoDigest, because a locally built base has no RepoDigest at
+  // all and an id is unambiguous either way.
+  let baseId = '';
+  try {
+    const { stdout } = await execAsync(`${CONTAINER_RUNTIME_BIN} image inspect --format '{{.Id}}' ${CONTAINER_IMAGE}`);
+    baseId = stdout.trim();
+  } catch {
+    // Non-fatal: the build below fails on its own if the base is really absent.
+  }
+
   let dockerfile = `FROM ${CONTAINER_IMAGE}\nUSER root\n`;
   if (aptPackages.length > 0) {
     dockerfile += `RUN apt-get update && apt-get install -y ${aptPackages.join(' ')} && rm -rf /var/lib/apt/lists/*\n`;
@@ -588,6 +652,17 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
     dockerfile += `RUN ${allowlist} && pnpm install -g ${npmPackages.join(' ')}\n`;
   }
   dockerfile += 'USER node\n';
+
+  // Overwrite the provenance label rather than letting it be inherited.
+  //
+  // `dev.nanoclaw.image-source` is documented as the one claim a retag cannot
+  // forge, and --status treats it as the trustworthy answer. But a derived
+  // build inherits the base's labels, so without this a group that has just
+  // added arbitrary apt/npm packages would keep asserting `hardened` — the
+  // vendor's claim, over bytes the vendor never saw. `derived` is the honest
+  // answer, and `derived-from` says what it was layered onto.
+  dockerfile += 'LABEL dev.nanoclaw.image-source="derived"\n';
+  if (baseId) dockerfile += `LABEL dev.nanoclaw.derived-from="${baseId}"\n`;
 
   const imageTag = `${CONTAINER_IMAGE_BASE}:${agentGroupId}`;
 

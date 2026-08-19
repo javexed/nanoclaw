@@ -19,6 +19,11 @@
  *        → kill. Covers the "alive but silent for 30 min" case. Extended
  *        only while Bash is declared as running longer, honouring the
  *        user's own timeout directive. Kill then resets processing rows.
+ *        When no heartbeat file exists yet, falls back to the tracked
+ *        container spawn time so a container that goes idle without ever
+ *        reaching an SDK event —
+ *        and so never writes a heartbeat — still ages out instead of
+ *        living forever (see decideStuckAction's grace-period comment).
  *
  *     2. Message-scoped stuck: for each 'processing' row, tolerance =
  *        max(60s, current_bash_timeout_ms_if_Bash_running). If
@@ -45,7 +50,7 @@ import {
 } from './db/session-db.js';
 import { log } from './log.js';
 import { openInboundDb, openOutboundDb, openOutboundDbRw, inboundDbPath, heartbeatPath } from './session-manager.js';
-import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
+import { getContainerStartedAtMs, isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
 import type { Session } from './types.js';
 
 /**
@@ -83,22 +88,32 @@ export type StuckDecision =
 export function decideStuckAction(args: {
   now: number;
   heartbeatMtimeMs: number; // 0 when heartbeat file absent
+  containerStartedAtMs?: number; // fallback when heartbeat file absent
   containerState: ContainerState | null;
   claims: Array<{ message_id: string; status_changed: string }>;
 }): StuckDecision {
-  const { now, heartbeatMtimeMs, containerState, claims } = args;
+  const { now, heartbeatMtimeMs, containerStartedAtMs, containerState, claims } = args;
   const declaredBashMs = bashTimeoutMs(containerState);
 
-  // Ceiling check only applies when we have an actual heartbeat timestamp.
-  // A freshly-spawned container hasn't had any SDK activity yet so no
-  // heartbeat file exists — if we treated that as infinitely stale we'd
-  // kill every container within seconds of spawn. Genuinely-dead containers
-  // that never wrote a heartbeat are caught by the separate "container
-  // process not running" cleanup path, not here. If a fresh container is
-  // hanging at the gate (claimed a message but never did anything) the
-  // claim-stuck check below handles it.
-  if (heartbeatMtimeMs !== 0) {
-    const heartbeatAge = now - heartbeatMtimeMs;
+  // Ceiling check prefers the heartbeat file's mtime. A freshly-spawned
+  // container hasn't had any SDK activity yet so no heartbeat file exists —
+  // if we treated that as infinitely stale we'd kill every container within
+  // seconds of spawn. But "no heartbeat file" isn't only a spawn-grace-period
+  // signal: a container can also finish its one turn (or find nothing to do)
+  // without its poll loop ever reaching an SDK event, in which case a
+  // heartbeat file is never created for the rest of that container's life,
+  // and it sits alive-but-idle forever, immune to this check. Falling back
+  // to the container's spawn timestamp gives fresh spawns the same grace
+  // period as before (age starts at ~0) while still aging out a
+  // container that never ticks. Genuinely-dead containers that never wrote a
+  // heartbeat AND have no session record are caught by the separate
+  // "container process not running" cleanup path, not here. If a fresh
+  // container is hanging at the gate (claimed a message but never did
+  // anything) the claim-stuck check below handles it independently of this
+  // fallback.
+  const effectiveHeartbeatMs = heartbeatMtimeMs !== 0 ? heartbeatMtimeMs : (containerStartedAtMs ?? 0);
+  if (effectiveHeartbeatMs !== 0) {
+    const heartbeatAge = now - effectiveHeartbeatMs;
     const ceiling = Math.max(ABSOLUTE_CEILING_MS, declaredBashMs ?? 0);
     if (heartbeatAge > ceiling) {
       return { action: 'kill-ceiling', heartbeatAgeMs: heartbeatAge, ceilingMs: ceiling };
@@ -261,6 +276,21 @@ async function sweepSession(session: Session): Promise<void> {
         log.info('Closed spent task session', { sessionId: session.id, threadId: session.thread_id });
       }
     }
+
+    // 7. Cross-session echo backlog pruning. Pending trigger=0 'session-echo'
+    // rows have no other TTL — cap them (newest-N per session, plus a hard
+    // age cutoff) so fan-out can never grow inbound.db unboundedly.
+    // MODULE-HOOK:cross-session-echo-prune:start
+    try {
+      const { pruneEchoBacklog } = await import('./modules/cross-session-context/index.js');
+      const pruned = pruneEchoBacklog(inDb);
+      if (pruned > 0) {
+        log.info('Pruned session-echo backlog', { sessionId: session.id, pruned });
+      }
+    } catch (err) {
+      log.error('Echo backlog prune failed', { sessionId: session.id, err });
+    }
+    // MODULE-HOOK:cross-session-echo-prune:end
   } finally {
     inDb.close();
     outDb?.close();
@@ -290,6 +320,7 @@ function enforceRunningContainerSla(
   const decision = decideStuckAction({
     now: Date.now(),
     heartbeatMtimeMs: heartbeatMtimeMs(agentGroupId, session.id),
+    containerStartedAtMs: getContainerStartedAtMs(session.id),
     containerState: getContainerState(outDb),
     claims: getProcessingClaims(outDb),
   });
