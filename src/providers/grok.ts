@@ -30,11 +30,18 @@
  * NOT `providesAgentSurfaces`. Grok reads CLAUDE.md and AGENTS.md from the cwd
  * natively (verified with `grok inspect`), so the host's default surfaces are
  * already the right ones — this provider composes nothing of its own.
+ *
+ * CREDENTIALS are materialised here too, per spawn: the host keeps the refresh
+ * token outside this mount and writes only a short-lived access token into it
+ * (grok-auth.ts). So the writable home below carries a session store and a
+ * bounded-lifetime token, never the renewable credential itself.
  */
 import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR } from '../config.js';
+import { log } from '../log.js';
+import { materializeContainerAuth } from './grok-auth.js';
 import { registerProviderContainerConfig } from './provider-container-registry.js';
 
 /** Container-side home for the grok CLI. Fixed by the CLI, not by us. */
@@ -63,6 +70,23 @@ export function ensureGrokSharedDir(agentGroupId: string): string {
 
 registerProviderContainerConfig('grok', (ctx) => {
   const hostPath = ensureGrokSharedDir(ctx.agentGroupId);
+
+  // Refresh the container's copy of the access token on every spawn. A group
+  // that has never authenticated simply has nothing to write — that is the
+  // un-authenticated case, handled by the setup walk-through, not an error to
+  // fail a spawn over.
+  const wrote = materializeContainerAuth(ctx.agentGroupId, hostPath, {
+    onError: (err) =>
+      log.warn(
+        `Grok token refresh failed for agent group ${ctx.agentGroupId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      ),
+  });
+  if (!wrote) {
+    log.warn(`Grok: no host credentials for agent group ${ctx.agentGroupId} — run the Grok auth walk-through`);
+  }
+
   return {
     mounts: [{ hostPath, containerPath: GROK_HOME_CONTAINER_PATH, readonly: false }],
   };
