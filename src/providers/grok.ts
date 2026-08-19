@@ -21,11 +21,23 @@
  * store must outlive any single session.
  *
  * NO PROXY BYPASS — the absence is the decision. Grok talks to a remote,
- * authenticated endpoint (api.x.ai), so it stays on the OneCLI path where
- * credentials are injected on the wire. This is the INVERSE of the local-model
- * providers, which NO_PROXY around the gateway to reach a host-local server.
- * Adding a bypass here would route subscription traffic outside the credential
- * gateway.
+ * authenticated endpoint, so it stays on the OneCLI path where credentials can
+ * be injected on the wire. This is the INVERSE of the local-model providers,
+ * which NO_PROXY around the gateway to reach a host-local server.
+ *
+ * SSL_CERT_FILE IS WHAT MAKES THAT TRUE RATHER THAN NOMINAL. The gateway can
+ * only inject a credential if it can terminate TLS, which requires the client to
+ * trust its CA. applyContainerConfig sets NODE_EXTRA_CA_CERTS — Node-only — and
+ * the grok CLI is a native binary, so without this it does not trust the proxy,
+ * the request tunnels straight through, and nothing is ever injected. Measured:
+ * with the CA trusted, a container holding a deliberately INVALID token still
+ * completed a turn because the gateway swapped the Authorization header; without
+ * it, the same request reached grok.com unmodified and returned
+ * `credential_not_found`. So this line is the difference between being on the
+ * credential path and merely appearing to be.
+ *
+ * Scoped to grok's own containers by virtue of being a provider contribution —
+ * it does not change the trust store for groups running any other harness.
  *
  * NOT `providesAgentSurfaces`. Grok reads CLAUDE.md and AGENTS.md from the cwd
  * natively (verified with `grok inspect`), so the host's default surfaces are
@@ -46,6 +58,15 @@ import { registerProviderContainerConfig } from './provider-container-registry.j
 
 /** Container-side home for the grok CLI. Fixed by the CLI, not by us. */
 export const GROK_HOME_CONTAINER_PATH = '/home/node/.grok';
+
+/**
+ * Where the OneCLI SDK mounts its proxy CA inside the container.
+ *
+ * Coupled to the SDK's choice (applyContainerConfig mounts it here and points
+ * NODE_EXTRA_CA_CERTS at it). Duplicated because the provider's config fn runs
+ * BEFORE that call, so there is nothing to read it from.
+ */
+export const ONECLI_CA_CONTAINER_PATH = '/tmp/onecli-gateway-ca.pem';
 
 /** Per-group host directory backing that home. Beside `.claude-shared`. */
 export function grokSharedDir(agentGroupId: string): string {
@@ -89,5 +110,6 @@ registerProviderContainerConfig('grok', (ctx) => {
 
   return {
     mounts: [{ hostPath, containerPath: GROK_HOME_CONTAINER_PATH, readonly: false }],
+    env: { SSL_CERT_FILE: ONECLI_CA_CONTAINER_PATH },
   };
 });

@@ -19,7 +19,7 @@ vi.mock('../config.js', async (importOriginal) => ({
   DATA_DIR: TMP,
 }));
 
-const { GROK_HOME_CONTAINER_PATH, ensureGrokSharedDir, grokSharedDir } = await import('./grok.js');
+const { GROK_HOME_CONTAINER_PATH, ONECLI_CA_CONTAINER_PATH, ensureGrokSharedDir, grokSharedDir } = await import('./grok.js');
 const { getProviderContainerConfig, listProviderContainerConfigNames, providerProvidesAgentSurfaces } = await import(
   './provider-container-registry.js'
 );
@@ -101,12 +101,22 @@ describe('the persistent grok home', () => {
 });
 
 describe('proxy posture', () => {
-  it('contributes NO env — Grok stays on the OneCLI credential path', () => {
+  it('never bypasses the gateway', () => {
     // The inverse of the local-model providers, which NO_PROXY around the
     // gateway. A bypass here would route subscription traffic outside the
     // credential gateway, so its absence is deliberate and pinned.
     const contribution = getProviderContainerConfig('grok')!(ctx('group-F'));
-    expect(contribution.env).toBeUndefined();
     expect(JSON.stringify(contribution)).not.toMatch(/NO_PROXY|no_proxy/);
+  });
+
+  it('trusts the gateway CA, without which the credential path is nominal only', () => {
+    // MEASURED: the grok CLI is a native binary, so NODE_EXTRA_CA_CERTS (which
+    // applyContainerConfig sets) does not reach it. Without this the request
+    // tunnels through unmodified and the gateway can inject nothing — a
+    // container holding an INVALID token got `credential_not_found` from
+    // grok.com, while the same request with the CA trusted completed because the
+    // Authorization header was swapped.
+    const contribution = getProviderContainerConfig('grok')!(ctx('group-G'));
+    expect(contribution.env?.SSL_CERT_FILE).toBe(ONECLI_CA_CONTAINER_PATH);
   });
 });
