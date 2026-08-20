@@ -68,14 +68,66 @@ export function readSetting(key: (typeof SETTINGS)[number], env: NodeJS.ProcessE
 }
 
 /**
- * Docker's network topology, decided at spawn: the egress-lockdown network
- * when the flag is on (throws rather than spawning with open egress), else the
+ * Decide the network for one session, when the topology is richer than
+ * `spec.network` can say.
+ *
+ * `spec.network` is deliberately a two-value field ('shared-private' | 'none')
+ * because a SPEC should describe intent, not a runtime's vocabulary. An
+ * installed module may need a third thing this install actually supports —
+ * per-group host-only egress, where the container reaches the host gateway but
+ * nothing beyond it. Rather than widen the spec for every runtime's private
+ * vocabulary, a resolver returns the argv for the cases it recognizes and null
+ * for everything else, which falls through to the rules below.
+ *
+ * Returning `[]` is meaningful and distinct from null: it means "this session
+ * gets no network flags at all", which is not the same as "I have no opinion".
+ *
+ * Core registers none: with nothing installed, every resolver is absent and the
+ * behavior below is exactly what it was.
+ */
+export type NetworkPolicyResolver = (spec: SessionSpec) => string[] | null;
+const networkPolicyResolvers: NetworkPolicyResolver[] = [];
+export function registerNetworkPolicyResolver(fn: NetworkPolicyResolver): void {
+  networkPolicyResolvers.push(fn);
+}
+export function resolveNetworkPolicy(spec: SessionSpec): string[] | null {
+  for (const fn of networkPolicyResolvers) {
+    try {
+      const out = fn(spec);
+      if (out) return out;
+    } catch (err) {
+      // A resolver must never be able to spawn a container with the WRONG
+      // network by throwing — fall through to the built-in rules, which are
+      // the safe ones (lockdown when armed).
+      log.warn('Network policy resolver failed; falling back', { err: String(err) });
+    }
+  }
+  return null;
+}
+
+/** Test-only: drop registered resolvers so one test cannot leak into the next. */
+export function __resetNetworkPolicyResolversForTest(): void {
+  networkPolicyResolvers.length = 0;
+}
+
+/**
+ * Docker's network topology, decided at spawn: a module's resolver first, then
+ * the session's own declared intent, then the egress-lockdown network when the
+ * flag is on (throws rather than spawning with open egress), else the
  * host-gateway mapping Linux needs to reach host services. Injected at
  * registration — the driver stays constructible without it in tests, and
  * composition never sees an argv-shaped network selection: `spec.network`
  * states the intent, this realizes it, and nothing rides between them.
+ *
+ * `spec.network === 'none'` was previously DECLARED AND NEVER READ: the comment
+ * above already claimed this function realized it, and it did not, so a session
+ * composed with no network still got the default. Honouring it here is what
+ * makes that claim true.
  */
-function dockerNetworkArgs(spec: SessionSpec): string[] {
+export function dockerNetworkArgs(spec: SessionSpec): string[] {
+  const fromModule = resolveNetworkPolicy(spec);
+  if (fromModule) return fromModule;
+  if (spec.network === 'none') return ['--network', 'none'];
   if (ensureEgressNetwork()) {
     log.info('Egress lockdown active', { containerName: agentContainerName(spec), network: EGRESS_NETWORK });
     return egressNetworkArgs();
