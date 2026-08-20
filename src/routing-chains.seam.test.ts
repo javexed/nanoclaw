@@ -109,7 +109,7 @@ describe('session inbound writers — first-true-claims chain', () => {
       calls.push('never');
       return true;
     });
-    expect(runSessionInboundWriter(args)).toBe(true);
+    expect(await runSessionInboundWriter(args)).toBe(true);
     expect(calls).toEqual(['declines', 'throws', 'claims']);
   });
 });

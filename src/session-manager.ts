@@ -164,18 +164,21 @@ export interface SessionInboundWriterArgs {
   currentMessageId: string;
   deliveryAddr: { platformId: string | null; channelType: string | null; threadId: string | null };
 }
-type SessionInboundWriter = (args: SessionInboundWriterArgs) => boolean;
+type SessionInboundWriter = (args: SessionInboundWriterArgs) => boolean | Promise<boolean>;
 const sessionInboundWriters: SessionInboundWriter[] = [];
 export function registerSessionInboundWriter(fn: SessionInboundWriter): void {
   sessionInboundWriters.push(fn);
 }
-export function runSessionInboundWriter(args: SessionInboundWriterArgs): boolean {
+export async function runSessionInboundWriter(args: SessionInboundWriterArgs): Promise<boolean> {
   // First writer to return true claims the write (writers decline sessions
   // they don't own); a throwing writer falls through to the next, and to the
-  // router's normal single-message write if none claim it.
+  // router's normal single-message write if none claim it. Async since the DB
+  // went async — the await matters doubly here: an un-awaited writer would
+  // look unclaimed (a promise is not === true) and the router would write a
+  // SECOND copy of everything the writer synced.
   for (const fn of sessionInboundWriters) {
     try {
-      if (fn(args)) return true;
+      if (await fn(args)) return true;
     } catch {
       /* fall through */
     }

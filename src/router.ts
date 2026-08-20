@@ -719,7 +719,7 @@ async function deliverToAgent(
   // (e.g. full room-transcript sync into the per-member session).
   const handledByWriter =
     keyOverride && wake
-      ? runSessionInboundWriter({
+      ? await runSessionInboundWriter({
           agentGroupId: agent.agent_group_id,
           session,
           roomId: mg.platform_id,
