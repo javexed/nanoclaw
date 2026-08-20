@@ -638,7 +638,7 @@ async function deliverToAgent(
   // Module turn gate: a registered gate may veto this delivery before any
   // session exists (e.g. per-user setup required). Core records the drop with
   // the module's reason; the user-facing notice is the module's own job.
-  const veto = consultTurnGates(mg, agent.agent_group_id, userId);
+  const veto = await consultTurnGates(mg, agent.agent_group_id, userId);
   if (veto) {
     recordDroppedMessage({
       channel_type: event.channelType,
@@ -659,7 +659,7 @@ async function deliverToAgent(
   // Pass the PRE-override thread: a resolver that re-keys by user needs it to
   // key by (user, thread) rather than collapsing a room's threads into one
   // session.
-  const keyOverride = resolveSessionKeyOverride(mg, agent.agent_group_id, userId, sessionThreadId);
+  const keyOverride = await resolveSessionKeyOverride(mg, agent.agent_group_id, userId, sessionThreadId);
   if (keyOverride) {
     effectiveSessionMode = keyOverride.sessionMode;
     sessionThreadId = keyOverride.threadId;

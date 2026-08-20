@@ -16,7 +16,7 @@ import type { MessagingGroup } from './types.js';
 const mg = { id: 'mg-1', channel_type: 'webchat', platform_id: 'room-1', is_group: 1 };
 
 describe('session-key resolvers — first-non-null chain + namespace guard', () => {
-  it('asks resolvers in order; first non-null override wins; throw is skipped', () => {
+  it('asks resolvers in order; first non-null override wins; throw is skipped', async () => {
     registerSessionKeyResolver(() => {
       throw new Error('resolver bug');
     });
@@ -27,13 +27,13 @@ describe('session-key resolvers — first-non-null chain + namespace guard', () 
     registerSessionKeyResolver((_m, _ag, userId) =>
       userId === 'webchat:alice' ? { sessionMode: 'shared' as const, threadId: 'never-reached' } : null,
     );
-    expect(resolveSessionKeyOverride(mg, 'ag-1', 'webchat:alice')).toEqual({
+    expect(await resolveSessionKeyOverride(mg, 'ag-1', 'webchat:alice')).toEqual({
       sessionMode: 'per-thread',
       threadId: 'webchat:alice',
     });
   });
 
-  it('passes the pre-override thread so a resolver can key by (user, thread)', () => {
+  it('passes the pre-override thread so a resolver can key by (user, thread)', async () => {
     // Without this a resolver that re-keys by user collapses every thread in a
     // room into one session: the room's and a topic thread's messages share a
     // queue, and replies come back on the wrong thread.
@@ -46,36 +46,36 @@ describe('session-key resolvers — first-non-null chain + namespace guard', () 
       seen.push(threadId);
       return { sessionMode: 'per-thread' as const, threadId: `${userId}::${threadId ?? 'main'}` };
     });
-    expect(resolveSessionKeyOverride(mg, 'ag-t', 'webchat:threadkey', 'topic-1')).toEqual({
+    expect(await resolveSessionKeyOverride(mg, 'ag-t', 'webchat:threadkey', 'topic-1')).toEqual({
       sessionMode: 'per-thread',
       threadId: 'webchat:threadkey::topic-1',
     });
-    expect(resolveSessionKeyOverride(mg, 'ag-t', 'webchat:threadkey', null)).toEqual({
+    expect(await resolveSessionKeyOverride(mg, 'ag-t', 'webchat:threadkey', null)).toEqual({
       sessionMode: 'per-thread',
       threadId: 'webchat:threadkey::main',
     });
     expect(seen).toEqual(['topic-1', null]);
   });
 
-  it('gives a resolver null (not undefined) when the caller omits the thread', () => {
+  it('gives a resolver null (not undefined) when the caller omits the thread', async () => {
     // Older callers pass three args; the resolver must still see a definite value.
     let got: unknown = 'unset';
     registerSessionKeyResolver((_m, _ag, userId, threadId) => {
       if (userId === 'webchat:omitted') got = threadId;
       return null;
     });
-    resolveSessionKeyOverride(mg, 'ag-t', 'webchat:omitted');
+    await resolveSessionKeyOverride(mg, 'ag-t', 'webchat:omitted');
     expect(got).toBeNull();
   });
 
-  it('rejects an override into the reserved system:% namespace and falls through', () => {
+  it('rejects an override into the reserved system:% namespace and falls through', async () => {
     registerSessionKeyResolver((_m, _ag, userId) =>
       userId === 'webchat:bob' ? { sessionMode: 'per-thread' as const, threadId: 'system:tasks:hijack' } : null,
     );
     registerSessionKeyResolver((_m, _ag, userId) =>
       userId === 'webchat:bob' ? { sessionMode: 'per-thread' as const, threadId: 'webchat:bob' } : null,
     );
-    expect(resolveSessionKeyOverride(mg, 'ag-2', 'webchat:bob')).toEqual({
+    expect(await resolveSessionKeyOverride(mg, 'ag-2', 'webchat:bob')).toEqual({
       sessionMode: 'per-thread',
       threadId: 'webchat:bob',
     });
@@ -91,7 +91,7 @@ describe('session inbound writers — first-true-claims chain', () => {
     deliveryAddr: { platformId: 'room-1', channelType: 'webchat', threadId: null },
   };
 
-  it('first writer returning true claims; decliners and throwers fall through', () => {
+  it('first writer returning true claims; decliners and throwers fall through', async () => {
     const calls: string[] = [];
     registerSessionInboundWriter(() => {
       calls.push('declines');
@@ -115,7 +115,7 @@ describe('session inbound writers — first-true-claims chain', () => {
 });
 
 describe('inbound delivery-plan resolvers — first-non-null chain', () => {
-  it('skips null and throwing resolvers; first plan wins', () => {
+  it('skips null and throwing resolvers; first plan wins', async () => {
     registerInboundDeliveryPlanResolver(() => null);
     registerInboundDeliveryPlanResolver(() => {
       throw new Error('planner bug');
@@ -125,7 +125,7 @@ describe('inbound delivery-plan resolvers — first-non-null chain', () => {
     expect(resolveInboundDeliveryPlan(mg as unknown as MessagingGroup, null, 'hello', undefined)).toBe(plan);
   });
 
-  it('returns null when no resolver claims the event', () => {
+  it('returns null when no resolver claims the event', async () => {
     expect(
       resolveInboundDeliveryPlan(
         { ...mg, id: 'mg-unclaimed', platform_id: 'other' } as unknown as MessagingGroup,

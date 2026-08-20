@@ -73,23 +73,25 @@ type SessionKeyResolver = (
    * last, so existing resolvers are unaffected.
    */
   threadId?: string | null,
-) => SessionKeyOverride | null;
+) => SessionKeyOverride | null | Promise<SessionKeyOverride | null>;
 const sessionKeyResolvers: SessionKeyResolver[] = [];
 export function registerSessionKeyResolver(fn: SessionKeyResolver): void {
   sessionKeyResolvers.push(fn);
 }
-export function resolveSessionKeyOverride(
+export async function resolveSessionKeyOverride(
   mg: { id: string; channel_type: string; platform_id: string; is_group?: number },
   agentGroupId: string,
   userId: string | null,
   threadId?: string | null,
-): SessionKeyOverride | null {
+): Promise<SessionKeyOverride | null> {
   // Decision chain: first non-null override wins; a throwing resolver is
-  // skipped (a resolver bug must never break routing).
+  // skipped (a resolver bug must never break routing). Async since the DB went
+  // async — a resolver that consults credential state has to await it, and the
+  // one caller (the router) is already in an async context.
   for (const fn of sessionKeyResolvers) {
     let override: SessionKeyOverride | null;
     try {
-      override = fn(mg, agentGroupId, userId, threadId ?? null);
+      override = await fn(mg, agentGroupId, userId, threadId ?? null);
     } catch {
       continue;
     }
@@ -126,19 +128,19 @@ type TurnGate = (
   mg: { id: string; channel_type: string; platform_id: string; is_group?: number },
   agentGroupId: string,
   userId: string | null,
-) => TurnVeto | null;
+) => TurnVeto | null | Promise<TurnVeto | null>;
 const turnGates: TurnGate[] = [];
 export function registerTurnGate(fn: TurnGate): void {
   turnGates.push(fn);
 }
-export function consultTurnGates(
+export async function consultTurnGates(
   mg: { id: string; channel_type: string; platform_id: string; is_group?: number },
   agentGroupId: string,
   userId: string | null,
-): TurnVeto | null {
+): Promise<TurnVeto | null> {
   for (const fn of turnGates) {
     try {
-      const veto = fn(mg, agentGroupId, userId);
+      const veto = await fn(mg, agentGroupId, userId);
       if (veto) return veto;
     } catch {
       // a gate bug must never break routing — skip it
