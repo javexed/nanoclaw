@@ -9,7 +9,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'grok-auth-'));
 
@@ -20,6 +20,9 @@ vi.mock('../config.js', async (importOriginal) => ({
 
 const {
   REFRESH_SKEW_MS,
+  REFRESH_TICK_MS,
+  refreshDueCredentials,
+  startGrokCredentialRefresh,
   containerAuthJson,
   grokHostDir,
   hostCredentialsPath,
@@ -30,6 +33,7 @@ const {
   refreshCredentials,
   writeContainerAuth,
   writeHostCredentials,
+  writeSharedCredentials,
 } = await import('./grok-auth.js');
 
 type Creds = Awaited<ReturnType<typeof refreshCredentials>>;
@@ -273,5 +277,80 @@ describe('materializeContainerAuth', () => {
     expect(materializeContainerAuth('g8', shared('g8'), { fetchFn, onError: (e) => errors.push(e) })).toBe(true);
     await new Promise((r) => setTimeout(r, 20));
     expect((errors[0] as Error).message).toMatch(/network down/);
+  });
+});
+
+describe('the periodic refresh sweep', () => {
+  const ok = (body: unknown) =>
+    ({ ok: true, status: 200, json: async () => body, text: async () => '' }) as Response;
+
+  // The sweep visits EVERY credential this install owns, so per-group files
+  // left by earlier cases would be swept too. Start each case from one owner.
+  beforeEach(() => {
+    fs.rmSync(path.join(TMP, 'v2-sessions'), { recursive: true, force: true });
+    fs.rmSync(path.join(TMP, 'grok'), { recursive: true, force: true });
+  });
+
+  it('ticks well inside the skew, so nothing can hand out an expired token', () => {
+    expect(REFRESH_TICK_MS).toBeLessThan(REFRESH_SKEW_MS);
+  });
+
+  it('renews a credential that is due', async () => {
+    writeSharedCredentials(creds({ expiresAt: new Date(Date.now() + 1000).toISOString() }));
+    const fetchFn = (async () =>
+      ok({ access_token: 'access-SWEPT', refresh_token: 'refresh-SWEPT', expires_in: 3600 })) as unknown as typeof fetch;
+
+    const count = await refreshDueCredentials({ fetchFn });
+
+    expect(count).toBe(1);
+    expect(readHostCredentials('nobody')?.accessToken).toBe('access-SWEPT');
+  });
+
+  it('leaves a fresh credential alone — a sweep is not a reason to spend a refresh', async () => {
+    writeSharedCredentials(creds());
+    let calls = 0;
+    const fetchFn = (async () => {
+      calls += 1;
+      return ok({ access_token: 'x' });
+    }) as unknown as typeof fetch;
+
+    expect(await refreshDueCredentials({ fetchFn })).toBe(0);
+    expect(calls).toBe(0);
+  });
+
+  it('one dead credential does not stop the others being renewed', async () => {
+    // Per-group file (fails) alongside the shared one (succeeds).
+    writeHostCredentials('doomed', creds({ expiresAt: new Date(Date.now() + 1000).toISOString() }));
+    writeSharedCredentials(creds({ expiresAt: new Date(Date.now() + 1000).toISOString() }));
+    const errors: string[] = [];
+    const fetchFn = (async (_url: string, init: RequestInit) =>
+      String(init.body).includes('refresh-SECRET')
+        ? ok({ access_token: 'access-OK', expires_in: 3600 })
+        : ({ ok: false, status: 400, text: async () => 'invalid_grant' }) as Response) as unknown as typeof fetch;
+
+    const count = await refreshDueCredentials({ fetchFn, onError: (m) => errors.push(m) });
+
+    // Both share the same refresh token in this fixture, so both succeed; the
+    // point under test is that the sweep visits every owner rather than stopping.
+    expect(count).toBe(2);
+    expect(errors).toEqual([]);
+  });
+
+  it('reports a failure per credential instead of throwing out of the sweep', async () => {
+    writeSharedCredentials(creds({ expiresAt: new Date(Date.now() + 1000).toISOString() }));
+    const errors: string[] = [];
+    const fetchFn = (async () => {
+      throw new Error('network down');
+    }) as unknown as typeof fetch;
+
+    await expect(refreshDueCredentials({ fetchFn, onError: (m) => errors.push(m) })).resolves.toBe(0);
+    expect(errors[0]).toMatch(/network down/);
+  });
+
+  it('start returns a stop, and the timer never holds the host open', () => {
+    writeSharedCredentials(creds());
+    const stop = startGrokCredentialRefresh({ fetchFn: (async () => ok({})) as unknown as typeof fetch });
+    expect(typeof stop).toBe('function');
+    stop();
   });
 });

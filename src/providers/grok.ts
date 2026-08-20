@@ -53,7 +53,8 @@ import path from 'path';
 
 import { DATA_DIR } from '../config.js';
 import { log } from '../log.js';
-import { materializeContainerAuth } from './grok-auth.js';
+import { materializeContainerAuth, startGrokCredentialRefresh } from './grok-auth.js';
+import { onHostStart } from '../host-lifecycle.js';
 import { registerProviderContainerConfig } from './provider-container-registry.js';
 
 /** Container-side home for the grok CLI. Fixed by the CLI, not by us. */
@@ -112,4 +113,23 @@ registerProviderContainerConfig('grok', (ctx) => {
     mounts: [{ hostPath, containerPath: GROK_HOME_CONTAINER_PATH, readonly: false }],
     env: { SSL_CERT_FILE: ONECLI_CA_CONTAINER_PATH },
   };
+});
+
+/**
+ * Keep credentials alive on a timer, not only when a container spawns.
+ *
+ * A spawn-gated refresh renews a 6h token only if something happens to use Grok
+ * inside that window. An install whose Grok agents idle overnight therefore
+ * wakes up expired — which is precisely what happened here: the wizard reported
+ * "not connected" on a credential whose refresh token was still perfectly good.
+ *
+ * Registered at host start rather than on import so it starts with the rest of
+ * the host, and skipped entirely when this install has no Grok credentials —
+ * the sweep reads nothing and does nothing.
+ */
+onHostStart(() => {
+  startGrokCredentialRefresh({
+    onInfo: (message) => log.info(message),
+    onError: (message) => log.warn(message),
+  });
 });

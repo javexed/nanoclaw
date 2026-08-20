@@ -37,6 +37,17 @@ import { DATA_DIR } from '../config.js';
 /** Refresh this far before actual expiry — never hand out a token about to die. */
 export const REFRESH_SKEW_MS = 10 * 60_000;
 
+/**
+ * How often the host checks whether a credential is due.
+ *
+ * MUST be shorter than REFRESH_SKEW_MS, and a test enforces it. The first cut
+ * was 15 minutes against a 10-minute skew, which leaves a hole: a token with 11
+ * minutes left is not due at one tick and is already expired by the next. The
+ * tick has to be able to catch a credential inside its own warning window.
+ * A tick that finds nothing due costs one small file read.
+ */
+export const REFRESH_TICK_MS = 5 * 60_000;
+
 /** xAI's OIDC token endpoint, from its published discovery document. */
 export const DEFAULT_TOKEN_ENDPOINT = 'https://auth.x.ai/oauth2/token';
 
@@ -262,4 +273,81 @@ export function materializeContainerAuth(
       .catch((err) => deps.onError?.(err));
   }
   return true;
+}
+
+/** Every credential file this install owns: the shared one, plus any per-group overrides. */
+export function listCredentialOwners(): Array<{ label: string; read: () => GrokCredentials | null; write: (c: GrokCredentials) => void }> {
+  const owners: Array<{ label: string; read: () => GrokCredentials | null; write: (c: GrokCredentials) => void }> = [
+    { label: 'shared', read: () => readCredentialFile(sharedCredentialsPath()), write: writeSharedCredentials },
+  ];
+  const root = path.join(DATA_DIR, 'v2-sessions');
+  let groups: string[] = [];
+  try {
+    groups = fs.readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
+  } catch {
+    return owners; // no sessions dir yet — the shared credential is all there is
+  }
+  for (const id of groups) {
+    if (!fs.existsSync(hostCredentialsPath(id))) continue;
+    owners.push({
+      label: `group ${id}`,
+      read: () => readCredentialFile(hostCredentialsPath(id)),
+      write: (c: GrokCredentials) => writeHostCredentials(id, c),
+    });
+  }
+  return owners;
+}
+
+export interface RefreshSweepDeps extends RefreshDeps {
+  onInfo?: (message: string) => void;
+  onError?: (message: string) => void;
+}
+
+/**
+ * Renew every credential that is due. Returns how many were refreshed.
+ *
+ * WHY THIS EXISTS AT ALL. Until now the only thing that ever refreshed a token
+ * was a container SPAWN. A Grok token lives 6h, so an install whose Grok agents
+ * sat idle overnight woke to an expired credential, a wizard card reading "not
+ * connected", and a first turn that had to race a background refresh to succeed.
+ * Observed exactly that. Expiry is a function of TIME, so the thing that renews
+ * it has to be too.
+ *
+ * Failures are per-credential and never thrown: one group's dead refresh token
+ * must not stop another group's from being renewed, and a network blip should
+ * cost a retry on the next tick, not the sweep.
+ */
+export async function refreshDueCredentials(deps: RefreshSweepDeps = {}): Promise<number> {
+  const now = (deps.now ?? Date.now)();
+  let refreshed = 0;
+  for (const owner of listCredentialOwners()) {
+    const creds = owner.read();
+    if (!creds || !needsRefresh(creds, now)) continue;
+    try {
+      const next = await refreshCredentials(creds, deps);
+      owner.write(next);
+      refreshed += 1;
+      deps.onInfo?.(`Grok credential renewed (${owner.label}) — valid until ${next.expiresAt}`);
+    } catch (err) {
+      deps.onError?.(
+        `Grok credential refresh failed (${owner.label}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  return refreshed;
+}
+
+/**
+ * Start the periodic sweep. Returns a stop function.
+ *
+ * The timer is unref'd so it never keeps the host alive on its own, and the
+ * first sweep runs immediately: a host that has just started after being down
+ * for hours is exactly the case where a credential is already stale.
+ */
+export function startGrokCredentialRefresh(deps: RefreshSweepDeps = {}): () => void {
+  const tick = () => void refreshDueCredentials(deps);
+  tick();
+  const timer = setInterval(tick, REFRESH_TICK_MS);
+  timer.unref?.();
+  return () => clearInterval(timer);
 }
