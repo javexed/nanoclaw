@@ -117,10 +117,10 @@ describe('writeOutboundDirect', () => {
  * message is logged-and-dropped forever — the reset silently kills the chat.
  */
 describe('writeSessionMessage re-provisions a deleted session folder', () => {
-  beforeEach(() => {
-    const db = initTestDb();
-    runMigrations(db);
-    createAgentGroup({
+  beforeEach(async () => {
+    const db = await initTestDb();
+    await runMigrations(db);
+    await createAgentGroup({
       id: AG,
       name: 'Reset',
       folder: 'reset',
@@ -138,11 +138,11 @@ describe('writeSessionMessage re-provisions a deleted session folder', () => {
       last_active: null,
       created_at: new Date().toISOString(),
     };
-    createSession(sess);
+    await createSession(sess);
   });
 
-  afterEach(() => {
-    closeDb();
+  afterEach(async () => {
+    await closeDb();
   });
 
   it('re-creates the folder + inbound.db and does not throw when the row still exists', () => {

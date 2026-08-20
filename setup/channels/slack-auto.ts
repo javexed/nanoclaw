@@ -42,6 +42,7 @@ import { confirmThenOpen } from '../lib/browser.js';
 import { runInheritScript } from '../lib/inherit-script.js';
 import {
   REGISTRY_LOGIN_SCRIPT,
+  clearImageSource,
   imageSourceDecided,
   loginScriptAvailable,
   readImageSource,
@@ -81,15 +82,29 @@ export interface ProvisionedApp {
   installError?: string;
 }
 
-/** The slice of src/provisioning/slack-app.ts this flow calls. */
+/**
+ * The slice of src/provisioning/slack-app.ts this flow calls.
+ *
+ * The optional attribution fields (requested_by, client_version) are
+ * optional metadata riding the service request — additive and
+ * safe against an installed core that predates them: the broker transport
+ * spreads its spec into the HTTP body verbatim (the service ignores fields it
+ * does not know), and the direct-Slack transport reads only name/description/
+ * agentView, so extra fields never reach the app manifest.
+ */
 export interface ProvisioningCore {
   BrokerHttpError: new (status: number, path: string, detail?: string) => Error & { status: number; path: string };
   brokerListWorkspaces(token: string): Promise<BrokerWorkspace[]>;
   brokerOauthUrl(token: string): Promise<{ url: string }>;
-  brokerProvision(token: string, spec: { team_id: string; name: string }): Promise<ProvisionedApp>;
-  provisionManagedApp(managerToken: string, spec: { name: string }): Promise<ProvisionedApp>;
+  brokerProvision(
+    token: string,
+    spec: { team_id: string; name: string; requested_by?: string; client_version?: string },
+  ): Promise<ProvisionedApp>;
+  provisionManagedApp(managerToken: string, spec: { name: string; client_version?: string }): Promise<ProvisionedApp>;
   readInstallToken(): string | undefined;
   readManagerToken(): string | undefined;
+  /** Where the broker calls go — named in the message when they are refused. */
+  readServiceBase(): string;
 }
 
 /** Injection seam for tests — the bootstrap never touches git or the loader in a unit test. */
@@ -98,6 +113,22 @@ export interface BootstrapDeps {
   /** Run a shell command at root; returns stdout, throws on failure. */
   exec?: (command: string) => string;
   importModule?: (fileUrl: string) => Promise<ProvisioningCore>;
+}
+
+/**
+ * The installing host's package.json version — the clientRecord idiom from
+ * setup/registry-login.ts, against the same root the provisioning-core
+ * bootstrap uses. Undefined (rather than 'unknown') when unreadable, so the
+ * optional client_version field is simply omitted from the request.
+ */
+function hostVersion(root: string): string | undefined {
+  try {
+    const pkg: unknown = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf-8'));
+    const version = (pkg as Record<string, unknown>)?.version;
+    return typeof version === 'string' && version.trim() ? version : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -202,18 +233,21 @@ export async function maybeAutoProvisionSlack(
   setupLog.userInput('slack_provision_mode', mode);
   if (mode === 'manual') return undefined;
 
-  if (managerToken) return provisionDirect(core, managerToken, agentName);
+  const clientVersion = hostVersion(deps.root ?? process.cwd());
+  if (managerToken) return provisionDirect(core, managerToken, agentName, clientVersion);
 
   // The login driver is idempotent: it validates a matching saved credential
   // without opening a browser, and re-authenticates when its issuer or token
   // is stale. Always pass through it rather than treating "a token exists" as
-  // proof that the token belongs to this setup's registry environment.
+  // proof that the token belongs to this setup's registry environment — and
+  // ask it, via --require-verified, to answer "no" rather than "keep what you
+  // have" when it could not reach the service to check.
   const validatedToken = await signInForBroker(core);
   if (!validatedToken) {
     p.log.warn('Not signed in — walking through manual app creation instead.');
     return undefined;
   }
-  return provisionViaBroker(core, validatedToken, agentName);
+  return provisionViaBroker(core, validatedToken, agentName, clientVersion);
 }
 
 /**
@@ -222,36 +256,53 @@ export async function maybeAutoProvisionSlack(
  * account, one sign-in, shared by the image pull and the Slack broker.
  *
  * The login driver flips the install's image source to 'hardened' as a side
- * effect (it exists to enable the pull). Signing in for Slack must not
- * override a deliberate local-build choice, so a decided source is restored.
+ * effect (it exists to enable the pull). Signing in for Slack must not answer
+ * the image question on the operator's behalf: a deliberate local-build choice
+ * is restored, and an install that has not been asked yet goes back to unasked
+ * rather than silently becoming a pulling one.
+ *
+ * `--require-verified` is what makes the return value mean something: without
+ * it the driver exits 0 for a credential it merely kept, and this function
+ * cannot tell that apart from one it checked. `retry` re-authenticates a
+ * credential the driver was happy with but the Slack service refused.
  */
-async function signInForBroker(core: ProvisioningCore): Promise<string | undefined> {
+async function signInForBroker(core: ProvisioningCore, opts: { retry?: boolean } = {}): Promise<string | undefined> {
   const savedAccount = readRegistryAccount();
   const savedService = displayServiceOrigin(savedAccount?.api);
   p.note(
     wrapForGutter(
-      savedAccount
+      opts.retry
         ? [
-            'Found saved NanoClaw credentials.',
-            `Service: ${savedService ?? 'unknown'}`,
-            'Checking whether they are valid for this setup…',
+            'The Slack service would not accept the saved credentials.',
+            'Signing in again — finish it in your browser, then come',
+            'back here.',
           ].join('\n')
-        : [
-            'Creating the app for you runs through your NanoClaw account.',
-            'A code appears below — finish the sign-in in your browser,',
-            'then come back here.',
-          ].join('\n'),
+        : savedAccount
+          ? [
+              'Found saved NanoClaw credentials.',
+              `Service: ${savedService ?? 'unknown'}`,
+              'Checking whether they are valid for this setup…',
+            ].join('\n')
+          : [
+              'Creating the app for you runs through your NanoClaw account.',
+              'A code appears below — finish the sign-in in your browser,',
+              'then come back here.',
+            ].join('\n'),
       6,
     ),
     'NanoClaw sign-in',
   );
-  const priorSource = imageSourceDecided() ? readImageSource() : undefined;
+  const wasDecided = imageSourceDecided();
+  const priorSource = wasDecided ? readImageSource() : undefined;
   const start = Date.now();
-  const code = await runInheritScript('bash', [REGISTRY_LOGIN_SCRIPT]);
+  const args = [REGISTRY_LOGIN_SCRIPT, '--require-verified', ...(opts.retry ? ['--force'] : [])];
+  const code = await runInheritScript('bash', args);
   if (priorSource === 'local') writeImageSource('local');
+  else if (!wasDecided) clearImageSource();
   const token = code === 0 ? core.readInstallToken() : undefined;
   setupLog.step('slack-broker-login', token ? 'success' : code === 2 ? 'skipped' : 'failed', Date.now() - start, {
     EXIT_CODE: String(code),
+    ...(opts.retry ? { RETRY: 'true' } : {}),
   });
   return token;
 }
@@ -271,12 +322,16 @@ async function provisionDirect(
   core: ProvisioningCore,
   managerToken: string,
   name: string,
+  clientVersion: string | undefined,
 ): Promise<Record<string, string> | undefined> {
   const s = p.spinner();
   const start = Date.now();
   s.start(`Creating ${name} in Slack… (~30s — generating its avatar first)`);
   try {
-    const app = await core.provisionManagedApp(managerToken, { name });
+    const app = await core.provisionManagedApp(managerToken, {
+      name,
+      ...(clientVersion ? { client_version: clientVersion } : {}),
+    });
     return finishProvisioned(app, name, s, start, 'slack-provision');
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -287,23 +342,72 @@ async function provisionDirect(
   }
 }
 
+/** An auth refusal, which no amount of retrying the same token can fix. */
+function isCredentialRefusal(core: ProvisioningCore, err: unknown): boolean {
+  return err instanceof core.BrokerHttpError && (err.status === 401 || err.status === 403);
+}
+
+/**
+ * Which two services are involved, for the message a refusal deserves. The
+ * credential comes from the account service; the call goes to the Slack
+ * service; naming only the second one describes a refusal the operator can do
+ * nothing about as an outage of a service that is in fact answering fine.
+ */
+function servicePairing(core: ProvisioningCore): string {
+  const credential = displayServiceOrigin(readRegistryAccount()?.api);
+  const service = displayServiceOrigin(core.readServiceBase()) ?? core.readServiceBase();
+  return `Credentials from ${credential ?? 'an unrecorded service'}; Slack service is ${service}.`;
+}
+
 async function provisionViaBroker(
   core: ProvisioningCore,
   installToken: string,
   name: string,
+  clientVersion: string | undefined,
 ): Promise<Record<string, string> | undefined> {
+  let token = installToken;
   let workspaces: BrokerWorkspace[];
   const s = p.spinner();
   let start = Date.now();
   s.start('Checking your connected Slack workspaces…');
   try {
-    workspaces = (await core.brokerListWorkspaces(installToken)).filter((w) => w.status === 'active');
+    workspaces = (await core.brokerListWorkspaces(token)).filter((w) => w.status === 'active');
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    s.stop("Couldn't reach the Slack service.", 1);
-    setupLog.step('slack-broker-workspaces', 'failed', Date.now() - start, { ERROR: message });
-    p.log.warn(`The service said: ${message}. Walking through manual app creation instead.`);
-    return undefined;
+    // A refusal means the token on disk is not one this service knows — the
+    // account service verifying it says nothing about that, since the two are
+    // separate deployments. One re-authentication is the only move that can
+    // change the answer; a second refusal is the operator's to resolve.
+    if (!isCredentialRefusal(core, err)) {
+      s.stop("Couldn't reach the Slack service.", 1);
+      setupLog.step('slack-broker-workspaces', 'failed', Date.now() - start, { ERROR: message });
+      p.log.warn(`The service said: ${message}. Walking through manual app creation instead.`);
+      return undefined;
+    }
+    s.stop("The Slack service didn't accept this install's credentials.", 1);
+    setupLog.step('slack-broker-workspaces', 'failed', Date.now() - start, { ERROR: message, REAUTH: 'offered' });
+    const refreshed = await signInForBroker(core, { retry: true });
+    if (!refreshed) {
+      p.log.warn(`${servicePairing(core)} Walking through manual app creation instead.`);
+      return undefined;
+    }
+    token = refreshed;
+    start = Date.now();
+    s.start('Checking your connected Slack workspaces…');
+    try {
+      workspaces = (await core.brokerListWorkspaces(token)).filter((w) => w.status === 'active');
+    } catch (retryErr) {
+      const retryMessage = retryErr instanceof Error ? retryErr.message : String(retryErr);
+      s.stop("The Slack service didn't accept this install's credentials.", 1);
+      setupLog.step('slack-broker-workspaces', 'failed', Date.now() - start, {
+        ERROR: retryMessage,
+        REAUTH: 'exhausted',
+      });
+      p.log.warn(
+        `The service said: ${retryMessage}. ${servicePairing(core)} Walking through manual app creation instead.`,
+      );
+      return undefined;
+    }
   }
   if (workspaces.length > 0) {
     s.stop(
@@ -313,7 +417,7 @@ async function provisionViaBroker(
     );
   } else {
     s.stop('No Slack workspace is connected yet.');
-    workspaces = await connectWorkspace(core, installToken);
+    workspaces = await connectWorkspace(core, token);
     if (workspaces.length === 0) return undefined;
   }
 
@@ -322,7 +426,16 @@ async function provisionViaBroker(
   start = Date.now();
   s2.start(`Creating ${name} in ${workspace.team_name}… (~30s — generating its avatar first)`);
   try {
-    const app = await core.brokerProvision(installToken, { team_id: workspace.team_id, name });
+    // Optional request metadata: the service already records connected_as
+    // (it recorded who connected the workspace), so sending it as
+    // requested_by adds nothing sensitive — it names who asked for this app.
+    // Passed verbatim (Enterprise Grid W-ids included); absent when unknown.
+    const app = await core.brokerProvision(token, {
+      team_id: workspace.team_id,
+      name,
+      ...(workspace.connected_as ? { requested_by: workspace.connected_as } : {}),
+      ...(clientVersion ? { client_version: clientVersion } : {}),
+    });
     const inputs = finishProvisioned(app, name, s2, start, 'slack-broker-provision');
     // The broker knows who connected the workspace — pre-fill the member-ID
     // prompt too (only when it matches the skill's validator; Enterprise Grid

@@ -20,6 +20,7 @@
     "setup": "tsx setup/index.ts",
     "setup:auto": "tsx setup/auto.ts",
     "ncl": "tsx src/cli/client.ts",
+    "migrate": "tsx scripts/migrate.ts",
     "chat": "tsx scripts/chat.ts",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",

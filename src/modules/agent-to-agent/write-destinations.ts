@@ -16,16 +16,16 @@ import { log } from '../../log.js';
 import { inboundDbPath, openInboundDb } from '../../session-manager.js';
 import { getDestinations } from './db/agent-destinations.js';
 
-export function writeDestinations(agentGroupId: string, sessionId: string): void {
+export async function writeDestinations(agentGroupId: string, sessionId: string): Promise<void> {
   const dbPath = inboundDbPath(agentGroupId, sessionId);
   if (!fs.existsSync(dbPath)) return;
 
-  const rows = getDestinations(agentGroupId);
+  const rows = await getDestinations(agentGroupId);
   const resolved: DestinationRow[] = [];
 
   for (const row of rows) {
     if (row.target_type === 'channel') {
-      const mg = getMessagingGroup(row.target_id);
+      const mg = await getMessagingGroup(row.target_id);
       if (!mg) continue;
       resolved.push({
         name: row.local_name,
@@ -36,7 +36,7 @@ export function writeDestinations(agentGroupId: string, sessionId: string): void
         agent_group_id: null,
       });
     } else if (row.target_type === 'agent') {
-      const ag = getAgentGroup(row.target_id);
+      const ag = await getAgentGroup(row.target_id);
       if (!ag) continue;
       resolved.push({
         name: row.local_name,

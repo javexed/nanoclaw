@@ -35,12 +35,12 @@ function now(): string {
   return new Date().toISOString();
 }
 
-function createGroup(id: string): void {
-  createAgentGroup({ id, name: id, folder: id, agent_provider: null, created_at: now() });
+async function createGroup(id: string): Promise<void> {
+  await createAgentGroup({ id, name: id, folder: id, agent_provider: null, created_at: now() });
 }
 
-function createChatSession(group: string, id: string): void {
-  createSession({
+async function createChatSession(group: string, id: string): Promise<void> {
+  await createSession({
     id,
     agent_group_id: group,
     messaging_group_id: null,
@@ -59,19 +59,19 @@ function agentCtx(group = 'ag-1', session = 'chat-1'): CallerContext {
 }
 
 describe('tasks CLI resource', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
     fs.mkdirSync(TEST_DIR, { recursive: true });
-    const db = initTestDb();
-    runMigrations(db);
-    createGroup('ag-1');
-    createGroup('ag-2');
-    createChatSession('ag-1', 'chat-1');
-    createChatSession('ag-2', 'chat-2');
+    const db = await initTestDb();
+    await runMigrations(db);
+    await createGroup('ag-1');
+    await createGroup('ag-2');
+    await createChatSession('ag-1', 'chat-1');
+    await createChatSession('ag-2', 'chat-2');
   });
 
-  afterEach(() => {
-    closeDb();
+  afterEach(async () => {
+    await closeDb();
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   });
 
@@ -92,7 +92,7 @@ describe('tasks CLI resource', () => {
     expect(created.session_id).not.toBe('chat-1');
 
     // The task lands in its own isolated per-series session, not the chat session.
-    const sessions = getSessionsByAgentGroup('ag-1');
+    const sessions = await getSessionsByAgentGroup('ag-1');
     const taskSession = sessions.find((s) => s.id === created.session_id);
     expect(taskSession?.thread_id).toBe(taskThreadId(created.series_id));
 
@@ -233,7 +233,7 @@ describe('tasks CLI resource', () => {
       agentCtx(),
     );
 
-    expect(findSessionByAgentGroup('ag-1')?.id).toBe('chat-1');
+    expect((await findSessionByAgentGroup('ag-1'))?.id).toBe('chat-1');
   });
 
   it('group-scoped agents cannot list tasks from another group session', async () => {

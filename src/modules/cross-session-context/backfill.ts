@@ -119,11 +119,11 @@ function collectSiblingTopLevel(agentGroup: AgentGroup, sessionId: string, limit
  * means the same audience. Call BEFORE the triggering message is written.
  * Non-throwing; no-ops for task sessions and sessions with no siblings.
  */
-export function backfillNewSession(agentGroup: AgentGroup, session: Session, mg: MessagingGroup): void {
+export async function backfillNewSession(agentGroup: AgentGroup, session: Session, mg: MessagingGroup): Promise<void> {
   try {
     if (session.thread_id !== null && isTaskThread(session.thread_id)) return;
 
-    const siblings = getSessionsByAgentGroup(agentGroup.id).filter(
+    const siblings = (await getSessionsByAgentGroup(agentGroup.id)).filter(
       (s) => s.id !== session.id && s.status === 'active' && s.messaging_group_id === mg.id,
     );
     if (siblings.length === 0) return;
@@ -141,11 +141,11 @@ export function backfillNewSession(agentGroup: AgentGroup, session: Session, mg:
       ? 'this channel, just before this conversation'
       : 'this DM, just before this conversation';
     const surface = isGroupSurface ? ECHO_CHANNEL_TIMELINE_SURFACE : ECHO_TIMELINE_SURFACE;
-    newest.forEach((row, i) => {
+    for (const [i, row] of newest.entries()) {
       // The most recent entry is what a short opener ("sure") is usually
       // answering — deliver it whole; earlier entries get the normal cap.
       const isLast = i === newest.length - 1;
-      writeSessionMessage(agentGroup.id, session.id, {
+      await writeSessionMessage(agentGroup.id, session.id, {
         id: `${session.id}:backfill:${i}`,
         kind: 'chat',
         timestamp: row.timestamp,
@@ -159,7 +159,7 @@ export function backfillNewSession(agentGroup: AgentGroup, session: Session, mg:
         }),
         trigger: 0,
       });
-    });
+    }
     log.debug('Backfilled new session with conversation timeline', {
       sessionId: session.id,
       rows: newest.length,

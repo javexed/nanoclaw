@@ -61,9 +61,7 @@ function pinnedBunVersion(root: string): string {
 export function portableDependencyCommand(root: string, bunOnHost: boolean, request: DependencyCommandRequest): string {
   const prefix = request.cwd ? `cd ${request.cwd} && ` : '';
   const manager =
-    request.manager === 'bun' && !bunOnHost
-      ? `pnpm --package=bun@${pinnedBunVersion(root)} dlx bun`
-      : request.manager;
+    request.manager === 'bun' && !bunOnHost ? `pnpm --package=bun@${pinnedBunVersion(root)} dlx bun` : request.manager;
   return `${prefix}${manager} ${request.action} ${request.packages.join(' ')}`;
 }
 

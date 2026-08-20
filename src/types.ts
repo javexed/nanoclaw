@@ -216,6 +216,13 @@ export interface PendingApproval {
   agent_group_id: string | null;
   channel_type: string | null;
   platform_id: string | null;
+  /**
+   * Adapter instance the card was delivered through (migration 023). NULL
+   * reads as the default instance (= channel_type). Delivery dispatch is
+   * exact-key, so any follow-up edit to the card must address the identity
+   * that posted it, not just the platform.
+   */
+  instance: string | null;
   platform_message_id: string | null;
   /**
    * For OneCLI credential rows, the gateway's request TTL. For a module

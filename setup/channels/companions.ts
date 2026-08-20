@@ -63,4 +63,4 @@ export function getCompanionSkills(channel: string): readonly string[] {
 // flag and returns without touching the registries when it is off; the
 // register function is passed in (rather than the shim importing it) so the
 // shim stays cycle-free and evaluates nothing beyond the flag check.
-registerSlackAutoProvision(registerChannelPreStep);
+registerSlackAutoProvision(registerChannelPreStep, registerCompanionSkills);

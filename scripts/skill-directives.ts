@@ -117,7 +117,8 @@ const KNOWN = new Set(['copy', 'append', 'dep', 'run', 'prompt', 'operator', 'en
 // Retired directives get a targeted lint error (not just "unknown") so an
 // author knows the removal was deliberate and what to do instead.
 const RETIRED: Record<string, string> = {
-  'env-sync': 'nc:env-sync was retired — nothing reads the data/env/env mirror (and it copied live tokens); delete the fence, the adapter reads .env directly',
+  'env-sync':
+    'nc:env-sync was retired — nothing reads the data/env/env mirror (and it copied live tokens); delete the fence, the adapter reads .env directly',
 };
 const PROMPT_FLAGS = new Set(['secret']);
 
@@ -221,7 +222,10 @@ export function validate(directives: Directive[], ctx?: { chatVersion?: string }
           // lockfile — the family moves together. This catches pin drift (the
           // 4.27.0-vs-chat@4.26.0 mismatch) at lint time.
           if (ctx?.chatVersion && name.startsWith('@chat-adapter/') && version !== ctx.chatVersion) {
-            flag(d, `${name} pinned ${version} but our chat core is ${ctx.chatVersion} — a @chat-adapter/* adapter must match the chat package`);
+            flag(
+              d,
+              `${name} pinned ${version} but our chat core is ${ctx.chatVersion} — a @chat-adapter/* adapter must match the chat package`,
+            );
           }
         }
         break;
@@ -317,7 +321,8 @@ export function validate(directives: Directive[], ctx?: { chatVersion?: string }
         flag(d, `when:${d.attrs.when} must be <var>=<value>`);
       } else {
         const wvar = d.attrs.when.slice(0, eq).trim();
-        if (!defined.has(wvar)) flag(d, `when:${d.attrs.when} references {{${wvar}}} but no earlier nc:prompt or nc:run capture defined it`);
+        if (!defined.has(wvar))
+          flag(d, `when:${d.attrs.when} references {{${wvar}}} but no earlier nc:prompt or nc:run capture defined it`);
       }
     }
     if (d.kind === 'prompt') {
@@ -358,11 +363,14 @@ export function lintReferenceFloor(markdown: string): Problem[] {
   if (!anchor) return []; // no credential / interactive step ⇒ no floor expected
   const hasTroubleshooting = markdown.split('\n').some((l) => /^##\s+Troubleshooting\s*$/.test(l.trim()));
   if (hasTroubleshooting) return [];
-  return [{
-    line: anchor.line,
-    kind: 'reference-floor',
-    message: 'a credentialed/interactive skill should carry a ## Troubleshooting section (the human floor when a live step misbehaves)',
-  }];
+  return [
+    {
+      line: anchor.line,
+      kind: 'reference-floor',
+      message:
+        'a credentialed/interactive skill should carry a ## Troubleshooting section (the human floor when a live step misbehaves)',
+    },
+  ];
 }
 
 /**

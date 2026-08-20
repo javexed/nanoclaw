@@ -20,6 +20,7 @@ import type { OutboundFile } from './channels/adapter.js';
 import { DATA_DIR } from './config.js';
 import { ensureContainedInboxDir, isPathInside } from './inbox-safety.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
+import { isUniqueViolation } from './db/errors.js';
 import {
   createSession,
   findSystemSession,
@@ -208,6 +209,35 @@ function generateId(): string {
   return `sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+const sessionCreationLocks = new Map<string, Promise<void>>();
+
+async function withSessionCreationLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const previous = sessionCreationLocks.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.then(() => current);
+  sessionCreationLocks.set(key, tail);
+  await previous;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (sessionCreationLocks.get(key) === tail) sessionCreationLocks.delete(key);
+  }
+}
+
+function sessionCreationKey(
+  agentGroupId: string,
+  messagingGroupId: string | null,
+  threadId: string | null,
+  sessionMode: 'shared' | 'per-thread' | 'agent-shared',
+): string {
+  if (sessionMode === 'agent-shared') return `agent\0${agentGroupId}`;
+  return `route\0${agentGroupId}\0${messagingGroupId ?? ''}\0${sessionMode === 'shared' ? '' : (threadId ?? '')}`;
+}
+
 /**
  * Find or create a session for a messaging group + thread.
  *
@@ -217,74 +247,101 @@ function generateId(): string {
  * - 'agent-shared': one session per agent group — all messaging groups
  *   wired with this mode share a single session (e.g. GitHub + Slack)
  */
-export function resolveSession(
+export async function resolveSession(
   agentGroupId: string,
   messagingGroupId: string | null,
   threadId: string | null,
   sessionMode: 'shared' | 'per-thread' | 'agent-shared',
-): { session: Session; created: boolean } {
-  // agent-shared: single session per agent group, regardless of messaging group
-  if (sessionMode === 'agent-shared') {
-    const existing = findSessionByAgentGroup(agentGroupId);
-    if (existing) {
+): Promise<{ session: Session; created: boolean }> {
+  const key = sessionCreationKey(agentGroupId, messagingGroupId, threadId, sessionMode);
+  return withSessionCreationLock(key, async () => {
+    // agent-shared: single session per agent group, regardless of messaging group
+    if (sessionMode === 'agent-shared') {
+      const existing = await findSessionByAgentGroup(agentGroupId);
+      if (existing) {
+        return { session: existing, created: false };
+      }
+    } else if (messagingGroupId) {
+      const lookupThreadId = sessionMode === 'shared' ? null : threadId;
+      // Scope lookup by agent_group_id so fan-out to multiple agents in the
+      // same chat doesn't accidentally deliver to the wrong agent's session.
+      const existing = await findSessionForAgent(agentGroupId, messagingGroupId, lookupThreadId);
+      if (existing) {
+        return { session: existing, created: false };
+      }
+    }
+
+    const id = generateId();
+    const lookupThreadId = sessionMode === 'per-thread' ? threadId : null;
+    const session: Session = {
+      id,
+      agent_group_id: agentGroupId,
+      messaging_group_id: messagingGroupId,
+      thread_id: lookupThreadId,
+      agent_provider: null,
+      status: 'active',
+      container_status: 'stopped',
+      last_active: null,
+      created_at: new Date().toISOString(),
+    };
+
+    try {
+      await createSession(session);
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      const existing =
+        sessionMode === 'agent-shared'
+          ? await findSessionByAgentGroup(agentGroupId)
+          : messagingGroupId
+            ? await findSessionForAgent(agentGroupId, messagingGroupId, lookupThreadId)
+            : undefined;
+      if (!existing) throw error;
       return { session: existing, created: false };
     }
-  } else if (messagingGroupId) {
-    const lookupThreadId = sessionMode === 'shared' ? null : threadId;
-    // Scope lookup by agent_group_id so fan-out to multiple agents in the
-    // same chat doesn't accidentally deliver to the wrong agent's session.
-    const existing = findSessionForAgent(agentGroupId, messagingGroupId, lookupThreadId);
-    if (existing) {
-      return { session: existing, created: false };
-    }
-  }
+    initSessionFolder(agentGroupId, id);
+    log.info('Session created', { id, agentGroupId, messagingGroupId, threadId: lookupThreadId, sessionMode });
 
-  const id = generateId();
-  const lookupThreadId = sessionMode === 'per-thread' ? threadId : null;
-  const session: Session = {
-    id,
-    agent_group_id: agentGroupId,
-    messaging_group_id: messagingGroupId,
-    thread_id: lookupThreadId,
-    agent_provider: null,
-    status: 'active',
-    container_status: 'stopped',
-    last_active: null,
-    created_at: new Date().toISOString(),
-  };
-
-  createSession(session);
-  initSessionFolder(agentGroupId, id);
-  log.info('Session created', { id, agentGroupId, messagingGroupId, threadId: lookupThreadId, sessionMode });
-
-  return { session, created: true };
+    return { session, created: true };
+  });
 }
 
 /** Find or create the per-agent-group session used for scheduled tasks. */
 /** Find or create the isolated session for one task series (thread `system:tasks:<seriesId>`). */
-export function resolveTaskSession(agentGroupId: string, seriesId: string): { session: Session; created: boolean } {
+export async function resolveTaskSession(
+  agentGroupId: string,
+  seriesId: string,
+): Promise<{ session: Session; created: boolean }> {
   const threadId = taskThreadId(seriesId);
-  const existing = findSystemSession(agentGroupId, threadId);
-  if (existing) return { session: existing, created: false };
+  return withSessionCreationLock(`system\0${agentGroupId}\0${threadId}`, async () => {
+    const existing = await findSystemSession(agentGroupId, threadId);
+    if (existing) return { session: existing, created: false };
 
-  const id = generateId();
-  const session: Session = {
-    id,
-    agent_group_id: agentGroupId,
-    messaging_group_id: null,
-    thread_id: threadId,
-    agent_provider: null,
-    status: 'active',
-    container_status: 'stopped',
-    last_active: null,
-    created_at: new Date().toISOString(),
-  };
+    const id = generateId();
+    const session: Session = {
+      id,
+      agent_group_id: agentGroupId,
+      messaging_group_id: null,
+      thread_id: threadId,
+      agent_provider: null,
+      status: 'active',
+      container_status: 'stopped',
+      last_active: null,
+      created_at: new Date().toISOString(),
+    };
 
-  createSession(session);
-  initSessionFolder(agentGroupId, id);
-  log.info('Task session created', { id, agentGroupId, seriesId });
+    try {
+      await createSession(session);
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      const raced = await findSystemSession(agentGroupId, threadId);
+      if (!raced) throw error;
+      return { session: raced, created: false };
+    }
+    initSessionFolder(agentGroupId, id);
+    log.info('Task session created', { id, agentGroupId, seriesId });
 
-  return { session, created: true };
+    return { session, created: true };
+  });
 }
 
 /** Create the session folder and initialize both DBs. */
@@ -308,17 +365,17 @@ export function initSessionFolder(agentGroupId: string, sessionId: string): void
  * writeDestinations() (when installed) so the latest routing is always in
  * place, including after admin rewiring.
  */
-export function writeSessionRouting(agentGroupId: string, sessionId: string): void {
+export async function writeSessionRouting(agentGroupId: string, sessionId: string): Promise<void> {
   const dbPath = inboundDbPath(agentGroupId, sessionId);
   if (!fs.existsSync(dbPath)) return;
 
-  const session = getSession(sessionId);
+  const session = await getSession(sessionId);
   if (!session) return;
 
   let channelType: string | null = null;
   let platformId: string | null = null;
   if (session.messaging_group_id) {
-    const mg = getMessagingGroup(session.messaging_group_id);
+    const mg = await getMessagingGroup(session.messaging_group_id);
     if (mg) {
       channelType = mg.channel_type;
       platformId = mg.platform_id;
@@ -345,7 +402,7 @@ export function writeSessionRouting(agentGroupId: string, sessionId: string): vo
  * long-lived connection — see the "Cross-mount visibility invariants" note
  * at the top of this file.
  */
-export function writeSessionMessage(
+export async function writeSessionMessage(
   agentGroupId: string,
   sessionId: string,
   message: {
@@ -377,7 +434,7 @@ export function writeSessionMessage(
      */
     onWake?: 0 | 1;
   },
-): void {
+): Promise<void> {
   // Documented reset: operators `rm -rf` a session folder to clear a stuck
   // session. The sessions row survives, so the next message takes the
   // existing-session path and lands here with a missing inbound.db — the open
@@ -411,7 +468,7 @@ export function writeSessionMessage(
     db.close();
   }
 
-  updateSession(sessionId, { last_active: new Date().toISOString() });
+  await updateSession(sessionId, { last_active: new Date().toISOString() });
 }
 
 /**
@@ -677,16 +734,16 @@ export function clearOutbox(agentGroupId: string, sessionId: string, messageId: 
 }
 
 /** Mark a container as running for a session. */
-export function markContainerRunning(sessionId: string): void {
-  updateSession(sessionId, { container_status: 'running', last_active: new Date().toISOString() });
+export async function markContainerRunning(sessionId: string): Promise<void> {
+  await updateSession(sessionId, { container_status: 'running', last_active: new Date().toISOString() });
 }
 
 /** Mark a container as idle for a session. */
-export function markContainerIdle(sessionId: string): void {
-  updateSession(sessionId, { container_status: 'idle' });
+export async function markContainerIdle(sessionId: string): Promise<void> {
+  await updateSession(sessionId, { container_status: 'idle' });
 }
 
 /** Mark a container as stopped for a session. */
-export function markContainerStopped(sessionId: string): void {
-  updateSession(sessionId, { container_status: 'stopped' });
+export async function markContainerStopped(sessionId: string): Promise<void> {
+  await updateSession(sessionId, { container_status: 'stopped' });
 }

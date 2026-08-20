@@ -61,19 +61,19 @@ function parseText(raw: string): { text: string; sender: string | null } {
  * Human rendering (pipe lines, localized stamps, capped cells) lives in
  * `formatHistoryLines`, wired as the operation's `formatHuman`.
  */
-export function sessionHistory(args: Record<string, unknown>, ctx: CallerContext): HistoryRow[] {
+export async function sessionHistory(args: Record<string, unknown>, ctx: CallerContext): Promise<HistoryRow[]> {
   const sessionId = typeof args.id === 'string' && args.id.length > 0 ? args.id : undefined;
   if (!sessionId) throw new Error('session id is required');
   const limitRaw = Number(args.limit ?? HISTORY_DEFAULT_LIMIT);
   const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : HISTORY_DEFAULT_LIMIT;
 
-  const session = getSession(sessionId);
+  const session = await getSession(sessionId);
   // Self-scope (see header): cross-group agents get "not found", never "forbidden".
   if (!session || (ctx.caller === 'agent' && session.agent_group_id !== ctx.agentGroupId)) {
     throw new Error(`session not found: ${sessionId}`);
   }
 
-  const agentName = getAgentGroup(session.agent_group_id)?.name ?? 'agent';
+  const agentName = (await getAgentGroup(session.agent_group_id))?.name ?? 'agent';
   const rows: HistoryRow[] = [];
 
   if (fs.existsSync(inboundDbPath(session.agent_group_id, session.id))) {

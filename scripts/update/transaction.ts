@@ -603,8 +603,7 @@ export function pruneTransactions(
       continue;
     }
     const valid =
-      state.schema === 'nanoclaw-update/v1' &&
-      hasSafeStatePaths(state, resolvedProjectRoot, transactionRoot, id);
+      state.schema === 'nanoclaw-update/v1' && hasSafeStatePaths(state, resolvedProjectRoot, transactionRoot, id);
     const olderThanKeep = Date.parse(state.createdAt) < Date.parse(keep.createdAt);
     if (!valid || id === keepId || !terminal.has(state.phase) || !olderThanKeep) {
       retained.push(id);

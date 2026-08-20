@@ -37,6 +37,11 @@ export interface InputMeta {
   validate?: string; // regex source (nc:prompt validate:<re>)
   flags?: string; // regex flags   (nc:prompt flags:<f>)
   normalize?: 'trim' | 'rstrip-slash' | 'lower'; // applied by the ENGINE at bind
+  // Interactive select options, `|`-separated (nc:prompt choices:a|b). When a
+  // value is legal only via pre-bound inputs (e.g. slack's `provisioned`
+  // connection), validate stays wider than the offered set — so a consumer
+  // must prefer this over options derived from the validate alternation.
+  choices?: string;
 }
 
 // Everything the engine EMITS — the core seam's output contract. Every
@@ -50,7 +55,15 @@ export interface InputMeta {
 // its own.
 export type ApplyEvent =
   | { type: 'step-start'; kind: string; line: number; label: string | null }
-  | { type: 'step-end'; kind: string; line: number; label: string | null; ok: boolean; durationMs: number; error?: string }
+  | {
+      type: 'step-end';
+      kind: string;
+      line: number;
+      label: string | null;
+      ok: boolean;
+      durationMs: number;
+      error?: string;
+    }
   | { type: 'operator'; line: number; text: string };
 // operator: text = the rendered, {{var}}-substituted block body;
 //           line = the directive's opening-fence line (keys driver policy maps)
@@ -103,14 +116,21 @@ function envKeySet(root: string, key: string): boolean {
 function jsonArrayHasKey(root: string, rel: string, key: string, value: unknown): boolean {
   try {
     const arr = JSON.parse(read(join(root, rel)) || '[]');
-    return Array.isArray(arr) && arr.some((el) => el !== null && typeof el === 'object' && (el as Record<string, unknown>)[key] === value);
+    return (
+      Array.isArray(arr) &&
+      arr.some((el) => el !== null && typeof el === 'object' && (el as Record<string, unknown>)[key] === value)
+    );
   } catch {
     return false;
   }
 }
 
 // Per-directive idempotency check + "what it would do". Read-only.
-function selfStatus(d: Directive, root: string, mode: 'install' | 'refresh' = 'install'): { status: StepStatus; detail: string } {
+function selfStatus(
+  d: Directive,
+  root: string,
+  mode: 'install' | 'refresh' = 'install',
+): { status: StepStatus; detail: string } {
   switch (d.kind) {
     case 'copy': {
       const dests = d.body.map(destOf);
@@ -156,7 +176,10 @@ function selfStatus(d: Directive, root: string, mode: 'install' | 'refresh' = 'i
       try {
         value = (JSON.parse(d.body.join('\n')) as Record<string, unknown>)[key];
       } catch {
-        return { status: 'agent', detail: `nc:json-merge body is not parseable JSON — an agent applies it from the prose` };
+        return {
+          status: 'agent',
+          detail: `nc:json-merge body is not parseable JSON — an agent applies it from the prose`,
+        };
       }
       if (mode === 'refresh') {
         return { status: 'apply', detail: `refresh ${key}=${JSON.stringify(value)} in ${into}` };
@@ -170,17 +193,24 @@ function selfStatus(d: Directive, root: string, mode: 'install' | 'refresh' = 'i
     case 'operator':
       return { status: 'apply', detail: `show operator: ${(d.body[0] ?? '').slice(0, 50)}…` };
     default:
-      return { status: 'agent', detail: `no deterministic handler for nc:${d.kind} — an agent applies it from the prose` };
+      return {
+        status: 'agent',
+        detail: `no deterministic handler for nc:${d.kind} — an agent applies it from the prose`,
+      };
   }
 }
 
-export function planSkill(skillDir: string, root: string): { steps: PlanStep[]; needsInput: string[]; agentSteps: number } {
+export function planSkill(
+  skillDir: string,
+  root: string,
+): { steps: PlanStep[]; needsInput: string[]; agentSteps: number } {
   const directives = parseDirectives(read(join(skillDir, 'SKILL.md')));
   const self = directives.map((d) => ({ d, ...selfStatus(d, root) }));
 
   const consumers = new Map<string, number[]>();
   self.forEach(({ d }, i) => {
-    for (const line of d.body) for (const m of line.matchAll(VAR_REF)) (consumers.get(m[1]) ?? consumers.set(m[1], []).get(m[1])!).push(i);
+    for (const line of d.body)
+      for (const m of line.matchAll(VAR_REF)) (consumers.get(m[1]) ?? consumers.set(m[1], []).get(m[1])!).push(i);
   });
 
   const steps: PlanStep[] = self.map(({ d, status, detail }, i) => {
@@ -316,7 +346,10 @@ export function firstFailureHint(res: ApplyResult): { headline: string; hint: st
   const hint = first.prose.trim();
   // The concise headline: the nearest `#`-heading the prose carries, stripped of
   // its markers; failing that, the first prose line; failing that, the reason.
-  const lines = first.prose.split('\n').map((l) => l.trim()).filter(Boolean);
+  const lines = first.prose
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
   const heading = lines.find((l) => l.startsWith('#'));
   const headline = heading ? heading.replace(/^#+\s*/, '').trim() : (lines[0] ?? first.reason);
   return { headline, hint };
@@ -360,7 +393,10 @@ export function referenceProse(md: string): string {
       }
       continue;
     }
-    if (fence !== null) { keep(line); continue; } // fence body
+    if (fence !== null) {
+      keep(line);
+      continue;
+    } // fence body
     const h = line.match(/^(#{1,6})\s+(.*)$/);
     if (h) {
       const level = h[1].length;
@@ -369,7 +405,10 @@ export function referenceProse(md: string): string {
         if (cur) sections.push(cur.join('\n').trim());
         cur = [line]; // open a new reference section
       } else if (level <= 2) {
-        if (cur) { sections.push(cur.join('\n').trim()); cur = null; } // a non-reference h1/h2 closes the slice
+        if (cur) {
+          sections.push(cur.join('\n').trim());
+          cur = null;
+        } // a non-reference h1/h2 closes the slice
       } else if (cur) {
         cur.push(line); // a subsection (### …) inside a captured reference section
       }
@@ -394,7 +433,10 @@ function defaultResolveRemote(branch: string, root: string): string {
       return '';
     }
   };
-  const remotes = cap('git remote').split('\n').map((s) => s.trim()).filter(Boolean);
+  const remotes = cap('git remote')
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean);
   const ordered = remotes.includes('origin') ? ['origin', ...remotes.filter((r) => r !== 'origin')] : remotes;
   for (const r of ordered) if (cap(`git ls-remote --heads ${r} ${branch}`).trim()) return r;
   return 'origin';
@@ -409,7 +451,11 @@ function proseFor(md: string, fenceLine1: number): string {
   const para: string[] = [];
   while (i >= 0 && lines[i].trim() !== '' && !lines[i].startsWith('#')) para.unshift(lines[i--]);
   let heading = '';
-  for (let h = i; h >= 0; h--) if (lines[h].startsWith('#')) { heading = lines[h]; break; }
+  for (let h = i; h >= 0; h--)
+    if (lines[h].startsWith('#')) {
+      heading = lines[h];
+      break;
+    }
   return [heading, ...para].filter(Boolean).join('\n').trim();
 }
 
@@ -427,7 +473,10 @@ function headingAbove(md: string, fenceLine1: number): string {
       // sequence restarts the count mid-run — so the operator sees
       // "1, 3, 4, 4, Restart, 2, 4". The engine's own (i/n) suffix
       // (labelOrdinals) already disambiguates repeats, and it stays correct.
-      return lines[h].replace(/^#+\s*/, '').replace(/^\d+[.)]\s+/, '').trim();
+      return lines[h]
+        .replace(/^#+\s*/, '')
+        .replace(/^\d+[.)]\s+/, '')
+        .trim();
     }
   }
   return '';
@@ -461,8 +510,12 @@ export function stepLabel(d: Directive, md: string): string | null {
   if (d.kind === 'dep') return 'Installing dependencies';
   if (d.kind === 'copy') return 'Fetching files';
   const byEffect: Record<string, string> = {
-    build: 'Building', test: 'Testing', fetch: 'Fetching',
-    wire: 'Wiring', restart: 'Restarting', external: 'Running',
+    build: 'Building',
+    test: 'Testing',
+    fetch: 'Fetching',
+    wire: 'Wiring',
+    restart: 'Restarting',
+    external: 'Running',
   };
   return (effect && byEffect[effect]) || 'Running';
 }
@@ -505,6 +558,7 @@ function inputMetaOf(d: Directive, secret: boolean, validate: string | undefined
   if (typeof d.attrs.normalize === 'string' && NORMALIZE_KINDS.has(d.attrs.normalize)) {
     meta.normalize = d.attrs.normalize as InputMeta['normalize'];
   }
+  if (typeof d.attrs.choices === 'string') meta.choices = d.attrs.choices;
   return meta;
 }
 
@@ -578,7 +632,17 @@ function bindCapture(
 // is derivable. Throws on failure → caught and bounced to an agent.
 async function applyOne(
   d: Directive,
-  ctx: { root: string; skillDir: string; exec: (c: string) => string | void | Promise<string | void>; execStream?: (c: string) => Promise<StepOutcome>; resolveRemote: (b: string) => string; resolveDependencyCommand?: (request: DependencyCommandRequest) => string; vars: Map<string, { value: string; secret: boolean }>; journal: JournalEntry[]; mode: 'install' | 'refresh' },
+  ctx: {
+    root: string;
+    skillDir: string;
+    exec: (c: string) => string | void | Promise<string | void>;
+    execStream?: (c: string) => Promise<StepOutcome>;
+    resolveRemote: (b: string) => string;
+    resolveDependencyCommand?: (request: DependencyCommandRequest) => string;
+    vars: Map<string, { value: string; secret: boolean }>;
+    journal: JournalEntry[];
+    mode: 'install' | 'refresh';
+  },
 ): Promise<void> {
   const { root, skillDir, exec, vars, journal } = ctx;
   switch (d.kind) {
@@ -675,14 +739,18 @@ async function applyOne(
       // multi-valued twin of stdout capture. No streaming exec ⇒ throw → an agent
       // runs the step from the prose (degrade, not crash).
       if (d.attrs.effect === 'step') {
-        if (!ctx.execStream) throw new Error('effect:step needs a streaming exec — an agent runs the step from the prose');
+        if (!ctx.execStream)
+          throw new Error('effect:step needs a streaming exec — an agent runs the step from the prose');
         const { ok, fields } = await ctx.execStream(substitute(d.body.join('\n'), vars));
         if (!ok) throw new Error('the step did not complete');
         if (capture) {
           for (const pair of capture.split(',')) {
             const eq = pair.indexOf('=');
             if (eq < 1) continue;
-            vars.set(pair.slice(0, eq).trim(), { value: (fields[pair.slice(eq + 1).trim()] ?? '').trim(), secret: false });
+            vars.set(pair.slice(0, eq).trim(), {
+              value: (fields[pair.slice(eq + 1).trim()] ?? '').trim(),
+              secret: false,
+            });
           }
         }
         journal.push({ op: 'ran', cmd: d.body.join('\n') });
@@ -713,7 +781,10 @@ async function applyOne(
         const key = entry.slice(0, eq).trim();
         const value = substitute(entry.slice(eq + 1).trim(), vars); // throws if a {{var}} is unresolved
         if (!envKeySet(root, key)) {
-          appendFileSync(envPath, (read(envPath).endsWith('\n') || read(envPath) === '' ? '' : '\n') + `${key}=${value}\n`);
+          appendFileSync(
+            envPath,
+            (read(envPath).endsWith('\n') || read(envPath) === '' ? '' : '\n') + `${key}=${value}\n`,
+          );
           journal.push({ op: 'set-env', key });
         }
       }
@@ -753,10 +824,23 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
   // caught, or one newer than this engine) bounces to an agent, never blocks.
   const md = read(join(skillDir, 'SKILL.md'));
   const directives = parseDirectives(md);
-  const exec = opts.exec ?? (() => { throw new Error('no exec provided'); });
+  const exec =
+    opts.exec ??
+    (() => {
+      throw new Error('no exec provided');
+    });
   const resolveRemote = opts.resolveRemote ?? ((b: string) => defaultResolveRemote(b, root));
   const vars = new Map<string, { value: string; secret: boolean }>();
-  const res: ApplyResult = { applied: [], skipped: [], deferred: [], agentTasks: [], operatorMessages: [], vars: {}, journal: [], referenceProse: referenceProse(md) };
+  const res: ApplyResult = {
+    applied: [],
+    skipped: [],
+    deferred: [],
+    agentTasks: [],
+    operatorMessages: [],
+    vars: {},
+    journal: [],
+    referenceProse: referenceProse(md),
+  };
   // A run-health gate: once ANY directive bounces to an agent, the skill is no
   // longer in a known-good state, so the dangerous side effects below must not
   // fire on their own — a live restart, an interactive pairing/QR step, or a wire
@@ -812,7 +896,10 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
         // via `resolveInput`; still undefined ⇒ defer (headless, no answer).
         let val = opts.inputs?.[v];
         if (val === undefined) val = await opts.resolveInput?.(v, inputMetaOf(d, secret, validate));
-        if (val === undefined) { res.deferred.push(v); continue; }
+        if (val === undefined) {
+          res.deferred.push(v);
+          continue;
+        }
         // normalize:<how> binds DETERMINISTICALLY for both inputs and answers, so
         // an `inputs` value and a typed one land identically (a trailing slash
         // stripped, whitespace trimmed) — see normalizeValue.
@@ -876,8 +963,14 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
         continue;
       }
       const st = selfStatus(d, root, opts.mode);
-      if (st.status === 'agent') { bounce(d, 'no deterministic handler'); continue; }
-      if (st.status === 'skip') { res.skipped.push(`${d.kind}: ${st.detail}`); continue; }
+      if (st.status === 'agent') {
+        bounce(d, 'no deterministic handler');
+        continue;
+      }
+      if (st.status === 'skip') {
+        res.skipped.push(`${d.kind}: ${st.detail}`);
+        continue;
+      }
       // Bracket the real mutation with step events so a consumer can render
       // progress. `label` null is a step-cost/interactivity declaration (see
       // `stepLabel`). `inFlight` is set only after step-start fires; the ok:true
@@ -886,10 +979,21 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
       const label = stepLabel(d, md);
       if (opts.onEvent) await opts.onEvent({ type: 'step-start', kind: d.kind, line: d.line, label });
       inFlight = { label, at: Date.now() };
-      await applyOne(d, { root, skillDir, exec, execStream: opts.execStream, resolveRemote, resolveDependencyCommand: opts.resolveDependencyCommand, vars, journal: res.journal, mode: opts.mode ?? 'install' });
+      await applyOne(d, {
+        root,
+        skillDir,
+        exec,
+        execStream: opts.execStream,
+        resolveRemote,
+        resolveDependencyCommand: opts.resolveDependencyCommand,
+        vars,
+        journal: res.journal,
+        mode: opts.mode ?? 'install',
+      });
       const durationMs = Date.now() - inFlight.at;
       inFlight = null;
-      if (opts.onEvent) await opts.onEvent({ type: 'step-end', kind: d.kind, line: d.line, label, ok: true, durationMs });
+      if (opts.onEvent)
+        await opts.onEvent({ type: 'step-end', kind: d.kind, line: d.line, label, ok: true, durationMs });
       res.applied.push(`${d.kind}: ${st.detail}`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -899,10 +1003,22 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
       // best-effort: a consumer that also throws here can't change the outcome —
       // we're already on the failure path.
       if (inFlight && opts.onEvent) {
-        const end = { kind: d.kind, line: d.line, label: inFlight.label, ok: false, durationMs: Date.now() - inFlight.at, error: msg };
-        try { await opts.onEvent({ type: 'step-end', ...end }); } catch { /* already failing — the close is best-effort */ }
+        const end = {
+          kind: d.kind,
+          line: d.line,
+          label: inFlight.label,
+          ok: false,
+          durationMs: Date.now() - inFlight.at,
+          error: msg,
+        };
+        try {
+          await opts.onEvent({ type: 'step-end', ...end });
+        } catch {
+          /* already failing — the close is best-effort */
+        }
       }
-      if (/unresolved \{\{/.test(msg)) res.deferred.push(msg); // blocked on a prompt input
+      if (/unresolved \{\{/.test(msg))
+        res.deferred.push(msg); // blocked on a prompt input
       else bounce(d, `engine could not apply (${msg}) — an agent applies it from the prose`);
     }
   }
@@ -912,15 +1028,31 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
 }
 
 // Remove is the journal played backwards — no hand-written REMOVE.md.
-export async function removeSkill(root: string, journal: JournalEntry[], exec?: (c: string) => void | Promise<void>): Promise<void> {
+export async function removeSkill(
+  root: string,
+  journal: JournalEntry[],
+  exec?: (c: string) => void | Promise<void>,
+): Promise<void> {
   for (const e of [...journal].reverse()) {
     if (e.op === 'wrote') rmSync(join(root, e.path), { force: true });
     else if (e.op === 'appended') {
       const p = join(root, e.path);
-      writeFileSync(p, read(p).split('\n').filter((l) => l.trim() !== e.line.trim()).join('\n'));
+      writeFileSync(
+        p,
+        read(p)
+          .split('\n')
+          .filter((l) => l.trim() !== e.line.trim())
+          .join('\n'),
+      );
     } else if (e.op === 'set-env') {
       const p = join(root, '.env');
-      writeFileSync(p, read(p).split('\n').filter((l) => !l.startsWith(`${e.key}=`)).join('\n'));
+      writeFileSync(
+        p,
+        read(p)
+          .split('\n')
+          .filter((l) => !l.startsWith(`${e.key}=`))
+          .join('\n'),
+      );
     } else if (e.op === 'json-merge') {
       const p = join(root, e.path);
       const arr = JSON.parse(read(p) || '[]') as unknown[];
@@ -948,7 +1080,13 @@ if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
   const root = process.cwd();
   const { steps, needsInput, agentSteps } = planSkill(skillDir, root);
   console.log(`PLAN ${skillDir}   project: ${root}\n`);
-  const icon: Record<StepStatus, string> = { skip: '✓ skip', apply: '→ apply', 'needs-input': '? human', agent: '↳ agent' };
-  for (const s of steps) console.log(`${String(s.n).padStart(2)}. ${icon[s.status].padEnd(8)} ${s.kind.padEnd(9)} ${s.detail}`);
+  const icon: Record<StepStatus, string> = {
+    skip: '✓ skip',
+    apply: '→ apply',
+    'needs-input': '? human',
+    agent: '↳ agent',
+  };
+  for (const s of steps)
+    console.log(`${String(s.n).padStart(2)}. ${icon[s.status].padEnd(8)} ${s.kind.padEnd(9)} ${s.detail}`);
   console.log(`\nneeds human input: ${needsInput.join(', ') || '(none)'}    →agent: ${agentSteps}`);
 }

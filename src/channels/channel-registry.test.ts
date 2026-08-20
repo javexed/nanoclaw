@@ -247,17 +247,17 @@ describe('channel + router integration', () => {
 
     const { initTestDb, runMigrations, createAgentGroup, createMessagingGroup, createMessagingGroupAgent } =
       await import('../db/index.js');
-    const db = initTestDb();
-    runMigrations(db);
+    const db = await initTestDb();
+    await runMigrations(db);
 
-    createAgentGroup({
+    await createAgentGroup({
       id: 'ag-1',
       name: 'Test Agent',
       folder: 'test-agent',
       agent_provider: null,
       created_at: now(),
     });
-    createMessagingGroup({
+    await createMessagingGroup({
       id: 'mg-1',
       channel_type: 'mock',
       platform_id: 'chan-100',
@@ -266,7 +266,7 @@ describe('channel + router integration', () => {
       unknown_sender_policy: 'public',
       created_at: now(),
     });
-    createMessagingGroupAgent({
+    await createMessagingGroupAgent({
       id: 'mga-1',
       messaging_group_id: 'mg-1',
       agent_group_id: 'ag-1',
@@ -282,7 +282,7 @@ describe('channel + router integration', () => {
 
   afterEach(async () => {
     const { closeDb } = await import('../db/index.js');
-    closeDb();
+    await closeDb();
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   });
 
@@ -307,7 +307,7 @@ describe('channel + router integration', () => {
     });
 
     // Verify session was created and message written
-    const session = findSession('mg-1', null);
+    const session = await findSession('mg-1', null);
     expect(session).toBeDefined();
 
     const dbPath = inboundDbPath('ag-1', session!.id);

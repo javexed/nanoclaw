@@ -79,8 +79,8 @@ function groupArg(args: Record<string, unknown>, ctx: CallerContext): string | u
   return str(args.group) ?? str(args.agent_group_id);
 }
 
-function ownSession(sessionId: string, ctx: CallerContext): ScopedSession {
-  const session = getSession(sessionId);
+async function ownSession(sessionId: string, ctx: CallerContext): Promise<ScopedSession> {
+  const session = await getSession(sessionId);
   if (!session) throw new Error(`session not found: ${sessionId}`);
   if (ctx.caller === 'agent' && session.agent_group_id !== ctx.agentGroupId) {
     throw new Error(`session not found: ${sessionId}`);
@@ -88,18 +88,18 @@ function ownSession(sessionId: string, ctx: CallerContext): ScopedSession {
   return { id: session.id, agent_group_id: session.agent_group_id };
 }
 
-function selectedSessions(args: Record<string, unknown>, ctx: CallerContext): ScopedSession[] {
+async function selectedSessions(args: Record<string, unknown>, ctx: CallerContext): Promise<ScopedSession[]> {
   const sessionId = str(args.session);
-  if (sessionId) return [ownSession(sessionId, ctx)];
+  if (sessionId) return [await ownSession(sessionId, ctx)];
 
   const group = groupArg(args, ctx);
   if (group) {
     // One session per live task series — the loops below already fan out across them.
-    return findTaskSessions(group).map((s) => ({ id: s.id, agent_group_id: s.agent_group_id }));
+    return (await findTaskSessions(group)).map((s) => ({ id: s.id, agent_group_id: s.agent_group_id }));
   }
 
   if (ctx.caller === 'agent') return [];
-  return getActiveSessions().map((s) => ({ id: s.id, agent_group_id: s.agent_group_id }));
+  return (await getActiveSessions()).map((s) => ({ id: s.id, agent_group_id: s.agent_group_id }));
 }
 
 function withInbound<T>(session: ScopedSession, fn: (db: Database.Database) => T): T | undefined {
@@ -158,7 +158,7 @@ function taskId(args: Record<string, unknown>): string {
   return id;
 }
 
-function createTask(args: Record<string, unknown>, ctx: CallerContext) {
+async function createTask(args: Record<string, unknown>, ctx: CallerContext) {
   const group = groupArg(args, ctx);
   if (!group) throw new Error('--group is required');
   const prompt = str(args.prompt);
@@ -172,9 +172,9 @@ function createTask(args: Record<string, unknown>, ctx: CallerContext) {
     processAfter: str(args.process_after),
     script,
     dangerouslyOverrideRecurrenceLimit: bool(args.dangerously_override_recurrence_limit),
-    timezone: resolveGroupTimezone(group),
+    timezone: await resolveGroupTimezone(group),
   });
-  const { session, row } = createScheduledTask(group, prepared, {
+  const { session, row } = await createScheduledTask(group, prepared, {
     originSessionId: ctx.caller === 'agent' ? ctx.sessionId : null,
   });
   return toOutput(session, row);
@@ -187,17 +187,17 @@ function createTask(args: Record<string, unknown>, ctx: CallerContext) {
  * can see when and why each run happened. Inside a task run the series is derived from
  * the caller's own task session, so the agent supplies only --msg.
  */
-function appendTaskLog(
+async function appendTaskLog(
   args: Record<string, unknown>,
   ctx: CallerContext,
-): { series: string; timestamp: string; path: string; ok: true } {
+): Promise<{ series: string; timestamp: string; path: string; ok: true }> {
   const msg = str(args.msg);
   if (!msg) throw new Error('--msg is required');
 
   let series = str(args.id);
   let group = groupArg(args, ctx);
   if (!series && ctx.caller === 'agent' && ctx.sessionId) {
-    const sess = getSession(ctx.sessionId);
+    const sess = await getSession(ctx.sessionId);
     if (sess && sess.thread_id && isTaskThread(sess.thread_id)) {
       series = sess.thread_id.slice(`${TASKS_SYSTEM_THREAD_ID}:`.length);
       group ??= sess.agent_group_id;
@@ -209,7 +209,7 @@ function appendTaskLog(
   // Group scope is enforced by groupArg (a cli_scope=group caller can only
   // ever resolve its own folder), so a foreign id at worst writes a stray log
   // under the caller's OWN folder — no leak. appendRunLog guards the charset.
-  return { ...appendRunLog(group, series, msg), ok: true };
+  return { ...(await appendRunLog(group, series, msg)), ok: true };
 }
 
 /**
@@ -235,8 +235,8 @@ function seriesStats(
 }
 
 /** Last ~10 lines of a series' run log (`tasks/<series>.md`), newest last. */
-function tailRunLog(agentGroupId: string, seriesKey: string, lines = 10): string[] {
-  const ag = getAgentGroup(agentGroupId);
+async function tailRunLog(agentGroupId: string, seriesKey: string, lines = 10): Promise<string[]> {
+  const ag = await getAgentGroup(agentGroupId);
   if (!ag) return [];
   const file = `${GROUPS_DIR}/${ag.folder}/tasks/${seriesKey}.md`;
   if (!fs.existsSync(file)) return [];
@@ -264,10 +264,10 @@ function enrichListRow(db: Database.Database, base: ReturnType<typeof toOutput>)
   };
 }
 
-function listTasks(args: Record<string, unknown>, ctx: CallerContext) {
+async function listTasks(args: Record<string, unknown>, ctx: CallerContext) {
   const status = statusFilter(args);
   const rows = [];
-  for (const session of selectedSessions(args, ctx)) {
+  for (const session of await selectedSessions(args, ctx)) {
     const sessionRows = withInbound(session, (db) =>
       selectLiveTasks(db, status).map((row) => enrichListRow(db, toOutput(session, row))),
     );
@@ -276,9 +276,9 @@ function listTasks(args: Record<string, unknown>, ctx: CallerContext) {
   return rows;
 }
 
-function getTask(args: Record<string, unknown>, ctx: CallerContext) {
+async function getTask(args: Record<string, unknown>, ctx: CallerContext) {
   const id = taskId(args);
-  for (const session of selectedSessions(args, ctx)) {
+  for (const session of await selectedSessions(args, ctx)) {
     const found = withInbound(session, (db) => {
       const row = selectTask(db, id);
       if (!row) return undefined;
@@ -292,29 +292,32 @@ function getTask(args: Record<string, unknown>, ctx: CallerContext) {
         origin_session_id: content.originSessionId,
         completed_runs: stats.runs,
         failed_runs: stats.failed_runs,
-        recent_log: tailRunLog(session.agent_group_id, seriesKey),
+        series_key: seriesKey,
       };
     });
-    if (found) return found;
+    if (found) {
+      const { series_key, ...output } = found;
+      return { ...output, recent_log: await tailRunLog(session.agent_group_id, series_key) };
+    }
   }
   throw new Error(`task not found: ${id}`);
 }
 
-function mutateTask(
+async function mutateTask(
   args: Record<string, unknown>,
   ctx: CallerContext,
   fn: (db: Database.Database, id: string) => number,
 ) {
   const id = taskId(args);
   let touched = 0;
-  for (const session of selectedSessions(args, ctx)) {
+  for (const session of await selectedSessions(args, ctx)) {
     touched += withInbound(session, (db) => fn(db, id)) ?? 0;
   }
   if (touched === 0) throw new Error(`no live task matched: ${id}`);
   return { series_id: id, touched };
 }
 
-function updateTaskCommand(args: Record<string, unknown>, ctx: CallerContext) {
+async function updateTaskCommand(args: Record<string, unknown>, ctx: CallerContext) {
   const id = taskId(args);
   const update: TaskUpdate = {};
   if (typeof args.prompt === 'string') update.prompt = args.prompt;
@@ -328,7 +331,7 @@ function updateTaskCommand(args: Record<string, unknown>, ctx: CallerContext) {
   let ownerGroup: string | undefined;
   let currentScript: string | null = null;
   if (args.process_after !== undefined || recurrence !== undefined) {
-    for (const session of selectedSessions(args, ctx)) {
+    for (const session of await selectedSessions(args, ctx)) {
       const row = withInbound(session, (db) => selectTask(db, id));
       if (row) {
         ownerGroup = session.agent_group_id;
@@ -337,7 +340,7 @@ function updateTaskCommand(args: Record<string, unknown>, ctx: CallerContext) {
       }
     }
   }
-  const tz = ownerGroup ? resolveGroupTimezone(ownerGroup) : TIMEZONE;
+  const tz = ownerGroup ? await resolveGroupTimezone(ownerGroup) : TIMEZONE;
 
   if (args.process_after !== undefined) update.processAfter = parseProcessAfter(args.process_after, tz);
   if (recurrence !== undefined) {
@@ -353,20 +356,20 @@ function updateTaskCommand(args: Record<string, unknown>, ctx: CallerContext) {
   if (fields.length === 0) throw new Error('nothing to update');
 
   let touched = 0;
-  for (const session of selectedSessions(args, ctx)) {
+  for (const session of await selectedSessions(args, ctx)) {
     touched += withInbound(session, (db) => updateTask(db, id, update)) ?? 0;
   }
   if (touched === 0) throw new Error(`no live task matched: ${id}`);
   return { series_id: id, touched, fields };
 }
 
-function cancelTaskCommand(args: Record<string, unknown>, ctx: CallerContext) {
+async function cancelTaskCommand(args: Record<string, unknown>, ctx: CallerContext) {
   if (!bool(args.all)) {
-    return mutateTask(args, ctx, cancelTask);
+    return await mutateTask(args, ctx, cancelTask);
   }
 
   let touched = 0;
-  for (const session of selectedSessions(args, ctx)) {
+  for (const session of await selectedSessions(args, ctx)) {
     touched += withInbound(session, cancelAllTasks) ?? 0;
   }
   return { cancelled: touched };
@@ -379,9 +382,9 @@ function cancelTaskCommand(args: Record<string, unknown>, ctx: CallerContext) {
  * `update --process-after now`, it neither consumes a one-shot nor force-advances
  * a recurring series' armed occurrence, so it is safe for testing a task.
  */
-function runTaskCommand(args: Record<string, unknown>, ctx: CallerContext) {
+async function runTaskCommand(args: Record<string, unknown>, ctx: CallerContext) {
   const id = taskId(args);
-  for (const session of selectedSessions(args, ctx)) {
+  for (const session of await selectedSessions(args, ctx)) {
     const fired = withInbound(session, (db) => {
       const row = selectTask(db, id);
       if (!row) return undefined;

@@ -141,13 +141,13 @@ export function prepareScheduledTask(input: {
 }
 
 /** Persist a prepared task through NanoClaw's single task/session representation. */
-export function createScheduledTask(
+export async function createScheduledTask(
   agentGroupId: string,
   task: PreparedScheduledTask,
   options?: { status?: 'pending' | 'paused'; originSessionId?: string | null },
-): { session: { id: string; agent_group_id: string }; row: ScheduledTaskRow } {
+): Promise<{ session: { id: string; agent_group_id: string }; row: ScheduledTaskRow }> {
   const id = makeTaskId(task.name);
-  const { session } = resolveTaskSession(agentGroupId, id);
+  const { session } = await resolveTaskSession(agentGroupId, id);
 
   if (!fs.existsSync(inboundDbPath(agentGroupId, session.id))) {
     throw new Error('task system session inbound.db not found');

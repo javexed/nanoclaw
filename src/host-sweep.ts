@@ -152,7 +152,7 @@ export function registerSweepTask(name: string, fn: () => Promise<void>): void {
 export function startHostSweep(): void {
   if (running) return;
   running = true;
-  sweep();
+  void sweep();
 }
 
 export function stopHostSweep(): void {
@@ -171,7 +171,7 @@ async function sweep(): Promise<void> {
   }
 
   try {
-    const sessions = getActiveSessions();
+    const sessions = await getActiveSessions();
     for (const session of sessions) {
       await sweepSession(session);
     }
@@ -203,7 +203,9 @@ async function sweep(): Promise<void> {
     }
   }
 
-  setTimeout(sweep, SWEEP_INTERVAL_MS);
+  // `() => void sweep()` is upstream's form since the async-DB refactor: sweep
+  // returns a promise now, and the bare reference made setTimeout swallow it.
+  setTimeout(() => void sweep(), SWEEP_INTERVAL_MS);
 }
 
 /** A per-task session with no live tasks and no running container is spent → close it. */
@@ -216,7 +218,7 @@ export function shouldCloseTaskSession(
 }
 
 async function sweepSession(session: Session): Promise<void> {
-  const agentGroup = getAgentGroup(session.agent_group_id);
+  const agentGroup = await getAgentGroup(session.agent_group_id);
   if (!agentGroup) return;
 
   const inPath = inboundDbPath(agentGroup.id, session.id);
@@ -296,7 +298,7 @@ async function sweepSession(session: Session): Promise<void> {
           .get() as { c: number }
       ).c;
       if (shouldCloseTaskSession(session.thread_id, isContainerRunning(session.id), liveTasks)) {
-        updateSession(session.id, { status: 'closed' });
+        await updateSession(session.id, { status: 'closed' });
         log.info('Closed spent task session', { sessionId: session.id, threadId: session.thread_id });
       }
     }

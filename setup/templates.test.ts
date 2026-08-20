@@ -50,7 +50,7 @@ import {
 describe('setup template library', () => {
   let root: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'setup-templates-'));
   });
 
@@ -241,7 +241,7 @@ describe('template pick persistence', () => {
 });
 
 describe('setup templates ncl contract (real dispatch)', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     fs.rmSync(CONTRACT_ROOT, { recursive: true, force: true });
     const tpl = path.join(CONTRACT_ROOT, 'templates', 'sales', 'sdr');
     fs.mkdirSync(path.join(tpl, NANOCLAW_EXTENSION_NS, 'context'), { recursive: true });
@@ -254,11 +254,11 @@ describe('setup templates ncl contract (real dispatch)', () => {
         mcpServers: { docs: { type: 'streamable-http', url: 'https://mcp.example.com/mcp' } },
       }),
     );
-    runMigrations(initTestDb());
+    await runMigrations(await initTestDb());
   });
 
-  afterEach(() => {
-    closeDb();
+  afterEach(async () => {
+    await closeDb();
     fs.rmSync(CONTRACT_ROOT, { recursive: true, force: true });
   });
 

@@ -62,12 +62,7 @@ describe('registry refresh end to end', () => {
     write(
       root,
       '.claude/skills/add-opencode/SKILL.md',
-      [
-        '# Apply',
-        '```nc:dep manager:bun cwd:container/agent-runner',
-        'example-provider@1.2.3',
-        '```',
-      ].join('\n'),
+      ['# Apply', '```nc:dep manager:bun cwd:container/agent-runner', 'example-provider@1.2.3', '```'].join('\n'),
     );
     const commands: string[] = [];
 

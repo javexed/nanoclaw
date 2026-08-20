@@ -95,9 +95,7 @@ export function cloneRegistry(): ClonedRegistry {
 export function listTemplatesFromDir(dir: string): TemplateEntry[] {
   if (!fs.existsSync(dir)) return [];
   const rootName = path.basename(path.resolve(dir));
-  const rels = (fs.readdirSync(dir, { recursive: true }) as string[]).map((entry) =>
-    entry.split(path.sep).join('/'),
-  );
+  const rels = (fs.readdirSync(dir, { recursive: true }) as string[]).map((entry) => entry.split(path.sep).join('/'));
 
   const refs = new Set<string>();
   for (const rel of rels) {

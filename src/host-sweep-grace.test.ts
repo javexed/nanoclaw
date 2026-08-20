@@ -82,7 +82,7 @@ async function runSweepTick(): Promise<void> {
   });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.mocked(isContainerRunning).mockReset().mockReturnValue(false);
   vi.mocked(killContainer).mockReset();
   vi.mocked(wakeContainer)
@@ -105,10 +105,10 @@ beforeEach(() => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
 
-  const db = initTestDb();
-  runMigrations(db);
-  createAgentGroup({ id: AG, name: 'Test Agent', folder: 'test-agent', agent_provider: null, created_at: now() });
-  createSession({
+  const db = await initTestDb();
+  await runMigrations(db);
+  await createAgentGroup({ id: AG, name: 'Test Agent', folder: 'test-agent', agent_provider: null, created_at: now() });
+  await createSession({
     id: SESS,
     agent_group_id: AG,
     messaging_group_id: null,
@@ -123,14 +123,14 @@ beforeEach(() => {
 
   // A due message (wakes the container) + a stale claim from a previous crash
   // (would trip claim-stuck if the SLA check ran on the wake tick).
-  writeSessionMessage(AG, SESS, { id: 'm-1', kind: 'chat', timestamp: now(), content: '{"text":"hi"}' });
+  await writeSessionMessage(AG, SESS, { id: 'm-1', kind: 'chat', timestamp: now(), content: '{"text":"hi"}' });
   seedStaleClaim('m-1', 2 * 60 * 60 * 1000); // claimed 2h ago
 });
 
-afterEach(() => {
+afterEach(async () => {
   stopHostSweep();
   setTimeoutSpy.mockRestore();
-  closeDb();
+  await closeDb();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
 

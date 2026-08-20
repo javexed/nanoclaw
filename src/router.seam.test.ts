@@ -59,13 +59,13 @@ async function registerTestHooks() {
   sm.registerSessionKeyResolver((_mg, agentGroupId) => (keyOverrideForTest ? keyOverrideForTest(agentGroupId) : null));
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   planForTest = null;
   keyOverrideForTest = null;
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
-  const db = initTestDb();
-  runMigrations(db);
+  const db = await initTestDb();
+  await runMigrations(db);
 
   for (const [id, name] of [
     ['ag-a', 'Agent A'],
@@ -124,11 +124,14 @@ function makeEvent(overrides: Partial<InboundEvent['message']> = {}): InboundEve
 }
 
 /** Read messages_in for the (mg-1, null) session of one agent group. */
-function rowsFor(agentGroupId: string): Array<{ content: string; trigger: number }> {
+async function rowsFor(agentGroupId: string): Promise<Array<{ content: string; trigger: number }>> {
   // Sessions are per (agent_group, mg, thread); find via the sessions table.
-  const session = getDb()
-    .prepare(`SELECT id FROM sessions WHERE agent_group_id = ? AND messaging_group_id = 'mg-1'`)
-    .get(agentGroupId) as { id: string } | undefined;
+  // Central-DB reads are async since upstream's driver refactor; the SESSION db
+  // below is still better-sqlite3 and stays synchronous.
+  const session = (await getDb().get(
+    `SELECT id FROM sessions WHERE agent_group_id = ? AND messaging_group_id = 'mg-1'`,
+    agentGroupId,
+  )) as { id: string } | undefined;
   if (!session) return [];
   const dbPath = inboundDbPath(agentGroupId, session.id);
   if (!fs.existsSync(dbPath)) return [];
@@ -159,7 +162,7 @@ describe('inbound delivery plan', () => {
     await router.routeInbound(makeEvent());
 
     // ag-a: woken, trigger=1, hints merged into content
-    const aRows = rowsFor('ag-a');
+    const aRows = await rowsFor('ag-a');
     expect(aRows).toHaveLength(1);
     expect(aRows[0].trigger).toBe(1);
     const aContent = JSON.parse(aRows[0].content);
@@ -168,13 +171,13 @@ describe('inbound delivery plan', () => {
     expect(aContent.text).toBe('hello'); // original fields preserved
 
     // ag-b: silent context, trigger=0
-    const bRows = rowsFor('ag-b');
+    const bRows = await rowsFor('ag-b');
     expect(bRows).toHaveLength(1);
     expect(bRows[0].trigger).toBe(0);
     expect(JSON.parse(bRows[0].content).responseExpectation).toBe('defer');
 
     // ag-c: absent from the plan → skipped entirely (no session, no rows)
-    expect(rowsFor('ag-c')).toHaveLength(0);
+    expect(await rowsFor('ag-c')).toHaveLength(0);
 
     // Exactly one wake (ag-a)
     expect(vi.mocked(wakeContainer)).toHaveBeenCalledTimes(1);
@@ -196,8 +199,8 @@ describe('inbound delivery plan', () => {
     // ...the event was AUTHORED by ag-a (loop-back), so ag-a must be skipped.
     await router.routeInbound(makeEvent({ senderAgentGroupId: 'ag-a' }));
 
-    expect(rowsFor('ag-a')).toHaveLength(0);
-    const bRows = rowsFor('ag-b');
+    expect(await rowsFor('ag-a')).toHaveLength(0);
+    const bRows = await rowsFor('ag-b');
     expect(bRows).toHaveLength(1);
     expect(JSON.parse(bRows[0].content).isPeerReply).toBe(true);
   });
@@ -212,9 +215,9 @@ describe('inbound delivery plan', () => {
     await router.routeInbound(makeEvent());
 
     // Stock catch-all patterns: every agent gets the message.
-    expect(rowsFor('ag-a')).toHaveLength(1);
-    expect(rowsFor('ag-b')).toHaveLength(1);
-    expect(rowsFor('ag-c')).toHaveLength(1);
+    expect(await rowsFor('ag-a')).toHaveLength(1);
+    expect(await rowsFor('ag-b')).toHaveLength(1);
+    expect(await rowsFor('ag-c')).toHaveLength(1);
   });
 });
 
@@ -234,16 +237,14 @@ describe('turn gate + session-key override', () => {
     await router.routeInbound(makeEvent());
 
     // ag-b vetoed: no inbound rows; drop recorded with the module's reason.
-    expect(rowsFor('ag-b')).toHaveLength(0);
-    const drops = getDb()
-      .prepare(`SELECT reason FROM unregistered_senders WHERE agent_group_id = 'ag-b'`)
-      .all() as Array<{ reason: string }>;
+    expect(await rowsFor('ag-b')).toHaveLength(0);
+    const drops = await getDb().all(`SELECT reason FROM unregistered_senders WHERE agent_group_id = 'ag-b'`) as Array<{ reason: string }>;
     expect(drops).toHaveLength(1);
     expect(drops[0].reason).toBe('test-policy-requires-setup');
 
     // The others deliver normally.
-    expect(rowsFor('ag-a')).toHaveLength(1);
-    expect(rowsFor('ag-c')).toHaveLength(1);
+    expect(await rowsFor('ag-a')).toHaveLength(1);
+    expect(await rowsFor('ag-c')).toHaveLength(1);
   });
 
   it('a session-key override redirects the turn to a differently-keyed session', async () => {
@@ -256,14 +257,14 @@ describe('turn gate + session-key override', () => {
 
     await router.routeInbound(makeEvent());
 
-    const cSessions = getDb().prepare(`SELECT thread_id FROM sessions WHERE agent_group_id = 'ag-c'`).all() as Array<{
+    const cSessions = await getDb().all(`SELECT thread_id FROM sessions WHERE agent_group_id = 'ag-c'`) as Array<{
       thread_id: string | null;
     }>;
     expect(cSessions).toHaveLength(1);
     expect(cSessions[0].thread_id).toBe('member:alice');
 
     // Un-overridden agents keep the stock null-thread session.
-    const aSessions = getDb().prepare(`SELECT thread_id FROM sessions WHERE agent_group_id = 'ag-a'`).all() as Array<{
+    const aSessions = await getDb().all(`SELECT thread_id FROM sessions WHERE agent_group_id = 'ag-a'`) as Array<{
       thread_id: string | null;
     }>;
     expect(aSessions).toHaveLength(1);

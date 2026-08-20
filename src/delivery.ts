@@ -176,21 +176,21 @@ export function setDeliveryAdapter(adapter: ChannelDeliveryAdapter): void {
 export function startActiveDeliveryPoll(): void {
   if (activePolling) return;
   activePolling = true;
-  pollActive();
+  void pollActive();
 }
 
 /** Start the sweep poll loop (~60s). */
 export function startSweepDeliveryPoll(): void {
   if (sweepPolling) return;
   sweepPolling = true;
-  pollSweep();
+  void pollSweep();
 }
 
 async function pollActive(): Promise<void> {
   if (!activePolling) return;
 
   try {
-    const sessions = getRunningSessions();
+    const sessions = await getRunningSessions();
     for (const session of sessions) {
       await deliverSessionMessages(session);
       await runSessionDeliveryObservers(session);
@@ -199,14 +199,14 @@ async function pollActive(): Promise<void> {
     log.error('Active delivery poll error', { err });
   }
 
-  setTimeout(pollActive, ACTIVE_POLL_MS);
+  setTimeout(() => void pollActive(), ACTIVE_POLL_MS);
 }
 
 async function pollSweep(): Promise<void> {
   if (!sweepPolling) return;
 
   try {
-    const sessions = getActiveSessions();
+    const sessions = await getActiveSessions();
     for (const session of sessions) {
       await deliverSessionMessages(session);
       // Observers run here too: pollActive only covers RUNNING sessions, so a
@@ -218,7 +218,7 @@ async function pollSweep(): Promise<void> {
     log.error('Sweep delivery poll error', { err });
   }
 
-  setTimeout(pollSweep, SWEEP_POLL_MS);
+  setTimeout(() => void pollSweep(), SWEEP_POLL_MS);
 }
 
 export async function deliverSessionMessages(session: Session): Promise<void> {
@@ -235,7 +235,7 @@ export async function deliverSessionMessages(session: Session): Promise<void> {
 }
 
 async function drainSession(session: Session): Promise<void> {
-  const agentGroup = getAgentGroup(session.agent_group_id);
+  const agentGroup = await getAgentGroup(session.agent_group_id);
   if (!agentGroup) return;
 
   let outDb: Database.Database;
@@ -268,7 +268,7 @@ async function drainSession(session: Session): Promise<void> {
     // delivery.
     for (const hook of batchPreviewHooks) {
       try {
-        hook(
+        await hook(
           undelivered.map((m) => ({ kind: m.kind, content: m.content })),
           session,
         );
@@ -302,13 +302,13 @@ async function drainSession(session: Session): Promise<void> {
           // user-facing — excluded. Runs after markDelivered so a delivery
           // retry never double-fans.
           if (msg.kind !== 'task_log') {
-            fanOutboundMessage(msg, session, agentGroup);
+            await fanOutboundMessage(msg, session, agentGroup);
             // Post-delivery hooks: user-facing rows only, same exclusions
             // as the fan above. Hooks are decoration: failures log and can
             // never affect delivery or retries.
             for (const hook of postDeliveryHooks) {
               try {
-                hook(msg, session, { firstDelivery });
+                await hook(msg, session, { firstDelivery });
               } catch (err) {
                 log.warn('Post-delivery hook failed', { messageId: msg.id, sessionId: session.id, err });
               }
@@ -378,7 +378,7 @@ async function deliverMessage(
     if (session.messaging_group_id === null && isTaskThread(session.thread_id) && session.thread_id) {
       const series = session.thread_id.slice(`${TASKS_SYSTEM_THREAD_ID}:`.length);
       try {
-        appendRunLog(session.agent_group_id, series, typeof content.text === 'string' ? content.text : '');
+        await appendRunLog(session.agent_group_id, series, typeof content.text === 'string' ? content.text : '');
       } catch (err) {
         log.warn('Failed to append task run log', { id: msg.id, sessionId: session.id, err });
       }
@@ -393,7 +393,7 @@ async function deliverMessage(
   // `agent_destinations` table won't exist and `routeAgentMessage`'s permission
   // check will throw, which falls into the normal retry → mark-failed path.
   if (msg.channel_type === 'agent') {
-    if (!hasTable(getDb(), 'agent_destinations')) {
+    if (!(await hasTable(getDb(), 'agent_destinations'))) {
       throw new Error(`agent-to-agent module not installed — cannot route message ${msg.id}`);
     }
     const { routeAgentMessage } = await import('./modules/agent-to-agent/agent-route.js');
@@ -427,12 +427,12 @@ async function deliverMessage(
     // sibling instances share the same channel address), falling back to the
     // by-platform lookup (default-instance-first) when the sender has no
     // matching destination.
-    const originMg = session.messaging_group_id ? getMessagingGroup(session.messaging_group_id) : undefined;
+    const originMg = session.messaging_group_id ? await getMessagingGroup(session.messaging_group_id) : undefined;
     const mg =
       originMg && originMg.channel_type === msg.channel_type && originMg.platform_id === msg.platform_id
         ? originMg
-        : (getMessagingGroupForOwnDestination(session.agent_group_id, msg.channel_type, msg.platform_id) ??
-          getMessagingGroupByPlatform(msg.channel_type, msg.platform_id));
+        : ((await getMessagingGroupForOwnDestination(session.agent_group_id, msg.channel_type, msg.platform_id)) ??
+          (await getMessagingGroupByPlatform(msg.channel_type, msg.platform_id)));
     if (!mg) {
       throw new Error(`unknown messaging group for ${msg.channel_type}/${msg.platform_id} (message ${msg.id})`);
     }
@@ -450,12 +450,13 @@ async function deliverMessage(
     // doesn't exist and we permit all non-origin channel sends (the
     // origin-chat case is always allowed regardless). Inlined SQL instead
     // of importing `hasDestination` so core doesn't depend on the module.
-    if (!isOriginChat && hasTable(getDb(), 'agent_destinations')) {
-      const row = getDb()
-        .prepare(
-          'SELECT 1 FROM agent_destinations WHERE agent_group_id = ? AND target_type = ? AND target_id = ? LIMIT 1',
-        )
-        .get(session.agent_group_id, 'channel', mg.id);
+    if (!isOriginChat && (await hasTable(getDb(), 'agent_destinations'))) {
+      const row = await getDb().get(
+        'SELECT 1 FROM agent_destinations WHERE agent_group_id = ? AND target_type = ? AND target_id = ? LIMIT 1',
+        session.agent_group_id,
+        'channel',
+        mg.id,
+      );
       if (!row) {
         throw new Error(
           `unauthorized channel destination: ${session.agent_group_id} cannot send to ${mg.channel_type}/${mg.platform_id}`,
@@ -469,7 +470,7 @@ async function deliverMessage(
   // Guarded: without the interactive module, `pending_questions` doesn't
   // exist and we skip persistence — the card still delivers to the user,
   // but the response path has nowhere to land and will log unclaimed.
-  if (content.type === 'ask_question' && content.questionId && hasTable(getDb(), 'pending_questions')) {
+  if (content.type === 'ask_question' && content.questionId && (await hasTable(getDb(), 'pending_questions'))) {
     const title = content.title as string | undefined;
     const rawOptions = content.options as unknown;
     if (!title || !Array.isArray(rawOptions)) {
@@ -477,7 +478,7 @@ async function deliverMessage(
         questionId: content.questionId,
       });
     } else {
-      const inserted = createPendingQuestion({
+      const inserted = await createPendingQuestion({
         question_id: content.questionId,
         session_id: session.id,
         message_out_id: msg.id,
@@ -554,7 +555,7 @@ export interface PostDeliveryInfo {
   firstDelivery: boolean;
 }
 
-export type PostDeliveryHook = (msg: OutboundMessage, session: Session, info: PostDeliveryInfo) => void;
+export type PostDeliveryHook = (msg: OutboundMessage, session: Session, info: PostDeliveryInfo) => void | Promise<void>;
 
 const postDeliveryHooks: PostDeliveryHook[] = [];
 
@@ -597,7 +598,10 @@ function isUnguardedEntry(entry: DeliveryEntry): entry is Extract<DeliveryEntry,
 }
 
 /** See the batch-preview invocation in the delivery poll for semantics. */
-type DeliveryBatchPreviewHook = (batch: Array<{ kind: string; content: string }>, session: Session) => void;
+type DeliveryBatchPreviewHook = (
+  batch: Array<{ kind: string; content: string }>,
+  session: Session,
+) => void | Promise<void>;
 const batchPreviewHooks: DeliveryBatchPreviewHook[] = [];
 export function registerDeliveryBatchPreview(hook: DeliveryBatchPreviewHook): void {
   batchPreviewHooks.push(hook);

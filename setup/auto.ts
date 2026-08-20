@@ -38,7 +38,7 @@ import { BACK_TO_CHANNEL_SELECTION } from './lib/back-nav.js';
 // — the wizard itself stays free of channel-specific imports.
 import { runChannelSkillWithPreStep } from './channels/run-channel-skill.js';
 import { runInheritScript } from './lib/inherit-script.js';
-import { pingCliAgent, type PingResult } from './lib/agent-ping.js';
+import { pingCliAgent, PING_AGENT_FOLDER, type PingResult } from './lib/agent-ping.js';
 import { getSetupProvider, listSetupProviders } from './providers/registry.js';
 import { applyProviderSkill } from './providers/install.js';
 // Provider payloads self-register their picker entry + auth on import.
@@ -59,12 +59,7 @@ import {
   type ImageSource,
 } from './lib/registry-state.js';
 import { upsertEnvVar } from './set-env.js';
-import {
-  applyToEnv,
-  parseFlags,
-  printHelp,
-  readFromEnv,
-} from './lib/setup-config-parse.js';
+import { applyToEnv, parseFlags, printHelp, readFromEnv } from './lib/setup-config-parse.js';
 import { runAdvancedScreen } from './lib/setup-config-screen.js';
 import { runWindowedStep } from './lib/windowed-runner.js';
 import { runUninstallFlow } from './uninstall/flow.js';
@@ -76,7 +71,17 @@ import { claudeCliAvailable, resolveTimezoneViaClaude } from './lib/tz-from-clau
 import * as setupLog from './logs.js';
 import { ensureAnswer, fail, runQuietChild, runQuietStep, spawnQuiet } from './lib/runner.js';
 import { emit as phEmit } from './lib/diagnostics.js';
-import { accentGreen, brandBody, brandBold, brandChip, dimWrap, fitToWidth, fmtDuration, note, wrapForGutter } from './lib/theme.js';
+import {
+  accentGreen,
+  brandBody,
+  brandBold,
+  brandChip,
+  dimWrap,
+  fitToWidth,
+  fmtDuration,
+  note,
+  wrapForGutter,
+} from './lib/theme.js';
 import { isValidTimezone } from '../src/timezone.js';
 import { DEFAULT_AGENT_PROVIDER, TEMPLATES_DIR } from '../src/config.js';
 import { SocketTransport } from '../src/cli/socket-client.js';
@@ -231,15 +236,14 @@ async function main(): Promise<void> {
   }
   // Existing installs do not get an unsolicited first-agent picker, but an
   // explicit --template-path is always honoured.
-  if (
-    !isResume &&
-    (process.env.NANOCLAW_TEMPLATE_PATH?.trim() || !detectRegisteredGroups(process.cwd()))
-  ) {
+  if (!isResume && (process.env.NANOCLAW_TEMPLATE_PATH?.trim() || !(await detectRegisteredGroups(process.cwd())))) {
     await runTemplateSetup(savedPickBridged);
   }
 
   if (!skip.has('container')) {
-    p.log.message(brandBody(dimWrap('Your assistant lives in its own sandbox. It can only see what you explicitly share.', 4)));
+    p.log.message(
+      brandBody(dimWrap('Your assistant lives in its own sandbox. It can only see what you explicitly share.', 4)),
+    );
     // Asked before the step runs, because the step is what acts on the answer.
     await chooseImageSource();
     p.log.message(
@@ -375,9 +379,7 @@ async function main(): Promise<void> {
       const res = await runQuietStep(
         'onecli',
         {
-          running: reuse
-            ? 'Hooking up to your existing OneCLI…'
-            : "Setting up OneCLI, your agent's vault…",
+          running: reuse ? 'Hooking up to your existing OneCLI…' : "Setting up OneCLI, your agent's vault…",
           done: 'OneCLI vault ready.',
         },
         reuse ? ['--reuse'] : [],
@@ -456,20 +458,12 @@ async function main(): Promise<void> {
       } catch (err) {
         s.stop(`Couldn't install ${agentProvider}.`, 1);
         const message = err instanceof Error ? err.message : String(err);
-        await fail(
-          `add-${agentProvider}`,
-          `Couldn't install ${agentProvider}.`,
-          message,
-        );
+        await fail(`add-${agentProvider}`, `Couldn't install ${agentProvider}.`, message);
         return; // unreachable — fail() exits — but narrows blockers for TS
       }
       if (blockers.length) {
         s.stop(`Couldn't install ${agentProvider}.`, 1);
-        await fail(
-          `add-${agentProvider}`,
-          `Couldn't install ${agentProvider}.`,
-          blockers.join('; '),
-        );
+        await fail(`add-${agentProvider}`, `Couldn't install ${agentProvider}.`, blockers.join('; '));
       }
       s.stop(`${agentProvider} installed.`);
       p.log.info(brandBody('Rebuilding the container image with the new provider…'));
@@ -538,13 +532,13 @@ async function main(): Promise<void> {
   async function resolveDisplayName(): Promise<string> {
     if (displayName) return displayName;
     const preset = process.env.NANOCLAW_DISPLAY_NAME?.trim();
-    const existing = detectExistingDisplayName(process.cwd());
+    const existing = await detectExistingDisplayName(process.cwd());
     const fallback = process.env.USER?.trim() || 'Operator';
     displayName = preset || existing || (await askDisplayName(fallback));
     return displayName;
   }
 
-  if (!skip.has('cli-agent') && detectRegisteredGroups(process.cwd())) {
+  if (!skip.has('cli-agent') && (await detectRegisteredGroups(process.cwd()))) {
     skip.add('cli-agent');
     skip.add('first-chat');
   }
@@ -557,7 +551,7 @@ async function main(): Promise<void> {
         running: 'Bringing your assistant online…',
         done: 'Assistant wired up.',
       },
-      ['--display-name', displayName!, '--agent-name', CLI_AGENT_NAME, '--folder', '_ping-test'],
+      ['--display-name', displayName!, '--agent-name', CLI_AGENT_NAME, '--folder', PING_AGENT_FOLDER],
     );
     if (!res.ok) {
       await fail(
@@ -582,7 +576,7 @@ async function main(): Promise<void> {
         const cleanupStart = Date.now();
         const cleanup = await spawnQuiet(
           'pnpm',
-          ['exec', 'tsx', 'scripts/delete-cli-agent.ts', '--folder', '_ping-test'],
+          ['exec', 'tsx', 'scripts/delete-cli-agent.ts', '--folder', PING_AGENT_FOLDER],
           cleanupRawLog,
         );
         setupLog.step(
@@ -621,7 +615,15 @@ async function main(): Promise<void> {
           const createRes = await runQuietChild(
             'create-terminal-agent',
             'pnpm',
-            ['exec', 'tsx', 'scripts/init-cli-agent.ts', '--display-name', displayName!, '--agent-name', terminalAgentName],
+            [
+              'exec',
+              'tsx',
+              'scripts/init-cli-agent.ts',
+              '--display-name',
+              displayName!,
+              '--agent-name',
+              terminalAgentName,
+            ],
             { running: `Creating ${terminalAgentName}…`, done: `${terminalAgentName} is ready.` },
           );
           if (!createRes.ok) {
@@ -1290,11 +1292,7 @@ async function chooseImageSource(): Promise<void> {
   if (choice === 'local') return;
 
   if (!loginScriptAvailable()) {
-    p.log.warn(
-      brandBody(
-        `This copy of NanoClaw has no ${REGISTRY_LOGIN_SCRIPT} — building the sandbox here instead.`,
-      ),
-    );
+    p.log.warn(brandBody(`This copy of NanoClaw has no ${REGISTRY_LOGIN_SCRIPT} — building the sandbox here instead.`));
     writeImageSource('local');
     return;
   }
@@ -1368,9 +1366,7 @@ async function askAgentProviderChoice(): Promise<string> {
   // pre-select the current default — a re-run Enter-through then preserves it
   // instead of silently resetting it to claude. Fall back to claude if the
   // persisted default isn't an offered option (e.g. its provider was removed).
-  const currentDefault = options.some((o) => o.value === DEFAULT_AGENT_PROVIDER)
-    ? DEFAULT_AGENT_PROVIDER
-    : 'claude';
+  const currentDefault = options.some((o) => o.value === DEFAULT_AGENT_PROVIDER) ? DEFAULT_AGENT_PROVIDER : 'claude';
   const choice = ensureAnswer(
     await brightSelect<string>({
       message: 'Which agent runtime should power your assistant?',
@@ -1443,11 +1439,7 @@ async function runAuthStep(): Promise<void> {
       return runAuthStep();
     }
     setupLog.step('auth', 'skipped', 0, { REASON: 'user-skipped' });
-    p.log.warn(
-      brandBody(
-        'Claude sign-in skipped. Re-run setup or run `bash nanoclaw.sh` to finish later.',
-      ),
-    );
+    p.log.warn(brandBody('Claude sign-in skipped. Re-run setup or run `bash nanoclaw.sh` to finish later.'));
     return;
   }
 
@@ -1548,19 +1540,12 @@ async function runPasteAuth(method: 'oauth' | 'api'): Promise<void> {
  * Authorization header on the wire — the container only ever sees
  * ANTHROPIC_BASE_URL + a placeholder bearer.
  */
-async function runCustomEndpointAuth(
-  baseUrl: string,
-  token: string,
-): Promise<void> {
+async function runCustomEndpointAuth(baseUrl: string, token: string): Promise<void> {
   let host: string;
   try {
     host = new URL(baseUrl).hostname;
   } catch {
-    await fail(
-      'auth',
-      `Invalid Anthropic base URL: ${baseUrl}`,
-      'Check --anthropic-base-url and retry.',
-    );
+    await fail('auth', `Invalid Anthropic base URL: ${baseUrl}`, 'Check --anthropic-base-url and retry.');
     return;
   }
 
@@ -1826,7 +1811,10 @@ async function askOtherChannelName(): Promise<void | typeof BACK_TO_CHANNEL_SELE
       placeholder: 'e.g. matrix, github, linear, webex',
     }),
   );
-  const name = (answer as string).trim().toLowerCase().replace(/^\/?(add-)?/, '');
+  const name = (answer as string)
+    .trim()
+    .toLowerCase()
+    .replace(/^\/?(add-)?/, '');
   setupLog.userInput('other_channel', name);
   phEmit('channel_other_named', { channel: name });
   p.log.info(
@@ -1919,7 +1907,10 @@ function maybeReexecUnderSg(): void {
   if (spawnSync('which', ['sg'], { stdio: 'ignore' }).status !== 0) return;
 
   p.log.warn(brandBody('Docker socket not accessible in current group. Re-executing under `sg docker`.'));
-  const existingSkip = (process.env.NANOCLAW_SKIP ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  const existingSkip = (process.env.NANOCLAW_SKIP ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
   const skipList = [...new Set([...existingSkip, ...setupLog.completedStepNames()])].join(',');
   const res = spawnSync('sg', ['docker', '-c', 'pnpm run setup:auto'], {
     stdio: 'inherit',

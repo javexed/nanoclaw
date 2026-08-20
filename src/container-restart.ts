@@ -19,14 +19,18 @@ import { openInboundDb, writeSessionMessage } from './session-manager.js';
  * wakeContainer call on exit. Without it, containers are killed and
  * only come back on the next real user message.
  */
-export function restartAgentGroupContainers(agentGroupId: string, reason: string, wakeMessage?: string): number {
-  const sessions = getSessionsByAgentGroup(agentGroupId).filter(
+export async function restartAgentGroupContainers(
+  agentGroupId: string,
+  reason: string,
+  wakeMessage?: string,
+): Promise<number> {
+  const sessions = (await getSessionsByAgentGroup(agentGroupId)).filter(
     (s) => s.status === 'active' && isContainerRunning(s.id),
   );
 
   for (const session of sessions) {
     if (wakeMessage) {
-      writeSessionMessage(agentGroupId, session.id, {
+      await writeSessionMessage(agentGroupId, session.id, {
         id: `restart-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         kind: 'chat',
         timestamp: new Date().toISOString(),
@@ -51,8 +55,10 @@ export function restartAgentGroupContainers(agentGroupId: string, reason: string
       reason,
       wakeMessage || hasPending
         ? () => {
-            const s = getSession(session.id);
-            if (s) wakeContainer(s);
+            void (async () => {
+              const s = await getSession(session.id);
+              if (s) await wakeContainer(s);
+            })();
           }
         : undefined,
     );

@@ -69,13 +69,13 @@ beforeEach(() => {
 });
 
 describe('backfillNewSession', () => {
-  it('seeds the new session with sibling roots + top-level agent posts, ordered by time', () => {
+  it('seeds the new session with sibling roots + top-level agent posts, ordered by time', async () => {
     outboundRows = [
       { timestamp: '2026-08-01T19:14:00Z', content: JSON.stringify({ text: 'Hey Gavriel! I am Pete… tour?' }) },
     ];
     inboundRows = [{ timestamp: '2026-08-01T19:10:00Z', content: chat('hello there') }];
 
-    backfillNewSession(AG, NEW_SESSION, DM_MG);
+    await backfillNewSession(AG, NEW_SESSION, DM_MG);
 
     expect(written).toHaveLength(2);
     expect(written[0]).toMatchObject({
@@ -94,27 +94,27 @@ describe('backfillNewSession', () => {
     expect(first.self).toBeUndefined();
   });
 
-  it('queries only conversation roots inbound and top-level outbound (SQL shape)', () => {
-    backfillNewSession(AG, NEW_SESSION, DM_MG);
+  it('queries only conversation roots inbound and top-level outbound (SQL shape)', async () => {
+    await backfillNewSession(AG, NEW_SESSION, DM_MG);
     expect(inboundSql[0]).toContain('ORDER BY seq ASC LIMIT 1');
     expect(inboundSql[0]).toContain('trigger = 1');
     expect(outboundSql[0]).toContain("thread_id IS NULL OR thread_id = '' OR thread_id LIKE '%:'");
     expect(outboundSql[0]).toContain("kind NOT IN ('system','task_log')");
   });
 
-  it('skips task sessions and sessions without siblings', () => {
-    backfillNewSession(AG, { ...(NEW_SESSION as object), thread_id: 'system:tasks:t-1' } as never, DM_MG);
+  it('skips task sessions and sessions without siblings', async () => {
+    await backfillNewSession(AG, { ...(NEW_SESSION as object), thread_id: 'system:tasks:t-1' } as never, DM_MG);
     siblingSessions = [];
-    backfillNewSession(AG, NEW_SESSION, DM_MG);
+    await backfillNewSession(AG, NEW_SESSION, DM_MG);
     expect(written).toHaveLength(0);
   });
 
-  it('seeds group-surface sessions with the channel timeline: channel-timeline surface + channel label', () => {
+  it('seeds group-surface sessions with the channel timeline: channel-timeline surface + channel label', async () => {
     siblingSessions = [{ id: 'sess-room-t1', status: 'active', messaging_group_id: 'mg-room' }];
     inboundRows = [{ timestamp: '2026-08-01T19:10:00Z', content: chat('thread root msg') }];
     outboundRows = [{ timestamp: '2026-08-01T19:14:00Z', content: JSON.stringify({ text: 'top-level agent post' }) }];
 
-    backfillNewSession(AG, NEW_SESSION, ROOM_MG);
+    await backfillNewSession(AG, NEW_SESSION, ROOM_MG);
 
     expect(written).toHaveLength(2);
     const first = JSON.parse(written[0]!.content as string) as Record<string, unknown>;
@@ -124,14 +124,14 @@ describe('backfillNewSession', () => {
     expect(second.self).toBe(true);
   });
 
-  it('ignores system-sender roots and caps at BACKFILL_LIMIT newest rows', () => {
+  it('ignores system-sender roots and caps at BACKFILL_LIMIT newest rows', async () => {
     inboundRows = [{ timestamp: '2026-08-01T18:00:00Z', content: chat('Introduce yourself', 'system', 'system') }];
     outboundRows = Array.from({ length: 20 }, (_, i) => ({
       timestamp: `2026-08-01T19:${String(10 + i).padStart(2, '0')}:00Z`,
       content: JSON.stringify({ text: `post ${i}` }),
     }));
 
-    backfillNewSession(AG, NEW_SESSION, DM_MG);
+    await backfillNewSession(AG, NEW_SESSION, DM_MG);
 
     expect(written).toHaveLength(BACKFILL_LIMIT);
     const texts = written.map((w) => (JSON.parse(w.content as string) as { text: string }).text);
@@ -139,9 +139,9 @@ describe('backfillNewSession', () => {
     expect(texts.at(-1)).toBe('post 19');
   });
 
-  it('only considers siblings of the same messaging group', () => {
+  it('only considers siblings of the same messaging group', async () => {
     siblingSessions = [{ id: 'sess-other-dm', status: 'active', messaging_group_id: 'mg-other' }];
-    backfillNewSession(AG, NEW_SESSION, DM_MG);
+    await backfillNewSession(AG, NEW_SESSION, DM_MG);
     expect(written).toHaveLength(0);
   });
 });
