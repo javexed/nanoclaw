@@ -29,7 +29,7 @@
  */
 import { AcpClient, spawnGrokTransport, type AcpTransport, type AcpUpdate, type GrokSpawnOptions } from './grok-acp.js';
 import { registerProvider } from './provider-registry.js';
-import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
+import { memoryContextForSessionStart, type MemorySessionHookRegistration } from '../memory/session-hook.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
 /** Update kinds whose text is assistant output the user should see. */
@@ -199,15 +199,27 @@ class GrokQuery implements AgentQuery {
   }
 
   /**
-   * Instructions ride on the first prompt of a NEW session only. Grok reads
-   * CLAUDE.md and AGENTS.md from the cwd natively, so this carries the
-   * composed system context that is not on disk — and a resumed session
-   * already has it in history, where repeating it would only cost tokens.
+   * Instructions and MEMORY ride on the first prompt of a NEW session only.
+   *
+   * Grok reads CLAUDE.md and AGENTS.md from the cwd natively, so this carries
+   * what is NOT on disk: the composed system context, and the rendered memory
+   * section. Memory needs carrying because the provider contract delivers it
+   * through a SessionStart command hook — which the Claude SDK invokes and a
+   * child process speaking ACP has no equivalent for. Without this, a Grok
+   * agent could read memory/ only if it thought to look, while a Claude agent
+   * is handed it; the composed CLAUDE.md mentions the directory in a comment
+   * and nothing more.
+   *
+   * `memoryContextForSessionStart` returns undefined on 'resume' by its own
+   * rule — a resumed conversation already carries the injected context — and
+   * this path only runs when there is no continuation, so the two agree.
    */
   private firstPrompt(): string {
+    if (this.input.continuation) return this.input.prompt;
     const instructions = this.input.systemContext?.instructions?.trim();
-    if (!instructions || this.input.continuation) return this.input.prompt;
-    return `${instructions}\n\n${this.input.prompt}`;
+    const memory = memoryContextForSessionStart('startup', this.input.cwd)?.trim();
+    const preamble = [memory, instructions].filter(Boolean).join('\n\n');
+    return preamble ? `${preamble}\n\n${this.input.prompt}` : this.input.prompt;
   }
 
   private async runTurn(prompt: string): Promise<void> {

@@ -219,6 +219,43 @@ describe('follow-ups and lifecycle', () => {
     expect(events.filter((e) => e.type === 'result').map((e) => (e as { text: string }).text)).toEqual(['one', 'two']);
   });
 
+  it('memory is injected on a NEW session, so Grok is handed it like Claude is', async () => {
+    // The provider contract delivers memory through a SessionStart command
+    // hook, which a child process speaking ACP has no equivalent for. Without
+    // this a Grok agent could read memory/ only if it thought to look.
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'grok-memory-'));
+    fs.mkdirSync(path.join(cwd, 'memory'), { recursive: true });
+    fs.writeFileSync(path.join(cwd, 'memory', 'index.md'), '# Memory Index\n\nThe codeword is BASALT.\n');
+
+    const prompts: string[] = [];
+    const spy = async (): Promise<AcpTransport> => {
+      let onLine: (l: string) => void = () => {};
+      return {
+        write(line) {
+          const m = JSON.parse(line) as { id?: number; method?: string; params?: { prompt?: { text: string }[] } };
+          if (m.method === 'session/prompt') prompts.push(m.params?.prompt?.[0]?.text ?? '');
+          const result =
+            m.method === 'session/new' ? { sessionId: 's' } : m.method === 'session/prompt' ? { stopReason: 'end_turn' } : {};
+          onLine(JSON.stringify({ jsonrpc: '2.0', id: m.id, result }) + '\n');
+        },
+        onLine: (h) => void (onLine = h),
+        onClose: () => {},
+        close: () => {},
+      };
+    };
+
+    const q = new GrokProvider({}, spy).query({ prompt: 'hello', cwd });
+    await collect(q, { stopAfterResult: true });
+    q.abort();
+    fs.rmSync(cwd, { recursive: true, force: true });
+
+    expect(prompts[0]).toContain('BASALT');
+    expect(prompts[0]).toContain('hello');
+  });
+
   it('systemContext rides the first prompt of a new session but not a resume', async () => {
     const prompts: string[] = [];
     const spy = (sessionId?: string) => async (): Promise<AcpTransport> => {
@@ -249,7 +286,12 @@ describe('follow-ups and lifecycle', () => {
     await collect(resumed, { stopAfterResult: true });
     resumed.abort();
 
-    expect(prompts[0]).toBe('BE TERSE\n\nask');
+    // The preamble now also carries the memory section, which is what Claude
+    // receives through its SessionStart hook — so assert the parts rather than
+    // an exact string that would re-break every time the preamble grows.
+    expect(prompts[0]).toContain('BE TERSE');
+    expect(prompts[0]).toContain('## Memory');
+    expect(prompts[0].endsWith('ask')).toBe(true);
     expect(prompts[1]).toBe('ask'); // already in history; repeating it only costs tokens
   });
 });
