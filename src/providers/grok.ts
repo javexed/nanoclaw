@@ -54,6 +54,7 @@ import path from 'path';
 import { DATA_DIR } from '../config.js';
 import { log } from '../log.js';
 import { materializeContainerAuth, startGrokCredentialRefresh } from './grok-auth.js';
+import { noteCredentialRefreshFailed, noteCredentialRenewed } from './grok-reauth.js';
 import { onHostStart } from '../host-lifecycle.js';
 import { registerProviderContainerConfig } from './provider-container-registry.js';
 
@@ -131,5 +132,9 @@ onHostStart(() => {
   startGrokCredentialRefresh({
     onInfo: (message) => log.info(message),
     onError: (message) => log.warn(message),
+    onCredentialRenewed: (label) => noteCredentialRenewed(label),
+    // Fire-and-forget by design: the sweep must not wait on a DM round-trip,
+    // and grok-reauth.ts already swallows its own failures into the log.
+    onCredentialFailed: (label, err) => void noteCredentialRefreshFailed(label, err),
   });
 });
