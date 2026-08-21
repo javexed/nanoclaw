@@ -107,6 +107,7 @@ function compose(overrides: { gateway?: Record<string, unknown>; contribution?: 
     containerName: 'nanoclaw-v2-agent-one-1700000000000',
     mounts,
     containerConfig,
+    mailboxEnvironment: { NANOCLAW_MAILBOX_BACKEND: 'sqlite' },
     contribution: (overrides.contribution ?? {}) as never,
     gateway: (overrides.gateway ?? {}) as never,
   });
@@ -119,6 +120,7 @@ function composeWithFolder(folder: string) {
     containerName: 'nanoclaw-v2-agent-one-1700000000000',
     mounts,
     containerConfig,
+    mailboxEnvironment: { NANOCLAW_MAILBOX_BACKEND: 'sqlite' },
     contribution: {} as never,
     gateway: {} as never,
   });
@@ -142,6 +144,10 @@ describe('composeSessionSpec', () => {
       ANTHROPIC_AUTH_TOKEN: 'placeholder',
     });
     expect(spec.containers[0].env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+  });
+
+  it('passes non-secret mailbox environment on the composed lane', () => {
+    expect(compose().containers[0].env.NANOCLAW_MAILBOX_BACKEND).toBe('sqlite');
   });
 
   it('the gateway contribution fills the contributed lane last and wins a collision', () => {

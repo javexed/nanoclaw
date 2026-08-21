@@ -648,6 +648,27 @@ describe('conformance: lifecycle', () => {
   });
 });
 
+describe('conformance: the attach surface describes, never execs', () => {
+  eachDriver('hands back a runnable argv that carries the client command', async (h) => {
+    const handle = await h.driver.prepare(fixtureSpec());
+    const issuedBefore = h.cli.calls.length;
+
+    const attach = handle.execSpec(['bash', '-lc', 'echo hi']);
+
+    // A client has to be able to spawn this: a program, and a full argv for
+    // each stdin shape. Which runtime words fill them is the driver's business.
+    expect(attach.bin).not.toBe('');
+    expect(attach.argsTty.length).toBeGreaterThan(0);
+    expect(attach.argsPlain.length).toBeGreaterThan(0);
+    // Whatever the driver prefixes, the command reaches the session verbatim.
+    expect(attach.argsTty.slice(-3)).toEqual(['bash', '-lc', 'echo hi']);
+    expect(attach.argsPlain.slice(-3)).toEqual(['bash', '-lc', 'echo hi']);
+    // Pure description — asking for the argv must not touch the runtime, and
+    // must not be the driver quietly running the attach on the caller's behalf.
+    expect(h.cli.calls).toHaveLength(issuedBefore);
+  });
+});
+
 describe('conformance: capabilities are honest', () => {
   eachDriver('declares what it cannot realize', (h) => {
     const capabilities = h.driver.capabilities();

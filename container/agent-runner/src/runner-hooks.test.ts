@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
-import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { runPollLoop, type PollLoopConfig } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
 import { registerProviderExchangeObserver, __snapshotProviderHooksForTest } from './providers/hooks.js';

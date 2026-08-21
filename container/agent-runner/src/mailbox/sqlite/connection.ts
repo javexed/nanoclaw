@@ -18,15 +18,12 @@
  * scripts/sanity-live-poll.ts for the empirical validation.
  */
 import { Database } from 'bun:sqlite';
-import fs from 'fs';
 
 const DEFAULT_INBOUND_PATH = '/workspace/inbound.db';
 const DEFAULT_OUTBOUND_PATH = '/workspace/outbound.db';
-const DEFAULT_HEARTBEAT_PATH = '/workspace/.heartbeat';
 
 let _inbound: Database | null = null;
 let _outbound: Database | null = null;
-let _heartbeatPath: string = DEFAULT_HEARTBEAT_PATH;
 let _testMode = false;
 
 /**
@@ -139,8 +136,11 @@ export function getOutboundDb(): Database {
       (_outbound.prepare("PRAGMA table_info('session_state')").all() as Array<{ name: string }>).map((c) => c.name),
     );
     if (!cols.has('updated_at')) {
-      _outbound.exec(`ALTER TABLE session_state ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''`);
+      _outbound.exec(
+        `ALTER TABLE session_state ADD COLUMN updated_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000Z'`,
+      );
     }
+    _outbound.exec(`UPDATE session_state SET updated_at = '1970-01-01T00:00:00.000Z' WHERE updated_at = ''`);
     // container_state: tracks the current tool in flight (if any) so the host
     // sweep can widen its stuck tolerance when Bash is running with a user-
     // declared long timeout. Forward-compat for older outbound.db files.
@@ -163,7 +163,7 @@ export function getOutboundDb(): Database {
  * timeout hint when one is available (Bash exposes it in the tool_use input);
  * omit for tools with no declared timeout.
  */
-export function setContainerToolInFlight(tool: string, declaredTimeoutMs: number | null): void {
+export function sqliteSetContainerToolInFlight(tool: string, declaredTimeoutMs: number | null): void {
   const now = new Date().toISOString();
   getOutboundDb()
     .prepare(
@@ -179,7 +179,7 @@ export function setContainerToolInFlight(tool: string, declaredTimeoutMs: number
 }
 
 /** Clear the in-flight tool — called on PostToolUse / PostToolUseFailure. */
-export function clearContainerToolInFlight(): void {
+export function sqliteClearContainerToolInFlight(): void {
   const now = new Date().toISOString();
   getOutboundDb()
     .prepare(
@@ -195,30 +195,11 @@ export function clearContainerToolInFlight(): void {
 }
 
 /**
- * Touch the heartbeat file — replaces the old touchProcessing() DB writes.
- * The host checks this file's mtime for stale container detection.
- * A file touch is cheaper and avoids cross-boundary DB write contention.
- */
-export function touchHeartbeat(): void {
-  const p = _heartbeatPath;
-  const now = new Date();
-  try {
-    fs.utimesSync(p, now, now);
-  } catch {
-    try {
-      fs.writeFileSync(p, '');
-    } catch {
-      // Silently ignore — parent dir may not exist (e.g., in-memory test DBs)
-    }
-  }
-}
-
-/**
  * Clear stale processing_ack entries on container startup.
  * If the previous container crashed, 'processing' entries are leftover.
  * Clearing them lets the new container re-process those messages.
  */
-export function clearStaleProcessingAcks(): void {
+export function sqliteClearStaleProcessingAcks(): void {
   getOutboundDb().prepare("DELETE FROM processing_ack WHERE status = 'processing'").run();
 }
 

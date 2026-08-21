@@ -14,11 +14,9 @@
  * usual. Rows are trigger=0 session-echo rows written BEFORE the triggering
  * message (lower seq → the formatter renders them first, as ambient context).
  */
-import fs from 'fs';
-
 import { getSessionsByAgentGroup, isTaskThread } from '../../db/sessions.js';
 import { log } from '../../log.js';
-import { inboundDbPath, openOutboundDb, withInboundDb, writeSessionMessage } from '../../session-manager.js';
+import { withExistingMailboxSession, writeSessionMessage } from '../../session-manager.js';
 import type { AgentGroup, MessagingGroup, Session } from '../../types.js';
 import { ECHO_CHANNEL_TIMELINE_SURFACE, ECHO_CHANNEL_TYPE, ECHO_TIMELINE_SURFACE } from './config.js';
 import { truncateEchoText } from './fan.js';
@@ -52,26 +50,26 @@ function parseContent(raw: string): { text?: string; sender?: string; senderId?:
  * Thread replies stay in their threads; deep conversations contribute one
  * line here, not their whole tail.
  */
-function collectSiblingTopLevel(agentGroup: AgentGroup, sessionId: string, limit: number): BackfillRow[] {
+async function collectSiblingTopLevel(
+  agentGroup: AgentGroup,
+  sessionId: string,
+  limit: number,
+): Promise<BackfillRow[]> {
   const rows: BackfillRow[] = [];
-  if (fs.existsSync(inboundDbPath(agentGroup.id, sessionId))) {
-    const inbound = withInboundDb(agentGroup.id, sessionId, (db) =>
-      db
-        .prepare(
-          "SELECT timestamp, content FROM messages_in WHERE kind IN ('chat','chat-sdk') " +
-            "AND trigger = 1 AND (channel_type IS NULL OR channel_type NOT IN (?, 'agent')) " +
-            'ORDER BY seq ASC LIMIT 1',
-        )
-        .all(ECHO_CHANNEL_TYPE),
-    ) as Array<{ timestamp: string; content: string }>;
-    for (const r of inbound) {
-      const c = parseContent(r.content);
-      if (!c.text || c.senderId === 'system' || c.sender === 'system') continue;
+  const timeline = await withExistingMailboxSession(agentGroup.id, sessionId, (mailbox) => ({
+    root: mailbox.getConversationRoot(),
+    outbound: mailbox.getTopLevelOutbound(limit),
+  }));
+  if (!timeline) return rows;
+
+  if (timeline.root) {
+    const r = timeline.root;
+    const c = parseContent(r.content);
+    if (c.text && c.senderId !== 'system' && c.sender !== 'system' && !c.text.startsWith('System instruction:')) {
       // Host-injected triggers (the welcome hand-off) are attributed to the
       // OWNER for sender-gating, so filter them by shape too — internal
       // prompts must never surface as user timeline entries (live-hit: the
       // raw "System instruction: run /welcome…" leaked into a new thread).
-      if (c.text.startsWith('System instruction:')) continue;
       rows.push({
         timestamp: r.timestamp,
         sender: c.sender ?? 'user',
@@ -81,33 +79,17 @@ function collectSiblingTopLevel(agentGroup: AgentGroup, sessionId: string, limit
       });
     }
   }
-  try {
-    const outDb = openOutboundDb(agentGroup.id, sessionId);
-    try {
-      const outbound = outDb
-        .prepare(
-          "SELECT timestamp, content FROM messages_out WHERE kind NOT IN ('system','task_log') " +
-            "AND (channel_type IS NULL OR channel_type != 'agent') " +
-            "AND (thread_id IS NULL OR thread_id = '' OR thread_id LIKE '%:') " +
-            'ORDER BY seq DESC LIMIT ?',
-        )
-        .all(limit) as Array<{ timestamp: string; content: string }>;
-      for (const r of outbound) {
-        const c = parseContent(r.content);
-        if (!c.text) continue;
-        rows.push({
-          timestamp: r.timestamp,
-          sender: agentGroup.name,
-          senderId: agentGroup.id,
-          text: c.text,
-          self: true,
-        });
-      }
-    } finally {
-      outDb.close();
-    }
-  } catch {
-    // outbound.db may not exist yet — inbound-only view.
+
+  for (const r of timeline.outbound) {
+    const c = parseContent(r.content);
+    if (!c.text) continue;
+    rows.push({
+      timestamp: r.timestamp,
+      sender: agentGroup.name,
+      senderId: agentGroup.id,
+      text: c.text,
+      self: true,
+    });
   }
   return rows;
 }
@@ -130,7 +112,7 @@ export async function backfillNewSession(agentGroup: AgentGroup, session: Sessio
 
     const rows: BackfillRow[] = [];
     for (const sibling of siblings) {
-      rows.push(...collectSiblingTopLevel(agentGroup, sibling.id, BACKFILL_LIMIT));
+      rows.push(...(await collectSiblingTopLevel(agentGroup, sibling.id, BACKFILL_LIMIT)));
     }
     rows.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
     const newest = rows.slice(-BACKFILL_LIMIT);
@@ -157,7 +139,7 @@ export async function backfillNewSession(agentGroup: AgentGroup, session: Sessio
           ...(row.self ? { self: true } : {}),
           echo: { surface, label },
         }),
-        trigger: 0,
+        trigger: false,
       });
     }
     log.debug('Backfilled new session with conversation timeline', {

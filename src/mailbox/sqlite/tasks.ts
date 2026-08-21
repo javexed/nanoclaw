@@ -1,5 +1,5 @@
 /**
- * Task DB helpers used by the scheduling module.
+ * SQLite task helpers used by the SQLite mailbox driver.
  *
  * Tasks are `messages_in` rows with `kind='task'`. This module doesn't own
  * its own table — it piggybacks on the core schema. That's why there's no
@@ -12,30 +12,9 @@
  */
 import type Database from 'better-sqlite3';
 
-import { nextEvenSeq } from '../../db/session-db.js';
-
-export interface TaskContent {
-  prompt: string;
-  script: string | null;
-  originSessionId: string | null;
-}
-
-/** Decode a task row's content envelope — the read half of insertTaskRow's encode. */
-export function parseTaskContent(raw: string): TaskContent {
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    return {
-      prompt: typeof parsed.prompt === 'string' ? parsed.prompt : '',
-      script: typeof parsed.script === 'string' ? parsed.script : null,
-      originSessionId: typeof parsed.originSessionId === 'string' ? parsed.originSessionId : null,
-    };
-    // eslint-disable-next-line no-catch-all/no-catch-all -- LEGACY-COMPAT(v1-tasks): plain-string content predating the JSON envelope
-  } catch {
-    // LEGACY-COMPAT(v1-tasks): plain-string content from rows that predate the
-    // JSON envelope. Removable once no pre-v2 session DBs remain in the wild.
-    return { prompt: raw, script: null, originSessionId: null };
-  }
-}
+import { nextEvenSeq } from './session-db.js';
+import { createTaskInboundRecord } from '../model.js';
+import type { TaskWrite } from '../model.js';
 
 /**
  * Insert one pending task occurrence. `seriesId` is the series join key — equal
@@ -43,25 +22,19 @@ export function parseTaskContent(raw: string): TaskContent {
  * or an on-demand run. Tasks never set platform/channel/thread (they fire into
  * an isolated system session), so those columns are always NULL.
  */
-export function insertTaskRow(
-  db: Database.Database,
-  row: {
-    id: string;
-    seriesId: string;
-    processAfter: string | null;
-    recurrence: string | null;
-    content: string;
-    status?: 'pending' | 'paused';
-  },
-): void {
+export function insertTaskRow(db: Database.Database, row: TaskWrite, sequence = nextEvenSeq(db)): void {
+  const record = createTaskInboundRecord(row, sequence, new Date().toISOString());
   db.prepare(
-    `INSERT INTO messages_in (id, seq, timestamp, status, tries, process_after, recurrence, kind, platform_id, channel_type, thread_id, content, series_id)
-     VALUES (@id, @seq, @timestamp, @status, 0, @processAfter, @recurrence, 'task', NULL, NULL, NULL, @content, @seriesId)`,
+    `INSERT INTO messages_in
+       (id, seq, kind, timestamp, status, process_after, recurrence, series_id, tries, trigger,
+        platform_id, channel_type, thread_id, content, source_session_id, on_wake)
+     VALUES
+       (@id, @sequence, @kind, @timestamp, @status, @processAfter, @recurrence, @seriesId, @tries, @trigger,
+        @platformId, @channelType, @threadId, @content, @sourceSessionId, @onWake)`,
   ).run({
-    status: 'pending',
-    ...row,
-    timestamp: new Date().toISOString(),
-    seq: nextEvenSeq(db),
+    ...record,
+    trigger: record.trigger ? 1 : 0,
+    onWake: record.onWake ? 1 : 0,
   });
 }
 
@@ -115,11 +88,16 @@ export interface TaskUpdate {
 // Merges content JSON in-place so callers can update prompt/script without
 // clobbering other fields. Matches by id OR series_id so the live next
 // occurrence of a recurring task is updated, not just the completed row the
-// agent last saw. Returns the number of rows touched.
+// agent last saw. Due occurrences are already execution candidates and remain
+// immutable; only future pending or paused occurrences are updated. Returns
+// the number of rows touched.
 export function updateTask(db: Database.Database, taskId: string, update: TaskUpdate): number {
   const rows = db
     .prepare(
-      "SELECT id, content FROM messages_in WHERE (id = ? OR series_id = ?) AND kind = 'task' AND status IN ('pending', 'paused')",
+      `SELECT id, content FROM messages_in
+       WHERE (id = ? OR series_id = ?)
+         AND kind = 'task'
+         AND (status = 'paused' OR (status = 'pending' AND datetime(process_after) > datetime('now')))`,
     )
     .all(taskId, taskId) as Array<{ id: string; content: string }>;
 

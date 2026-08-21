@@ -19,7 +19,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 
 import { initTestDb, closeDb, runMigrations, getDb } from '../../db/index.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
-import { createNewAgentGroup } from './channel-approval.js';
+import { AGENT_ACCESS_SCOPE_WARNING, createNewAgentGroup } from './channel-approval.js';
 import { createMessagingGroup, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import { registerChannelAdapter } from '../../channels/channel-registry.js';
 import type { ChannelDefaults } from '../../channels/adapter.js';
@@ -187,6 +187,7 @@ describe('unknown-channel registration flow', () => {
     expect(payload.type).toBe('ask_question');
     // Card tells the approver the resolved engage rule.
     expect(payload.question).toContain('will respond to @-mentions in this group');
+    expect(payload.question).toContain(AGENT_ACCESS_SCOPE_WARNING);
     // Single-agent card offers a direct "Connect to <name>" button.
     const connectOption = payload.options.find((o: { value: string }) => o.value.startsWith('connect:'));
     expect(connectOption).toBeDefined();
@@ -561,8 +562,10 @@ describe('unknown-channel registration flow', () => {
     }
 
     const followupPayload = JSON.parse(deliverMock.mock.calls[1][4] as string) as {
+      question: string;
       options: Array<{ label: string; value: string }>;
     };
+    expect(followupPayload.question).toContain(AGENT_ACCESS_SCOPE_WARNING);
     expect(followupPayload.options.map((option) => option.value)).toContain('connect:ag-1');
     expect(followupPayload.options.map((option) => option.value)).not.toContain('connect:ag-2');
 

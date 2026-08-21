@@ -23,7 +23,7 @@ import { closeDb, getAllAgentGroups, initTestDb, runMigrations } from '../db/ind
 import { getContainerConfig } from '../db/container-configs.js';
 import { findTaskSessions } from '../db/sessions.js';
 import { PERSONA_PREPEND_FILE } from '../group-persona.js';
-import { inboundDbPath } from '../session-manager.js';
+import { inboundDbPath } from '../mailbox/sqlite/paths.js';
 import { NANOCLAW_EXTENSION_NS } from './extension.js';
 import { MCP_SCHEMA_URL, PLUGIN_SCHEMA_URL } from './manifest.js';
 import { createAgentFromTemplate } from './create-agent.js';

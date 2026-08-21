@@ -90,7 +90,7 @@ describe('skill-directives parser, on the converted add-slack', () => {
     expect(appends[0].body).toEqual(["import './slack.js';"]);
     expect(appends[1].body).toEqual(["import './slack-a2a-guard.js';"]);
     // The agents-feature module/tool barrel appends live in /slack-agent-flow;
-    // the companion declaration is trunk's, gated on NANOCLAW_SLACK_AGENTS
+    // the companion declaration is trunk's, registered by default
     // (setup/channels/slack-auto-register.ts) — no skill appends it anymore.
   });
 

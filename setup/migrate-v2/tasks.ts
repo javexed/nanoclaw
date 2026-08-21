@@ -20,8 +20,8 @@ import { initDb, closeDb } from '../../src/db/connection.js';
 import { getAgentGroupByFolder } from '../../src/db/agent-groups.js';
 import { getMessagingGroupByPlatform } from '../../src/db/messaging-groups.js';
 import { runMigrations } from '../../src/db/migrations/index.js';
-import { insertTask } from '../../src/modules/scheduling/db.js';
-import { openInboundDb, resolveSession } from '../../src/session-manager.js';
+import '../../src/mailbox/compose.js';
+import { resolveSession, withMailboxSession } from '../../src/session-manager.js';
 import { readEnvFile } from '../../src/env.js';
 import { buildDiscordResolver, type DiscordResolver } from './discord-resolver.js';
 import { parseJid, v2PlatformId } from './shared.js';
@@ -152,19 +152,12 @@ async function main(): Promise<void> {
       }
 
       const { session } = await resolveSession(ag.id, mg.id, null, 'shared');
-      const inboxDb = openInboundDb(ag.id, session.id);
-      try {
-        // Idempotence check
-        const existing = inboxDb.prepare("SELECT id FROM messages_in WHERE id = ? AND kind = 'task'").get(t.id) as
-          | { id: string }
-          | undefined;
-        if (existing) {
-          skipped++;
-          continue;
-        }
-
-        insertTask(inboxDb, {
+      const inserted = await withMailboxSession(ag.id, session.id, async (mailbox) => {
+        if (mailbox.getTask(t.id)) return false;
+        await mailbox.insertMessage({
           id: t.id,
+          kind: 'task',
+          timestamp: new Date().toISOString(),
           processAfter: scheduling.processAfter,
           recurrence: scheduling.recurrence,
           platformId,
@@ -175,11 +168,12 @@ async function main(): Promise<void> {
             script: t.script ?? null,
             migrated_from_v1: { original_id: t.id, context_mode: t.context_mode ?? null },
           }),
+          trigger: true,
         });
-        migrated++;
-      } finally {
-        inboxDb.close();
-      }
+        return true;
+      });
+      if (inserted) migrated++;
+      else skipped++;
     } catch (err) {
       failed++;
       console.error(`TASK_ERROR:${t.id}:${err instanceof Error ? err.message : String(err)}`);

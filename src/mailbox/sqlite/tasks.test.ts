@@ -8,7 +8,7 @@ import fs from 'fs';
 import path from 'path';
 import { describe, it, expect, afterEach } from 'vitest';
 
-import { ensureSchema, openInboundDb } from '../../db/session-db.js';
+import { ensureSchema, openInboundDb } from './session-db.js';
 import {
   insertTaskRow,
   insertRecurrence,
@@ -18,7 +18,7 @@ import {
   updateTask,
   getCompletedRecurring,
   type RecurringMessage,
-} from './db.js';
+} from './tasks.js';
 
 const TEST_DIR = '/tmp/nanoclaw-scheduling-db-test';
 const DB_PATH = path.join(TEST_DIR, 'inbound.db');
@@ -154,7 +154,7 @@ describe('updateTask', () => {
     insertTaskRow(db, {
       id: 'task-1',
       seriesId: 'task-1',
-      processAfter: new Date().toISOString(),
+      processAfter: '2999-01-01T00:00:00.000Z',
       recurrence: null,
       content: JSON.stringify({ prompt: 'old', script: 'echo old', extra: 'keep me' }),
     });
@@ -174,19 +174,19 @@ describe('updateTask', () => {
     insertTaskRow(db, {
       id: 'task-1',
       seriesId: 'task-1',
-      processAfter: '2026-01-01T00:00:00Z',
+      processAfter: '2999-01-01T00:00:00.000Z',
       recurrence: '0 9 * * *',
       content: JSON.stringify({ prompt: 'p' }),
     });
 
-    updateTask(db, 'task-1', { recurrence: '0 18 * * *', processAfter: '2026-02-01T00:00:00Z' });
+    updateTask(db, 'task-1', { recurrence: '0 18 * * *', processAfter: '2999-02-01T00:00:00.000Z' });
 
     const row = db.prepare('SELECT recurrence, process_after FROM messages_in WHERE id = ?').get('task-1') as {
       recurrence: string;
       process_after: string;
     };
     expect(row.recurrence).toBe('0 18 * * *');
-    expect(row.process_after).toBe('2026-02-01T00:00:00Z');
+    expect(row.process_after).toBe('2999-02-01T00:00:00.000Z');
   });
 
   it('clears recurrence when null is passed', () => {
@@ -194,7 +194,7 @@ describe('updateTask', () => {
     insertTaskRow(db, {
       id: 'task-1',
       seriesId: 'task-1',
-      processAfter: '2026-01-01T00:00:00Z',
+      processAfter: '2999-01-01T00:00:00.000Z',
       recurrence: '0 9 * * *',
       content: JSON.stringify({ prompt: 'p' }),
     });
@@ -236,6 +236,36 @@ describe('updateTask', () => {
     // Original (completed) row left alone.
     const orig = db.prepare("SELECT content FROM messages_in WHERE id = 'task-orig'").get() as { content: string };
     expect(JSON.parse(orig.content).prompt).toBe('old');
+  });
+
+  it('leaves a due run immutable while updating the future occurrence in its series', () => {
+    const db = freshDb();
+    insertTaskRow(db, {
+      id: 'task-scheduled',
+      seriesId: 'task-scheduled',
+      processAfter: '2999-01-01T00:00:00.000Z',
+      recurrence: '0 9 * * *',
+      content: JSON.stringify({ prompt: 'old' }),
+    });
+    insertTaskRow(db, {
+      id: 'task-run-now',
+      seriesId: 'task-scheduled',
+      processAfter: '2000-01-01T00:00:00.000Z',
+      recurrence: null,
+      content: JSON.stringify({ prompt: 'old' }),
+    });
+
+    expect(updateTask(db, 'task-scheduled', { prompt: 'new' })).toBe(1);
+
+    const scheduled = db.prepare("SELECT content FROM messages_in WHERE id = 'task-scheduled'").get() as {
+      content: string;
+    };
+    const running = db.prepare("SELECT content FROM messages_in WHERE id = 'task-run-now'").get() as {
+      content: string;
+    };
+    expect(JSON.parse(scheduled.content).prompt).toBe('new');
+    expect(JSON.parse(running.content).prompt).toBe('old');
+    db.close();
   });
 
   it('returns 0 when no live task matches', () => {

@@ -37,6 +37,7 @@ import { guard } from '../../guard/index.js';
 import { channelsRegister, sendersAdmit } from './guard.js';
 import { canAccessAgentGroup } from './access.js';
 import {
+  AGENT_ACCESS_SCOPE_WARNING,
   buildAgentSelectionOptions,
   CHOOSE_EXISTING_VALUE,
   CONNECT_PREFIX,
@@ -504,7 +505,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
     const agentGroups = await getAllAgentGroups();
     const options = await buildAgentSelectionOptions(agentGroups, approverId);
     const title = '📋 Choose an agent';
-    const question = 'Which agent should handle this channel?';
+    const question = `Which agent should handle this channel? ${AGENT_ACCESS_SCOPE_WARNING}`;
     await updatePendingChannelApprovalCard(row.messaging_group_id, title, question, JSON.stringify(options));
 
     try {

@@ -5,10 +5,9 @@
  * wakes a fresh container via the onExit callback — race-free.
  */
 import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
-import { countDueMessages } from './db/session-db.js';
 import { getSession, getSessionsByAgentGroup } from './db/sessions.js';
 import { log } from './log.js';
-import { openInboundDb, writeSessionMessage } from './session-manager.js';
+import { withExistingMailboxSession, writeSessionMessage } from './session-manager.js';
 
 /**
  * Kill all running containers for an agent group and respawn them.
@@ -42,14 +41,19 @@ export async function restartAgentGroupContainers(
           sender: 'system',
           senderId: 'system',
         }),
-        onWake: 1,
+        onWake: true,
       });
     }
     // Always respawn after the kill when there is anything to process: an
     // explicit wake message, or in-flight messages the dying container had
     // claimed. Without this, a provider switch mid-conversation leaves the
     // claimed messages dark until the next inbound or a slow sweep backoff.
-    const hasPending = countDueMessages(openInboundDb(session.agent_group_id, session.id)) > 0;
+    const hasPending =
+      (await withExistingMailboxSession(
+        session.agent_group_id,
+        session.id,
+        (mailbox) => mailbox.countDueMessages() > 0,
+      )) ?? false;
     killContainer(
       session.id,
       reason,

@@ -85,7 +85,6 @@ vi.mock('../../session-manager.js', () => ({
   readOutboxFiles: vi.fn().mockReturnValue([]),
   resolveSession: vi.fn(),
   sessionDir: vi.fn().mockReturnValue('/tmp/nowhere'),
-  inboundDbPath: vi.fn().mockReturnValue('/tmp/nowhere/inbound.db'),
 }));
 vi.mock('../../container-runner.js', () => ({
   wakeContainer: vi.fn().mockResolvedValue(undefined),
@@ -108,7 +107,7 @@ const SESSION = { id: 'sess-1', agent_group_id: 'ag-1' } as Session;
 async function runCreateAgent(content: Record<string, unknown>): Promise<void> {
   const wrapped = getDeliveryAction('create_agent');
   expect(wrapped).toBeDefined();
-  await wrapped!(content, SESSION, undefined as never);
+  await wrapped!(content, SESSION);
 }
 
 function liveGrant(approvalId: string, payload: Record<string, unknown>): PendingApproval {

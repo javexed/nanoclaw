@@ -11,7 +11,8 @@ import { initTestDb, closeDb, runMigrations, createAgentGroup } from '../../db/i
 import { getDb } from '../../db/connection.js';
 import { createPendingApproval, createSession, deletePendingApproval, getPendingApproval } from '../../db/sessions.js';
 import { requestApproval } from '../approvals/index.js';
-import { initSessionFolder, inboundDbPath } from '../../session-manager.js';
+import { inboundDbPath } from '../../mailbox/sqlite/paths.js';
+import { initSessionFolder } from '../../session-manager.js';
 import type { PendingApproval, Session } from '../../types.js';
 
 vi.mock('../../container-runner.js', () => ({

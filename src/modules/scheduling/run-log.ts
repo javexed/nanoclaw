@@ -32,3 +32,10 @@ export async function appendRunLog(
   fs.appendFileSync(file, `${timestamp} — ${msg}\n`);
   return { series, timestamp, path: file };
 }
+
+export async function deleteRunLog(agentGroupId: string, series: string): Promise<void> {
+  if (!/^[a-z0-9-]+$/.test(series)) throw new Error(`invalid task id: ${series}`);
+  const ag = await getAgentGroup(agentGroupId);
+  if (!ag) throw new Error(`agent group not found: ${agentGroupId}`);
+  fs.rmSync(`${GROUPS_DIR}/${ag.folder}/tasks/${series}.md`, { force: true });
+}

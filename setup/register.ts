@@ -30,6 +30,7 @@ import {
 } from '../src/db/messaging-groups.js';
 import { isValidGroupFolder } from '../src/group-folder.js';
 import { log } from '../src/log.js';
+import '../src/mailbox/compose.js';
 import { namespacedPlatformId } from '../src/platform-id.js';
 import { resolveSession, writeSessionMessage } from '../src/session-manager.js';
 import { emitStatus } from './status.js';
@@ -290,7 +291,7 @@ export async function run(args: string[]): Promise<void> {
       null,
       parsed.sessionMode as 'shared' | 'per-thread' | 'agent-shared',
     );
-    writeSessionMessage(agentGroup.id, session.id, {
+    await writeSessionMessage(agentGroup.id, session.id, {
       id: generateId('onboard'),
       kind: 'task',
       timestamp: new Date().toISOString(),

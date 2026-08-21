@@ -17,7 +17,7 @@ import { closeDb, createAgentGroup, initTestDb, runMigrations } from '../../db/i
 import { createMessagingGroup } from '../../db/messaging-groups.js';
 import { createSession } from '../../db/sessions.js';
 import { createDestination } from '../agent-to-agent/db/agent-destinations.js';
-import { inboundDbPath } from '../../session-manager.js';
+import { inboundDbPath } from '../../mailbox/sqlite/paths.js';
 import type { MessagingGroup, Session } from '../../types.js';
 import {
   buildDeliveredEchoLabel,

@@ -17,24 +17,19 @@ let inboundRows: Array<{ timestamp: string; content: string }> = [];
 let outboundRows: Array<{ timestamp: string; content: string }> = [];
 let siblingSessions: Array<{ id: string; status: string; messaging_group_id: string | null }> = [];
 
-vi.mock('fs', () => ({ default: { existsSync: () => true }, existsSync: () => true }));
 vi.mock('../../session-manager.js', () => ({
-  inboundDbPath: (g: string, s: string) => `/tmp/${g}/${s}/inbound.db`,
-  withInboundDb: (_g: string, _s: string, fn: (db: unknown) => unknown) =>
+  withExistingMailboxSession: (_g: string, _s: string, fn: (mailbox: unknown) => unknown) =>
     fn({
-      prepare: (sql: string) => {
-        inboundSql.push(sql);
-        return { all: () => inboundRows };
+      getConversationRoot: () => {
+        inboundSql.push('getConversationRoot');
+        return inboundRows[0];
+      },
+      getTopLevelOutbound: () => {
+        outboundSql.push('getTopLevelOutbound');
+        return outboundRows;
       },
     }),
-  openOutboundDb: () => ({
-    prepare: (sql: string) => {
-      outboundSql.push(sql);
-      return { all: () => outboundRows };
-    },
-    close: () => {},
-  }),
-  writeSessionMessage: (agentGroupId: string, sessionId: string, msg: Record<string, unknown>) => {
+  writeSessionMessage: async (agentGroupId: string, sessionId: string, msg: Record<string, unknown>) => {
     written.push({ agentGroupId, sessionId, ...msg });
   },
 }));
@@ -82,7 +77,7 @@ describe('backfillNewSession', () => {
       sessionId: 'sess-new',
       kind: 'chat',
       channelType: 'session-echo',
-      trigger: 0,
+      trigger: false,
     });
     const first = JSON.parse(written[0]!.content as string) as Record<string, unknown>;
     const second = JSON.parse(written[1]!.content as string) as Record<string, unknown>;
@@ -94,12 +89,10 @@ describe('backfillNewSession', () => {
     expect(first.self).toBeUndefined();
   });
 
-  it('queries only conversation roots inbound and top-level outbound (SQL shape)', async () => {
+  it('reads the semantic conversation timeline operations', async () => {
     await backfillNewSession(AG, NEW_SESSION, DM_MG);
-    expect(inboundSql[0]).toContain('ORDER BY seq ASC LIMIT 1');
-    expect(inboundSql[0]).toContain('trigger = 1');
-    expect(outboundSql[0]).toContain("thread_id IS NULL OR thread_id = '' OR thread_id LIKE '%:'");
-    expect(outboundSql[0]).toContain("kind NOT IN ('system','task_log')");
+    expect(inboundSql).toEqual(['getConversationRoot']);
+    expect(outboundSql).toEqual(['getTopLevelOutbound']);
   });
 
   it('skips task sessions and sessions without siblings', async () => {

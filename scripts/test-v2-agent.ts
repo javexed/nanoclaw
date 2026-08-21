@@ -45,7 +45,7 @@ db.close();
 process.env.SESSION_DB_PATH = DB_PATH;
 process.env.AGENT_PROVIDER = 'claude';
 
-const { getInboundDb, closeSessionDb } = await import('../container/agent-runner/src/db/connection.js');
+const { getInboundDb, closeSessionDb } = await import('../container/agent-runner/src/mailbox/sqlite/connection.js');
 const { getUndeliveredMessages } = await import('../container/agent-runner/src/db/messages-out.js');
 const { getPendingMessages } = await import('../container/agent-runner/src/db/messages-in.js');
 const { createProvider } = await import('../container/agent-runner/src/providers/factory.js');

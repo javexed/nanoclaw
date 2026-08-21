@@ -289,7 +289,7 @@ describe('channel + router integration', () => {
   it('should route inbound message from adapter to session DB', async () => {
     const { routeInbound } = await import('../router.js');
     const { findSession } = await import('../db/sessions.js');
-    const { inboundDbPath } = await import('../session-manager.js');
+    const { inboundDbPath } = await import('../mailbox/sqlite/paths.js');
 
     // Simulate what the adapter bridge does: stringify content, call routeInbound
     const inboundContent = { sender: 'TestUser', senderId: 'u1', text: 'Hello from adapter', isFromMe: false };

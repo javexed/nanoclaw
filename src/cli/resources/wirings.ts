@@ -96,7 +96,7 @@ registerResource({
       name: 'ignored_message_policy',
       type: 'string',
       description:
-        'What happens to messages that don\'t trigger engagement. "drop" — agent never sees them. "accumulate" — stored as background context (trigger=0) so the agent has prior context when eventually triggered.',
+        'What happens to messages that don\'t trigger engagement. "drop" — agent never sees them. "accumulate" — stored as background context so the agent has prior context when eventually triggered.',
       enum: ['drop', 'accumulate'],
       default: 'drop',
       updatable: true,

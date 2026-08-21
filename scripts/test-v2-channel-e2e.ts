@@ -71,7 +71,7 @@ import { routeInbound } from '../src/router.js';
 import { setDeliveryAdapter, startActiveDeliveryPoll, stopDeliveryPolls } from '../src/delivery.js';
 import { getChannelAdapter, registerChannelAdapter, initChannelAdapters } from '../src/channels/channel-registry.js';
 import { findSession } from '../src/db/sessions.js';
-import { inboundDbPath } from '../src/session-manager.js';
+import { inboundDbPath } from '../src/mailbox/sqlite/paths.js';
 import type { ChannelAdapter, ChannelSetup, OutboundMessage } from '../src/channels/adapter.js';
 
 // Track delivered messages

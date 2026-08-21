@@ -332,7 +332,7 @@ registerResource({
               channelType: 'agent',
               threadId: null,
               content: JSON.stringify({ text: message, sender: 'system', senderId: 'system' }),
-              onWake: 1,
+              onWake: true,
             });
           }
           killContainer(

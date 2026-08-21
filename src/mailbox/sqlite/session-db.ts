@@ -7,6 +7,8 @@
  */
 import Database from 'better-sqlite3';
 
+import { createInboundRecord } from '../model.js';
+import type { InboundWrite } from '../model.js';
 import { INBOUND_SCHEMA, OUTBOUND_SCHEMA } from './schema.js';
 
 /** Apply the inbound or outbound schema to a DB file. Idempotent. */
@@ -84,52 +86,22 @@ export function replaceDestinations(db: Database.Database, entries: DestinationR
  *
  * Exported so the scheduling module's task helpers can maintain the
  * host-writes-even-seq invariant without duplicating the logic. Not part of
- * the general public API — imported by `src/modules/scheduling/db.ts` only.
+ * the general public API — used only by this SQLite driver.
  */
 export function nextEvenSeq(db: Database.Database): number {
   const maxSeq = (db.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_in').get() as { m: number }).m;
   return maxSeq < 2 ? 2 : maxSeq + 2 - (maxSeq % 2);
 }
 
-export function insertMessage(
-  db: Database.Database,
-  message: {
-    id: string;
-    kind: string;
-    timestamp: string;
-    platformId: string | null;
-    channelType: string | null;
-    threadId: string | null;
-    content: string;
-    processAfter: string | null;
-    recurrence: string | null;
-    /**
-     * 1 = wake the agent (default); 0 = accumulate as context only.
-     * Host countDueMessages gates on this; container reads everything.
-     */
-    trigger?: 0 | 1;
-    /**
-     * For agent-to-agent inbound: the source session id that emitted the
-     * outbound message which became this inbound row. Used as the return
-     * path for the target's reply. NULL on channel-side inbound.
-     */
-    sourceSessionId?: string | null;
-    /**
-     * 1 = only deliver on the container's first poll (fresh start).
-     * Dying containers (past first poll) skip these rows.
-     */
-    onWake?: 0 | 1;
-  },
-): void {
+export function insertMessage(db: Database.Database, message: InboundWrite, sequence = nextEvenSeq(db)): void {
+  const record = createInboundRecord(message, sequence);
   db.prepare(
     `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content, process_after, recurrence, series_id, trigger, source_session_id, on_wake)
-     VALUES (@id, @seq, @kind, @timestamp, 'pending', @platformId, @channelType, @threadId, @content, @processAfter, @recurrence, @id, @trigger, @sourceSessionId, @onWake)`,
+     VALUES (@id, @sequence, @kind, @timestamp, @status, @platformId, @channelType, @threadId, @content, @processAfter, @recurrence, @seriesId, @trigger, @sourceSessionId, @onWake)`,
   ).run({
-    ...message,
-    trigger: message.trigger ?? 1,
-    onWake: message.onWake ?? 0,
-    sourceSessionId: message.sourceSessionId ?? null,
-    seq: nextEvenSeq(db),
+    ...record,
+    trigger: record.trigger ? 1 : 0,
+    onWake: record.onWake ? 1 : 0,
   });
 }
 
@@ -219,6 +191,7 @@ export interface ContainerState {
   current_tool: string | null;
   tool_declared_timeout_ms: number | null;
   tool_started_at: string | null;
+  updated_at: string;
 }
 
 /**
@@ -231,7 +204,7 @@ export function getContainerState(outDb: Database.Database): ContainerState | nu
   try {
     const row = outDb
       .prepare(
-        `SELECT current_tool, tool_declared_timeout_ms, tool_started_at
+        `SELECT current_tool, tool_declared_timeout_ms, tool_started_at, updated_at
            FROM container_state WHERE id = 1`,
       )
       .get() as ContainerState | undefined;
@@ -248,12 +221,16 @@ export function getContainerState(outDb: Database.Database): ContainerState | nu
 
 export interface OutboundMessage {
   id: string;
+  seq: number | null;
+  in_reply_to: string | null;
+  timestamp: string;
+  deliver_after: string | null;
+  recurrence: string | null;
   kind: string;
   platform_id: string | null;
   channel_type: string | null;
   thread_id: string | null;
   content: string;
-  in_reply_to: string | null;
 }
 
 export function getDueOutboundMessages(db: Database.Database): OutboundMessage[] {

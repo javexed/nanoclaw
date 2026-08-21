@@ -7,21 +7,16 @@
  * `hasTable('agent_destinations')` check — without the agent-to-agent module
  * installed, the central table doesn't exist and the projection is skipped.
  */
-import fs from 'fs';
-
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
-import { replaceDestinations, type DestinationRow } from '../../db/session-db.js';
+import type { Destination } from '../../mailbox/index.js';
 import { log } from '../../log.js';
-import { inboundDbPath, openInboundDb } from '../../session-manager.js';
+import { withMailboxSession } from '../../session-manager.js';
 import { getDestinations } from './db/agent-destinations.js';
 
 export async function writeDestinations(agentGroupId: string, sessionId: string): Promise<void> {
-  const dbPath = inboundDbPath(agentGroupId, sessionId);
-  if (!fs.existsSync(dbPath)) return;
-
   const rows = await getDestinations(agentGroupId);
-  const resolved: DestinationRow[] = [];
+  const resolved: Destination[] = [];
 
   for (const row of rows) {
     if (row.target_type === 'channel') {
@@ -29,31 +24,28 @@ export async function writeDestinations(agentGroupId: string, sessionId: string)
       if (!mg) continue;
       resolved.push({
         name: row.local_name,
-        display_name: mg.name ?? row.local_name,
+        displayName: mg.name ?? row.local_name,
         type: 'channel',
-        channel_type: mg.channel_type,
-        platform_id: mg.platform_id,
-        agent_group_id: null,
+        channelType: mg.channel_type,
+        platformId: mg.platform_id,
+        agentGroupId: null,
       });
     } else if (row.target_type === 'agent') {
       const ag = await getAgentGroup(row.target_id);
       if (!ag) continue;
       resolved.push({
         name: row.local_name,
-        display_name: ag.name,
+        displayName: ag.name,
         type: 'agent',
-        channel_type: null,
-        platform_id: null,
-        agent_group_id: ag.id,
+        channelType: null,
+        platformId: null,
+        agentGroupId: ag.id,
       });
     }
   }
 
-  const db = openInboundDb(agentGroupId, sessionId);
-  try {
-    replaceDestinations(db, resolved);
-  } finally {
-    db.close();
-  }
+  await withMailboxSession(agentGroupId, sessionId, (db) => {
+    db.replaceDestinations(resolved);
+  });
   log.debug('Destination map written', { sessionId, count: resolved.length });
 }

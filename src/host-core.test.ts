@@ -23,11 +23,10 @@ import {
   writeSessionRouting,
   initSessionFolder,
   sessionDir,
-  inboundDbPath,
-  outboundDbPath,
   readOutboxFiles,
   clearOutbox,
 } from './session-manager.js';
+import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
 import { getSession, findSession } from './db/sessions.js';
 import type { InboundEvent } from './channels/adapter.js';
 

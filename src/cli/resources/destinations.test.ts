@@ -27,7 +27,8 @@ const TEST_DIR = '/tmp/nanoclaw-test-cli-destinations';
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from '../../db/index.js';
 import { createSession } from '../../db/sessions.js';
-import { initSessionFolder, inboundDbPath } from '../../session-manager.js';
+import { inboundDbPath } from '../../mailbox/sqlite/paths.js';
+import { initSessionFolder } from '../../session-manager.js';
 import { dispatch } from '../dispatch.js';
 // Side-effect import: registers the `destinations-add` / `destinations-remove` commands.
 import './destinations.js';

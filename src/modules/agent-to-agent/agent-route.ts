@@ -24,12 +24,11 @@ import path from 'path';
 import { isSafeAttachmentName } from '../../attachment-safety.js';
 import { ensureContainedInboxDir, isPathInside } from '../../inbox-safety.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
-import { getInboundSourceSessionId, getMostRecentPeerSourceSessionId } from '../../db/session-db.js';
 import { getSession } from '../../db/sessions.js';
 import { wakeContainer } from '../../container-runner.js';
 import { GuardDenyError, guard } from '../../guard/index.js';
 import { log } from '../../log.js';
-import { openInboundDb, resolveSession, sessionDir, writeSessionMessage } from '../../session-manager.js';
+import { resolveSession, sessionDir, withExistingMailboxSession, writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval, Session } from '../../types.js';
 import { requestApproval } from '../approvals/index.js';
 import { A2A_MESSAGE_GATE_ACTION, a2aSend } from './guard.js';
@@ -237,21 +236,19 @@ async function resolveTargetSession(
   sourceSession: Session,
   targetAgentGroupId: string,
 ): Promise<Session> {
-  const srcDb = openInboundDb(sourceSession.agent_group_id, sourceSession.id);
-  let originSessionId: string | null = null;
-  try {
+  const originSessionId = await withExistingMailboxSession(sourceSession.agent_group_id, sourceSession.id, (srcDb) => {
+    let origin: string | null = null;
     if (msg.in_reply_to) {
-      originSessionId = getInboundSourceSessionId(srcDb, msg.in_reply_to);
+      origin = srcDb.getInboundSourceSessionId(msg.in_reply_to);
     }
-    if (!originSessionId) {
+    if (!origin) {
       // Peer-affinity fallback — covers the case where the container's
       // outbound write didn't carry in_reply_to (e.g. legacy MCP send_message
       // path, container running pre-fix code).
-      originSessionId = getMostRecentPeerSourceSessionId(srcDb, targetAgentGroupId);
+      origin = srcDb.getMostRecentPeerSourceSessionId(targetAgentGroupId);
     }
-  } finally {
-    srcDb.close();
-  }
+    return origin;
+  });
   if (originSessionId) {
     const candidate = await getSession(originSessionId);
     if (candidate && candidate.agent_group_id === targetAgentGroupId && candidate.status === 'active') {

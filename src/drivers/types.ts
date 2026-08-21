@@ -198,6 +198,27 @@ export interface SessionWatch {
   stop(): void;
 }
 
+/**
+ * The argv a client shells to attach an interactive session to this runtime.
+ *
+ * The driver describes the invocation; it never performs it. Handing back argv
+ * instead of a stream is what keeps an interactive attach honest: the terminal
+ * belongs to the client's own stdio, so a caller that needs a real TTY gets one
+ * from the process it spawns rather than from a pipe this layer would have to
+ * emulate. It also keeps the driver seam free of process lifetime — nothing
+ * here to supervise, cancel, or leak.
+ *
+ * Two variants because the caller, not the driver, knows whether a TTY is
+ * appropriate: `argsTty` when stdin is a terminal, `argsPlain` when the attach
+ * is piped or scripted. Allocating a TTY for a non-terminal stdin corrupts the
+ * stream with control sequences, so this choice cannot be made from here.
+ */
+export interface SessionExecSpec {
+  bin: string;
+  argsTty: string[];
+  argsPlain: string[];
+}
+
 export interface SessionHandle {
   key: SessionKey;
   /** Stable runtime name for logs and operator commands. */
@@ -213,6 +234,13 @@ export interface SessionHandle {
    * blocking-until-gone.
    */
   stop(reason: string): Promise<void>;
+  /**
+   * The argv for attaching `command` interactively to this session. Pure
+   * description — see `SessionExecSpec`. Valid only while the session is live;
+   * a caller that races teardown gets the runtime's own error from the spawn,
+   * not a lie from this layer.
+   */
+  execSpec(command: string[]): SessionExecSpec;
 }
 
 export interface DriverCapabilities {

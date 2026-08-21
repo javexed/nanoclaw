@@ -78,7 +78,7 @@ describe('sessionHistory', () => {
     await writeInbound('in-1', '2026-08-01T10:00:00.000Z', 'hello there');
     await writeInbound('in-2', '2026-08-01T10:02:00.000Z', 'second message');
     // writeOutboundDirect stamps now() — always sorts after the fixed 2026 stamps.
-    writeOutboundDirect(AG, SESS, {
+    await writeOutboundDirect(AG, SESS, {
       id: 'out-1',
       kind: 'chat',
       platformId: 'D1',

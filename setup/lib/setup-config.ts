@@ -106,8 +106,8 @@ export const CONFIG: Entry[] = [
   },
   {
     key: 'templatePath',
-    label: 'First-agent template',
-    help: 'Create the first agent from a local template ref under templates/ (for example, sales/sdr).',
+    label: 'Agent template',
+    help: 'Create or update an agent from a local template ref under templates/ (for example, sales/sdr).',
     surface: 'flag+ui',
     group: 'Agent',
     type: 'string',

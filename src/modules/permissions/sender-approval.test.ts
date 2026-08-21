@@ -19,6 +19,7 @@ import { createAgentGroup } from '../../db/agent-groups.js';
 import { createMessagingGroup, createMessagingGroupAgent } from '../../db/messaging-groups.js';
 import { upsertUser } from './db/users.js';
 import { grantRole } from './db/user-roles.js';
+import { AGENT_ACCESS_SCOPE_WARNING } from './channel-approval.js';
 
 // Mock container runner — prevent actual docker spawn.
 vi.mock('../../container-runner.js', () => ({
@@ -175,6 +176,7 @@ describe('unknown-sender request_approval flow', () => {
     const payload = JSON.parse(content as string);
     expect(payload.type).toBe('ask_question');
     expect(payload.questionId).toMatch(/^nsa-/);
+    expect(payload.question).toContain(AGENT_ACCESS_SCOPE_WARNING);
 
     const { getDb } = await import('../../db/connection.js');
     const rows = await getDb().all('SELECT * FROM pending_sender_approvals');

@@ -24,7 +24,7 @@ export async function projectDestinationsToSessions(agentGroupId: string): Promi
     try {
       await writeDestinations(agentGroupId, session.id);
     } catch (err) {
-      log.warn('Failed to project destinations to session inbound.db', { agentGroupId, sessionId: session.id, err });
+      log.warn('Failed to project destinations to session mailbox', { agentGroupId, sessionId: session.id, err });
     }
   }
 }

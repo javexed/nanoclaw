@@ -79,7 +79,7 @@ export async function applyInstallPackages(payload: Record<string, unknown>, ses
         sender: 'system',
         senderId: 'system',
       }),
-      onWake: 1,
+      onWake: true,
     });
     killContainer(session.id, 'rebuild applied', () => {
       void wakeSessionById(session.id);
@@ -152,7 +152,7 @@ export async function applyAddMcpServer(payload: Record<string, unknown>, sessio
       sender: 'system',
       senderId: 'system',
     }),
-    onWake: 1,
+    onWake: true,
   });
   killContainer(session.id, 'mcp server added', () => {
     void wakeSessionById(session.id);

@@ -163,6 +163,35 @@ async function waitForDeliveries(count: number): Promise<void> {
 }
 
 describe('unknown-sender decline_notify flow', () => {
+  it('honors caller-supplied copy and conversation-scoped dedupe', async () => {
+    const { declineAndNotify } = await import('./sender-approval.js');
+    const event = strangerDm('hello');
+    const input = {
+      messagingGroupId: 'mg-dm-stranger',
+      agentGroupId: 'ag-1',
+      senderIdentity: 'telegram:stranger-1',
+      senderName: 'Stranger One',
+      event,
+      dedupeKey: 'conversation',
+      declineText: 'Only the owner can connect me here.',
+      fyiText: 'FYI: I declined an unauthorized channel invitation.',
+    };
+
+    await declineAndNotify(input);
+    await waitForDeliveries(2);
+    expect(JSON.parse(deliverMock.mock.calls[0][4] as string).text).toBe(input.declineText);
+    expect(JSON.parse(deliverMock.mock.calls[1][4] as string).text).toBe(input.fyiText);
+
+    await declineAndNotify({
+      ...input,
+      senderIdentity: 'telegram:stranger-2',
+      senderName: 'Stranger Two',
+    });
+    await settle();
+
+    expect(deliverMock).toHaveBeenCalledTimes(2);
+  });
+
   it('declines in the DM, FYIs the owner, records the drop — no card', async () => {
     const { routeInbound } = await import('../../router.js');
     await routeInbound(strangerDm('hi, can you book me a flight?'));

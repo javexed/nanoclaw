@@ -67,6 +67,7 @@ import { detectExistingInstall } from './uninstall/scan.js';
 import { detectRegisteredGroups, detectExistingDisplayName, readEnvKey } from './environment.js';
 import { pollHealth } from './onecli.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
+import type { AgentGroup } from '../src/types.js';
 import { claudeCliAvailable, resolveTimezoneViaClaude } from './lib/tz-from-claude.js';
 import * as setupLog from './logs.js';
 import { ensureAnswer, fail, runQuietChild, runQuietStep, spawnQuiet } from './lib/runner.js';
@@ -91,9 +92,13 @@ import {
   cloneRegistry,
   copyTemplate,
   installTemplateAgent,
+  listTemplateAgents,
   listTemplatesFromDir,
+  validateNewTemplateAgentName,
   type ClonedRegistry,
+  type SetupTemplateAgent,
   type TemplateEntry,
+  type TemplateOperation,
 } from './templates.js';
 
 const CLI_AGENT_NAME = 'Terminal Agent';
@@ -105,7 +110,17 @@ const REGISTRY_STEP = 'pnpm exec tsx setup/index.ts --step registry';
 /** `setup/registry-login.sh`'s "nothing was signed in, and that is fine" code. */
 const LOGIN_EXIT_SKIPPED = 2;
 
-type ChannelChoice = 'telegram' | 'discord' | 'whatsapp' | 'signal' | 'teams' | 'slack' | 'imessage' | 'other' | 'skip';
+type ChannelChoice =
+  | 'telegram'
+  | 'discord'
+  | 'whatsapp'
+  | 'signal'
+  | 'teams'
+  | 'slack'
+  | 'imessage'
+  | 'dial'
+  | 'other'
+  | 'skip';
 
 async function main(): Promise<void> {
   // Make sure ~/.local/bin is on PATH for every child process we spawn.
@@ -223,9 +238,8 @@ async function main(): Promise<void> {
 
   // Nothing loads .env into the wizard process — bridge the persisted pick so
   // it survives not just self re-execs (`sg docker`, fail-retry) but full
-  // process restarts. Without this, a run that aborted after the pick leaves a
-  // partial install whose registered groups silently gate the picker off on
-  // rerun, and the pick is lost.
+  // process restarts. Without this, a run that aborted after the pick silently
+  // loses that choice on a full rerun.
   let savedPickBridged = false;
   if (!process.env.NANOCLAW_TEMPLATE_PATH?.trim()) {
     const savedPick = readEnvKey('NANOCLAW_TEMPLATE_PATH')?.trim();
@@ -234,10 +248,8 @@ async function main(): Promise<void> {
       savedPickBridged = true;
     }
   }
-  // Existing installs do not get an unsolicited first-agent picker, but an
-  // explicit --template-path is always honoured.
-  if (!isResume && (process.env.NANOCLAW_TEMPLATE_PATH?.trim() || !(await detectRegisteredGroups(process.cwd())))) {
-    await runTemplateSetup(savedPickBridged);
+  if (!isResume) {
+    await runTemplateSetup(savedPickBridged, await detectRegisteredGroups(process.cwd()));
   }
 
   if (!skip.has('container')) {
@@ -657,14 +669,14 @@ async function main(): Promise<void> {
     await runTimezoneStep();
   }
 
-  await installSelectedTemplateAgent(agentProvider);
+  const templateAgentOutcome = await installSelectedTemplateAgent(agentProvider);
 
   // v1 → v2 migration is handled by `bash migrate-v2.sh`, not the setup flow.
   // Users migrating from v1 run that script before (or instead of) setup.
 
   let channelChoice: ChannelChoice = 'skip';
 
-  if (!skip.has('channel')) {
+  if (!skip.has('channel') && templateAgentOutcome !== 'restamped') {
     // Loop so a channel sub-flow can return BACK_TO_CHANNEL_SELECTION on
     // its first prompt and bounce the user back to the chooser without
     // restarting setup. Channels not yet wired with the back option just
@@ -696,6 +708,8 @@ async function main(): Promise<void> {
         result = await runChannelSkillWithPreStep('slack', displayName!, { offerBack: true });
       } else if (channelChoice === 'imessage') {
         result = await runChannelSkillWithPreStep('imessage', displayName!, { offerBack: true });
+      } else if (channelChoice === 'dial') {
+        result = await runChannelSkillWithPreStep('dial', displayName!, { offerBack: true });
       } else if (channelChoice === 'other') {
         result = await askOtherChannelName();
       } else {
@@ -711,6 +725,9 @@ async function main(): Promise<void> {
       if (result === BACK_TO_CHANNEL_SELECTION) backed = true;
     }
   }
+  // Setup-selected targets are one-run-only. A later setup derives connect
+  // choices from current wirings instead of inheriting an old agent id.
+  delete process.env.NANOCLAW_TEMPLATE_AGENT_ID;
 
   // Deferred wire (Teams): verify passes with zero groups because the
   // platform id only exists after the first DM. Tracked here so the ENDING
@@ -834,6 +851,8 @@ function channelDmLabel(choice: ChannelChoice): string | null {
       return 'iMessage';
     case 'slack':
       return 'Slack DMs';
+    case 'dial':
+      return 'phone';
     default:
       return null;
   }
@@ -962,7 +981,7 @@ const INSTALLABLE_PROVIDERS = [
 // the operator may be rerunning precisely to change it. In-process presets
 // (--template-path, the Advanced screen, self re-execs, an exported env var)
 // keep the silent skip.
-async function runTemplateSetup(pickSavedByPreviousRun: boolean): Promise<void> {
+async function runTemplateSetup(pickSavedByPreviousRun: boolean, hasRegisteredAgents: boolean): Promise<void> {
   const preset = process.env.NANOCLAW_TEMPLATE_PATH?.trim();
   if (preset) {
     if (listLocalTemplates().some((template) => template.ref === preset)) {
@@ -999,9 +1018,13 @@ async function runTemplateSetup(pickSavedByPreviousRun: boolean): Promise<void> 
   for (;;) {
     const source = ensureAnswer(
       await brightSelect<'none' | 'library' | 'local'>({
-        message: 'How should we create your first agent?',
+        message: hasRegisteredAgents
+          ? 'Would you like to add or update an agent from a template?'
+          : 'How should we create your first agent?',
         options: [
-          { value: 'none', label: 'Fresh agent', hint: 'recommended — shape it by chatting' },
+          hasRegisteredAgents
+            ? { value: 'none', label: 'No template changes', hint: 'recommended' }
+            : { value: 'none', label: 'Fresh agent', hint: 'recommended — shape it by chatting' },
           { value: 'library', label: 'From the NanoClaw template library', hint: 'prebuilt agents' },
           { value: 'local', label: 'From local templates', hint: 'templates/ in this install' },
         ],
@@ -1109,14 +1132,20 @@ async function chooseTemplate(templates: TemplateEntry[]): Promise<string | unde
   return ref === BACK_TO_TEMPLATE_SOURCE ? undefined : ref;
 }
 
-async function installSelectedTemplateAgent(provider?: string): Promise<void> {
+type TemplateAgentOutcome = 'none' | 'channel-target' | 'restamped';
+type TemplateSetupOperation =
+  | TemplateOperation
+  | { kind: 'connect'; agentGroupId: string };
+
+async function installSelectedTemplateAgent(provider?: string): Promise<TemplateAgentOutcome> {
   const ref = process.env.NANOCLAW_TEMPLATE_PATH?.trim();
-  if (!ref || process.env.NANOCLAW_TEMPLATE_AGENT_ID?.trim()) return;
+  if (!ref) return 'none';
+  if (process.env.NANOCLAW_TEMPLATE_AGENT_ID?.trim()) return 'channel-target';
 
   // Only an explicit operator name overrides the template: the CLI's own
   // fallback chain (--name → the manifest's agentName → the folder leaf) must
   // stay reachable through the wizard, or a template's agentName is dead.
-  const name = process.env.NANOCLAW_AGENT_NAME?.trim() || undefined;
+  const presetName = process.env.NANOCLAW_AGENT_NAME?.trim() || undefined;
   const transport = new SocketTransport();
   const runNcl = async (command: string, args: Record<string, unknown>): Promise<unknown> => {
     const response = await transport.sendFrame({ id: randomUUID(), command, args });
@@ -1126,10 +1155,46 @@ async function installSelectedTemplateAgent(provider?: string): Promise<void> {
 
   const start = Date.now();
   phEmit('step_started', { step: 'template-agent' });
-  p.log.step(brandBody(`Installing the "${ref}" template…`));
   try {
+    const agents = await listTemplateAgents(ref, runNcl);
+    const operation = await chooseTemplateOperation(ref, agents);
+    if (!operation) {
+      clearTemplatePick();
+      setupLog.step('template-agent', 'success', Date.now() - start, { ref, cancelled: true });
+      phEmit('step_completed', { step: 'template-agent', status: 'success' });
+      p.log.info('No template changes made.');
+      return 'none';
+    }
+
+    if (operation.kind === 'connect') {
+      const group = agents.find((agent) => agent.id === operation.agentGroupId);
+      if (!group) throw new Error('Selected template agent no longer exists');
+      clearTemplatePick();
+      process.env.NANOCLAW_TEMPLATE_AGENT_ID = group.id;
+      process.env.NANOCLAW_AGENT_NAME = group.name;
+      setupLog.step('template-agent', 'success', Date.now() - start, {
+        ref,
+        agent_group_id: group.id,
+        operation: 'connect',
+      });
+      phEmit('step_completed', { step: 'template-agent', status: 'success' });
+      p.log.success(`Ready to connect agent "${group.name}".`);
+      return 'channel-target';
+    }
+
+    const name =
+      operation.kind === 'create' && agents.length > 0
+        ? await askNewTemplateAgentName(agents, presetName)
+        : presetName;
+
+    p.log.step(
+      brandBody(
+        operation.kind === 'create' ? `Installing the "${ref}" template…` : `Preparing the "${ref}" template update…`,
+      ),
+    );
     const result = await installTemplateAgent({
       ref,
+      operation,
       name,
       timezone: readEnvKey('TZ') ?? undefined,
       provider,
@@ -1143,7 +1208,7 @@ async function installSelectedTemplateAgent(provider?: string): Promise<void> {
               `Agent "${plan.group.name}" is already stamped from this template. Update it in place? ` +
               `${resets.length} plugin-owned surface${resets.length === 1 ? '' : 's'} will be reset` +
               (customized > 0 ? ` (${customized} with local edits that will be lost)` : '') +
-              '. Memory, chats, and wiring are kept.',
+              '. Provider, memory, chats, and wiring are kept.',
             initialValue: customized === 0,
           }),
         );
@@ -1152,35 +1217,38 @@ async function installSelectedTemplateAgent(provider?: string): Promise<void> {
       },
     });
 
-    if (result.status === 'kept') {
-      process.env.NANOCLAW_TEMPLATE_AGENT_ID = result.group.id;
-      process.env.NANOCLAW_AGENT_NAME = result.group.name;
+    if (result.status === 'cancelled') {
+      clearTemplatePick();
       setupLog.step('template-agent', 'success', Date.now() - start, {
         ref,
-        agent_group_id: result.group.id,
-        kept: true,
+        cancelled: true,
       });
       phEmit('step_completed', { step: 'template-agent', status: 'success' });
-      p.log.success(`Keeping agent "${result.group.name}" as-is — local edits preserved. Wiring it unchanged.`);
-      return;
+      p.log.info('Template update cancelled. The agent was left unchanged.');
+      return 'none';
     }
 
-    // The pick is NOT cleared here: it must survive until the wire that
-    // consumes the stamped agent succeeds (run-channel-skill), or a rerun
-    // after a failed channel step silently wires a fresh vanilla agent while
-    // this one sits orphaned. Contract comment: setup/templates.ts.
-    process.env.NANOCLAW_TEMPLATE_AGENT_ID = result.group.id;
-    process.env.NANOCLAW_AGENT_NAME = result.group.name;
     setupLog.step('template-agent', 'success', Date.now() - start, {
       ref,
       agent_group_id: result.group.id,
     });
     phEmit('step_completed', { step: 'template-agent', status: 'success' });
-    p.log.success(
-      result.status === 'updated'
-        ? `Template agent "${result.group.name}" updated in place.`
-        : `Template agent "${result.group.name}" created.`,
-    );
+    if (result.status === 'updated') {
+      // Restamping preserves wiring, so it has no deferred channel work and
+      // must not make the channel step consume this existing agent as "new".
+      clearTemplatePick();
+      p.log.success(`Template agent "${result.group.name}" updated in place.`);
+      return 'restamped';
+    }
+
+    // The id is intentionally one-run-only. A later setup derives unwired
+    // agents from ncl and offers an explicit Connect action instead of silently
+    // targeting whatever id a previous run left behind.
+    clearTemplatePick();
+    process.env.NANOCLAW_TEMPLATE_AGENT_ID = result.group.id;
+    process.env.NANOCLAW_AGENT_NAME = result.group.name;
+    p.log.success(`Template agent "${result.group.name}" created.`);
+    return 'channel-target';
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     setupLog.step('template-agent', 'failed', Date.now() - start, { ref, error: message });
@@ -1200,7 +1268,63 @@ async function installSelectedTemplateAgent(provider?: string): Promise<void> {
       ].join('\n'),
       'Skipping the template',
     );
+    return 'none';
   }
+}
+
+async function chooseTemplateOperation(
+  ref: string,
+  agents: readonly SetupTemplateAgent[],
+): Promise<TemplateSetupOperation | undefined> {
+  if (agents.length === 0) return { kind: 'create' };
+
+  const options = agents.flatMap((agent) => [
+    ...(agent.isWired
+      ? []
+      : [{
+          value: { kind: 'connect', agentGroupId: agent.id } as const,
+          label: `Connect "${agent.name}" to a channel`,
+          hint: `groups/${agent.folder} · not connected`,
+        }]),
+    {
+      value: { kind: 'restamp', agentGroupId: agent.id } as const,
+      label: `Update "${agent.name}" in place`,
+      hint: `groups/${agent.folder} · keeps provider, memory, chats, and wiring`,
+    },
+  ]);
+  const choice = ensureAnswer(
+    await brightSelect<TemplateSetupOperation | { kind: 'cancel' }>({
+      message: `The "${ref}" template is already in use. What would you like to do?`,
+      options: [
+        ...options,
+        { value: { kind: 'create' }, label: 'Create another agent' },
+        { value: { kind: 'cancel' }, label: 'Cancel' },
+      ],
+      initialValue: options[0].value,
+    }),
+  ) as TemplateSetupOperation | { kind: 'cancel' };
+  setupLog.userInput(
+    'template_operation',
+    'agentGroupId' in choice ? `${choice.kind}:${choice.agentGroupId}` : choice.kind,
+  );
+  return choice.kind === 'cancel' ? undefined : choice;
+}
+
+async function askNewTemplateAgentName(
+  agents: readonly AgentGroup[],
+  initialValue?: string,
+): Promise<string> {
+  const answer = ensureAnswer(
+    await p.text({
+      message: 'Name the new agent',
+      placeholder: 'e.g. EMEA Sales',
+      ...(initialValue ? { initialValue } : {}),
+      validate: (value) => validateNewTemplateAgentName(value, agents),
+    }),
+  );
+  const name = (answer as string).trim();
+  setupLog.userInput('template_agent_name', name);
+  return name;
 }
 
 /**
@@ -1759,9 +1883,12 @@ async function askChannelChoice(): Promise<ChannelChoice> {
     await brightSelect<ChannelChoice>({
       message: 'Want to chat with your assistant from your phone?',
       options: [
-        { value: 'telegram', label: 'Yes, connect Telegram', hint: 'recommended' },
+        { value: 'slack', label: 'Yes, connect Slack', hint: 'NEW!! one-click install' },
+        { value: 'teams', label: 'Yes, connect Microsoft Teams' },
+        { value: 'telegram', label: 'Yes, connect Telegram' },
         { value: 'discord', label: 'Yes, connect Discord' },
         { value: 'whatsapp', label: 'Yes, connect WhatsApp', hint: 'best with a dedicated number' },
+        { value: 'dial', label: 'Yes, connect Dial', hint: 'a dedicated phone number for your agent — place calls, SMS — worldwide' },
         {
           value: 'signal',
           label: 'Yes, connect Signal',
@@ -1772,12 +1899,6 @@ async function askChannelChoice(): Promise<ChannelChoice> {
           label: 'Yes, connect iMessage',
           hint: 'local Mac or hosted iMessage (via photon.codes)',
         },
-        {
-          value: 'slack',
-          label: 'Yes, connect Slack (experimental)',
-          hint: 'needs public URL',
-        },
-        { value: 'teams', label: 'Yes, connect Microsoft Teams', hint: 'complex setup' },
         { value: 'other', label: 'Other…', hint: 'install via /add-<name> after setup' },
         { value: 'skip', label: 'Skip for now', hint: "I'll just use the terminal" },
       ],

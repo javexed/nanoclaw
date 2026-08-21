@@ -20,7 +20,7 @@ import {
   createMessagingGroup,
   createMessagingGroupAgent,
 } from './db/index.js';
-import { inboundDbPath } from './session-manager.js';
+import { inboundDbPath } from './mailbox/sqlite/paths.js';
 import { findSession } from './db/sessions.js';
 import type { InboundEvent } from './channels/adapter.js';
 

@@ -100,13 +100,13 @@ export function isTaskThread(threadId: string | null): boolean {
   return threadId === TASKS_SYSTEM_THREAD_ID || (threadId?.startsWith(`${TASKS_SYSTEM_THREAD_ID}:`) ?? false);
 }
 
-/** All active task sessions for a group — one per live series, plus any legacy shared one. */
-export async function findTaskSessions(agentGroupId: string): Promise<Session[]> {
+/** Task sessions for a group — active by default, optionally including closed history. */
+export async function findTaskSessions(agentGroupId: string, includeClosed = false): Promise<Session[]> {
   return getDb().all<Session>(
     `SELECT * FROM sessions
-       WHERE agent_group_id = ?
-         AND messaging_group_id IS NULL
-         AND status = 'active'
+      WHERE agent_group_id = ?
+        AND messaging_group_id IS NULL
+        ${includeClosed ? '' : "AND status = 'active'"}
          AND (thread_id = ? OR thread_id LIKE ?)
        ORDER BY created_at DESC`,
     agentGroupId,

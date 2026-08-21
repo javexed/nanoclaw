@@ -162,7 +162,7 @@ async function fanEcho(input: EchoFanInput): Promise<number> {
         channelType: ECHO_CHANNEL_TYPE,
         threadId: null,
         content,
-        trigger: 0,
+        trigger: false,
         sourceSessionId: input.sourceSessionId,
       });
       written++;

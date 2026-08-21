@@ -185,6 +185,7 @@ export type ProviderEvent =
   | { type: 'text'; text: string }
   | { type: 'error'; message: string; retryable: boolean; classification?: string }
   | { type: 'progress'; message: string }
+  | { type: 'file'; path: string }
   /**
    * A line of the agent's reasoning/thinking, surfaced to observers via the
    * poll-loop's provider-message forward (see providers/hooks.ts). Cosmetic;

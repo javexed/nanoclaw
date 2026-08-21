@@ -92,8 +92,8 @@ async function handleRegisteredApproval(
   if (!(await transitionPendingApprovalStatus(approval.approval_id, 'pending', 'approved'))) return;
 
   // Approved — dispatch to the module that registered for this action.
-  const notify = async (text: string): Promise<void> => {
-    await writeSessionMessage(session.agent_group_id, session.id, {
+  const notify = (text: string): Promise<void> =>
+    writeSessionMessage(session.agent_group_id, session.id, {
       id: `appr-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       kind: 'chat',
       timestamp: new Date().toISOString(),
@@ -102,7 +102,6 @@ async function handleRegisteredApproval(
       threadId: null,
       content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
     });
-  };
 
   const handler = getApprovalHandler(approval.action);
   if (!handler) {

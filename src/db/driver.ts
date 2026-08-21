@@ -39,7 +39,8 @@ export interface DbMigrationHooks {
 
 /**
  * Async central-database boundary. Session mailboxes deliberately do not use
- * this interface: inbound.db and outbound.db remain direct SQLite databases.
+ * this interface: the default inbound.db and outbound.db implementation is SQLite,
+ * but mailbox implementations may use other storage backends.
  *
  * Transaction callbacks must issue DB calls sequentially. Do not use
  * Promise.all, and never await mailbox, container, adapter, or network work

@@ -26,13 +26,14 @@ vi.mock('./db/sessions.js', () => ({
 const mockWriteSessionMessage = vi.fn();
 vi.mock('./session-manager.js', () => ({
   writeSessionMessage: (...args: unknown[]) => mockWriteSessionMessage(...args),
-  openInboundDb: () => ({}),
+  withExistingMailboxSession: (
+    _agentGroupId: string,
+    _sessionId: string,
+    action: (mailbox: { countDueMessages(): number }) => unknown,
+  ) => action({ countDueMessages: () => mockCountDueMessages() }),
 }));
 
 const mockCountDueMessages = vi.fn((..._args: unknown[]) => 0);
-vi.mock('./db/session-db.js', () => ({
-  countDueMessages: (...args: unknown[]) => mockCountDueMessages(...args),
-}));
 
 import { restartAgentGroupContainers } from './container-restart.js';
 
@@ -102,7 +103,7 @@ describe('restartAgentGroupContainers', () => {
     const [agentGroupId, sessionId, msg] = mockWriteSessionMessage.mock.calls[0];
     expect(agentGroupId).toBe('g1');
     expect(sessionId).toBe('s1');
-    expect(msg.onWake).toBe(1);
+    expect(msg.onWake).toBe(true);
     expect(JSON.parse(msg.content).text).toBe('Resuming.');
 
     // Should pass an onExit callback to killContainer

@@ -227,9 +227,9 @@ export interface ChannelSkillOverrides extends Partial<RunSkillOptions> {
   /** The shared wire; defaults to init-first-agent. Injectable for tests. */
   wire?: (args: WireArgs) => Promise<boolean> | boolean;
   /**
-   * Clears the persisted template pick once the wire consumed the stamped
-   * agent; defaults to the real .env writer (setup/templates.ts). Injectable
-   * so tests never touch the repo's .env.
+   * Clears any persisted template pick after a targeted wire. Modern setup
+   * clears it when the operator chooses an action; this remains idempotent for
+   * re-exec and direct-driver paths. Injectable so tests never touch .env.
    */
   clearTemplatePick?: () => void;
   /**
@@ -389,11 +389,8 @@ export async function runChannelSkill(
       'You can retry later with `/init-first-agent`.',
     );
   }
-  // This wire is the seam that consumes the template pick: only now has the
-  // pick done its job. Clearing earlier (at stamp time) orphans the agent on
-  // a rerun after a failed channel step; never clearing makes every future
-  // setup run re-enter template setup. Pinned by run-channel-skill.test.ts
-  // ("clears the template pick…").
+  // Idempotently clear any legacy/re-exec template pick after the targeted
+  // wire succeeds. Pinned by run-channel-skill.test.ts.
   if (templateAgentGroupId) (overrides.clearTemplatePick ?? clearTemplatePick)();
 }
 

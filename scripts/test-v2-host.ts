@@ -71,7 +71,7 @@ console.log('\n=== Step 2: Route inbound message ===');
 
 import { routeInbound } from '../src/router.js';
 import { findSession } from '../src/db/sessions.js';
-import { inboundDbPath, outboundDbPath } from '../src/session-manager.js';
+import { inboundDbPath, outboundDbPath } from '../src/mailbox/sqlite/paths.js';
 
 await routeInbound({
   channelType: 'test',

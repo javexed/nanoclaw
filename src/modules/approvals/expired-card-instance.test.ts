@@ -34,9 +34,8 @@ vi.mock('@onecli-sh/sdk', () => ({
   },
 }));
 
-const { editCardExpired, startOneCLIApprovalHandler, stopOneCLIApprovalHandler, ONECLI_ACTION } = await import(
-  './onecli-approvals.js'
-);
+const { editCardExpired, startOneCLIApprovalHandler, stopOneCLIApprovalHandler, ONECLI_ACTION } =
+  await import('./onecli-approvals.js');
 
 const TEST_DIR = '/tmp/nanoclaw-test-expired-card-instance';
 

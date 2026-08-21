@@ -26,8 +26,8 @@ import { configFromDb, type McpServerConfig } from '../container-config.js';
 import { findTaskSessions } from '../db/sessions.js';
 import { PERSONA_PREPEND_FILE } from '../group-persona.js';
 import { createScheduledTask, prepareScheduledTask } from '../modules/scheduling/create.js';
-import { resumeTask } from '../modules/scheduling/db.js';
-import { inboundDbPath, withInboundDb } from '../session-manager.js';
+import { resumeTask } from '../mailbox/sqlite/tasks.js';
+import { inboundDbPath } from '../mailbox/sqlite/paths.js';
 import type { AgentGroup } from '../types.js';
 import { NANOCLAW_EXTENSION_NS } from './extension.js';
 import { MCP_SCHEMA_URL, PLUGIN_SCHEMA_URL } from './manifest.js';
@@ -35,6 +35,15 @@ import { createAgentFromTemplate } from './create-agent.js';
 import { restampAgentFromTemplate, type RestampChange } from './restamp.js';
 
 const TPL = path.join(TEMPLATES_DIR, 'sales', 'sdr');
+
+function withInboundDb<T>(agentGroupId: string, sessionId: string, action: (db: Database.Database) => T): T {
+  const db = new Database(inboundDbPath(agentGroupId, sessionId));
+  try {
+    return action(db);
+  } finally {
+    db.close();
+  }
+}
 
 /** The v1 template every test stamps from. */
 function writeTemplateV1(): void {
@@ -455,7 +464,7 @@ describe('restampAgentFromTemplate', () => {
       recurrence: '0 12 * * 1-5',
       timezone: 'UTC',
     });
-    const mine = (await createScheduledTask(g.id, prepared, { status: 'pending' })).row.series_id!;
+    const mine = (await createScheduledTask(g.id, prepared, { status: 'pending' })).row.seriesId!;
     writeTemplateV2();
 
     await restampAgentFromTemplate('sales/sdr', g.id, { apply: true });

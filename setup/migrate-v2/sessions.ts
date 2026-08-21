@@ -27,7 +27,9 @@ import { initDb, closeDb } from '../../src/db/connection.js';
 import { getAllAgentGroups } from '../../src/db/agent-groups.js';
 import { getMessagingGroupsByAgentGroup } from '../../src/db/messaging-groups.js';
 import { runMigrations } from '../../src/db/migrations/index.js';
-import { resolveSession, writeSessionRouting, outboundDbPath } from '../../src/session-manager.js';
+import '../../src/mailbox/compose.js';
+import { outboundDbPath } from '../../src/mailbox/sqlite/paths.js';
+import { resolveSession, writeSessionRouting } from '../../src/session-manager.js';
 
 const SKIP_NAMES = new Set(['.DS_Store']);
 
@@ -55,7 +57,7 @@ function copyTree(src: string, dst: string): number {
   return written;
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const v1Path = process.argv[2];
   if (!v1Path) {
     console.error('Usage: tsx setup/migrate-v2/sessions.ts <v1-path>');
@@ -113,7 +115,7 @@ function main(): void {
 
       if (created) {
         // Write routing so the container knows where to reply
-        writeSessionRouting(ag.id, session.id);
+        await writeSessionRouting(ag.id, session.id);
         sessionsCreated++;
       } else {
         sessionsReused++;
@@ -176,4 +178,7 @@ function main(): void {
   console.log(`OK:created=${sessionsCreated},reused=${sessionsReused},skipped=${sessionsSkipped},files=${filesCopied}`);
 }
 
-main();
+main().catch((err) => {
+  console.error(`FAIL:${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+});
