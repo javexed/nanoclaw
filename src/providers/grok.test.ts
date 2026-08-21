@@ -53,8 +53,8 @@ describe('registration', () => {
 });
 
 describe('the persistent grok home', () => {
-  it('mounts the group dir read-write at the CLI\'s fixed home path', () => {
-    const contribution = getProviderContainerConfig('grok')!(ctx('group-A'));
+  it('mounts the group dir read-write at the CLI\'s fixed home path', async () => {
+    const contribution = await getProviderContainerConfig('grok')!(ctx('group-A'));
     expect(contribution.mounts).toEqual([
       { hostPath: grokSharedDir('group-A'), containerPath: GROK_HOME_CONTAINER_PATH, readonly: false },
     ]);
@@ -101,22 +101,22 @@ describe('the persistent grok home', () => {
 });
 
 describe('proxy posture', () => {
-  it('never bypasses the gateway', () => {
+  it('never bypasses the gateway', async () => {
     // The inverse of the local-model providers, which NO_PROXY around the
     // gateway. A bypass here would route subscription traffic outside the
     // credential gateway, so its absence is deliberate and pinned.
-    const contribution = getProviderContainerConfig('grok')!(ctx('group-F'));
+    const contribution = await getProviderContainerConfig('grok')!(ctx('group-F'));
     expect(JSON.stringify(contribution)).not.toMatch(/NO_PROXY|no_proxy/);
   });
 
-  it('trusts the gateway CA, without which the credential path is nominal only', () => {
+  it('trusts the gateway CA, without which the credential path is nominal only', async () => {
     // MEASURED: the grok CLI is a native binary, so NODE_EXTRA_CA_CERTS (which
     // applyContainerConfig sets) does not reach it. Without this the request
     // tunnels through unmodified and the gateway can inject nothing — a
     // container holding an INVALID token got `credential_not_found` from
     // grok.com, while the same request with the CA trusted completed because the
     // Authorization header was swapped.
-    const contribution = getProviderContainerConfig('grok')!(ctx('group-G'));
+    const contribution = await getProviderContainerConfig('grok')!(ctx('group-G'));
     expect(contribution.env?.SSL_CERT_FILE).toBe(ONECLI_CA_CONTAINER_PATH);
   });
 });
