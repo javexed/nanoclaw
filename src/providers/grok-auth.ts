@@ -276,14 +276,21 @@ export function materializeContainerAuth(
 }
 
 /** Every credential file this install owns: the shared one, plus any per-group overrides. */
-export function listCredentialOwners(): Array<{ label: string; read: () => GrokCredentials | null; write: (c: GrokCredentials) => void }> {
+export function listCredentialOwners(): Array<{
+  label: string;
+  read: () => GrokCredentials | null;
+  write: (c: GrokCredentials) => void;
+}> {
   const owners: Array<{ label: string; read: () => GrokCredentials | null; write: (c: GrokCredentials) => void }> = [
     { label: 'shared', read: () => readCredentialFile(sharedCredentialsPath()), write: writeSharedCredentials },
   ];
   const root = path.join(DATA_DIR, 'v2-sessions');
   let groups: string[] = [];
   try {
-    groups = fs.readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
+    groups = fs
+      .readdirSync(root, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name);
   } catch {
     return owners; // no sessions dir yet — the shared credential is all there is
   }
@@ -301,6 +308,16 @@ export function listCredentialOwners(): Array<{ label: string; read: () => GrokC
 export interface RefreshSweepDeps extends RefreshDeps {
   onInfo?: (message: string) => void;
   onError?: (message: string) => void;
+  /**
+   * Per-credential outcome, structured.
+   *
+   * `onInfo`/`onError` exist to be written to a log and take a finished
+   * sentence. These two exist to be ACTED on — re-arming a notice, or waking
+   * a human — so they hand over the label and the raw error rather than a
+   * string a caller would have to parse back apart.
+   */
+  onCredentialRenewed?: (label: string) => void;
+  onCredentialFailed?: (label: string, err: unknown) => void;
 }
 
 /**
@@ -328,10 +345,19 @@ export async function refreshDueCredentials(deps: RefreshSweepDeps = {}): Promis
       owner.write(next);
       refreshed += 1;
       deps.onInfo?.(`Grok credential renewed (${owner.label}) — valid until ${next.expiresAt}`);
+      deps.onCredentialRenewed?.(owner.label);
     } catch (err) {
       deps.onError?.(
         `Grok credential refresh failed (${owner.label}): ${err instanceof Error ? err.message : String(err)}`,
       );
+      // Never awaited and never allowed to throw: notifying a human about
+      // one dead credential must not stop the next one being renewed, which
+      // is the same reason the catch exists at all.
+      try {
+        deps.onCredentialFailed?.(owner.label, err);
+      } catch {
+        /* a failing notifier is not the sweep's problem */
+      }
     }
   }
   return refreshed;
