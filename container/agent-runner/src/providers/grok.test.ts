@@ -7,7 +7,7 @@
  */
 import { describe, it, expect } from 'bun:test';
 
-import { GrokProvider, isRetryable } from './grok.js';
+import { GROK_AUTH_EXPIRED_MESSAGE, GrokProvider, describeGrokError, isRetryable } from './grok.js';
 import type { AcpTransport } from './grok-acp.js';
 import type { ProviderEvent } from './types.js';
 
@@ -25,7 +25,8 @@ function scriptedAgent(script: {
   let turnIndex = 0;
 
   const emit = (msg: unknown) => onLine(JSON.stringify(msg) + '\n');
-  const update = (u: Record<string, unknown>) => emit({ jsonrpc: '2.0', method: 'session/update', params: { update: u } });
+  const update = (u: Record<string, unknown>) =>
+    emit({ jsonrpc: '2.0', method: 'session/update', params: { update: u } });
 
   const transport: AcpTransport = {
     write(line) {
@@ -138,7 +139,16 @@ describe('content mapping', () => {
   it('tool calls become progress; thinking does not', async () => {
     const p = new GrokProvider(
       {},
-      scriptedAgent({ turns: [[thought('think'), thought('ing'), { sessionUpdate: 'tool_call', title: 'run_terminal_command' }, chunk('done')]] }),
+      scriptedAgent({
+        turns: [
+          [
+            thought('think'),
+            thought('ing'),
+            { sessionUpdate: 'tool_call', title: 'run_terminal_command' },
+            chunk('done'),
+          ],
+        ],
+      }),
     );
     const q = p.query({ prompt: 'x', cwd: '/w' });
     const events = await collect(q, { stopAfterResult: true });
@@ -238,7 +248,11 @@ describe('follow-ups and lifecycle', () => {
           const m = JSON.parse(line) as { id?: number; method?: string; params?: { prompt?: { text: string }[] } };
           if (m.method === 'session/prompt') prompts.push(m.params?.prompt?.[0]?.text ?? '');
           const result =
-            m.method === 'session/new' ? { sessionId: 's' } : m.method === 'session/prompt' ? { stopReason: 'end_turn' } : {};
+            m.method === 'session/new'
+              ? { sessionId: 's' }
+              : m.method === 'session/prompt'
+                ? { stopReason: 'end_turn' }
+                : {};
           onLine(JSON.stringify({ jsonrpc: '2.0', id: m.id, result }) + '\n');
         },
         onLine: (h) => void (onLine = h),
@@ -265,7 +279,11 @@ describe('follow-ups and lifecycle', () => {
           const m = JSON.parse(line) as { id?: number; method?: string; params?: { prompt?: { text: string }[] } };
           if (m.method === 'session/prompt') prompts.push(m.params?.prompt?.[0]?.text ?? '');
           const result =
-            m.method === 'session/new' ? { sessionId: sessionId ?? 's' } : m.method === 'session/prompt' ? { stopReason: 'end_turn' } : {};
+            m.method === 'session/new'
+              ? { sessionId: sessionId ?? 's' }
+              : m.method === 'session/prompt'
+                ? { stopReason: 'end_turn' }
+                : {};
           onLine(JSON.stringify({ jsonrpc: '2.0', id: m.id, result }) + '\n');
         },
         onLine: (h) => void (onLine = h),
@@ -275,13 +293,18 @@ describe('follow-ups and lifecycle', () => {
     };
 
     const fresh = new GrokProvider({}, spy()).query({
-      prompt: 'ask', cwd: '/w', systemContext: { instructions: 'BE TERSE' },
+      prompt: 'ask',
+      cwd: '/w',
+      systemContext: { instructions: 'BE TERSE' },
     });
     await collect(fresh, { stopAfterResult: true });
     fresh.abort();
 
     const resumed = new GrokProvider({}, spy()).query({
-      prompt: 'ask', cwd: '/w', continuation: 'prior', systemContext: { instructions: 'BE TERSE' },
+      prompt: 'ask',
+      cwd: '/w',
+      continuation: 'prior',
+      systemContext: { instructions: 'BE TERSE' },
     });
     await collect(resumed, { stopAfterResult: true });
     resumed.abort();
@@ -334,5 +357,34 @@ describe('binary resolution', () => {
     await spawnGrokTransport({ spawnFn: fakeSpawn });
     expect(seenBin).toBe('grok');
     expect(seenBin).not.toContain('.grok/bin');
+  });
+});
+
+describe('describeGrokError', () => {
+  // A dead credential reaches the room as a JSON-RPC blob — the shape that
+  // started this thread. The admin DM tells whoever can fix it; this tells
+  // whoever was mid-conversation why the agent stopped answering.
+  it('translates the real 401 blob into a sentence', () => {
+    const raw = 'session/prompt: {"code":-32603,"message":"Internal error: request failed: Unauthorized (401)"}';
+    expect(describeGrokError(new Error(raw))).toBe(GROK_AUTH_EXPIRED_MESSAGE);
+  });
+
+  it('catches the other shapes a dead credential arrives in', () => {
+    for (const raw of ['oauth: invalid_grant', 'refresh failed: token has expired', 'HTTP 401 Unauthorised']) {
+      expect(describeGrokError(new Error(raw))).toBe(GROK_AUTH_EXPIRED_MESSAGE);
+    }
+  });
+
+  it('passes anything else through verbatim', () => {
+    // An unfamiliar error is more useful raw than flattened into a guess, and a
+    // false positive would send someone to reconnect a credential that is fine.
+    expect(describeGrokError(new Error('transport closed'))).toBe('transport closed');
+    expect(describeGrokError(new Error('rate limit exceeded'))).toBe('rate limit exceeded');
+    expect(describeGrokError(new Error('session not found'))).toBe('session not found');
+  });
+
+  it('handles a non-Error throw without crashing the turn', () => {
+    expect(describeGrokError('Unauthorized (401)')).toBe(GROK_AUTH_EXPIRED_MESSAGE);
+    expect(describeGrokError(undefined)).toBe('');
   });
 });

@@ -59,7 +59,44 @@ const ERROR_STOP_REASONS = new Set(['refusal', 'error', 'max_tokens']);
  * patterns broad — a false positive costs one fresh session, a false negative
  * strands the agent on a continuation that can never load.
  */
-const SESSION_INVALID_PATTERNS = [/session\s*not\s*found/i, /no\s*such\s*session/i, /unknown\s*session/i, /session.*(expired|invalid)/i];
+const SESSION_INVALID_PATTERNS = [
+  /session\s*not\s*found/i,
+  /no\s*such\s*session/i,
+  /unknown\s*session/i,
+  /session.*(expired|invalid)/i,
+];
+
+/**
+ * Errors that mean the credential is dead rather than the request bad. Grok
+ * surfaces these as a JSON-RPC failure whose message carries the upstream
+ * status, so — like the session patterns above — matching is textual by
+ * necessity.
+ *
+ * The raw text is unreadable in a room: a user mid-conversation sees
+ * `session/prompt: {"code":-32603,...Unauthorized (401)...}` and has no way to
+ * know their agent needs re-authenticating rather than that it broke. An admin
+ * gets a DM when a refresh token dies for good; this is for whoever was
+ * actually talking to the agent.
+ *
+ * Deliberately narrow. A false positive tells someone to reconnect a credential
+ * that is fine, which sends them somewhere unhelpful — so match the status and
+ * the words that accompany it, not the word "auth" wherever it appears.
+ */
+const AUTH_FAILURE_PATTERNS = [/\b401\b/, /unauthor(?:ised|ized)/i, /invalid[_\s-]?grant/i, /token (?:has )?expired/i];
+
+/** The sentence a room gets instead of the raw JSON-RPC blob. */
+export const GROK_AUTH_EXPIRED_MESSAGE =
+  "I can't run this turn: Grok rejected it as unauthorised, which means this agent's Grok sign-in has expired or been revoked. An admin needs to reconnect it before I can answer.";
+
+/**
+ * What to show a user for a failed turn. Everything except a recognised auth
+ * failure passes through verbatim — an unfamiliar error is more useful raw than
+ * flattened into a guess.
+ */
+export function describeGrokError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err ?? '');
+  return AUTH_FAILURE_PATTERNS.some((p) => p.test(message)) ? GROK_AUTH_EXPIRED_MESSAGE : message;
+}
 
 /** How a query obtains its stdio transport. Injected in tests; spawns grok in production. */
 export type GrokTransportFactory = (options: GrokSpawnOptions) => Promise<AcpTransport>;
@@ -174,7 +211,7 @@ class GrokQuery implements AgentQuery {
     } catch (err) {
       this.queue.push({
         type: 'error',
-        message: err instanceof Error ? err.message : String(err),
+        message: describeGrokError(err),
         retryable: isRetryable(err),
       });
     } finally {
