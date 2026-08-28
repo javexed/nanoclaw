@@ -22,10 +22,11 @@ import { runGuarded, type DeliveryGuardSpec, type GuardedDeliveryHandler } from 
 import { isUnguarded, type Unguarded } from './guard/index.js';
 import { fanOutboundMessage } from './modules/cross-session-context/index.js';
 import { log } from './log.js';
+import { agentStatusSweep, setStatusAdapter } from './modules/agent-status/index.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, readOutboxFiles, withExistingMailboxSession } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
-import type { OutboundFile } from './channels/adapter.js';
+import type { AgentActivityStatus, OutboundFile } from './channels/adapter.js';
 import type { PendingApproval, Session } from './types.js';
 import type { OutboundMessage } from './mailbox/index.js';
 
@@ -71,6 +72,14 @@ export interface ChannelDeliveryAdapter {
     status?: string,
     statusKind?: 'auto' | 'agent',
   ): Promise<void>;
+  /** Push a live agent-activity frame (thinking bubble) — see agent-status. */
+  sendStatus?(
+    channelType: string,
+    platformId: string,
+    threadId: string | null,
+    status: AgentActivityStatus,
+    instance?: string,
+  ): Promise<void>;
 }
 
 let deliveryAdapter: ChannelDeliveryAdapter | null = null;
@@ -109,6 +118,9 @@ export function setDeliveryAdapter(adapter: ChannelDeliveryAdapter): void {
   // Forward to the typing module so it can fire setTyping on its own
   // interval. Direct call, not a registry — typing is a default module.
   setTypingAdapter(adapter);
+  // Same pattern for the agent-status module (thinking bubble): it tails
+  // status_events on the delivery polls below and forwards via sendStatus.
+  setStatusAdapter(adapter);
   for (const cb of adapterReadyCallbacks) {
     void Promise.resolve()
       .then(() => cb(adapter))
@@ -137,6 +149,9 @@ async function pollActive(): Promise<void> {
     const sessions = await getRunningSessions();
     for (const session of sessions) {
       await deliverSessionMessages(session);
+      // Thinking bubble: forward any new status_events rows this session's
+      // container wrote since the last tick. Best-effort inside the module.
+      await agentStatusSweep(session);
     }
   } catch (err) {
     log.error('Active delivery poll error', { err });
@@ -152,6 +167,7 @@ async function pollSweep(): Promise<void> {
     const sessions = await getActiveSessions();
     for (const session of sessions) {
       await deliverSessionMessages(session);
+      await agentStatusSweep(session);
     }
   } catch (err) {
     log.error('Sweep delivery poll error', { err });

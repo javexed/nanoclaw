@@ -361,7 +361,27 @@ function extractAttachmentFiles(
 
   let changed = false;
   for (const att of attachments) {
-    if (typeof att.data !== 'string') continue;
+    // Two delivery forms. `data` is inline base64. `hostPath` points at a
+    // file the adapter already staged on disk — webchat uses it above 25MB so
+    // a large upload is never base64-encoded. (The predecessor handled only
+    // `data` here; hostPath attachments were silently skipped — the row kept
+    // a bare filename, no bytes reached the container, and nothing logged.)
+    const inlineData = typeof att.data === 'string' ? (att.data as string) : null;
+    const rawHostPath = typeof att.hostPath === 'string' ? (att.hostPath as string) : null;
+    if (inlineData === null && rawHostPath === null) continue;
+
+    // A hostPath is a stronger primitive than supplied bytes — it copies
+    // whatever the path names. Legitimate producers stage into DATA_DIR, so
+    // require that: an adapter may hand over files it staged, nothing else.
+    let hostPath: string | null = null;
+    if (rawHostPath !== null) {
+      const resolved = path.resolve(rawHostPath);
+      if (!isPathInside(path.resolve(DATA_DIR), resolved)) {
+        log.warn('Refused attachment hostPath outside the data dir', { messageId, hostPath: rawHostPath });
+        continue;
+      }
+      hostPath = resolved;
+    }
 
     const rawName = deriveAttachmentName(att);
     const filename = isSafeAttachmentName(rawName) ? rawName : `attachment-${Date.now()}`;
@@ -385,7 +405,13 @@ function extractAttachmentFiles(
       // wx = exclusive create. Refuses to follow a pre existing symlink or
       // overwrite any existing file. The host expects to be the sole writer
       // of these attachments.
-      fs.writeFileSync(filePath, Buffer.from(att.data as string, 'base64'), { flag: 'wx' });
+      if (inlineData !== null) {
+        fs.writeFileSync(filePath, Buffer.from(inlineData, 'base64'), { flag: 'wx' });
+      } else {
+        // COPYFILE_EXCL mirrors the `wx` guarantee: fail rather than follow a
+        // pre-placed symlink or overwrite an existing file.
+        fs.copyFileSync(hostPath as string, filePath, fs.constants.COPYFILE_EXCL);
+      }
     } catch (err: unknown) {
       const e = err as NodeJS.ErrnoException;
       if (e.code === 'EEXIST') {
@@ -401,6 +427,7 @@ function extractAttachmentFiles(
     att.name = filename;
     att.localPath = `inbox/${messageId}/${filename}`;
     delete att.data;
+    delete att.hostPath;
     changed = true;
     log.debug('Saved attachment to inbox', { messageId, filename, size: att.size });
   }

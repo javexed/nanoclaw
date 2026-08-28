@@ -219,6 +219,55 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent-soft
 
 #typing-line { color: var(--text-dim); font-style: italic; padding: 6px 0; }
 
+/* ── Thinking bubble ── */
+#thinking { display: flex; flex-direction: column; gap: 8px; max-width: 900px; margin: 8px auto 0; }
+.think {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  max-width: 85%;
+}
+.think-head { display: flex; align-items: center; gap: 8px; }
+.think-name { font-weight: 600; font-size: 0.85rem; }
+.think-timer { color: var(--text-dim); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.think-stop {
+  margin-left: auto;
+  padding: 0 8px;
+  font-size: 0.75rem;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+.think-stop:hover { color: var(--danger); border-color: var(--danger); }
+.think-activity { color: var(--text); font-size: 0.88rem; margin-top: 4px; }
+.think-activity::after { content: ''; animation: think-dots 1.4s steps(4, end) infinite; }
+@keyframes think-dots { 0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75% { content: '...'; } }
+.think-reasoning { margin-top: 4px; display: flex; flex-direction: column; gap: 2px; }
+.think-line { color: var(--text-dim); font-size: 0.78rem; font-style: italic; opacity: 0.85; }
+.think-line:first-child { opacity: 0.5; }
+
+/* ── Approval cards ── */
+.msg-approval { padding: 0; background: none; }
+.appr-card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-left: 3px solid #d4a72c;
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  display: grid;
+  gap: 8px;
+  min-width: 260px;
+}
+.appr-card.appr-resolved { border-left-color: var(--border); opacity: 0.75; }
+.appr-title { font-weight: 600; }
+.appr-question { color: var(--text-dim); font-size: 0.9rem; white-space: pre-wrap; }
+.appr-note { color: var(--text-dim); font-size: 0.85rem; }
+.appr-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.appr-btn { font-size: 0.85rem; }
+.appr-approve { background: #1d4428; border-color: #2ea043; }
+.appr-approve:hover { border-color: #3fb950; }
+
 #jump-pill {
   position: absolute;
   bottom: 76px;
@@ -242,7 +291,8 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent-soft
   align-items: flex-end;
 }
 #composer-input { flex: 1; resize: none; max-height: 200px; }
-#stop-btn, #send-btn { flex: none; height: 38px; }
+#stop-btn, #send-btn, #attach-btn { flex: none; height: 38px; }
+#transcript.drop-target { outline: 2px dashed var(--accent); outline-offset: -8px; }
 #send-btn { background: var(--accent); border-color: var(--accent); color: #fff; }
 
 /* ── Slash menu ── */

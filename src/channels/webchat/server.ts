@@ -38,6 +38,7 @@ import { json, readJsonBody } from './server/http.js';
 import { broadcast, broadcastRooms, annotateRooms } from './state.js';
 import {
   createWebchatRoom,
+  getWebchatPendingApprovalsForUser,
   deleteWebchatRoom,
   getAgentsForWebchatRoom,
   getWebchatMessagesBeforeId,
@@ -50,6 +51,7 @@ import {
   type FileMeta,
 } from './db.js';
 import { redactSensitiveData } from './redact.js';
+import { handleFileServe, handleMultipartUpload, uploadsDir } from './files.js';
 import { getAgentGroup, getAllAgentGroups } from '../../db/agent-groups.js';
 import { createMessagingGroupAgent, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 
@@ -172,40 +174,19 @@ export async function stopWebchatServer(server: WebchatServer): Promise<void> {
 }
 
 // ── Outbound file persistence (agent → user attachments) ────────────────────
-// Files arriving via OutboundMessage.files are written under DATA_DIR-adjacent
-// uploads and served back through /api/files/. Full upload pipeline lands with
-// files.ts (M3); this half exists from the start because deliver() needs it.
-
-const UPLOADS_DIR = path.resolve('data/webchat/uploads');
+// Files arriving via OutboundMessage.files are written into the same uploads
+// tree the browser uploads use (files.ts owns the layout) and served back
+// through the same /api/files route.
 
 export function persistOutboundFile(roomId: string, file: OutboundFile): string {
   const safeRoom = roomId.replace(/[^a-zA-Z0-9_-]/g, '_');
-  const dir = path.join(UPLOADS_DIR, safeRoom);
+  const dir = uploadsDir(roomId);
   fs.mkdirSync(dir, { recursive: true });
   const id = randomUUID();
   const safeName = path.basename(file.filename).replace(/[^a-zA-Z0-9._-]/g, '_') || 'file';
   const stored = `${id}-${safeName}`;
   fs.writeFileSync(path.join(dir, stored), file.data);
   return `/api/files/${safeRoom}/${stored}`;
-}
-
-function serveUploadedFile(url: URL, res: ServerResponse): boolean {
-  const m = url.pathname.match(/^\/api\/files\/([^/]+)\/([^/]+)$/);
-  if (!m) return false;
-  const filePath = path.join(UPLOADS_DIR, m[1], m[2]);
-  if (!filePath.startsWith(UPLOADS_DIR + path.sep) || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
-    res.writeHead(404);
-    res.end();
-    return true;
-  }
-  const ext = path.extname(filePath);
-  res.writeHead(200, {
-    'Content-Type': STATIC_MIME[ext] || 'application/octet-stream',
-    'Cache-Control': 'private, max-age=31536000, immutable',
-    'Content-Disposition': 'inline',
-  });
-  res.end(fs.readFileSync(filePath));
-  return true;
 }
 
 // ── HTTP request handler ────────────────────────────────────────────────────
@@ -287,7 +268,21 @@ async function handleHttp(
   }
 
   // Uploaded/outbound files (auth-gated — private attachments).
-  if (method === 'GET' && serveUploadedFile(url, res)) return;
+  {
+    const m = url.pathname.match(/^\/api\/files\/([^/]+)\/([^/]+)$/);
+    if (m && method === 'GET') {
+      handleFileServe(res, decodeURIComponent(m[1]), decodeURIComponent(m[2]));
+      return;
+    }
+    const up = url.pathname.match(/^\/api\/files\/([^/]+)$/);
+    if (up && (method === 'POST' || method === 'PUT')) {
+      if (req.headers['x-webchat-csrf'] !== '1') return json(res, 403, { error: 'Missing X-Webchat-CSRF header' });
+      await handleMultipartUpload(req, res, decodeURIComponent(up[1]), senderIdentity, userId, {
+        onInbound: (roomId, message) => hooks.onInbound(roomId, message),
+      });
+      return;
+    }
+  }
 
   for (const r of API_ROUTES) {
     const methods = Array.isArray(r.method) ? r.method : [r.method];
@@ -458,7 +453,50 @@ async function rHistoryGet({ res, url }: RouteCtx, m: RegExpMatchArray): Promise
   });
 }
 
+// ── Approval routes ─────────────────────────────────────────────────────────
+
+/** Pending approvals for this user's inbox — the PWA refetches on connect. */
+async function rApprovalsPendingGet({ res, userId }: RouteCtx): Promise<void> {
+  const rows = await getWebchatPendingApprovalsForUser(userId);
+  return json(res, 200, {
+    approvals: rows.map((r) => ({
+      questionId: r.approval_id,
+      action: r.action,
+      title: r.title,
+      options: JSON.parse(r.options_json || '[]'),
+      created_at: r.created_at,
+    })),
+  });
+}
+
+const RE_APPROVE = /^\/api\/approvals\/([^/]+)\/respond$/;
+
+/**
+ * Resolve an approval card. Routes through the SAME dispatch a platform
+ * button-click takes (hooks.onAction → core response registry), so the claim
+ * guard, authorization, and handler dispatch are identical to every other
+ * channel. The response is fire-and-forget host-side; resolution reaches the
+ * client via the approval_resolved broadcast.
+ */
+async function rApprovalRespondPost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const { req, res, userId, hooks } = ctx;
+  const raw = await readJsonBody(req, res);
+  if (raw === null) return;
+  let body: { value?: unknown };
+  try {
+    body = JSON.parse(raw) as typeof body;
+  } catch {
+    return json(res, 400, { error: 'Invalid JSON' });
+  }
+  const value = typeof body.value === 'string' ? body.value : '';
+  if (!value) return json(res, 400, { error: 'value required' });
+  hooks.onAction(decodeURIComponent(m[1]), value, userId);
+  return json(res, 200, { ok: true });
+}
+
 const API_ROUTES: ApiRoute[] = [
+  { method: 'GET', path: '/api/approvals/pending', h: rApprovalsPendingGet },
+  { method: 'POST', path: RE_APPROVE, guards: ['csrf'], h: rApprovalRespondPost },
   { method: 'GET', path: '/api/agents', h: rAgentsGet },
   { method: 'GET', path: '/api/rooms', h: rRoomsGet },
   { method: 'POST', path: '/api/rooms', guards: ['csrf'], h: rRoomsPost },

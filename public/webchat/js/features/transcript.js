@@ -8,6 +8,8 @@ import DOMPurify from '/dompurify.min.js';
 import { $, esc } from '../core/dom.js';
 import { authFetch } from '../core/api.js';
 import { state } from '../core/state.js';
+import { buildApprovalCard } from './approvals.js';
+import { closeTurnFor } from './thinking.js';
 const list = () => $('#messages');
 const scroller = () => $('#transcript');
 // ── Rendering ────────────────────────────────────────────────────────────────
@@ -56,17 +58,8 @@ function buildRow(msg, statusText) {
         bubble.appendChild(buildFileBody(msg.file_meta, msg.content));
     }
     else if (msg.message_type === 'approval' || msg.message_type === 'approval_resolved') {
-        // M3 renders these as actionable cards; until then a locked note keeps the
-        // history legible.
-        bubble.classList.add('msg-note');
-        let title = 'Approval';
-        try {
-            title = JSON.parse(msg.content ?? '{}').title || title;
-        }
-        catch {
-            /* keep default */
-        }
-        bubble.textContent = msg.message_type === 'approval_resolved' ? `🔒 ${title} — resolved` : `🔒 ${title} — pending`;
+        bubble.classList.add('msg-approval');
+        bubble.appendChild(buildApprovalCard(msg));
     }
     else {
         const body = document.createElement('div');
@@ -156,6 +149,11 @@ export function appendMessage(msg) {
     if (msg.id && list().querySelector(`[data-message-id="${CSS.escape(msg.id)}"]`))
         return; // replay dedup
     setEmptyNote(null);
+    // An agent message means the turn produced output — close that agent's
+    // bubble even if the 'done' status frame is late or lost (belt; the frame
+    // remains the primary close).
+    if (msg.sender_type === 'agent')
+        closeTurnFor(msg.sender ?? '');
     list().appendChild(buildRow(msg));
 }
 /** Prepend one older page, preserving the reader's scroll position. */

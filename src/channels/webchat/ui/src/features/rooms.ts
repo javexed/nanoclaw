@@ -4,6 +4,7 @@ import { apiJson } from '../core/api.js';
 import { toastError } from '../core/toast.js';
 import { state, type Room } from '../core/state.js';
 import { clearTranscript, hideAgentTyping, setEmptyNote, clearMissed } from './transcript.js';
+import { clearAllTurns } from './thinking.js';
 
 export function renderRooms(rooms: Room[]): void {
   const listEl = $('#room-list')!;
@@ -46,6 +47,7 @@ export function joinRoom(roomId: string, roomName: string): void {
   state.userScrolledAway = false;
   clearMissed();
   hideAgentTyping();
+  clearAllTurns();
   localStorage.setItem('lastRoom', roomId);
   $('#room-title')!.textContent = roomName;
   $('#app')!.classList.add('in-room'); // mobile: show the chat pane

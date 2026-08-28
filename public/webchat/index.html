@@ -40,10 +40,13 @@
     <div id="transcript">
       <div id="transcript-empty" hidden></div>
       <div id="messages"></div>
+      <div id="thinking"></div>
       <div id="typing-line" hidden></div>
     </div>
     <button id="jump-pill" type="button" hidden></button>
     <form id="composer" hidden>
+      <button id="attach-btn" type="button" title="Attach a file">📎</button>
+      <input id="attach-input" type="file" multiple hidden>
       <textarea id="composer-input" rows="1" placeholder="Message… (/ for commands)"></textarea>
       <button id="stop-btn" type="button" title="Stop the agent">■</button>
       <button id="send-btn" type="submit" title="Send">➤</button>

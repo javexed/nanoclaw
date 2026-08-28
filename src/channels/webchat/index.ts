@@ -26,23 +26,32 @@ import './migration.js';
 import { randomUUID } from 'crypto';
 
 import { log } from '../../log.js';
-import { createMessagingGroup, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
+import { createMessagingGroup, getMessagingGroup, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import { registerChannelAdapter } from '../channel-registry.js';
 import type { AgentActivityStatus, ChannelAdapter, ChannelSetup, OutboundMessage } from '../adapter.js';
 import { redactSensitiveData } from './redact.js';
 import { startWebchatServer, stopWebchatServer, type WebchatServer } from './server.js';
 import {
   APPROVAL_INBOX_PREFIX,
+  deleteWebchatApprovalIndex,
   findActiveAgentForWebchatRoom,
+  getWebchatApprovalInboxes,
   getWebchatRoom,
   isApprovalInbox,
+  markRoomApprovalResolved,
   recordWebchatApproval,
+  storeWebchatApprovalCard,
   storeWebchatFileMessage,
   storeWebchatMessage,
+  userForApprovalInbox,
   type FileMeta,
   type WebchatRoomAgent,
 } from './db.js';
-import { pushApprovalToUser, recordTurnStart, recordTurnEnd } from './state.js';
+import { broadcast, pushApprovalResolvedToUser, pushApprovalToUser, recordTurnStart, recordTurnEnd } from './state.js';
+import {
+  registerApprovalRequestedListener,
+  registerApprovalResolvedHandler,
+} from '../../modules/approvals/primitive.js';
 
 export const CHANNEL_TYPE = 'webchat';
 
@@ -237,6 +246,44 @@ function guessMime(filename: string): string {
   };
   return map[ext] ?? 'application/octet-stream';
 }
+
+// Surface an ACTIONABLE approval card into the requesting agent's own room
+// (in addition to the owner's inbox), so the operator can act without hunting.
+// The room is also indexed so the resolved-handler below clears the card on
+// response. Best-effort; webchat rooms only.
+registerApprovalRequestedListener(async (e) => {
+  const mg = await (e.session.messaging_group_id ? getMessagingGroup(e.session.messaging_group_id) : null);
+  if (!mg || mg.channel_type !== 'webchat') return;
+  const roomId = mg.platform_id;
+  const card = await storeWebchatApprovalCard(roomId, e.agentName || 'agent', {
+    questionId: e.approvalId,
+    title: e.title,
+    question: e.question,
+    options: e.options,
+    action: e.action,
+  });
+  await recordWebchatApproval(e.approvalId, roomId);
+  await broadcast(roomId, { type: 'message', ...card });
+});
+
+// Resolution cleanup: flip the in-room card to resolved, clear the owner's
+// inbox copy live on every open tab, then drop the index rows (dead pointers
+// once the pending row is gone). Offline tabs refetch on reconnect.
+registerApprovalResolvedHandler(async (event) => {
+  const approvalId = event.approval.approval_id;
+  const resolvedByUserId = event.userId;
+  const indexed = await getWebchatApprovalInboxes(approvalId);
+  for (const platformId of indexed) {
+    const userId = userForApprovalInbox(platformId);
+    if (userId) {
+      pushApprovalResolvedToUser(userId, approvalId, resolvedByUserId);
+    } else {
+      await markRoomApprovalResolved(approvalId, resolvedByUserId);
+      await broadcast(platformId, { type: 'approval_resolved', approvalId, resolvedBy: resolvedByUserId });
+    }
+  }
+  if (indexed.length > 0) await deleteWebchatApprovalIndex(approvalId);
+});
 
 registerChannelAdapter('webchat', {
   factory: () => (isEnabled() ? createAdapter() : null),

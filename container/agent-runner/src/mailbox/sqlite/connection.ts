@@ -112,6 +112,18 @@ export function getOutboundDb(): Database {
         updated_at               TEXT NOT NULL
       );
     `);
+    // status_events: append-only activity feed for the webchat thinking
+    // bubble (status-feed.ts writes, the host's agent-status module tails).
+    // Forward-compat for session DBs created before the feed existed.
+    _outbound.exec(`
+      CREATE TABLE IF NOT EXISTS status_events (
+        seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind       TEXT NOT NULL,
+        text       TEXT,
+        detail     TEXT,
+        created_at TEXT NOT NULL
+      );
+    `);
   }
   return _outbound;
 }
@@ -216,6 +228,14 @@ export function initTestSessionDb(): { inbound: Database; outbound: Database } {
       thread_id      TEXT,
       content        TEXT NOT NULL
     );
+    CREATE TABLE status_events (
+      seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind       TEXT NOT NULL,
+      text       TEXT,
+      detail     TEXT,
+      created_at TEXT NOT NULL
+    );
+
     CREATE TABLE processing_ack (
       message_id     TEXT PRIMARY KEY,
       status         TEXT NOT NULL,

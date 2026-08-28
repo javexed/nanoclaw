@@ -8,6 +8,7 @@ import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/cont
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
 import { shimCwd } from './cwd-shim.js';
+import { notifyProviderMessage } from './hooks.js';
 import { registerProvider } from './provider-registry.js';
 import type {
   AgentProvider,
@@ -252,8 +253,32 @@ const preToolUseHook: HookCallback = async (input) => {
   } catch (err) {
     log(`PreToolUse: failed to record container_state: ${err instanceof Error ? err.message : String(err)}`);
   }
+  // Surface the tool call to observers (the status feed). Inert when nothing
+  // registered; a throwing observer is isolated by the notify wrapper.
+  if (toolName) notifyProviderMessage({ kind: 'tool_use', toolName, toolInput: i.tool_input });
   return { continue: true };
 };
+
+/** Max reasoning lines surfaced per thinking block, and per-line char cap. The
+ *  status feed only keeps the last few anyway; this just bounds DB/WS volume
+ *  for a long thinking trace. */
+const REASONING_MAX_LINES = 8;
+const REASONING_LINE_MAX = 200;
+
+/**
+ * Turn a raw thinking block into a short list of feed lines: split on
+ * newlines, strip markdown header/bullet noise, drop empties, truncate each,
+ * and cap the count (keeping the LAST lines — the conclusion of the reasoning
+ * is the most informative).
+ */
+export function summarizeThinking(thinking: string): string[] {
+  const lines = thinking
+    .split(/\n+/)
+    .map((l) => l.replace(/^[#>\-*\s]+/, '').trim())
+    .filter((l) => l.length > 0)
+    .map((l) => (l.length > REASONING_LINE_MAX ? `${l.slice(0, REASONING_LINE_MAX - 1)}…` : l));
+  return lines.slice(-REASONING_MAX_LINES);
+}
 
 /** Clear in-flight tool on PostToolUse / PostToolUseFailure. */
 const postToolUseHook: HookCallback = async () => {
@@ -612,9 +637,20 @@ export class ClaudeProvider implements AgentProvider {
           // result reports. Blocks split across ASSISTANT MESSAGES (a tool
           // call between them) remain unparseable mid-turn by design; the
           // poll-loop's midTurnSent===0 fallback and wrap-nudge cover that.
-          const content = (message as { message?: { content?: Array<{ type?: string; text?: string }> } }).message
-            ?.content;
+          const content = (message as {
+            message?: { content?: Array<{ type?: string; text?: string; thinking?: string }> };
+          }).message?.content;
           if (Array.isArray(content)) {
+            // Thinking blocks feed the bubble's streaming reasoning lines —
+            // summarized, never verbatim (a full trace is voluminous and the
+            // feed only shows the last few lines anyway).
+            const thinking = content
+              .filter((block) => block.type === 'thinking' && block.thinking)
+              .map((block) => block.thinking)
+              .join('\n');
+            if (thinking) {
+              for (const line of summarizeThinking(thinking)) yield { type: 'reasoning', message: line };
+            }
             const text = content
               .filter((block) => block.type === 'text' && block.text)
               .map((block) => block.text)

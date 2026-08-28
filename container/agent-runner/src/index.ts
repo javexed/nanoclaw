@@ -20,6 +20,9 @@
  */
 
 import fs from 'fs';
+// Status feed: registers the provider-message observer that writes
+// status_events for the webchat thinking bubble. Side effects only.
+import './status-feed.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 

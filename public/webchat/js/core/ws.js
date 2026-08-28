@@ -10,7 +10,7 @@ import { state, setLastSeenMessageId } from './state.js';
 import { appendMessage, appendSystem, upgradeOptimistic, clearTranscript, setEmptyNote, followScroll, hideAgentTyping, incrementMissed, isNearBottom, removeMessage, scrollToBottom, showAgentTyping, } from '../features/transcript.js';
 import { joinRoom, renderRooms, updateUnreadDots } from '../features/rooms.js';
 import { handleStatusEvent } from '../features/thinking.js';
-import { handleApprovalEvent, handleApprovalResolved } from '../features/approvals.js';
+import { fetchPendingApprovals, handleApprovalEvent, handleApprovalResolved } from '../features/approvals.js';
 export function setConnectionBanner(text) {
     const banner = $('#connection-banner');
     if (!banner)
@@ -95,6 +95,8 @@ export function connect() {
                 const rooms = msg.rooms;
                 state.lastRoomsList = rooms;
                 renderRooms(rooms);
+                // Catch up on approvals queued while offline / mid-reconnect. Idempotent.
+                void fetchPendingApprovals();
                 if (state.currentRoom) {
                     // Rejoin after reconnect, then catch up on anything missed while the
                     // socket was down (the join's history reply also covers this, but

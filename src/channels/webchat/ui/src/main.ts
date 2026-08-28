@@ -6,6 +6,7 @@ import { connect, wireVisibilityReconnect, catchUpSince } from './core/ws.js';
 import { wireComposer } from './features/composer.js';
 import { wireRoomCreate, wireBackButton } from './features/rooms.js';
 import { wireTranscriptScroll } from './features/transcript.js';
+import { wireAttachments } from './features/files.js';
 import { state } from './core/state.js';
 
 async function boot(): Promise<void> {
@@ -14,6 +15,7 @@ async function boot(): Promise<void> {
   wireComposer();
   wireRoomCreate();
   wireBackButton();
+  wireAttachments();
   wireVisibilityReconnect();
   connect();
 
