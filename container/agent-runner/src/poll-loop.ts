@@ -109,7 +109,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   while (true) {
     if (config.signal?.aborted) return;
     // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
-    const messages = getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system');
+    // An 'interrupt' row reaching THIS loop is stale: it targeted a stream that
+    // has already ended (the mid-stream poll below is where a live one lands).
+    // Consume it silently — formatted into a prompt it would read as content.
+    const fetched = getPendingMessages(isFirstPoll);
+    const staleInterrupts = fetched.filter((m) => m.kind === 'interrupt');
+    if (staleInterrupts.length > 0) markCompleted(staleInterrupts.map((m) => m.id));
+    const messages = fetched.filter((m) => m.kind !== 'system' && m.kind !== 'interrupt');
     isFirstPoll = false;
     pollCount++;
 
@@ -426,6 +432,18 @@ export async function processQuery(
         // not end: end() lets an in-flight turn run to completion, which
         // can block the command (e.g. /clear during a long task) for as
         // long as the turn takes.
+        // GUI stop button: an 'interrupt' control row aborts the active
+        // stream. Consume the row here — unlike slash commands it must NOT
+        // stay pending for the outer loop, which would read it as content.
+        const interrupts = pending.filter((m) => m.kind === 'interrupt');
+        if (interrupts.length > 0) {
+          log('Interrupt received — aborting active stream');
+          markCompleted(interrupts.map((m) => m.id));
+          endedForCommand = true;
+          query.abort();
+          return;
+        }
+
         if (pending.some((m) => isRunnerCommand(m))) {
           log('Pending slash command — aborting active stream so outer loop can process');
           endedForCommand = true;

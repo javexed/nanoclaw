@@ -35,7 +35,9 @@ export function json(res: ServerResponse, status: number, data: unknown): void {
     );
     return;
   }
-  res.writeHead(status, { 'Content-Type': 'application/json' });
+  // no-store: API responses must never be heuristically cached by a browser
+  // or proxy — a cached /api/auth/check can fake a working session offline.
+  res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(data));
 }
 

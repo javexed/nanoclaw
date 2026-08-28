@@ -2,19 +2,70 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>nanoclaw-web</title>
-<style>
-  body { font-family: system-ui, sans-serif; background: #111417; color: #e6e8ea; display: grid; place-items: center; min-height: 100vh; margin: 0; }
-  main { text-align: center; }
-  code { background: #1c2126; padding: 2px 6px; border-radius: 4px; }
-</style>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111417">
+<title>NanoClaw</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<main>
-  <h1>nanoclaw-web</h1>
-  <p>M1 skeleton — the chat UI lands in M2.</p>
-  <p>API is live: <code>/health</code> · <code>/api/auth/info</code> · <code>/api/rooms</code> · <code>/ws</code></p>
-</main>
+
+<div id="login-screen" hidden>
+  <form id="login-form">
+    <h1>NanoClaw</h1>
+    <p>Enter the access token for this install.</p>
+    <input id="login-token" type="password" autocomplete="current-password" placeholder="Access token">
+    <p id="login-error" class="login-error" hidden></p>
+    <button type="submit">Connect</button>
+  </form>
+</div>
+
+<div id="app">
+  <aside id="sidebar">
+    <header id="sidebar-header">
+      <span class="brand">NanoClaw</span>
+      <button id="new-room-btn" type="button" title="New room">+</button>
+    </header>
+    <ul id="room-list"></ul>
+  </aside>
+
+  <main id="chat">
+    <header id="chat-header">
+      <button id="back-btn" type="button" aria-label="Back to rooms">‹</button>
+      <span id="room-title">Pick a room</span>
+    </header>
+    <div id="connection-banner"></div>
+    <div id="transcript">
+      <div id="transcript-empty" hidden></div>
+      <div id="messages"></div>
+      <div id="typing-line" hidden></div>
+    </div>
+    <button id="jump-pill" type="button" hidden></button>
+    <form id="composer" hidden>
+      <textarea id="composer-input" rows="1" placeholder="Message… (/ for commands)"></textarea>
+      <button id="stop-btn" type="button" title="Stop the agent">■</button>
+      <button id="send-btn" type="submit" title="Send">➤</button>
+    </form>
+  </main>
+</div>
+
+<dialog id="new-room-dialog">
+  <form id="new-room-form" method="dialog">
+    <h2>New room</h2>
+    <label>Name <input id="new-room-name" type="text" maxlength="80" required></label>
+    <label>Agent <select id="new-room-agent"></select></label>
+    <menu>
+      <button id="new-room-cancel" type="button">Cancel</button>
+      <button type="submit" value="create">Create</button>
+    </menu>
+  </form>
+</dialog>
+
+<div id="slash-menu" hidden></div>
+<div id="toasts"></div>
+
+<script type="module" src="/js/main.js"></script>
 </body>
 </html>

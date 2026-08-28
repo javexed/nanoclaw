@@ -41,6 +41,7 @@ import {
   deleteWebchatRoom,
   getAgentsForWebchatRoom,
   getWebchatMessagesBeforeId,
+  getWebchatMessagesAfterId,
   getWebchatMessages,
   getWebchatRoom,
   sanitizeRoomName,
@@ -49,7 +50,7 @@ import {
   type FileMeta,
 } from './db.js';
 import { redactSensitiveData } from './redact.js';
-import { getAgentGroup } from '../../db/agent-groups.js';
+import { getAgentGroup, getAllAgentGroups } from '../../db/agent-groups.js';
 import { createMessagingGroupAgent, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 
 const DEFAULT_HOST = '127.0.0.1';
@@ -242,7 +243,7 @@ async function handleHttp(
   res.setHeader(
     'Content-Security-Policy',
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-      "img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; " +
+      "img-src 'self' data: blob:; connect-src 'self' https://www.gstatic.com; font-src 'self'; " +
       "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
   );
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -335,6 +336,16 @@ interface ApiRoute {
 }
 
 // ── Room routes ─────────────────────────────────────────────────────────────
+
+/** Agents, for the room-create picker and (M4) the management panel. */
+async function rAgentsGet({ res }: RouteCtx): Promise<void> {
+  const groups = await getAllAgentGroups();
+  return json(
+    res,
+    200,
+    groups.map((g) => ({ id: g.id, name: g.name, folder: g.folder })),
+  );
+}
 
 async function rRoomsGet({ res }: RouteCtx): Promise<void> {
   return json(res, 200, { rooms: await annotateRooms() });
@@ -434,10 +445,13 @@ async function rHistoryGet({ res, url }: RouteCtx, m: RegExpMatchArray): Promise
   const roomId = decodeURIComponent(m[1]);
   if (!(await getWebchatRoom(roomId))) return json(res, 404, { error: 'Room not found' });
   const before = url.searchParams.get('before');
+  const after = url.searchParams.get('after');
   const limit = Math.min(Number(url.searchParams.get('limit')) || 50, 200);
   const messages = before
     ? await getWebchatMessagesBeforeId(roomId, before, limit)
-    : await getWebchatMessages(roomId, limit);
+    : after
+      ? await getWebchatMessagesAfterId(roomId, after, limit)
+      : await getWebchatMessages(roomId, limit);
   return json(res, 200, {
     room_id: roomId,
     messages: messages.map((msg) => ({ ...msg, content: redactSensitiveData(msg.content) })),
@@ -445,6 +459,7 @@ async function rHistoryGet({ res, url }: RouteCtx, m: RegExpMatchArray): Promise
 }
 
 const API_ROUTES: ApiRoute[] = [
+  { method: 'GET', path: '/api/agents', h: rAgentsGet },
   { method: 'GET', path: '/api/rooms', h: rRoomsGet },
   { method: 'POST', path: '/api/rooms', guards: ['csrf'], h: rRoomsPost },
   { method: 'PUT', path: RE_ROOM_NAME, guards: ['csrf'], h: rRoomNamePut },
@@ -489,7 +504,9 @@ const COMPRESSIBLE_EXT = new Set(['.html', '.js', '.mjs', '.css', '.json', '.svg
 export function computeSwCacheVersion(publicDir: string): string {
   let entries: string[];
   try {
-    entries = fs.readdirSync(publicDir).sort();
+    // Recursive: the emitted /js/ module tree must count toward the version,
+    // or a client-code change would never bust the cache.
+    entries = fs.readdirSync(publicDir, { recursive: true }).map(String).sort();
   } catch {
     return 'nanoclaw-web-dev';
   }
