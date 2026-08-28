@@ -185,6 +185,21 @@ export interface ChannelDefaults {
   mentions: 'platform' | 'dm-only' | 'never';
 }
 
+/**
+ * A live activity frame for one agent turn — what the thinking bubble
+ * renders. `start` opens the bubble, `tool`/`reasoning`/`progress` refine it,
+ * `done`/`stalled` close it. Channels that can render live status implement
+ * ChannelAdapter.sendStatus; everyone else omits it and the host no-ops.
+ */
+export interface AgentActivityStatus {
+  kind: 'start' | 'tool' | 'reasoning' | 'progress' | 'done' | 'stalled';
+  agentName?: string | null;
+  /** Short human line ("Reading src/router.ts", a reasoning summary line). */
+  text?: string | null;
+  /** Longer detail the client may show expanded. */
+  detail?: string | null;
+}
+
 /** The v2 channel adapter contract. */
 export interface ChannelAdapter {
   name: string;
@@ -226,6 +241,13 @@ export interface ChannelAdapter {
     status?: string,
     statusKind?: 'auto' | 'agent',
   ): Promise<void>;
+
+  /**
+   * Push a live agent-activity frame to the conversation (thinking bubble).
+   * Optional; channels without a live surface omit it. Fed by the
+   * agent-status module from the runner's status_events feed.
+   */
+  sendStatus?(platformId: string, threadId: string | null, status: AgentActivityStatus): Promise<void>;
   syncConversations?(): Promise<ConversationInfo[]>;
   resolveChannelName?(platformId: string): Promise<string | null>;
 

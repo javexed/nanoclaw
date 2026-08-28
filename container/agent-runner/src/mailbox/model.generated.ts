@@ -23,7 +23,7 @@ export type ProcessingStatus = 'processing' | 'completed' | 'failed' | 'script-s
 export type TaskStatus = 'pending' | 'paused' | 'completed' | 'failed' | 'cancelled';
 export type InboundStatus = TaskStatus | 'processing';
 
-const INBOUND_KINDS = ['chat', 'chat-sdk', 'task', 'webhook', 'system'] as const;
+const INBOUND_KINDS = ['chat', 'chat-sdk', 'task', 'webhook', 'system', 'interrupt'] as const;
 
 export type InboundKind = (typeof INBOUND_KINDS)[number];
 
