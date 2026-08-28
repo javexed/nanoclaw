@@ -319,6 +319,61 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent-soft
 .mollama-list, .mollama-pulls { display: grid; gap: 8px; }
 .mpull { display: flex; align-items: center; gap: 8px; font-size: 0.88rem; color: var(--text-dim); font-variant-numeric: tabular-nums; }
 
+/* ── Wizard ── */
+#wizard {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: grid;
+  place-items: center;
+  z-index: 15;
+}
+#wizard-card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  width: min(520px, 94vw);
+  max-height: 88vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+#wizard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+.wiz-stepno { color: var(--text-dim); font-size: 0.82rem; font-weight: 400; }
+#wizard-body { padding: 16px 20px; display: grid; gap: 12px; }
+#wizard-body h3 { margin: 0; }
+#wizard-footer { padding: 10px 20px 16px; }
+#wizard-footer button { background: none; border: none; color: var(--text-dim); padding: 0; }
+#wizard-footer button:hover { color: var(--text); }
+.wiz-text { margin: 0; color: var(--text-dim); font-size: 0.9rem; }
+.wiz-choices { display: grid; gap: 10px; }
+.wiz-choice {
+  text-align: left;
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+}
+.wiz-choice.selected { border-color: var(--accent); background: var(--accent-soft); }
+.wiz-choice-title { font-weight: 600; }
+.wiz-choice-desc { color: var(--text-dim); font-size: 0.85rem; }
+.wiz-nav { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+.wiz-token {
+  display: block;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  word-break: break-all;
+  user-select: all;
+}
+
 #jump-pill {
   position: absolute;
   bottom: 76px;

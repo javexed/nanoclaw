@@ -121,7 +121,7 @@ export interface DraftedAgent {
  * "identifier not in agent_groups" WILL flag `webchat-drafter`. It is live —
  * do not delete it, and do not include it in an `all` → `selective` rollout.
  */
-function ensureDrafterIdentity(): Promise<void> {
+export function ensureDrafterIdentity(): Promise<void> {
   if (bootstrapPromise) return bootstrapPromise;
   // Throttle: if a recent bootstrap failed, fail fast for the cooldown
   // window instead of fanning out OneCLI calls as the user retries.

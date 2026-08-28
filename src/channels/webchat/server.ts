@@ -52,6 +52,7 @@ import {
 } from './db.js';
 import { redactSensitiveData } from './redact.js';
 import { handleFileServe, handleMultipartUpload, uploadsDir } from './files.js';
+import { ensureDrafterIdentity } from './drafter.js';
 import {
   rAgentDelete,
   rAgentModelPut,
@@ -78,6 +79,16 @@ import {
   rRoomAgentDelete,
   rRoomAgentsPost,
 } from './server/routes-manage.js';
+import {
+  rBearerGeneratePost,
+  rOnboardingGet,
+  rOnboardingPut,
+  rRestartPost,
+  rTailscaleHttpsGet,
+  rTailscaleHttpsPost,
+  rTailscaleInstallGet,
+  rTailscaleInstallPost,
+} from './server/routes-setup.js';
 import { getAgentGroup, getAllAgentGroups } from '../../db/agent-groups.js';
 import { createMessagingGroupAgent, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 
@@ -145,6 +156,12 @@ export async function startWebchatServer(hooks: WebchatServerHooks): Promise<Web
   } else {
     httpServer = createHttpServer(requestHandler);
   }
+
+  // Warm the drafter's OneCLI identity in the background so the FIRST
+  // "suggest from prompt" click doesn't pay the registration round-trip
+  // (observed pushing the first draft past a 90s client timeout after a
+  // restart). Failure is fine — the call path re-ensures on demand.
+  void ensureDrafterIdentity().catch(() => {});
 
   const wss = setupWebSocket(httpServer, { onInbound: hooks.onInbound }, async (req) => {
     const auth = await authenticateRequest(req);
@@ -545,6 +562,15 @@ const API_ROUTES: ApiRoute[] = [
   { method: 'POST', path: '/api/models/discover', guards: ['csrf'], h: rModelsDiscoverPost },
   { method: 'POST', path: '/api/models/probe', guards: ['csrf'], h: rModelsProbePost },
   { method: 'POST', path: '/api/models/reachability', guards: ['csrf'], h: rModelsReachabilityPost },
+  // Setup: onboarding wizard, bearer token, restart, Tailscale
+  { method: 'GET', path: '/api/webchat/onboarding', h: rOnboardingGet },
+  { method: 'PUT', path: '/api/webchat/onboarding', guards: ['csrf'], h: rOnboardingPut },
+  { method: 'POST', path: '/api/webchat/auth/bearer/generate', guards: ['csrf'], h: rBearerGeneratePost },
+  { method: 'POST', path: '/api/webchat/restart', guards: ['csrf'], h: rRestartPost },
+  { method: 'GET', path: '/api/webchat/tailscale-https', h: rTailscaleHttpsGet },
+  { method: 'POST', path: '/api/webchat/tailscale-https', guards: ['csrf'], h: rTailscaleHttpsPost },
+  { method: 'GET', path: '/api/webchat/tailscale/install', h: rTailscaleInstallGet },
+  { method: 'POST', path: '/api/webchat/tailscale/install', guards: ['csrf'], h: rTailscaleInstallPost },
   // Management: Ollama console
   { method: 'GET', path: '/api/ollama/hosts', h: rOllamaHostsGet },
   { method: 'GET', path: '/api/ollama/models', h: rOllamaModelsGet },

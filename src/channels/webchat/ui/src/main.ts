@@ -8,6 +8,7 @@ import { wireRoomCreate, wireBackButton } from './features/rooms.js';
 import { wireTranscriptScroll } from './features/transcript.js';
 import { wireAttachments } from './features/files.js';
 import { wireManage } from './features/manage.js';
+import { maybeOpenWizard } from './features/wizard.js';
 import { state } from './core/state.js';
 
 async function boot(): Promise<void> {
@@ -18,6 +19,7 @@ async function boot(): Promise<void> {
   wireBackButton();
   wireAttachments();
   wireManage();
+  void maybeOpenWizard();
   wireVisibilityReconnect();
   connect();
 
