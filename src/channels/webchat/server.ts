@@ -52,6 +52,32 @@ import {
 } from './db.js';
 import { redactSensitiveData } from './redact.js';
 import { handleFileServe, handleMultipartUpload, uploadsDir } from './files.js';
+import {
+  rAgentDelete,
+  rAgentModelPut,
+  rAgentsDetailGet,
+  rAgentsDraftPost,
+  rAgentsPost,
+  rModelIdDelete,
+  rModelIdPut,
+  rModelsDefaultPut,
+  rModelsDiscoverPost,
+  rModelsGet,
+  rModelsPost,
+  rModelsProbePost,
+  rModelsReachabilityPost,
+  rOllamaDeletePost,
+  rOllamaHostsGet,
+  rOllamaInstallPost,
+  rOllamaLocalGet,
+  rOllamaModelsGet,
+  rOllamaPullCancelPost,
+  rOllamaPullPost,
+  rOllamaPullsGet,
+  rOllamaRecommendGet,
+  rRoomAgentDelete,
+  rRoomAgentsPost,
+} from './server/routes-manage.js';
 import { getAgentGroup, getAllAgentGroups } from '../../db/agent-groups.js';
 import { createMessagingGroupAgent, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 
@@ -494,9 +520,41 @@ async function rApprovalRespondPost(ctx: RouteCtx, m: RegExpMatchArray): Promise
   return json(res, 200, { ok: true });
 }
 
+const RE_AGENT = /^\/api\/agents\/([^/]+)$/;
+const RE_AGENT_MODEL = /^\/api\/agents\/([^/]+)\/model$/;
+const RE_ROOM_AGENT = /^\/api\/rooms\/([^/]+)\/agents\/([^/]+)$/;
+const RE_MODEL = /^\/api\/models\/([^/]+)$/;
+
 const API_ROUTES: ApiRoute[] = [
   { method: 'GET', path: '/api/approvals/pending', h: rApprovalsPendingGet },
   { method: 'POST', path: RE_APPROVE, guards: ['csrf'], h: rApprovalRespondPost },
+  // Management: agents
+  { method: 'GET', path: '/api/agents/detail', h: rAgentsDetailGet },
+  { method: 'POST', path: '/api/agents', guards: ['csrf'], h: rAgentsPost },
+  { method: 'POST', path: '/api/agents/draft', guards: ['csrf'], h: rAgentsDraftPost },
+  { method: 'DELETE', path: RE_AGENT, guards: ['csrf'], h: rAgentDelete },
+  { method: 'PUT', path: RE_AGENT_MODEL, guards: ['csrf'], h: rAgentModelPut },
+  { method: 'POST', path: RE_ROOM_AGENTS, guards: ['csrf'], h: rRoomAgentsPost },
+  { method: 'DELETE', path: RE_ROOM_AGENT, guards: ['csrf'], h: rRoomAgentDelete },
+  // Management: models
+  { method: 'GET', path: '/api/models', h: rModelsGet },
+  { method: 'POST', path: '/api/models', guards: ['csrf'], h: rModelsPost },
+  { method: 'PUT', path: '/api/models/default', guards: ['csrf'], h: rModelsDefaultPut },
+  { method: 'PUT', path: RE_MODEL, guards: ['csrf'], h: rModelIdPut },
+  { method: 'DELETE', path: RE_MODEL, guards: ['csrf'], h: rModelIdDelete },
+  { method: 'POST', path: '/api/models/discover', guards: ['csrf'], h: rModelsDiscoverPost },
+  { method: 'POST', path: '/api/models/probe', guards: ['csrf'], h: rModelsProbePost },
+  { method: 'POST', path: '/api/models/reachability', guards: ['csrf'], h: rModelsReachabilityPost },
+  // Management: Ollama console
+  { method: 'GET', path: '/api/ollama/hosts', h: rOllamaHostsGet },
+  { method: 'GET', path: '/api/ollama/models', h: rOllamaModelsGet },
+  { method: 'GET', path: '/api/ollama/pulls', h: rOllamaPullsGet },
+  { method: 'POST', path: '/api/ollama/pull', guards: ['csrf'], h: rOllamaPullPost },
+  { method: 'POST', path: '/api/ollama/pull/cancel', guards: ['csrf'], h: rOllamaPullCancelPost },
+  { method: 'POST', path: '/api/ollama/delete', guards: ['csrf'], h: rOllamaDeletePost },
+  { method: 'GET', path: '/api/ollama/recommend', h: rOllamaRecommendGet },
+  { method: 'GET', path: '/api/ollama/local', h: rOllamaLocalGet },
+  { method: 'POST', path: '/api/ollama/install', guards: ['csrf'], h: rOllamaInstallPost },
   { method: 'GET', path: '/api/agents', h: rAgentsGet },
   { method: 'GET', path: '/api/rooms', h: rRoomsGet },
   { method: 'POST', path: '/api/rooms', guards: ['csrf'], h: rRoomsPost },

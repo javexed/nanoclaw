@@ -7,6 +7,7 @@ import { wireComposer } from './features/composer.js';
 import { wireRoomCreate, wireBackButton } from './features/rooms.js';
 import { wireTranscriptScroll } from './features/transcript.js';
 import { wireAttachments } from './features/files.js';
+import { wireManage } from './features/manage.js';
 import { state } from './core/state.js';
 
 async function boot(): Promise<void> {
@@ -16,6 +17,7 @@ async function boot(): Promise<void> {
   wireRoomCreate();
   wireBackButton();
   wireAttachments();
+  wireManage();
   wireVisibilityReconnect();
   connect();
 

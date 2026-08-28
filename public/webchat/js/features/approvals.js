@@ -17,7 +17,12 @@ async function respond(questionId, value) {
 function optionButtons(questionId, options, onDone) {
     const row = document.createElement('div');
     row.className = 'appr-actions';
-    const list = options.length > 0 ? options : [{ label: 'Approve', value: 'approve' }, { label: 'Reject', value: 'reject' }];
+    const list = options.length > 0
+        ? options
+        : [
+            { label: 'Approve', value: 'approve' },
+            { label: 'Reject', value: 'reject' },
+        ];
     for (const opt of list) {
         const btn = document.createElement('button');
         btn.type = 'button';

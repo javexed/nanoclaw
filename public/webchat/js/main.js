@@ -7,6 +7,7 @@ import { wireComposer } from './features/composer.js';
 import { wireRoomCreate, wireBackButton } from './features/rooms.js';
 import { wireTranscriptScroll } from './features/transcript.js';
 import { wireAttachments } from './features/files.js';
+import { wireManage } from './features/manage.js';
 import { state } from './core/state.js';
 async function boot() {
     await ensureAuthenticated();
@@ -15,6 +16,7 @@ async function boot() {
     wireRoomCreate();
     wireBackButton();
     wireAttachments();
+    wireManage();
     wireVisibilityReconnect();
     connect();
     // Waking a hidden tab: the socket reconnect repaints via history, but a
