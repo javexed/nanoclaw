@@ -316,7 +316,7 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent-soft
 }
 .mcreate { border-style: dashed; }
 .mrow-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-.mrow-name { font-weight: 600; }
+.mrow-name { font-weight: 600; margin-right: auto; }
 .mrow-del { font-size: 0.8rem; padding: 3px 10px; color: var(--text-dim); }
 .mrow-del:hover { color: var(--danger); border-color: var(--danger); }
 .mrow-meta { color: var(--text-dim); font-size: 0.82rem; }
