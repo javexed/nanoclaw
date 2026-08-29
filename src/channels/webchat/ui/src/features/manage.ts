@@ -211,6 +211,13 @@ function buildAgentCreate(): HTMLElement {
 
 // ── Models tab ──────────────────────────────────────────────────────────────
 
+function msection(label: string): HTMLElement {
+  const el = document.createElement('div');
+  el.className = 'msection';
+  el.textContent = label;
+  return el;
+}
+
 async function renderModels(): Promise<void> {
   const pane = $('#mpane-models')!;
   try {
@@ -220,17 +227,25 @@ async function renderModels(): Promise<void> {
       known_anthropic: string[];
     };
     const rosterKeys = new Set(data.models.map((m) => `${(m.endpoint ?? '').replace(/\/$/, '')}|${m.model_id}`));
-    const ollamaHead = document.createElement('div');
-    ollamaHead.className = 'msection';
-    ollamaHead.textContent = 'Ollama hosts';
     const ollamaBox = document.createElement('div');
+    const rows: HTMLElement[] = data.models.map((m) => buildModelRow(m, data.default_model_id));
+    if (rows.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'mrow-meta';
+      empty.textContent = 'No models registered yet — add one below.';
+      rows.push(empty);
+    }
     pane.replaceChildren(
-      buildModelCreate(data.known_anthropic),
-      ...data.models.map((m) => buildModelRow(m, data.default_model_id)),
-      ollamaHead,
+      msection('Your models'),
+      ...rows,
+      msection('On this machine'),
       ollamaBox,
+      msection('Add Claude model'),
+      buildClaudePicker(data.known_anthropic),
+      buildAdvancedForm(),
     );
     void renderOllamaInto(ollamaBox, rosterKeys);
+    void probeRosterDots(pane, data.models);
   } catch (err) {
     toastError(err, 'Could not load models');
   }
@@ -241,12 +256,23 @@ function buildModelRow(m: ModelRow, defaultId: string | null): HTMLElement {
   row.className = 'mrow';
   const head = document.createElement('div');
   head.className = 'mrow-head';
+  const dot = document.createElement('span');
+  dot.className = 'mdot';
+  if (m.endpoint) {
+    dot.dataset.ep = m.endpoint.replace(/\/$/, '');
+    dot.title = 'Probing…';
+  } else {
+    dot.classList.add('ok');
+    dot.title = 'Cloud (Anthropic)';
+  }
   const name = document.createElement('span');
   name.className = 'mrow-name';
   name.textContent = m.name;
   const del = document.createElement('button');
   del.className = 'mrow-del';
-  del.textContent = 'Delete';
+  del.textContent = '✕';
+  del.setAttribute('aria-label', `Delete ${m.name}`);
+  del.title = 'Remove from roster';
   del.addEventListener('click', async () => {
     try {
       await apiJson(`/api/models/${encodeURIComponent(m.id)}`, { method: 'DELETE' });
@@ -263,7 +289,7 @@ function buildModelRow(m: ModelRow, defaultId: string | null): HTMLElement {
       } else toastError(err, 'Delete failed');
     }
   });
-  head.append(name, del);
+  head.append(dot, name, del);
 
   const meta = document.createElement('div');
   meta.className = 'mrow-meta';
@@ -284,63 +310,101 @@ function buildModelRow(m: ModelRow, defaultId: string | null): HTMLElement {
     }
   });
   actions.appendChild(def);
-  if (m.endpoint) {
-    const reach = document.createElement('button');
-    reach.textContent = 'Check reachability';
-    reach.addEventListener('click', async () => {
-      reach.disabled = true;
-      reach.textContent = 'Checking…';
-      try {
-        const r = (await apiJson('/api/models/reachability', {
-          method: 'POST',
-          body: { endpoint: m.endpoint },
-        })) as { ok?: boolean; reachable?: boolean; detail?: string; error?: string };
-        const good = r.ok ?? r.reachable;
-        showToast(good ? 'Reachable from agent containers' : `Unreachable: ${r.detail || r.error || 'no route'}`, {
-          kind: good ? 'success' : 'error',
-        });
-      } catch (err) {
-        toastError(err, 'Probe failed');
-      } finally {
-        reach.disabled = false;
-        reach.textContent = 'Check reachability';
-      }
-    });
-    actions.appendChild(reach);
-  }
 
   row.append(head, meta, actions);
   return row;
 }
 
-function buildModelCreate(knownAnthropic: string[]): HTMLElement {
+/** One reachability probe per unique endpoint; every row's dot gets the verdict. */
+async function probeRosterDots(pane: HTMLElement, models: ModelRow[]): Promise<void> {
+  const endpoints = [...new Set(models.filter((m) => m.endpoint).map((m) => m.endpoint!.replace(/\/$/, '')))];
+  await Promise.all(
+    endpoints.map(async (ep) => {
+      let good = false;
+      let detail = '';
+      try {
+        const r = (await apiJson('/api/models/reachability', { method: 'POST', body: { endpoint: ep } })) as {
+          ok?: boolean;
+          reachable?: boolean;
+          detail?: string;
+          error?: string;
+        };
+        good = Boolean(r.ok ?? r.reachable);
+        detail = r.detail || r.error || '';
+      } catch (err) {
+        detail = (err as Error).message;
+      }
+      for (const el of pane.querySelectorAll(`.mdot[data-ep="${CSS.escape(ep)}"]`)) {
+        el.classList.add(good ? 'ok' : 'bad');
+        (el as HTMLElement).title = good
+          ? 'Reachable from agent containers'
+          : `Unreachable${detail ? `: ${detail}` : ''}`;
+      }
+    }),
+  );
+}
+
+function buildClaudePicker(knownAnthropic: string[]): HTMLElement {
   const box = document.createElement('div');
   box.className = 'mrow mcreate';
-  const title = document.createElement('div');
-  title.className = 'mrow-name';
-  title.textContent = 'Add model';
+  const sel = document.createElement('select');
+  for (const k of knownAnthropic) {
+    const o = document.createElement('option');
+    o.value = k;
+    o.textContent = k;
+    sel.appendChild(o);
+  }
+  const add = document.createElement('button');
+  add.className = 'mprimary';
+  add.textContent = 'Add';
+  add.addEventListener('click', async () => {
+    if (!sel.value) return;
+    add.disabled = true;
+    try {
+      await apiJson('/api/models', {
+        method: 'POST',
+        body: { name: sel.value, kind: 'anthropic', model_id: sel.value },
+      });
+      showToast('Model added', { kind: 'success' });
+      void renderModels();
+    } catch (err) {
+      add.disabled = false;
+      toastError(err, 'Add failed');
+    }
+  });
+  const row = document.createElement('div');
+  row.className = 'mactions';
+  row.append(sel, add);
+  box.appendChild(row);
+  return box;
+}
 
+/** The old free-form add box, folded away — remote Ollama and OpenAI-compatible hosts. */
+function buildAdvancedForm(): HTMLElement {
+  const details = document.createElement('details');
+  details.className = 'madv';
+  const summary = document.createElement('summary');
+  summary.textContent = 'Advanced: custom endpoint…';
+  details.appendChild(summary);
+
+  const box = document.createElement('div');
+  box.className = 'mrow mcreate';
   const name = document.createElement('input');
   name.placeholder = 'Display name';
   const kind = document.createElement('select');
-  for (const k of ['anthropic', 'ollama', 'openai-compatible']) {
+  for (const k of ['ollama', 'openai-compatible', 'anthropic']) {
     const o = document.createElement('option');
     o.value = k;
     o.textContent = k;
     kind.appendChild(o);
   }
   const endpoint = document.createElement('input');
-  endpoint.placeholder = 'Endpoint (http://host:11434) — not needed for anthropic';
+  endpoint.placeholder = 'Endpoint (http://host:11434)';
   const modelId = document.createElement('input');
   modelId.placeholder = 'Model id (e.g. qwen3:8b)';
-  modelId.setAttribute('list', 'known-anthropic');
+  modelId.setAttribute('list', 'discovered-models');
   const datalist = document.createElement('datalist');
-  datalist.id = 'known-anthropic';
-  for (const k of knownAnthropic) {
-    const o = document.createElement('option');
-    o.value = k;
-    datalist.appendChild(o);
-  }
+  datalist.id = 'discovered-models';
 
   const discover = document.createElement('button');
   discover.textContent = 'Discover models';
@@ -364,9 +428,7 @@ function buildModelCreate(knownAnthropic: string[]): HTMLElement {
       );
       showToast(
         models.length ? `${models.length} models on that host — pick in the model-id box` : 'Host has no models',
-        {
-          kind: 'info',
-        },
+        { kind: 'info' },
       );
     } catch (err) {
       toastError(err, 'Discovery failed');
@@ -391,21 +453,19 @@ function buildModelCreate(knownAnthropic: string[]): HTMLElement {
         },
       });
       showToast('Model added', { kind: 'success' });
-      name.value = '';
-      modelId.value = '';
       void renderModels();
     } catch (err) {
-      toastError(err, 'Add failed');
-    } finally {
       add.disabled = false;
+      toastError(err, 'Add failed');
     }
   });
 
   const actions = document.createElement('div');
   actions.className = 'mactions';
   actions.append(discover, add);
-  box.append(title, name, kind, endpoint, modelId, datalist, actions);
-  return box;
+  box.append(name, kind, endpoint, modelId, datalist, actions);
+  details.appendChild(box);
+  return details;
 }
 
 // ── Ollama section (lives inside the Models tab) ──────────────────────────────────────────────────────────────
@@ -421,6 +481,7 @@ async function renderOllamaInto(pane: HTMLElement, rosterKeys: Set<string>): Pro
       o.textContent = h;
       hostSel.appendChild(o);
     }
+    hostSel.hidden = hosts.length < 2; // localhost-only: nothing to choose
     const list = document.createElement('div');
     list.className = 'mollama-list';
     const pullsBox = document.createElement('div');
@@ -491,8 +552,12 @@ async function renderOllamaInto(pane: HTMLElement, rosterKeys: Set<string>): Pro
         list.replaceChildren();
         const bad = document.createElement('div');
         bad.className = 'mrow-meta';
-        bad.textContent = `Host unreachable: ${(err as Error).message}`;
+        const local = /127\.0\.0\.1|localhost/.test(hostSel.value);
+        bad.textContent = local
+          ? 'Ollama is not running on this machine.'
+          : `Host unreachable: ${(err as Error).message}`;
         list.appendChild(bad);
+        if (local) void offerLocalInstall(list, refreshModels);
       }
     };
     hostSel.addEventListener('change', () => void refreshModels());
@@ -563,5 +628,49 @@ async function renderOllamaInto(pane: HTMLElement, rosterKeys: Set<string>): Pro
     void refreshPulls();
   } catch (err) {
     toastError(err, 'Could not load Ollama hosts');
+  }
+}
+
+/** Local Ollama is down: if the host can install it, offer a one-click install. */
+async function offerLocalInstall(list: HTMLElement, onReady: () => Promise<void>): Promise<void> {
+  try {
+    const state = (await apiJson('/api/ollama/local')) as { reachable: boolean; canInstall: boolean };
+    if (state.reachable || !state.canInstall) return;
+    const btn = document.createElement('button');
+    btn.className = 'mprimary';
+    btn.textContent = 'Install Ollama on this machine';
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      btn.textContent = 'Installing… (a few minutes)';
+      try {
+        await apiJson('/api/ollama/install', { method: 'POST', body: {} });
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = 'Install Ollama on this machine';
+        toastError(err, 'Install failed to start');
+        return;
+      }
+      // Poll until the local daemon answers, then refresh the model list.
+      for (let i = 0; i < 200; i++) {
+        await new Promise((r) => setTimeout(r, 3000));
+        try {
+          const st = (await apiJson('/api/ollama/local')) as { reachable: boolean };
+          if (st.reachable) {
+            showToast('Ollama is running', { kind: 'success' });
+            btn.remove();
+            void onReady();
+            return;
+          }
+        } catch {
+          /* transient */
+        }
+      }
+      btn.disabled = false;
+      btn.textContent = 'Install Ollama on this machine';
+      showToast('Install is taking unusually long — check the host logs', { kind: 'error' });
+    });
+    list.appendChild(btn);
+  } catch {
+    /* state endpoint unavailable — leave the plain unreachable note */
   }
 }

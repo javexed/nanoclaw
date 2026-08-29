@@ -486,3 +486,23 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; margin: 6px 0 
   text-transform: uppercase;
   color: var(--text-dim, #8b93a7);
 }
+
+/* Models tab: auto-probed status dots + advanced disclosure */
+.mdot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dim, #8b93a7);
+  margin-right: 8px;
+  flex: none;
+}
+.mdot.ok { background: #4cc38a; }
+.mdot.bad { background: #e5534b; }
+#manage .madv { margin-top: 18px; }
+#manage .madv summary {
+  cursor: pointer;
+  font-size: var(--fs-small, 0.78rem);
+  color: var(--text-dim, #8b93a7);
+}
+#manage .madv[open] summary { margin-bottom: 6px; }
