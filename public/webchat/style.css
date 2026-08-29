@@ -470,3 +470,12 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; margin: 6px 0 
   #slash-menu { left: 12px; }
   .msg { max-width: 92%; }
 }
+
+#manage .msection {
+  margin: 18px 0 4px;
+  font-size: var(--fs-small, 0.78rem);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim, #8b93a7);
+}

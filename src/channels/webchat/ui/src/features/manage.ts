@@ -37,7 +37,7 @@ let pullTimer: ReturnType<typeof setInterval> | null = null;
 export function wireManage(): void {
   $('#manage-btn')!.addEventListener('click', () => (open ? closeDrawer() : openDrawer()));
   $('#manage-close')!.addEventListener('click', closeDrawer);
-  for (const tab of ['agents', 'models', 'ollama']) {
+  for (const tab of ['agents', 'models']) {
     $(`#mtab-${tab}`)!.addEventListener('click', () => showTab(tab));
   }
 }
@@ -58,7 +58,7 @@ function closeDrawer(): void {
 }
 
 function showTab(tab: string): void {
-  for (const t of ['agents', 'models', 'ollama']) {
+  for (const t of ['agents', 'models']) {
     $(`#mtab-${t}`)!.classList.toggle('active', t === tab);
     $(`#mpane-${t}`)!.hidden = t !== tab;
   }
@@ -67,8 +67,7 @@ function showTab(tab: string): void {
     pullTimer = null;
   }
   if (tab === 'agents') void renderAgents();
-  else if (tab === 'models') void renderModels();
-  else void renderOllama();
+  else void renderModels();
 }
 
 // ── Agents tab ──────────────────────────────────────────────────────────────
@@ -220,10 +219,18 @@ async function renderModels(): Promise<void> {
       default_model_id: string | null;
       known_anthropic: string[];
     };
+    const rosterKeys = new Set(data.models.map((m) => `${(m.endpoint ?? '').replace(/\/$/, '')}|${m.model_id}`));
+    const ollamaHead = document.createElement('div');
+    ollamaHead.className = 'msection';
+    ollamaHead.textContent = 'Ollama hosts';
+    const ollamaBox = document.createElement('div');
     pane.replaceChildren(
       buildModelCreate(data.known_anthropic),
       ...data.models.map((m) => buildModelRow(m, data.default_model_id)),
+      ollamaHead,
+      ollamaBox,
     );
+    void renderOllamaInto(ollamaBox, rosterKeys);
   } catch (err) {
     toastError(err, 'Could not load models');
   }
@@ -401,10 +408,9 @@ function buildModelCreate(knownAnthropic: string[]): HTMLElement {
   return box;
 }
 
-// ── Ollama tab ──────────────────────────────────────────────────────────────
+// ── Ollama section (lives inside the Models tab) ──────────────────────────────────────────────────────────────
 
-async function renderOllama(): Promise<void> {
-  const pane = $('#mpane-ollama')!;
+async function renderOllamaInto(pane: HTMLElement, rosterKeys: Set<string>): Promise<void> {
   pane.replaceChildren();
   try {
     const { hosts } = (await apiJson('/api/ollama/hosts')) as { hosts: string[] };
@@ -449,7 +455,25 @@ async function renderOllama(): Promise<void> {
                 toastError(err, 'Delete failed');
               }
             });
-            head.append(nm, del);
+            const inRoster = rosterKeys.has(`${hostSel.value.replace(/\/$/, '')}|${mm.name}`);
+            const add = document.createElement('button');
+            add.textContent = inRoster ? 'In roster' : 'Add to roster';
+            add.disabled = inRoster;
+            add.addEventListener('click', async () => {
+              add.disabled = true;
+              try {
+                await apiJson('/api/models', {
+                  method: 'POST',
+                  body: { name: mm.name, kind: 'ollama', endpoint: hostSel.value, model_id: mm.name },
+                });
+                showToast('Added to roster', { kind: 'success' });
+                void renderModels();
+              } catch (err) {
+                add.disabled = false;
+                toastError(err, 'Add failed');
+              }
+            });
+            head.append(nm, add, del);
             const meta = document.createElement('div');
             meta.className = 'mrow-meta';
             meta.textContent = `${(mm.size / 1e9).toFixed(1)} GB`;
@@ -528,6 +552,7 @@ async function renderOllama(): Promise<void> {
         /* transient */
       }
     };
+    if (pullTimer) clearInterval(pullTimer);
     pullTimer = setInterval(() => void refreshPulls(), 1500);
 
     const pullForm = document.createElement('div');

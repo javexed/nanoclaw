@@ -272,7 +272,8 @@ function renderAccess() {
             const tokenBox = document.createElement('code');
             tokenBox.className = 'wiz-token';
             tokenBox.textContent = token;
-            bDesc.textContent = 'Save this token now — it is shown once. It becomes active after the restart at the end of the wizard.';
+            bDesc.textContent =
+                'Save this token now — it is shown once. It becomes active after the restart at the end of the wizard.';
             bearer.insertBefore(tokenBox, bBtn);
         }
         catch (err) {
