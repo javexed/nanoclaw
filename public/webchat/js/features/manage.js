@@ -274,21 +274,24 @@ function buildModelRow(m, defaultId) {
 async function probeRosterDots(pane, models) {
     const endpoints = [...new Set(models.filter((m) => m.endpoint).map((m) => m.endpoint.replace(/\/$/, '')))];
     await Promise.all(endpoints.map(async (ep) => {
-        let good = false;
+        let verdict = 'bad';
         let detail = '';
         try {
             const r = (await apiJson('/api/models/reachability', { method: 'POST', body: { endpoint: ep } }));
-            good = Boolean(r.ok ?? r.reachable);
-            detail = r.detail || r.error || '';
+            verdict = r.verdict === 'ok' ? 'ok' : r.verdict === 'skipped' ? 'skipped' : 'bad';
+            detail = [r.detail || r.error, r.fix].filter(Boolean).join(' — ');
         }
         catch (err) {
             detail = err.message;
         }
         for (const el of pane.querySelectorAll(`.mdot[data-ep="${CSS.escape(ep)}"]`)) {
-            el.classList.add(good ? 'ok' : 'bad');
-            el.title = good
-                ? 'Reachable from agent containers'
-                : `Unreachable${detail ? `: ${detail}` : ''}`;
+            if (verdict === 'skipped') {
+                el.title = detail || 'Probe skipped';
+                continue; // stays grey
+            }
+            el.classList.add(verdict);
+            el.title =
+                verdict === 'ok' ? 'Reachable from agent containers' : `Unreachable${detail ? `: ${detail}` : ''}`;
         }
     }));
 }

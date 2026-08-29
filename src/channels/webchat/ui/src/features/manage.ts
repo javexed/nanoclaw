@@ -320,25 +320,28 @@ async function probeRosterDots(pane: HTMLElement, models: ModelRow[]): Promise<v
   const endpoints = [...new Set(models.filter((m) => m.endpoint).map((m) => m.endpoint!.replace(/\/$/, '')))];
   await Promise.all(
     endpoints.map(async (ep) => {
-      let good = false;
+      let verdict = 'bad';
       let detail = '';
       try {
         const r = (await apiJson('/api/models/reachability', { method: 'POST', body: { endpoint: ep } })) as {
-          ok?: boolean;
-          reachable?: boolean;
+          verdict?: string;
           detail?: string;
+          fix?: string;
           error?: string;
         };
-        good = Boolean(r.ok ?? r.reachable);
-        detail = r.detail || r.error || '';
+        verdict = r.verdict === 'ok' ? 'ok' : r.verdict === 'skipped' ? 'skipped' : 'bad';
+        detail = [r.detail || r.error, r.fix].filter(Boolean).join(' — ');
       } catch (err) {
         detail = (err as Error).message;
       }
       for (const el of pane.querySelectorAll(`.mdot[data-ep="${CSS.escape(ep)}"]`)) {
-        el.classList.add(good ? 'ok' : 'bad');
-        (el as HTMLElement).title = good
-          ? 'Reachable from agent containers'
-          : `Unreachable${detail ? `: ${detail}` : ''}`;
+        if (verdict === 'skipped') {
+          (el as HTMLElement).title = detail || 'Probe skipped';
+          continue; // stays grey
+        }
+        el.classList.add(verdict);
+        (el as HTMLElement).title =
+          verdict === 'ok' ? 'Reachable from agent containers' : `Unreachable${detail ? `: ${detail}` : ''}`;
       }
     }),
   );
