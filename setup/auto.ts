@@ -1325,6 +1325,17 @@ async function chooseImageSource(): Promise<void> {
   // good answer cannot be honoured.
   if (!readAgentImagePin()) return;
 
+  // Headless (deploy scripts, stdin at /dev/null): the select below would
+  // cancel on EOF and exit the whole setup as a "success" — same failure the
+  // welcome prompt had. Headless takes the local build: it needs no account
+  // and no interactive device flow, so it is the only choice that can be
+  // honoured without a human present.
+  if (!process.stdin.isTTY) {
+    setupLog.userInput('image_source', 'local (headless default)');
+    writeImageSource('local');
+    return;
+  }
+
   p.log.message(
     brandBody(
       dimWrap(
