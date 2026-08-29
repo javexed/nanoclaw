@@ -33,6 +33,17 @@ export async function maybeOpenWizard(): Promise<void> {
   openWizard();
 }
 
+/** Manual trigger (manage drawer): refresh state, then open at step one. */
+export async function launchWizard(): Promise<void> {
+  try {
+    state = (await apiJson('/api/webchat/onboarding')) as OnboardingState;
+  } catch (err) {
+    toastError(err, 'Could not load setup state');
+    return;
+  }
+  openWizard();
+}
+
 export function openWizard(): void {
   step = 0;
   $('#wizard')!.hidden = false;

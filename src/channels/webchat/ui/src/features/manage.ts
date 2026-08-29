@@ -5,6 +5,7 @@
 import { $ } from '../core/dom.js';
 import { apiJson } from '../core/api.js';
 import { showToast, toastError } from '../core/toast.js';
+import { launchWizard } from './wizard.js';
 
 interface AgentDetail {
   id: string;
@@ -40,6 +41,10 @@ export function wireManage(): void {
   for (const tab of ['agents', 'models']) {
     $(`#mtab-${tab}`)!.addEventListener('click', () => showTab(tab));
   }
+  $('#wizard-btn')!.addEventListener('click', () => {
+    closeDrawer();
+    void launchWizard();
+  });
 }
 
 function openDrawer(): void {
@@ -230,10 +235,25 @@ async function renderModels(): Promise<void> {
     const ollamaBox = document.createElement('div');
     const rows: HTMLElement[] = data.models.map((m) => buildModelRow(m, data.default_model_id));
     if (rows.length === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'mrow-meta';
-      empty.textContent = 'No models registered yet — add one below.';
-      rows.push(empty);
+      // Empty roster is not "no model": agents fall through to the provider's
+      // built-in Claude default. Say so instead of implying nothing works.
+      const builtin = document.createElement('div');
+      builtin.className = 'mrow';
+      const head = document.createElement('div');
+      head.className = 'mrow-head';
+      const dot = document.createElement('span');
+      dot.className = 'mdot ok';
+      dot.title = 'Cloud (Anthropic)';
+      const nm = document.createElement('span');
+      nm.className = 'mrow-name';
+      nm.textContent = 'Claude — built-in default';
+      head.append(dot, nm);
+      const meta = document.createElement('div');
+      meta.className = 'mrow-meta';
+      meta.textContent =
+        'Agents use the Claude provider\u2019s default model until you register one here and make it the default.';
+      builtin.append(head, meta);
+      rows.push(builtin);
     }
     pane.replaceChildren(
       msection('Your models'),
