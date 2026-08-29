@@ -6,6 +6,8 @@ import { state } from '../core/state.js';
 import { clearTranscript, hideAgentTyping, setEmptyNote, clearMissed } from './transcript.js';
 import { clearAllTurns } from './thinking.js';
 export function renderRooms(rooms) {
+    if (state.currentRoom && !rooms.some((r) => r.id === state.currentRoom))
+        leaveRoom();
     const listEl = $('#room-list');
     const sorted = [...rooms].sort((a, b) => Math.max(state.roomActivity.get(b.id) ?? 0, b.last_activity) -
         Math.max(state.roomActivity.get(a.id) ?? 0, a.last_activity));
@@ -43,6 +45,7 @@ export function joinRoom(roomId, roomName) {
     clearAllTurns();
     localStorage.setItem('lastRoom', roomId);
     $('#room-title').textContent = roomName;
+    $('#room-del-btn').hidden = false;
     $('#app').classList.add('in-room'); // mobile: show the chat pane
     $('#composer').hidden = false;
     clearTranscript();
@@ -53,6 +56,37 @@ export function joinRoom(roomId, roomName) {
     if (state.ws && state.ws.readyState === WebSocket.OPEN) {
         state.ws.send(JSON.stringify({ type: 'join', room_id: roomId }));
     }
+}
+/** Back to the no-room state — after deleting, or when the room vanishes. */
+export function leaveRoom() {
+    state.currentRoom = null;
+    state.currentRoomName = '';
+    localStorage.removeItem('lastRoom');
+    $('#room-title').textContent = 'Pick a room';
+    $('#room-del-btn').hidden = true;
+    $('#composer').hidden = true;
+    $('#app').classList.remove('in-room');
+    clearTranscript();
+    setEmptyNote('');
+    hideAgentTyping();
+    clearAllTurns();
+}
+export function wireRoomDelete() {
+    $('#room-del-btn').addEventListener('click', async () => {
+        const roomId = state.currentRoom;
+        if (!roomId)
+            return;
+        if (!confirm(`Delete room "${state.currentRoomName}"? Its messages are removed permanently.`))
+            return;
+        try {
+            await apiJson(`/api/rooms/${encodeURIComponent(roomId)}`, { method: 'DELETE' });
+            leaveRoom();
+            renderRooms(state.lastRoomsList.filter((r) => r.id !== roomId));
+        }
+        catch (err) {
+            toastError(err, 'Could not delete room');
+        }
+    });
 }
 export function wireBackButton() {
     $('#back-btn').addEventListener('click', () => {

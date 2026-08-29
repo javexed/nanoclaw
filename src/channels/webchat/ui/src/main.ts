@@ -4,7 +4,7 @@
 import { ensureAuthenticated } from './features/auth.js';
 import { connect, wireVisibilityReconnect, catchUpSince } from './core/ws.js';
 import { wireComposer } from './features/composer.js';
-import { wireRoomCreate, wireBackButton } from './features/rooms.js';
+import { wireRoomCreate, wireBackButton, wireRoomDelete } from './features/rooms.js';
 import { wireTranscriptScroll } from './features/transcript.js';
 import { wireAttachments } from './features/files.js';
 import { wireManage } from './features/manage.js';
@@ -17,6 +17,7 @@ async function boot(): Promise<void> {
   wireComposer();
   wireRoomCreate();
   wireBackButton();
+  wireRoomDelete();
   wireAttachments();
   wireManage();
   void maybeOpenWizard();
