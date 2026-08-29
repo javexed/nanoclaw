@@ -160,7 +160,12 @@ async function main(): Promise<void> {
   // work begins. Default lands on standard so Enter is the happy path.
   // On sg re-exec, the user already chose — skip straight to standard.
   let startChoice: 'default' | 'advanced' = 'default';
-  if (process.env.NANOCLAW_REEXEC_SG !== '1') {
+  // Headless (stdin is not a TTY — deploy scripts run with </dev/null): the
+  // welcome select would render, read EOF, and cancel — and ensureAnswer's
+  // cancel is exit 0, so a `set -e` deploy sails past the ENTIRE setup as if
+  // it succeeded (no container image, no vault; the first message then fails
+  // with image-unavailable). Headless means standard setup, by definition.
+  if (process.env.NANOCLAW_REEXEC_SG !== '1' && process.stdin.isTTY) {
     startChoice = ensureAnswer(
       await brightSelect<'default' | 'advanced'>({
         message: 'How would you like to begin?',
