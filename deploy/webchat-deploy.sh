@@ -149,9 +149,16 @@ env_set TZ "$TZ_VAL"
 say "Wrote .env (webchat on ${HOST}:${PORT})"
 
 # ── 3. System service (root + systemd) ──────────────────────────────────────
+# Slug-scoped unit name (same derivation as src/install-slug.ts getSystemdUnit),
+# so two NanoClaw checkouts on one machine never clobber each other's service.
+# A hard-coded `nanoclaw.service` here once overwrote a coexisting install's
+# unit — the exact failure the slug system exists to prevent.
+UNIT_NAME="$(cd "$DIR" && node -e 'const {createHash}=require("crypto");console.log("nanoclaw-v2-"+createHash("sha1").update(process.cwd()).digest("hex").slice(0,8))')"
+say "Service unit: ${UNIT_NAME}.service"
+
 if [ "$SERVICE" = 1 ] && [ "$(id -u)" = 0 ] && command -v systemctl >/dev/null 2>&1; then
   NODE_BIN="$(command -v node)"
-  cat >/etc/systemd/system/nanoclaw.service <<UNIT
+  cat >"/etc/systemd/system/${UNIT_NAME}.service" <<UNIT
 [Unit]
 Description=NanoClaw
 After=docker.service
@@ -177,14 +184,14 @@ RestartSec=5
 WantedBy=multi-user.target
 UNIT
   systemctl daemon-reload
-  systemctl enable --now nanoclaw
-  say "Installed + started the nanoclaw systemd service"
+  systemctl enable --now "$UNIT_NAME"
+  say "Installed + started ${UNIT_NAME}.service"
 elif [ "$SERVICE" = 1 ] && [ "$LOCALHOST" = 1 ] && command -v systemctl >/dev/null 2>&1 \
      && systemctl --user show-environment >/dev/null 2>&1; then
   # Localhost dev box: a per-USER service — no root, starts now and on login.
   # (A root system service is overkill for a single-user loopback install.)
   mkdir -p "$HOME/.config/systemd/user"
-  cat >"$HOME/.config/systemd/user/nanoclaw.service" <<UNIT
+  cat >"$HOME/.config/systemd/user/${UNIT_NAME}.service" <<UNIT
 [Unit]
 Description=NanoClaw (localhost)
 After=docker.service
@@ -206,10 +213,10 @@ RestartSec=5
 WantedBy=default.target
 UNIT
   systemctl --user daemon-reload
-  systemctl --user enable --now nanoclaw
+  systemctl --user enable --now "$UNIT_NAME"
   # Survive logout without a login session open (best-effort, no prompt).
   command -v loginctl >/dev/null 2>&1 && loginctl enable-linger "$(id -un)" 2>/dev/null || true
-  say "Installed + started nanoclaw as a systemd --user service"
+  say "Installed + started ${UNIT_NAME}.service as a systemd --user service"
 elif [ "$SERVICE" = 1 ]; then
   say "Skipped service install (needs root+systemd, or --localhost for a --user service) — start manually: node $DIR/dist/index.js"
 fi
