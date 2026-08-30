@@ -71,7 +71,7 @@ function render(): void {
     clearInterval(pullTimer);
     pullTimer = null;
   }
-  const steps = [renderEngine, ...(engine === 'local' ? [renderModel] : []), renderAccess, renderAgent];
+  const steps = [renderEngine, renderAccess, renderAgent];
   $('#wizard-step')!.textContent = `Step ${step + 1} of ${steps.length}`;
   box.replaceChildren(steps[Math.min(step, steps.length - 1)]());
   $('#wizard-skip')!.onclick = () => void finish();
@@ -156,7 +156,7 @@ function renderEngine(): HTMLElement {
     ),
   );
   box.append(choices);
-  if (engine === 'claude') box.appendChild(renderClaudeAuth());
+  box.appendChild(engine === 'claude' ? renderClaudeAuth() : buildLocalModels());
   box.append(nav({}));
   return box;
 }
@@ -252,11 +252,12 @@ function renderClaudeAuth(): HTMLElement {
   return box;
 }
 
-// ── Step: local model (engine = local only) ─────────────────────────────────
+// ── Ollama accordion body (engine screen, engine = local) ───────────────────
 
-function renderModel(): HTMLElement {
+/** The Ollama accordion body on the engine screen: probe → pick → pull. */
+function buildLocalModels(): HTMLElement {
   const box = document.createElement('div');
-  box.append(heading('Local models'));
+  box.className = 'wiz-auth';
 
   const urlInput = document.createElement('input');
   urlInput.value = 'http://127.0.0.1:11434';
@@ -467,7 +468,7 @@ function renderModel(): HTMLElement {
   pullRow.className = 'mactions';
   pullRow.append(pullInput, pullBtn);
 
-  box.append(urlRow, installRow, statusLine, list, pullRow, progress, nav({}));
+  box.append(urlRow, installRow, statusLine, list, pullRow, progress);
   // Auto-query on step entry when the local daemon is already up.
   if (state?.ollama.reachable) void probe();
   else pullRow.hidden = true;
