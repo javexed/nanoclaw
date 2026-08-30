@@ -616,7 +616,21 @@ function renderAccess(): HTMLElement {
     'Generates a token and opens the port to your network. You log in with the token; keep it safe. Requires a restart.';
   const bBtn = document.createElement('button');
   bBtn.textContent = 'Generate token';
+  // Two-click arm: generation commits real install state (token + network
+  // exposure on the next restart), and stray single clicks kept arming it.
+  let armed = false;
+  let disarm: ReturnType<typeof setTimeout> | null = null;
   bBtn.onclick = async () => {
+    if (!armed) {
+      armed = true;
+      bBtn.textContent = 'Opens the port to your network — click again to confirm';
+      disarm = setTimeout(() => {
+        armed = false;
+        bBtn.textContent = 'Generate token';
+      }, 5000);
+      return;
+    }
+    if (disarm) clearTimeout(disarm);
     bBtn.disabled = true;
     try {
       const { token } = (await apiJson('/api/webchat/auth/bearer/generate', { method: 'POST' })) as { token: string };
