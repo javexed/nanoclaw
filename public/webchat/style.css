@@ -607,3 +607,27 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; margin: 6px 0 
   min-height: 360px;
 }
 #wizard-body > div > .wiz-nav { margin-top: auto; }
+
+/* UX review batch */
+#no-room-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  pointer-events: none;
+}
+#chat { position: relative; }
+#room-title { cursor: text; }
+#room-title-edit { font: inherit; font-weight: 600; }
+.confirm-dialog { max-width: 380px; }
+.confirm-dialog p { margin: 0 0 14px; }
+.mdanger { color: #e5534b; border-color: #e5534b; }
+.mdanger:hover { background: rgba(229, 83, 75, 0.12); }
+.mdot { cursor: pointer; }
+/* Toasts anchor top-right — under the open drawer. Shift them clear of it on
+   viewports where the drawer doesn't span the whole width. */
+@media (min-width: 700px) {
+  body.drawer-open #toasts { right: 436px; }
+}

@@ -4,7 +4,7 @@
 import { ensureAuthenticated } from './features/auth.js';
 import { connect, wireVisibilityReconnect, catchUpSince } from './core/ws.js';
 import { wireComposer } from './features/composer.js';
-import { wireRoomCreate, wireBackButton, wireRoomDelete } from './features/rooms.js';
+import { wireRoomCreate, wireBackButton, wireRoomDelete, wireRoomRename } from './features/rooms.js';
 import { wireTranscriptScroll } from './features/transcript.js';
 import { wireAttachments } from './features/files.js';
 import { wireManage } from './features/manage.js';
@@ -18,6 +18,7 @@ async function boot(): Promise<void> {
   wireRoomCreate();
   wireBackButton();
   wireRoomDelete();
+  wireRoomRename();
   wireAttachments();
   wireManage();
   void maybeOpenWizard();
@@ -35,6 +36,17 @@ async function boot(): Promise<void> {
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {
       /* http:// on a non-localhost host — fine, the app still runs */
+    });
+    // A deploy activates a new worker (skipWaiting + claim); reload once so the
+    // fresh assets appear without the manual hard-refresh dance. The first-ever
+    // install also fires controllerchange — skip that one, nothing changed.
+    let hadController = Boolean(navigator.serviceWorker.controller);
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController) {
+        hadController = true;
+        return;
+      }
+      location.reload();
     });
   }
 }

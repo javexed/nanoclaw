@@ -6,6 +6,7 @@ import { $ } from '../core/dom.js';
 import { apiJson } from '../core/api.js';
 import { showToast, toastError } from '../core/toast.js';
 import { launchWizard } from './wizard.js';
+import { confirmDialog } from '../core/confirm.js';
 let open = false;
 let pullTimer = null;
 export function wireManage() {
@@ -21,11 +22,13 @@ export function wireManage() {
 }
 function openDrawer() {
     open = true;
+    document.body.classList.add('drawer-open');
     $('#manage').classList.add('open');
     showTab('agents');
 }
 function closeDrawer() {
     open = false;
+    document.body.classList.remove('drawer-open');
     $('#manage').classList.remove('open');
     if (pullTimer) {
         clearInterval(pullTimer);
@@ -54,13 +57,13 @@ async function renderAgents() {
             apiJson('/api/agents/detail'),
             apiJson('/api/models'),
         ]);
-        pane.replaceChildren(buildAgentCreate(), ...detail.agents.map((a) => buildAgentRow(a, modelsRes.models)));
+        pane.replaceChildren(buildAgentCreate(), ...detail.agents.map((a) => buildAgentRow(a, modelsRes.models, detail.default_model_id)));
     }
     catch (err) {
         toastError(err, 'Could not load agents');
     }
 }
-function buildAgentRow(a, models) {
+function buildAgentRow(a, models, defaultModelId) {
     const row = document.createElement('div');
     row.className = 'mrow';
     const head = document.createElement('div');
@@ -72,7 +75,7 @@ function buildAgentRow(a, models) {
     del.className = 'mrow-del';
     del.textContent = 'Delete';
     del.addEventListener('click', async () => {
-        if (!confirm(`Delete agent "${a.name}"? Its rooms stay but stop routing to it.`))
+        if (!(await confirmDialog(`Delete agent "${a.name}"? Its rooms stay but stop routing to it.`)))
             return;
         try {
             await apiJson(`/api/agents/${encodeURIComponent(a.id)}`, { method: 'DELETE' });
@@ -87,7 +90,9 @@ function buildAgentRow(a, models) {
     const modelSel = document.createElement('select');
     const none = document.createElement('option');
     none.value = '';
-    none.textContent = 'Default model';
+    // Say what "default" resolves to — the bare label read as placeholder text.
+    const defName = models.find((m) => m.id === defaultModelId)?.name;
+    none.textContent = defName ? `Install default (${defName})` : 'Install default (Claude built-in)';
     modelSel.appendChild(none);
     for (const m of models) {
         const opt = document.createElement('option');
@@ -291,6 +296,8 @@ function buildModelRow(m, defaultId) {
         dot.classList.add('ok');
         dot.title = 'Cloud (Anthropic)';
     }
+    // Hover-only tooltips don't exist on touch — tap surfaces the verdict.
+    dot.addEventListener('click', () => showToast(dot.title || 'Still probing…', { kind: dot.classList.contains('bad') ? 'error' : 'info' }));
     const name = document.createElement('span');
     name.className = 'mrow-name';
     name.textContent = m.name;
@@ -307,7 +314,7 @@ function buildModelRow(m, defaultId) {
         catch (err) {
             const body = err.body;
             if (body?.agents?.length) {
-                if (confirm(`Assigned to: ${body.agents.join(', ')}. Delete anyway (they fall back to the default)?`)) {
+                if (await confirmDialog(`Assigned to: ${body.agents.join(', ')}. Delete anyway (they fall back to the default)?`)) {
                     await apiJson(`/api/models/${encodeURIComponent(m.id)}?force=1`, { method: 'DELETE' }).catch((e) => toastError(e, 'Delete failed'));
                     void renderModels();
                 }
@@ -481,7 +488,7 @@ async function renderOllamaInto(pane, rosterKeys) {
                     del.className = 'mrow-del';
                     del.textContent = 'Delete';
                     del.addEventListener('click', async () => {
-                        if (!confirm(`Remove ${mm.name} from ${hostSel.value}?`))
+                        if (!(await confirmDialog(`Remove ${mm.name} from ${hostSel.value}? This frees its disk space.`, 'Remove')))
                             return;
                         try {
                             await apiJson('/api/ollama/delete', {

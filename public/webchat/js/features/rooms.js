@@ -1,7 +1,8 @@
 // ── Room list + join ─────────────────────────────────────────────────────────
 import { $, esc } from '../core/dom.js';
 import { apiJson } from '../core/api.js';
-import { toastError } from '../core/toast.js';
+import { showToast, toastError } from '../core/toast.js';
+import { confirmDialog } from '../core/confirm.js';
 import { state } from '../core/state.js';
 import { clearTranscript, hideAgentTyping, setEmptyNote, clearMissed } from './transcript.js';
 import { clearAllTurns } from './thinking.js';
@@ -46,6 +47,7 @@ export function joinRoom(roomId, roomName) {
     localStorage.setItem('lastRoom', roomId);
     $('#room-title').textContent = roomName;
     $('#room-del-btn').hidden = false;
+    $('#no-room-hint').hidden = true;
     $('#app').classList.add('in-room'); // mobile: show the chat pane
     $('#composer').hidden = false;
     clearTranscript();
@@ -64,6 +66,7 @@ export function leaveRoom() {
     localStorage.removeItem('lastRoom');
     $('#room-title').textContent = 'Pick a room';
     $('#room-del-btn').hidden = true;
+    $('#no-room-hint').hidden = false;
     $('#composer').hidden = true;
     $('#app').classList.remove('in-room');
     clearTranscript();
@@ -71,12 +74,56 @@ export function leaveRoom() {
     hideAgentTyping();
     clearAllTurns();
 }
+/** Click the room title to rename in place — Enter saves, Escape cancels. */
+export function wireRoomRename() {
+    const title = $('#room-title');
+    title.title = 'Click to rename';
+    title.addEventListener('click', () => {
+        if (!state.currentRoom)
+            return;
+        const input = document.createElement('input');
+        input.id = 'room-title-edit';
+        input.value = state.currentRoomName;
+        title.replaceWith(input);
+        input.focus();
+        input.select();
+        let done = false;
+        const finish = async (save) => {
+            if (done)
+                return;
+            done = true;
+            const name = input.value.trim();
+            input.replaceWith(title);
+            if (!save || !name || name === state.currentRoomName)
+                return;
+            try {
+                await apiJson(`/api/rooms/${encodeURIComponent(state.currentRoom)}/name`, { method: 'PUT', body: { name } });
+                state.currentRoomName = name;
+                title.textContent = name;
+                showToast('Room renamed', { kind: 'success' });
+            }
+            catch (err) {
+                toastError(err, 'Rename failed');
+            }
+        };
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                void finish(true);
+            }
+            else if (e.key === 'Escape') {
+                void finish(false);
+            }
+        });
+        input.addEventListener('blur', () => void finish(true));
+    });
+}
 export function wireRoomDelete() {
     $('#room-del-btn').addEventListener('click', async () => {
         const roomId = state.currentRoom;
         if (!roomId)
             return;
-        if (!confirm(`Delete room "${state.currentRoomName}"? Its messages are removed permanently.`))
+        if (!(await confirmDialog(`Delete room "${state.currentRoomName}"? Its messages are removed permanently.`)))
             return;
         try {
             await apiJson(`/api/rooms/${encodeURIComponent(roomId)}`, { method: 'DELETE' });

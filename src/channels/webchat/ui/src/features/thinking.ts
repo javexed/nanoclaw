@@ -87,6 +87,7 @@ function openTurn(agentName: string): Turn {
 
   const turn: Turn = { agentName, el, activity, reasoning, timerEl, startedAt, timer };
   turns.set(agentName, turn);
+  syncStopButton();
   scrollFollow();
   return turn;
 }
@@ -99,6 +100,13 @@ function closeTurn(agentName: string): void {
   clearInterval(turn.timer);
   turn.el.remove();
   turns.delete(turn.agentName);
+  syncStopButton();
+}
+
+/** ■ only exists while something can be stopped (UX review finding 2). */
+function syncStopButton(): void {
+  const btn = $('#stop-btn');
+  if (btn) btn.hidden = turns.size === 0;
 }
 
 function scrollFollow(): void {

@@ -27,6 +27,10 @@ export function sendMessage(text) {
     state.ws.send(JSON.stringify({ type: 'message', content, client_id: clientId }));
 }
 export function wireComposer() {
+    // 390px wraps the full placeholder and clips the second line.
+    if (matchMedia('(max-width: 480px)').matches) {
+        $('#composer-input').placeholder = 'Message…';
+    }
     const input = $('#composer-input');
     const form = $('#composer');
     const menu = $('#slash-menu');

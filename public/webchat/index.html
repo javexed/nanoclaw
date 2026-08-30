@@ -27,14 +27,15 @@
     <header id="sidebar-header">
       <img class="brand-logo" src="/logo.svg" alt="NanoClaw" />
       <span class="sidebar-actions">
-        <button id="manage-btn" type="button" title="Manage agents and models">⚙</button>
-        <button id="new-room-btn" type="button" title="New room">+</button>
+        <button id="manage-btn" type="button" title="Manage agents and models" aria-label="Manage agents and models">⚙</button>
+        <button id="new-room-btn" type="button" title="New room" aria-label="New room">+</button>
       </span>
     </header>
     <ul id="room-list"></ul>
   </aside>
 
   <main id="chat">
+    <div id="no-room-hint">Pick a room, or create one with the + button.</div>
     <header id="chat-header">
       <button id="back-btn" type="button" aria-label="Back to rooms">‹</button>
       <span id="room-title">Pick a room</span>
@@ -49,11 +50,11 @@
     </div>
     <button id="jump-pill" type="button" hidden></button>
     <form id="composer" hidden>
-      <button id="attach-btn" type="button" title="Attach a file">📎</button>
+      <button id="attach-btn" type="button" title="Attach a file" aria-label="Attach a file">📎</button>
       <input id="attach-input" type="file" multiple hidden>
       <textarea id="composer-input" rows="1" placeholder="Message… (/ for commands)"></textarea>
-      <button id="stop-btn" type="button" title="Stop the agent">■</button>
-      <button id="send-btn" type="submit" title="Send">➤</button>
+      <button id="stop-btn" type="button" title="Stop the agent" aria-label="Stop the agent" hidden>■</button>
+      <button id="send-btn" type="submit" title="Send" aria-label="Send">➤</button>
     </form>
   </main>
 </div>

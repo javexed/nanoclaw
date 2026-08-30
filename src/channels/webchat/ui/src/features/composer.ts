@@ -29,6 +29,10 @@ export function sendMessage(text: string): void {
 }
 
 export function wireComposer(): void {
+  // 390px wraps the full placeholder and clips the second line.
+  if (matchMedia('(max-width: 480px)').matches) {
+    ($('#composer-input') as HTMLTextAreaElement).placeholder = 'Message…';
+  }
   const input = $('#composer-input') as HTMLTextAreaElement;
   const form = $('#composer') as HTMLFormElement;
   const menu = $('#slash-menu')!;

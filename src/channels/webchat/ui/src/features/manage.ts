@@ -6,6 +6,7 @@ import { $ } from '../core/dom.js';
 import { apiJson } from '../core/api.js';
 import { showToast, toastError } from '../core/toast.js';
 import { launchWizard } from './wizard.js';
+import { confirmDialog } from '../core/confirm.js';
 
 interface AgentDetail {
   id: string;
@@ -49,12 +50,14 @@ export function wireManage(): void {
 
 function openDrawer(): void {
   open = true;
+  document.body.classList.add('drawer-open');
   $('#manage')!.classList.add('open');
   showTab('agents');
 }
 
 function closeDrawer(): void {
   open = false;
+  document.body.classList.remove('drawer-open');
   $('#manage')!.classList.remove('open');
   if (pullTimer) {
     clearInterval(pullTimer);
@@ -84,13 +87,16 @@ async function renderAgents(): Promise<void> {
       apiJson('/api/agents/detail') as Promise<{ agents: AgentDetail[]; default_model_id: string | null }>,
       apiJson('/api/models') as Promise<{ models: ModelRow[] }>,
     ]);
-    pane.replaceChildren(buildAgentCreate(), ...detail.agents.map((a) => buildAgentRow(a, modelsRes.models)));
+    pane.replaceChildren(
+      buildAgentCreate(),
+      ...detail.agents.map((a) => buildAgentRow(a, modelsRes.models, detail.default_model_id)),
+    );
   } catch (err) {
     toastError(err, 'Could not load agents');
   }
 }
 
-function buildAgentRow(a: AgentDetail, models: ModelRow[]): HTMLElement {
+function buildAgentRow(a: AgentDetail, models: ModelRow[], defaultModelId: string | null): HTMLElement {
   const row = document.createElement('div');
   row.className = 'mrow';
   const head = document.createElement('div');
@@ -102,7 +108,7 @@ function buildAgentRow(a: AgentDetail, models: ModelRow[]): HTMLElement {
   del.className = 'mrow-del';
   del.textContent = 'Delete';
   del.addEventListener('click', async () => {
-    if (!confirm(`Delete agent "${a.name}"? Its rooms stay but stop routing to it.`)) return;
+    if (!(await confirmDialog(`Delete agent "${a.name}"? Its rooms stay but stop routing to it.`))) return;
     try {
       await apiJson(`/api/agents/${encodeURIComponent(a.id)}`, { method: 'DELETE' });
       showToast(`Deleted ${a.name}`, { kind: 'success' });
@@ -116,7 +122,9 @@ function buildAgentRow(a: AgentDetail, models: ModelRow[]): HTMLElement {
   const modelSel = document.createElement('select');
   const none = document.createElement('option');
   none.value = '';
-  none.textContent = 'Default model';
+  // Say what "default" resolves to — the bare label read as placeholder text.
+  const defName = models.find((m) => m.id === defaultModelId)?.name;
+  none.textContent = defName ? `Install default (${defName})` : 'Install default (Claude built-in)';
   modelSel.appendChild(none);
   for (const m of models) {
     const opt = document.createElement('option');
@@ -332,6 +340,10 @@ function buildModelRow(m: ModelRow, defaultId: string | null): HTMLElement {
     dot.classList.add('ok');
     dot.title = 'Cloud (Anthropic)';
   }
+  // Hover-only tooltips don't exist on touch — tap surfaces the verdict.
+  dot.addEventListener('click', () =>
+    showToast(dot.title || 'Still probing…', { kind: dot.classList.contains('bad') ? 'error' : 'info' }),
+  );
   const name = document.createElement('span');
   name.className = 'mrow-name';
   name.textContent = m.name;
@@ -347,7 +359,9 @@ function buildModelRow(m: ModelRow, defaultId: string | null): HTMLElement {
     } catch (err) {
       const body = (err as { body?: { agents?: string[] } }).body;
       if (body?.agents?.length) {
-        if (confirm(`Assigned to: ${body.agents.join(', ')}. Delete anyway (they fall back to the default)?`)) {
+        if (
+          await confirmDialog(`Assigned to: ${body.agents.join(', ')}. Delete anyway (they fall back to the default)?`)
+        ) {
           await apiJson(`/api/models/${encodeURIComponent(m.id)}?force=1`, { method: 'DELETE' }).catch((e) =>
             toastError(e, 'Delete failed'),
           );
@@ -539,7 +553,10 @@ async function renderOllamaInto(pane: HTMLElement, rosterKeys: Set<string>): Pro
             del.className = 'mrow-del';
             del.textContent = 'Delete';
             del.addEventListener('click', async () => {
-              if (!confirm(`Remove ${mm.name} from ${hostSel.value}?`)) return;
+              if (
+                !(await confirmDialog(`Remove ${mm.name} from ${hostSel.value}? This frees its disk space.`, 'Remove'))
+              )
+                return;
               try {
                 await apiJson('/api/ollama/delete', {
                   method: 'POST',
