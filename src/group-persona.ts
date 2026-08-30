@@ -44,3 +44,32 @@ export function readGroupPersona(groupDir: string): string | null {
     if (fd !== undefined) fs.closeSync(fd);
   }
 }
+
+/**
+ * Overwrite a group's standing instructions (webchat editor). Empty content
+ * removes the file — an absent persona and an empty one compose identically.
+ * O_NOFOLLOW like the reader: never write through a symlink.
+ */
+export function writeGroupPersona(groupDir: string, instructions: string): void {
+  const file = path.join(groupDir, PERSONA_PREPEND_FILE);
+  const content = instructions.trimEnd();
+  if (!content.trim()) {
+    try {
+      fs.unlinkSync(file);
+    } catch (err) {
+      if (typeof err === 'object' && err !== null && 'code' in err && err.code === 'ENOENT') return;
+      throw err;
+    }
+    return;
+  }
+  fs.mkdirSync(groupDir, { recursive: true });
+  const fd = fs.openSync(
+    file,
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW,
+  );
+  try {
+    fs.writeSync(fd, `${content}\n`);
+  } finally {
+    fs.closeSync(fd);
+  }
+}

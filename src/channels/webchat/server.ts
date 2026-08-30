@@ -56,6 +56,8 @@ import { ensureDrafterIdentity } from './drafter.js';
 import {
   rAgentDelete,
   rAgentModelPut,
+  rAgentInstructionsGet,
+  rAgentInstructionsPut,
   rAgentsDetailGet,
   rAgentsDraftPost,
   rAgentsPost,
@@ -543,6 +545,7 @@ async function rApprovalRespondPost(ctx: RouteCtx, m: RegExpMatchArray): Promise
 
 const RE_AGENT = /^\/api\/agents\/([^/]+)$/;
 const RE_AGENT_MODEL = /^\/api\/agents\/([^/]+)\/model$/;
+const RE_AGENT_INSTRUCTIONS = /^\/api\/agents\/([^/]+)\/instructions$/;
 const RE_ROOM_AGENT = /^\/api\/rooms\/([^/]+)\/agents\/([^/]+)$/;
 const RE_MODEL = /^\/api\/models\/([^/]+)$/;
 
@@ -555,6 +558,8 @@ const API_ROUTES: ApiRoute[] = [
   { method: 'POST', path: '/api/agents/draft', guards: ['csrf'], h: rAgentsDraftPost },
   { method: 'DELETE', path: RE_AGENT, guards: ['csrf'], h: rAgentDelete },
   { method: 'PUT', path: RE_AGENT_MODEL, guards: ['csrf'], h: rAgentModelPut },
+  { method: 'GET', path: RE_AGENT_INSTRUCTIONS, h: rAgentInstructionsGet },
+  { method: 'PUT', path: RE_AGENT_INSTRUCTIONS, guards: ['csrf'], h: rAgentInstructionsPut },
   { method: 'POST', path: RE_ROOM_AGENTS, guards: ['csrf'], h: rRoomAgentsPost },
   { method: 'DELETE', path: RE_ROOM_AGENT, guards: ['csrf'], h: rRoomAgentDelete },
   // Management: models

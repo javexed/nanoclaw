@@ -48,6 +48,8 @@ import {
   startPull,
 } from '../ollama-manage.js';
 import { draftAgent } from '../drafter.js';
+import { readGroupPersona, writeGroupPersona } from '../../../group-persona.js';
+import { resolveGroupFolderPath } from '../../../group-folder.js';
 import { reloadAgentModelEnv, refreshUnassignedGroupsForDefaultModel } from './model-wiring.js';
 import { wireAgentToRoom } from '../server.js';
 import { broadcastRooms } from '../state.js';
@@ -431,3 +433,31 @@ export async function rOllamaInstallPost({ res }: RouteCtx): Promise<void> {
 
 // Re-exported for the WebchatModelKind consumers in the route table typing.
 export type { WebchatModelKind };
+
+// ── Standing instructions (instructions.prepend.md) ─────────────────────────
+// The composed CLAUDE.md is spawn-generated; this file is the operator-owned
+// part that gets prepended into it. Edits apply at the next container spawn.
+
+const INSTRUCTIONS_MAX_BYTES = 256 * 1024;
+
+export async function rAgentInstructionsGet(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const id = decodeURIComponent(m[1]);
+  const group = await getAgentGroup(id);
+  if (!group) return json(ctx.res, 404, { error: 'Agent not found' });
+  const dir = resolveGroupFolderPath(group.folder);
+  return json(ctx.res, 200, { instructions: readGroupPersona(dir) ?? '' });
+}
+
+export async function rAgentInstructionsPut(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const id = decodeURIComponent(m[1]);
+  const group = await getAgentGroup(id);
+  if (!group) return json(ctx.res, 404, { error: 'Agent not found' });
+  const body = await parseBody<{ instructions?: unknown }>(ctx);
+  if (!body) return;
+  if (typeof body.instructions !== 'string') return json(ctx.res, 400, { error: 'instructions must be a string' });
+  if (Buffer.byteLength(body.instructions) > INSTRUCTIONS_MAX_BYTES) {
+    return json(ctx.res, 413, { error: 'Instructions too large (256KB max)' });
+  }
+  writeGroupPersona(resolveGroupFolderPath(group.folder), body.instructions);
+  return json(ctx.res, 200, { ok: true, applies: 'next-session' });
+}

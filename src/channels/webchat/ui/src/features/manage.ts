@@ -142,7 +142,59 @@ function buildAgentRow(a: AgentDetail, models: ModelRow[]): HTMLElement {
   rooms.className = 'mrow-meta';
   rooms.textContent = a.rooms.length ? `Rooms: ${a.rooms.map((r) => r.name).join(', ')}` : 'Not wired to any room';
 
-  row.append(head, modelSel, rooms);
+  // Standing instructions (instructions.prepend.md), collapsed behind a toggle.
+  const instrBox = document.createElement('div');
+  instrBox.hidden = true;
+  const instrBtn = document.createElement('button');
+  instrBtn.textContent = 'Instructions';
+  instrBtn.addEventListener('click', async () => {
+    if (!instrBox.hidden) {
+      instrBox.hidden = true;
+      return;
+    }
+    instrBtn.disabled = true;
+    try {
+      const { instructions } = (await apiJson(`/api/agents/${encodeURIComponent(a.id)}/instructions`)) as {
+        instructions: string;
+      };
+      const ta = document.createElement('textarea');
+      ta.rows = 6;
+      ta.value = instructions;
+      ta.placeholder = 'Standing instructions for this agent (markdown)';
+      const save = document.createElement('button');
+      save.className = 'mprimary';
+      save.textContent = 'Save';
+      save.addEventListener('click', async () => {
+        save.disabled = true;
+        try {
+          await apiJson(`/api/agents/${encodeURIComponent(a.id)}/instructions`, {
+            method: 'PUT',
+            body: { instructions: ta.value },
+          });
+          showToast('Saved — applies on the agent\u2019s next session', { kind: 'success' });
+          instrBox.hidden = true;
+        } catch (err) {
+          toastError(err, 'Save failed');
+        } finally {
+          save.disabled = false;
+        }
+      });
+      const actions = document.createElement('div');
+      actions.className = 'mactions';
+      actions.appendChild(save);
+      instrBox.replaceChildren(ta, actions);
+      instrBox.hidden = false;
+    } catch (err) {
+      toastError(err, 'Could not load instructions');
+    } finally {
+      instrBtn.disabled = false;
+    }
+  });
+  const instrRow = document.createElement('div');
+  instrRow.className = 'mactions';
+  instrRow.appendChild(instrBtn);
+
+  row.append(head, modelSel, instrRow, instrBox, rooms);
   return row;
 }
 
