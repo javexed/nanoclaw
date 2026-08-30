@@ -671,9 +671,14 @@ function renderAccess(): HTMLElement {
 
 function renderAgent(): HTMLElement {
   const box = document.createElement('div');
+  const rerun = (state?.agents ?? 0) > 0;
   box.append(
-    heading('Create your first agent'),
-    para('A name and, optionally, what it should be. ✨ drafts both from a one-line idea.'),
+    heading(rerun ? 'Add another agent (optional)' : 'Create your first agent'),
+    para(
+      rerun
+        ? `You already have ${state!.agents} agent${state!.agents === 1 ? '' : 's'} — leave the name empty to just finish.`
+        : 'A name and, optionally, what it should be. ✨ drafts both from a one-line idea.',
+    ),
   );
 
   const name = document.createElement('input');
@@ -715,9 +720,15 @@ function renderAgent(): HTMLElement {
     instructions,
     row,
     nav({
-      nextLabel: 'Create & finish',
+      nextLabel: rerun ? 'Finish' : 'Create & finish',
       next: async () => {
-        const n = name.value.trim() || 'Assistant';
+        // Re-run with nothing typed: there is nothing to create — the default
+        // 'Assistant' name would collide with the agent the first run made.
+        const n = name.value.trim() || (rerun ? '' : 'Assistant');
+        if (!n) {
+          await finish();
+          return;
+        }
         const { agent } = (await apiJson('/api/agents', {
           method: 'POST',
           body: { name: n, instructions: instructions.value.trim() || undefined },

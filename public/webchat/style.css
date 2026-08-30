@@ -579,3 +579,15 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; margin: 6px 0 
 .wiz-token-row { display: flex; gap: 8px; align-items: stretch; }
 .wiz-token-row .wiz-token { flex: 1; min-width: 0; }
 .wiz-token-row button { flex: none; }
+
+/* Wizard fields span the card — base input styles set no width, so the name
+   input and instructions textarea rendered at intrinsic width. Radios excluded
+   (the local-model list) — width:100% would blow them up. */
+#wizard-body input:not([type='radio']),
+#wizard-body textarea {
+  width: 100%;
+  box-sizing: border-box;
+}
+#wizard-body textarea { resize: vertical; }
+#wizard-body > div > input,
+#wizard-body > div > textarea { margin-bottom: 10px; }
