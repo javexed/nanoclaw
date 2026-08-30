@@ -108,6 +108,30 @@ function nav(opts: { next?: () => void | Promise<void>; nextLabel?: string; canB
   return row;
 }
 
+/** Clipboard write with an execCommand fallback — navigator.clipboard is
+ *  undefined outside secure contexts (plain-HTTP LAN access). */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    /* fall through */
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 function para(text: string): HTMLElement {
   const p = document.createElement('p');
   p.className = 'wiz-text';
@@ -557,9 +581,25 @@ function renderAccess(): HTMLElement {
       const tokenBox = document.createElement('code');
       tokenBox.className = 'wiz-token';
       tokenBox.textContent = token;
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'mprimary';
+      copyBtn.textContent = 'Copy';
+      copyBtn.onclick = async () => {
+        const ok = await copyText(token);
+        copyBtn.textContent = ok ? 'Copied ✓' : 'Select + copy manually';
+        if (ok) {
+          setTimeout(() => {
+            copyBtn.textContent = 'Copy';
+          }, 1600);
+        }
+      };
+      const row = document.createElement('div');
+      row.className = 'wiz-token-row';
+      row.append(tokenBox, copyBtn);
       bDesc.textContent =
         'Save this token now — it is shown once. It becomes active after the restart at the end of the wizard.';
-      bearer.insertBefore(tokenBox, bBtn);
+      bearer.insertBefore(row, bBtn);
+      bBtn.remove(); // spent — the token row replaces it
     } catch (err) {
       toastError(err, 'Could not generate');
       bBtn.disabled = false;
