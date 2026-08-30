@@ -22,7 +22,7 @@
  *     --channel discord \
  *     --user-id discord:1470183333427675709 \
  *     --platform-id discord:@me:1491573333382523708 \
- *     --display-name "Gavriel" \
+ *     --display-name "Alex" \
  *     [--agent-name "Andy"] \
  *     [--agent-group-id <id>] \       # wire an agent setup already created
  *     [--welcome "System instruction: ..."] \

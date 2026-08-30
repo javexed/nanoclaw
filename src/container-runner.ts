@@ -9,6 +9,7 @@
  */
 import { exec } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { promisify } from 'util';
 
@@ -29,6 +30,17 @@ import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
 import { composeGroupProjectDoc, DEFAULT_PROJECT_DOC } from './project-doc-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import {
+  getLiveHostInstance,
+  getSessionClaim,
+  listSessionsWithStopIntent,
+  releaseSessionClaim,
+  setStopIntent,
+  shadowWrite,
+  tryClaimSession,
+  type SessionClaimRow,
+} from './db/coordination.js';
+import { getHostInstanceId } from './host-instance.js';
 import { getDb, hasTable } from './db/connection.js';
 import { getSession } from './db/sessions.js';
 import { notifySessionStopped } from './modules/agent-status/index.js';
@@ -98,9 +110,71 @@ interface ActiveSessionRuntime {
   finishedPromise: Promise<void>;
   resolveFinished: () => void;
   stopReason?: string;
+  /** Incarnation this process shadow-claimed in session_claims, if the write landed. */
+  claimIncarnation?: number;
+  /** A deferred fenced finalization is already queued for this runtime. */
+  deferredFinishScheduled?: boolean;
 }
 
 const activeContainers = new Map<string, ActiveSessionRuntime>();
+
+// Claimant identity for the session_claims rows: the host's durable lease
+// instance id when the lease is running, else a process-scoped fallback
+// (tests, tools). The lease id is what makes claims answerable against
+// host_instances liveness below.
+function claimantId(): string {
+  return getHostInstanceId() ?? `${os.hostname()}:${process.pid}`;
+}
+
+/**
+ * Claim a session this process is about to run (spawn or adopt). The
+ * `session_claims` row is the authority for which process/incarnation owns a
+ * session: losing the compare-and-set means another live claimant got there
+ * first, and the caller must not start or adopt a container for it. Returns
+ * the claimed incarnation, or null when the claim was lost. Throws on a
+ * failed write — a claim that cannot be recorded is a claim not held.
+ *
+ * A claim held by a LIVE peer host (a host_instances row that is not stopped
+ * and whose lease is unexpired) is refused outright — two live hosts must
+ * never trade a session back and forth. A claim whose holder is stopped,
+ * lease-expired, or unknown (older claimant-id schemes) stays takeover-able:
+ * a crashed claimant must never wedge a session.
+ */
+async function claimSessionRun(sessionId: string, containerRef: string): Promise<number | null> {
+  const current = await getSessionClaim(sessionId);
+  const self = claimantId();
+  if (current?.claimed_by && current.claimed_by !== self) {
+    const holder = await getLiveHostInstance(current.claimed_by, new Date().toISOString());
+    if (holder) {
+      log.warn('Refusing session claim held by a live peer host', {
+        sessionId,
+        holder: current.claimed_by,
+        claimant: self,
+      });
+      return null;
+    }
+  }
+  return tryClaimSession({
+    sessionId,
+    instanceId: self,
+    expectedIncarnation: current?.incarnation ?? 0,
+    containerRef,
+    now: new Date().toISOString(),
+  });
+}
+
+/** Release our claim at this incarnation. Never throws — a failed release is
+ *  self-healing (the next claimant's CAS supersedes it). */
+async function releaseClaimQuietly(sessionId: string, incarnation: number): Promise<void> {
+  await shadowWrite('session-claim-release', () =>
+    releaseSessionClaim({
+      sessionId,
+      instanceId: claimantId(),
+      incarnation,
+      now: new Date().toISOString(),
+    }),
+  );
+}
 
 /**
  * In-flight wake promises, keyed by session id. Deduplicates concurrent
@@ -121,6 +195,52 @@ export function isContainerRunning(sessionId: string): boolean {
 
 export function getContainerStartedAtMs(sessionId: string): number | undefined {
   return activeContainers.get(sessionId)?.startedAtMs;
+}
+
+/**
+ * Sessions whose running container could not be claim-fenced at adoption (the
+ * store was unreachable). They are deliberately NOT in the registry — nothing
+ * supervises them yet — but they are alive, so the wake path must reclaim them
+ * instead of spawning a duplicate. Cleared on a successful retry, on
+ * discovering the container gone, or on losing the claim to another live host.
+ */
+const pendingAdoptions = new Set<string>();
+
+export function _resetAdoptionRetryStateForTesting(): void {
+  pendingAdoptions.clear();
+}
+
+/**
+ * Retry the claim-fenced adoption of a container that survived a failed claim
+ * write. Re-lists from the driver (fresher truth than any cached handle):
+ * container gone → false, a fresh spawn is correct; claim lost to a live
+ * host → throws, no spawn either; store still down → throws, wake retries.
+ */
+async function retryPendingAdoption(session: Session): Promise<boolean> {
+  const driver = getSessionDriver();
+  const snapshots = await driver.listSessions(INSTALL_SLUG);
+  const snapshot = snapshots.find(({ handle, phase }) => handle.key.sessionId === session.id && phase === 'running');
+  if (!snapshot) {
+    pendingAdoptions.delete(session.id);
+    return false;
+  }
+  const claimIncarnation = await claimSessionRun(session.id, snapshot.handle.name);
+  if (claimIncarnation === null) {
+    pendingAdoptions.delete(session.id);
+    throw new Error(
+      `session ${session.id} is claimed by another live host process — not adopting or spawning a duplicate`,
+    );
+  }
+  const runtime = registerRuntime(session.id, snapshot.handle, snapshot.handle.name, true);
+  runtime.claimIncarnation = claimIncarnation;
+  runtime.stopReason = undefined;
+  snapshot.handle.onTerminal((failure) => {
+    void finishAndResolve(session.id, runtime, failure);
+  });
+  await markContainerRunning(session.id);
+  pendingAdoptions.delete(session.id);
+  log.info('Adopted surviving container on retry after a failed claim write', { sessionId: session.id });
+  return true;
 }
 
 /**
@@ -156,6 +276,12 @@ export function wakeContainer(session: Session): Promise<boolean> {
 }
 
 async function spawnContainer(session: Session): Promise<void> {
+  if (pendingAdoptions.has(session.id)) {
+    // A running container is waiting to be re-fenced after a failed adoption
+    // claim. Reclaim it rather than spawning a duplicate; its poll loop picks
+    // up any pending mail the moment it is ours again.
+    if (await retryPendingAdoption(session)) return;
+  }
   const agentGroup = await getAgentGroup(session.agent_group_id);
   if (!agentGroup) {
     log.error('Agent group not found', { agentGroupId: session.agent_group_id });
@@ -225,21 +351,37 @@ async function spawnContainer(session: Session): Promise<void> {
 
   log.info('Spawning session', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
 
+  // The claim is the cross-process spawn fence: winning it is what licenses
+  // touching the session's runtime state (the heartbeat clear below included).
+  // Losing it means another live claimant runs this session — abort; the wake
+  // contract turns the throw into `false` and the sweep re-checks next tick.
+  const claimIncarnation = await claimSessionRun(session.id, containerName);
+  if (claimIncarnation === null) {
+    throw new Error(`session ${session.id} is claimed by another live host process — not spawning a duplicate`);
+  }
+
   // Clear any orphan heartbeat from a previous container instance — the sweep's
   // ceiling check treats a missing file as "fresh spawn, give grace". Without
   // this, the stale mtime can trigger an immediate kill before the new container
   // touches the file itself.
   fs.rmSync(heartbeatPath(agentGroup.id, session.id), { force: true });
 
-  const handle = await driver.prepare(spec);
+  let handle;
+  try {
+    handle = await driver.prepare(spec);
+  } catch (err) {
+    await releaseClaimQuietly(session.id, claimIncarnation);
+    throw err;
+  }
 
   const runtime = registerRuntime(session.id, handle, containerName, false);
+  runtime.claimIncarnation = claimIncarnation;
 
   try {
     await armSessionLifecycle({
       handle,
       onTerminal: (failure) => {
-        void finishAndResolve(session.id, failure);
+        void finishAndResolve(session.id, runtime, failure);
       },
       afterStart: () => {
         return markContainerRunning(session.id);
@@ -249,6 +391,7 @@ async function spawnContainer(session: Session): Promise<void> {
     if (activeContainers.get(session.id) === runtime && !runtime.finished) {
       activeContainers.delete(session.id);
       runtime.resolveFinished();
+      await releaseClaimQuietly(session.id, claimIncarnation);
     } else {
       await runtime.finishedPromise;
     }
@@ -299,11 +442,28 @@ function registerRuntime(
   return runtime;
 }
 
-/** Single-shot finalization: only the first terminal event resolves shutdown. */
-async function finishAndResolve(sessionId: string, failure?: SessionFailure): Promise<void> {
-  const runtime = activeContainers.get(sessionId);
-  if (!runtime || runtime.finished) return;
+/**
+ * Single-shot finalization: only the first terminal event resolves shutdown,
+ * and only for the runtime the event belongs to. A terminal event is always
+ * bound to the runtime that armed it — a late event from a runtime that a
+ * fresh spawn has already replaced resolves its own waiters and touches
+ * nothing else (the in-process half of the stale-finish fence).
+ */
+async function finishAndResolve(
+  sessionId: string,
+  runtime: ActiveSessionRuntime,
+  failure?: SessionFailure,
+): Promise<void> {
+  if (runtime.finished) return;
   runtime.finished = true;
+  if (activeContainers.get(sessionId) !== runtime) {
+    log.warn('Ignoring stale session finish — a newer runtime is registered', {
+      sessionId,
+      containerName: runtime.containerName,
+    });
+    runtime.resolveFinished();
+    return;
+  }
   try {
     await finish(sessionId, runtime, failure);
   } finally {
@@ -311,8 +471,82 @@ async function finishAndResolve(sessionId: string, failure?: SessionFailure): Pr
   }
 }
 
+// Fence-read schedule: brief in-line retries (~30s), then the whole
+// finalization defers to the resync cadence. A store outage never forces a
+// choice between clobbering a newer incarnation and leaking the runtime.
+let fenceRetryDelaysMs = [5_000, 10_000, 15_000];
+let deferredFinishDelayMs = 60_000;
+export function _setFinishFenceScheduleForTesting(retryDelaysMs?: number[], deferDelayMs?: number): void {
+  fenceRetryDelaysMs = retryDelaysMs ?? [5_000, 10_000, 15_000];
+  deferredFinishDelayMs = deferDelayMs ?? 60_000;
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms).unref?.());
+
+/** Re-run finalization once the store may be back. One timer per runtime. */
+function scheduleDeferredFinish(sessionId: string, runtime: ActiveSessionRuntime, failure?: SessionFailure): void {
+  if (runtime.deferredFinishScheduled) return;
+  runtime.deferredFinishScheduled = true;
+  const timer = setTimeout(() => {
+    runtime.deferredFinishScheduled = false;
+    finish(sessionId, runtime, failure).catch((err: unknown) => {
+      log.error('Deferred finalization failed', { sessionId, err });
+    });
+  }, deferredFinishDelayMs);
+  timer.unref?.();
+}
+
 async function finish(sessionId: string, runtime: ActiveSessionRuntime, failure?: SessionFailure): Promise<void> {
   const { containerName } = runtime;
+
+  // Durable fence: the claim row is the authority for which incarnation owns
+  // this session. A finish racing a fresh spawn — possibly from another
+  // process — must not stomp the fresh incarnation's bookkeeping (the status
+  // write, the exit callbacks, the claim release are all skipped; only this
+  // runtime's own registry entry is dropped).
+  if (runtime.claimIncarnation !== undefined) {
+    let fenced: boolean | 'unreadable' = 'unreadable';
+    /* eslint-disable no-catch-all/no-catch-all -- an unreadable fence defers finalization; it never licenses unfenced writes */
+    for (let attempt = 0; attempt <= fenceRetryDelaysMs.length; attempt++) {
+      if (attempt > 0) await sleep(fenceRetryDelaysMs[attempt - 1]);
+      try {
+        const claim = await getSessionClaim(sessionId);
+        fenced = claim !== undefined && claim.incarnation !== runtime.claimIncarnation;
+        break;
+      } catch (err) {
+        log.warn('Claim fence check failed', { sessionId, attempt: attempt + 1, err });
+      }
+    }
+    /* eslint-enable no-catch-all/no-catch-all */
+    if (fenced === 'unreadable') {
+      // Fail closed: no status write, no claim release, no exit callbacks —
+      // none of it may happen unfenced. The registry entry stays, so wakes
+      // see the session as occupied and nothing double-spawns; an unref'd
+      // timer re-runs finalization at the resync cadence until the store
+      // answers. Exit callbacks are deferred, not dropped — and a pending
+      // respawn is carried by its durable stop-intent row even if this
+      // process dies first.
+      log.warn('Claim fence unreadable — deferring finalization until the store answers', {
+        sessionId,
+        containerName,
+        incarnation: runtime.claimIncarnation,
+      });
+      scheduleDeferredFinish(sessionId, runtime, failure);
+      return;
+    }
+    if (fenced) {
+      log.warn('Ignoring stale session finish — a newer incarnation holds the claim', {
+        sessionId,
+        containerName,
+        staleIncarnation: runtime.claimIncarnation,
+      });
+      if (activeContainers.get(sessionId) === runtime) {
+        activeContainers.delete(sessionId);
+      }
+      return;
+    }
+  }
+
   try {
     await markContainerStopped(sessionId);
   } catch (err) {
@@ -345,6 +579,9 @@ async function finish(sessionId: string, runtime: ActiveSessionRuntime, failure?
   if (activeContainers.get(sessionId) === runtime) {
     activeContainers.delete(sessionId);
   }
+  if (runtime.claimIncarnation !== undefined) {
+    await releaseClaimQuietly(sessionId, runtime.claimIncarnation);
+  }
   for (const callback of runtime.exitCallbacks) {
     try {
       callback();
@@ -370,11 +607,11 @@ export function killContainer(sessionId: string, reason: string, onExit?: () => 
       // A handle whose supervision channel is gone (an adopted handle whose
       // attach process belonged to the previous host) would otherwise never
       // finalize, and the session would stay in the registry forever.
-      if (!entry.finished) void finishAndResolve(sessionId, undefined);
+      if (!entry.finished) void finishAndResolve(sessionId, entry, undefined);
     },
     (err: unknown) => {
       log.error('Failed to stop session', { sessionId, reason, err });
-      if (!entry.finished) void finishAndResolve(sessionId, undefined);
+      if (!entry.finished) void finishAndResolve(sessionId, entry, undefined);
     },
   );
 }
@@ -411,10 +648,36 @@ export async function adoptRunningSessions(): Promise<{ adopted: number; stopped
       stopped += 1;
       continue;
     }
+    // Claim before adopting: a lost CAS means another live process already
+    // owns this session — leave its container strictly alone. A failed claim
+    // WRITE also fails closed: an unfenced adoption could stomp a newer
+    // claimant's session, while an unadopted-but-running container is safe to
+    // leave — the spawn path is claim-first fail-closed too, so nothing can
+    // start a duplicate while the store is down, and the wake path reclaims
+    // the container (`retryPendingAdoption`) once the store answers.
+    let claimIncarnation: number | null;
+    /* eslint-disable no-catch-all/no-catch-all -- fail closed: leave the container unadopted and let the wake path retry, never adopt unfenced */
+    try {
+      claimIncarnation = await claimSessionRun(session.id, handle.name);
+    } catch (err) {
+      log.error('Session claim write failed during adoption — leaving the container unadopted for retry', {
+        sessionId: session.id,
+        err,
+      });
+      pendingAdoptions.add(session.id);
+      continue;
+    }
+    /* eslint-enable no-catch-all/no-catch-all */
+    if (claimIncarnation === null) {
+      log.warn('Session adoption skipped — another live host process holds the claim', { sessionId: session.id });
+      continue;
+    }
+    pendingAdoptions.delete(session.id);
     const runtime = registerRuntime(session.id, handle, handle.name, true);
+    runtime.claimIncarnation = claimIncarnation;
     runtime.stopReason = undefined;
     handle.onTerminal((failure) => {
-      void finishAndResolve(session.id, failure);
+      void finishAndResolve(session.id, runtime, failure);
     });
     await markContainerRunning(session.id);
     adopted += 1;
@@ -429,7 +692,61 @@ export async function adoptRunningSessions(): Promise<{ adopted: number; stopped
   if (adopted > 0 || stopped > 0) {
     log.info('Reconciled sessions at startup', { adopted, stopped });
   }
+
+  await honorPendingStopIntents();
+
   return { adopted, stopped };
+}
+
+/**
+ * Honor stop intents that outlived their process. A kill-with-respawn used to
+ * live only in a volatile onExit callback: a host dying between the kill and
+ * the respawn forgot the restart entirely ("rebuild applied" and nothing came
+ * back). The durable `respawn_after_stop` row is consumed here at startup —
+ * a session whose container is still up gets its kill re-issued with the
+ * respawn re-armed; one without a container gets the respawn directly. The
+ * intent clears only once the respawn wake actually succeeds, so a failed
+ * wake is retried at the next startup while the sweep retries it sooner.
+ */
+export async function honorPendingStopIntents(
+  wake: (session: Session) => Promise<boolean> = wakeContainer,
+): Promise<void> {
+  let intents: SessionClaimRow[];
+  try {
+    intents = await listSessionsWithStopIntent();
+  } catch (err) {
+    log.warn('Failed to read pending stop intents', { err });
+    return;
+  }
+  for (const intent of intents) {
+    if (intent.stop_intent !== 'respawn_after_stop') continue;
+    if (pendingAdoptions.has(intent.session_id)) {
+      // The session's container is alive but not yet re-fenced; acting on the
+      // intent now could kill or respawn the wrong incarnation. The row stays
+      // for the next recovery pass.
+      log.warn('Deferring stop intent — session awaits claim-fenced adoption', { sessionId: intent.session_id });
+      continue;
+    }
+    const session = await getSession(intent.session_id);
+    if (!session || session.status !== 'active') {
+      await shadowWrite('stop-intent-clear', () => setStopIntent(intent.session_id, null, new Date().toISOString()));
+      continue;
+    }
+    const respawn = async (): Promise<void> => {
+      const woke = await wake(session);
+      if (woke) {
+        await shadowWrite('stop-intent-clear', () => setStopIntent(session.id, null, new Date().toISOString()));
+      }
+    };
+    if (activeContainers.has(session.id)) {
+      // The kill never completed — the container outlived the host that
+      // ordered it. Re-issue the kill with the respawn re-armed.
+      log.info('Re-issuing interrupted restart', { sessionId: session.id });
+      killContainer(session.id, 'restart-intent-recovery', () => void respawn());
+    } else {
+      await respawn();
+    }
+  }
 }
 
 /**

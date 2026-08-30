@@ -93,6 +93,11 @@ export interface ProviderOptions {
    * through to the underlying SDK. If omitted, the SDK default is used.
    */
   effort?: string;
+  /**
+   * API fast serving tier: faster output at a higher per-token price. Passed
+   * through to the underlying SDK. If omitted, the SDK default is used.
+   */
+  fastMode?: boolean;
 }
 
 export interface QueryInput {

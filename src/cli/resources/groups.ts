@@ -7,7 +7,8 @@ import {
   type AdditionalMountConfig,
   type McpServerConfig,
 } from '../../container-config.js';
-import { buildAgentGroupImage, killContainer, wakeContainer } from '../../container-runner.js';
+import { buildAgentGroupImage, killContainer } from '../../container-runner.js';
+import { requestWake } from '../../request-wake.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { getDb, hasTable } from '../../db/connection.js';
@@ -342,7 +343,7 @@ registerResource({
               ? () => {
                   void (async () => {
                     const s = await getSession(ctx.sessionId);
-                    if (s) await wakeContainer(s);
+                    if (s) await requestWake(s, 'cli');
                   })();
                 }
               : undefined,
