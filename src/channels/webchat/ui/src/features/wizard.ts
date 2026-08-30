@@ -256,75 +256,179 @@ function renderClaudeAuth(): HTMLElement {
 
 function renderModel(): HTMLElement {
   const box = document.createElement('div');
-  box.append(heading('Pull a local model'), para('Downloaded once, runs offline afterwards.'));
+  box.append(heading('Local models'));
 
-  const status = document.createElement('div');
-  status.className = 'wiz-text';
-  const input = document.createElement('input');
-  input.placeholder = 'Model (e.g. qwen3:8b)';
-  const host = 'http://127.0.0.1:11434';
+  const urlInput = document.createElement('input');
+  urlInput.value = 'http://127.0.0.1:11434';
+  const probeBtn = document.createElement('button');
+  probeBtn.className = 'mprimary';
+  probeBtn.textContent = 'Probe';
+  const urlRow = document.createElement('div');
+  urlRow.className = 'mactions';
+  urlRow.append(urlInput, probeBtn);
 
-  void apiJson('/api/ollama/recommend')
-    .then((r: { model?: string; note?: string }) => {
-      if (r.model) input.value ||= r.model;
-      if (r.note) status.textContent = r.note;
-    })
-    .catch(() => {});
+  const statusLine = document.createElement('div');
+  statusLine.className = 'wiz-text';
+  const list = document.createElement('ul');
+  list.className = 'wiz-model-list';
 
+  const isLocal = (): boolean => /127\.0\.0\.1|localhost/.test(urlInput.value);
+
+  // ── Install (localhost only, when the daemon is down) ─────────────────────
   const installRow = document.createElement('div');
-  if (!state?.ollama.reachable) {
-    const installBtn = document.createElement('button');
-    installBtn.textContent = state?.ollama.canInstall ? 'Install Ollama on this machine' : 'Ollama not detected';
-    installBtn.disabled = !state?.ollama.canInstall;
-    const installErr = document.createElement('div');
-    installErr.className = 'wiz-text wiz-err';
-    installBtn.onclick = async () => {
-      installBtn.disabled = true;
-      installBtn.textContent = 'Installing…';
-      installErr.textContent = '';
-      await apiJson('/api/ollama/install', { method: 'POST' }).catch((e) => toastError(e, 'Install failed to start'));
-      pullTimer = setInterval(async () => {
-        const st = (await apiJson('/api/ollama/local').catch(() => null)) as {
-          reachable?: boolean;
-          running?: boolean;
-          lines?: string[];
-          exitCode?: number | null;
-        } | null;
-        if (!st) return;
-        if (st.reachable) {
-          if (state) state.ollama.reachable = true;
-          showToast('Ollama is up', { kind: 'success' });
-          render();
-          return;
+  const installErr = document.createElement('div');
+  installErr.className = 'wiz-text wiz-err';
+  const installBtn = document.createElement('button');
+  installBtn.textContent = state?.ollama.canInstall ? 'Install Ollama on this machine' : 'Ollama not detected';
+  installBtn.disabled = !state?.ollama.canInstall;
+  installBtn.onclick = async () => {
+    installBtn.disabled = true;
+    installBtn.textContent = 'Installing…';
+    installErr.textContent = '';
+    await apiJson('/api/ollama/install', { method: 'POST' }).catch((e) => toastError(e, 'Install failed to start'));
+    pullTimer = setInterval(async () => {
+      const st = (await apiJson('/api/ollama/local').catch(() => null)) as {
+        reachable?: boolean;
+        running?: boolean;
+        lines?: string[];
+        exitCode?: number | null;
+      } | null;
+      if (!st) return;
+      if (st.reachable) {
+        if (pullTimer) {
+          clearInterval(pullTimer);
+          pullTimer = null;
         }
-        // Installer finished without a daemon: surface why instead of
-        // spinning on "Installing…" forever.
-        if (!st.running && st.exitCode !== null && st.exitCode !== undefined && st.exitCode !== 0) {
-          if (pullTimer) {
-            clearInterval(pullTimer);
-            pullTimer = null;
-          }
-          const lastLine = (st.lines ?? []).filter((l) => l.trim()).pop() ?? '';
-          installErr.textContent = `Install failed (exit ${st.exitCode})${lastLine ? `: ${lastLine}` : ''}`;
-          installBtn.disabled = false;
-          installBtn.textContent = 'Install Ollama on this machine';
+        if (state) state.ollama.reachable = true;
+        showToast('Ollama is up', { kind: 'success' });
+        installRow.hidden = true;
+        void probe();
+        return;
+      }
+      // Installer finished without a daemon: surface why instead of spinning.
+      if (!st.running && st.exitCode !== null && st.exitCode !== undefined && st.exitCode !== 0) {
+        if (pullTimer) {
+          clearInterval(pullTimer);
+          pullTimer = null;
         }
-      }, 3000);
-    };
-    installRow.append(installBtn, installErr);
-  }
+        const lastLine = (st.lines ?? []).filter((l) => l.trim()).pop() ?? '';
+        installErr.textContent = `Install failed (exit ${st.exitCode})${lastLine ? `: ${lastLine}` : ''}`;
+        installBtn.disabled = false;
+        installBtn.textContent = 'Install Ollama on this machine';
+      }
+    }, 3000);
+  };
+  installRow.append(installBtn, installErr);
+  installRow.hidden = Boolean(state?.ollama.reachable);
 
+  // ── Probe → radio list; selecting a model IS the action ───────────────────
+  let probed: { kind: 'ollama' | 'openai-compatible'; endpoint: string } | null = null;
+
+  const selectModel = async (modelId: string): Promise<void> => {
+    if (!probed) return;
+    try {
+      // Reuse an existing roster row for the same endpoint+model — repeated
+      // selection must never spawn duplicates (no uniqueness constraint).
+      const { models } = (await apiJson('/api/models')) as {
+        models: Array<{ id: string; model_id: string; endpoint: string | null }>;
+      };
+      const ep = probed.endpoint;
+      let row = models.find((m) => m.model_id === modelId && (m.endpoint ?? '').replace(/\/$/, '') === ep);
+      if (!row) {
+        const created = (await apiJson('/api/models', {
+          method: 'POST',
+          body: { name: modelId, kind: probed.kind, endpoint: ep, model_id: modelId },
+        })) as { model: { id: string; model_id: string; endpoint: string | null } };
+        row = created.model;
+      }
+      await apiJson('/api/models/default', { method: 'PUT', body: { model_id: row.id } });
+      showToast(`${modelId} is the default model`, { kind: 'success' });
+    } catch (err) {
+      toastError(err, 'Could not select that model');
+    }
+  };
+
+  const renderList = (models: string[], checkedId: string | null): void => {
+    list.replaceChildren(
+      ...models.map((m) => {
+        const li = document.createElement('li');
+        const label = document.createElement('label');
+        const radio = document.createElement('input');
+        radio.type = 'radio';
+        radio.name = 'wizard-ollama-model';
+        radio.value = m;
+        radio.checked = m === checkedId;
+        radio.addEventListener('change', () => void selectModel(m));
+        const span = document.createElement('span');
+        span.textContent = m;
+        label.append(radio, span);
+        li.appendChild(label);
+        return li;
+      }),
+    );
+  };
+
+  const probe = async (): Promise<void> => {
+    const ep = urlInput.value.trim().replace(/\/$/, '');
+    if (!ep) return;
+    probeBtn.disabled = true;
+    probeBtn.textContent = 'Probing…';
+    statusLine.textContent = '';
+    statusLine.classList.remove('wiz-err', 'wiz-ok');
+    try {
+      const r = (await apiJson('/api/models/probe-endpoint', { method: 'POST', body: { endpoint: ep } })) as {
+        kind: 'ollama' | 'openai-compatible';
+        models: string[];
+      };
+      probed = { kind: r.kind, endpoint: ep };
+      // Mark the current default's radio when it lives on this endpoint.
+      const roster = (await apiJson('/api/models').catch(() => null)) as {
+        models: Array<{ id: string; model_id: string; endpoint: string | null }>;
+        default_model_id: string | null;
+      } | null;
+      const def = roster?.models.find((m) => m.id === roster.default_model_id);
+      const checkedId = def && (def.endpoint ?? '').replace(/\/$/, '') === ep ? def.model_id : null;
+      renderList(r.models, checkedId);
+      const n = r.models.length;
+      statusLine.textContent =
+        n === 0
+          ? `Nothing installed at ${ep} yet — pull a model below.`
+          : `Found ${n} model${n === 1 ? '' : 's'} at ${ep} — pick one to make it the default.`;
+      statusLine.classList.add('wiz-ok');
+      pullRow.hidden = r.kind !== 'ollama' || !isLocal();
+    } catch (err) {
+      probed = null;
+      renderList([], null);
+      statusLine.textContent = (err as Error).message;
+      statusLine.classList.add('wiz-err');
+      installRow.hidden = !isLocal() || Boolean(state?.ollama.canInstall) === false;
+      pullRow.hidden = !isLocal();
+    } finally {
+      probeBtn.disabled = false;
+      probeBtn.textContent = 'Probe';
+    }
+  };
+  probeBtn.onclick = () => void probe();
+
+  // ── Pull (local Ollama only) ──────────────────────────────────────────────
   const progress = document.createElement('div');
   progress.className = 'wiz-text';
+  const pullInput = document.createElement('input');
+  pullInput.placeholder = 'Model to pull (e.g. qwen3:8b)';
+  void apiJson('/api/ollama/recommend')
+    .then((r: { model?: string }) => {
+      if (r.model) pullInput.value ||= r.model;
+    })
+    .catch(() => {});
   const pullBtn = document.createElement('button');
   pullBtn.className = 'mprimary';
-  pullBtn.textContent = 'Pull model';
+  pullBtn.textContent = 'Pull';
   pullBtn.onclick = async () => {
-    const model = input.value.trim();
+    const model = pullInput.value.trim();
     if (!model) return;
     pullBtn.disabled = true;
     try {
-      await apiJson('/api/ollama/pull', { method: 'POST', body: { host, model } });
+      await apiJson('/api/ollama/pull', { method: 'POST', body: { host: 'http://127.0.0.1:11434', model } });
       pullTimer = setInterval(async () => {
         const { pulls } = (await apiJson('/api/ollama/pulls').catch(() => ({ pulls: [] }))) as {
           pulls: Array<{ model: string; status: string; completed?: number; total?: number; error?: string | null }>;
@@ -332,20 +436,21 @@ function renderModel(): HTMLElement {
         const p = pulls.find((x) => x.model.includes(model));
         if (!p) return;
         if (p.status === 'done') {
-          clearInterval(pullTimer!);
-          pullTimer = null;
-          progress.textContent = 'Downloaded. Registering the model…';
-          // Register in the roster + make it the install default.
-          const { model: created } = (await apiJson('/api/models', {
-            method: 'POST',
-            body: { name: model, kind: 'ollama', endpoint: host, model_id: model },
-          })) as { model: { id: string } };
-          await apiJson('/api/models/default', { method: 'PUT', body: { model_id: created.id } });
-          progress.textContent = `${model} is ready and set as the default model.`;
-          showToast('Local model ready', { kind: 'success' });
+          if (pullTimer) {
+            clearInterval(pullTimer);
+            pullTimer = null;
+          }
+          progress.textContent = '';
+          pullBtn.disabled = false;
+          await probe(); // fresh list includes the new model
+          await selectModel(model); // …and it becomes the default
+          const radio = list.querySelector<HTMLInputElement>(`input[value="${CSS.escape(model)}"]`);
+          if (radio) radio.checked = true;
         } else if (p.status === 'error') {
-          clearInterval(pullTimer!);
-          pullTimer = null;
+          if (pullTimer) {
+            clearInterval(pullTimer);
+            pullTimer = null;
+          }
           progress.textContent = `Pull failed: ${p.error ?? 'unknown error'}`;
           pullBtn.disabled = false;
         } else {
@@ -358,11 +463,14 @@ function renderModel(): HTMLElement {
       pullBtn.disabled = false;
     }
   };
+  const pullRow = document.createElement('div');
+  pullRow.className = 'mactions';
+  pullRow.append(pullInput, pullBtn);
 
-  const rowEl = document.createElement('div');
-  rowEl.className = 'mactions';
-  rowEl.append(input, pullBtn);
-  box.append(status, installRow, rowEl, progress, nav({}));
+  box.append(urlRow, installRow, statusLine, list, pullRow, progress, nav({}));
+  // Auto-query on step entry when the local daemon is already up.
+  if (state?.ollama.reachable) void probe();
+  else pullRow.hidden = true;
   return box;
 }
 
