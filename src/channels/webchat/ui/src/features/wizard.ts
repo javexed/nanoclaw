@@ -167,35 +167,41 @@ let claudeSignin: { sessionId: string; url: string } | null = null;
 function renderClaudeAuth(): HTMLElement {
   const box = document.createElement('div');
   box.className = 'wiz-auth';
-  if (state?.claude.connected) {
-    const ok = para('✓ Claude account connected');
-    ok.classList.add('wiz-ok');
-    box.appendChild(ok);
-    return box;
-  }
+  const connected = Boolean(state?.claude.connected);
 
+  // Integrations-row style (as the predecessor webchat renders credentials):
+  // leading status dot + text that carries the state (screen readers and
+  // colour-blind users get the words, not just the dot), action right-aligned.
+  const rowEl = document.createElement('div');
+  rowEl.className = 'wiz-creds-row';
+  const status = document.createElement('span');
+  status.className = 'wiz-creds-status' + (connected ? ' is-connected' : '');
+  status.textContent = `Claude account — ${connected ? 'connected' : 'not connected'}`;
+  const action = document.createElement('button');
+  action.textContent = connected ? 'Reconnect' : 'Connect';
+  if (!connected) action.className = 'mprimary';
+  action.onclick = async () => {
+    action.disabled = true;
+    action.textContent = 'Starting…';
+    try {
+      claudeSignin = (await apiJson('/api/webchat/claude-auth/start', { method: 'POST', body: {} })) as {
+        sessionId: string;
+        url: string;
+      };
+      render();
+    } catch (err) {
+      action.disabled = false;
+      action.textContent = connected ? 'Reconnect' : 'Connect';
+      toastError(err, 'Could not start sign-in');
+    }
+  };
+  rowEl.append(status, action);
+  box.appendChild(rowEl);
   if (!claudeSignin) {
-    const btn = document.createElement('button');
-    btn.className = 'mprimary';
-    btn.textContent = 'Sign in with Claude';
-    btn.onclick = async () => {
-      btn.disabled = true;
-      btn.textContent = 'Starting…';
-      try {
-        claudeSignin = (await apiJson('/api/webchat/claude-auth/start', { method: 'POST', body: {} })) as {
-          sessionId: string;
-          url: string;
-        };
-        render();
-      } catch (err) {
-        btn.disabled = false;
-        btn.textContent = 'Sign in with Claude';
-        toastError(err, 'Could not start sign-in');
-      }
-    };
-    box.appendChild(btn);
+    if (connected) action.classList.add('wiz-quiet');
     return box;
   }
+  action.hidden = true; // the flow below replaces the action while in flight
 
   const link = document.createElement('a');
   link.href = claudeSignin.url;

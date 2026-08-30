@@ -528,6 +528,23 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; margin: 6px 0 
 .wiz-actions { display: flex; gap: 8px; align-items: center; }
 .wiz-actions input { flex: 1; min-width: 0; }
 .wiz-ok { color: #4cc38a; }
+.wiz-creds-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.wiz-creds-status {
+  font-size: 0.9rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+/* Leading status dot: muted = not connected, green = connected. */
+.wiz-creds-status::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border);
+}
+.wiz-creds-status.is-connected::before { background: #4cc38a; }
+.wiz-quiet { font-size: 0.82rem; color: var(--text-dim); }
 
 .mprobe-results { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 .mactions input { flex: 1; min-width: 0; }
