@@ -5,7 +5,7 @@
 // the owner.
 import { randomBytes } from 'crypto';
 
-import { json } from './http.js';
+import { json, readJsonBody } from './http.js';
 import type { RouteCtx } from '../server.js';
 import { getAllWebchatRooms, getOnboardingComplete, setOnboardingComplete } from '../db.js';
 import { getAllAgentGroups } from '../../../db/agent-groups.js';
@@ -18,21 +18,41 @@ import {
   upsertEnv,
 } from '../ollama-manage.js';
 import { enableTailscaleServe, getTailscaleServeState } from '../tailscale-serve.js';
+import {
+  cancelClaudeSignin,
+  finishClaudeSignin,
+  hasClaudeCredential,
+  startClaudeSignin,
+  storeClaudeCredential,
+} from '../claude-auth.js';
+
+async function parseBody<T>(ctx: RouteCtx): Promise<T | null> {
+  const raw = await readJsonBody(ctx.req, ctx.res);
+  if (raw === null) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    json(ctx.res, 400, { error: 'Invalid JSON' });
+    return null;
+  }
+}
 
 /** Wizard state: what's done, what the environment offers. */
 export async function rOnboardingGet({ res }: RouteCtx): Promise<void> {
-  const [complete, agents, rooms, ollama, tailscale] = await Promise.all([
+  const [complete, agents, rooms, ollama, tailscale, claudeConnected] = await Promise.all([
     getOnboardingComplete(),
     getAllAgentGroups(),
     getAllWebchatRooms(),
     getOllamaLocalState(),
     getTailscaleServeState(),
+    hasClaudeCredential(),
   ]);
   return json(res, 200, {
     complete,
     agents: agents.length,
     rooms: rooms.length,
     bearerConfigured: Boolean(process.env.WEBCHAT_TOKEN),
+    claude: { connected: claudeConnected },
     ollama: { reachable: ollama.reachable, canInstall: ollama.canInstall },
     tailscale: { available: tailscale.available, active: tailscale.active, url: tailscale.url },
   });
@@ -101,4 +121,36 @@ export async function rTailscaleInstallGet({ res }: RouteCtx): Promise<void> {
 export async function rTailscaleInstallPost({ res }: RouteCtx): Promise<void> {
   const result = startTailscaleInstall();
   return json(res, result.started ? 202 : 409, result);
+}
+
+// ── Claude sign-in (browser mint of the install credential) ─────────────────
+
+export async function rClaudeAuthStartPost(ctx: RouteCtx): Promise<void> {
+  try {
+    return json(ctx.res, 200, await startClaudeSignin());
+  } catch (err) {
+    return json(ctx.res, 502, { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+export async function rClaudeAuthCodePost(ctx: RouteCtx): Promise<void> {
+  const body = await parseBody<{ sessionId?: unknown; code?: unknown }>(ctx);
+  if (!body) return;
+  if (typeof body.sessionId !== 'string' || typeof body.code !== 'string' || !body.code.trim()) {
+    return json(ctx.res, 400, { error: 'sessionId and code required' });
+  }
+  try {
+    const token = await finishClaudeSignin(body.sessionId, body.code);
+    await storeClaudeCredential(token);
+    return json(ctx.res, 200, { ok: true });
+  } catch (err) {
+    return json(ctx.res, 502, { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+export async function rClaudeAuthCancelPost(ctx: RouteCtx): Promise<void> {
+  const body = await parseBody<{ sessionId?: unknown }>(ctx);
+  if (!body) return;
+  if (typeof body.sessionId === 'string') cancelClaudeSignin(body.sessionId);
+  return json(ctx.res, 200, { ok: true });
 }

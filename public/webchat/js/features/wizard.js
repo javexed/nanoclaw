@@ -108,7 +108,7 @@ function heading(text) {
 // ── Step: engine ────────────────────────────────────────────────────────────
 function renderEngine() {
     const box = document.createElement('div');
-    box.append(heading('Which model powers your agents?'), para('You can mix both later — this just sets up the first one.'));
+    box.append(heading('Which model powers your agents?'));
     const choices = document.createElement('div');
     choices.className = 'wiz-choices';
     const mk = (id, title, desc) => {
@@ -128,10 +128,95 @@ function renderEngine() {
         };
         return c;
     };
-    choices.append(mk('claude', 'Claude (Anthropic)', 'Uses the credential in your OneCLI vault. Most capable; needs the vault set up (setup does this).'), mk('local', 'Local model (Ollama)', state?.ollama.reachable
-        ? 'Ollama is running on this machine — pull a model and chat privately, no cloud.'
-        : 'Runs models on this machine. Ollama is not detected yet; the next step can install it.'));
-    box.append(choices, nav({}));
+    choices.append(mk('claude', 'Claude (Anthropic)', 'Most capable — sign in with your Claude account.'), mk('local', 'Local model (Ollama)', state?.ollama.reachable
+        ? 'Private, no cloud — pull a model and chat.'
+        : 'Private, no cloud. Not detected yet; the next step can install it.'));
+    box.append(choices);
+    if (engine === 'claude')
+        box.appendChild(renderClaudeAuth());
+    box.append(nav({}));
+    return box;
+}
+// The in-flight sign-in, so a re-render mid-flow keeps the URL + code box.
+let claudeSignin = null;
+function renderClaudeAuth() {
+    const box = document.createElement('div');
+    box.className = 'wiz-auth';
+    if (state?.claude.connected) {
+        const ok = para('✓ Claude account connected');
+        ok.classList.add('wiz-ok');
+        box.appendChild(ok);
+        return box;
+    }
+    if (!claudeSignin) {
+        const btn = document.createElement('button');
+        btn.className = 'mprimary';
+        btn.textContent = 'Sign in with Claude';
+        btn.onclick = async () => {
+            btn.disabled = true;
+            btn.textContent = 'Starting…';
+            try {
+                claudeSignin = (await apiJson('/api/webchat/claude-auth/start', { method: 'POST', body: {} }));
+                render();
+            }
+            catch (err) {
+                btn.disabled = false;
+                btn.textContent = 'Sign in with Claude';
+                toastError(err, 'Could not start sign-in');
+            }
+        };
+        box.appendChild(btn);
+        return box;
+    }
+    const link = document.createElement('a');
+    link.href = claudeSignin.url;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = 'Open the sign-in page ↗';
+    const codeInput = document.createElement('input');
+    codeInput.placeholder = 'Paste the code from that page';
+    const connect = document.createElement('button');
+    connect.className = 'mprimary';
+    connect.textContent = 'Connect';
+    connect.onclick = async () => {
+        const code = codeInput.value.trim();
+        if (!code || !claudeSignin)
+            return;
+        connect.disabled = true;
+        connect.textContent = 'Connecting…';
+        try {
+            await apiJson('/api/webchat/claude-auth/code', {
+                method: 'POST',
+                body: { sessionId: claudeSignin.sessionId, code },
+            });
+            claudeSignin = null;
+            if (state)
+                state.claude.connected = true;
+            showToast('Claude connected', { kind: 'success' });
+            render();
+        }
+        catch (err) {
+            connect.disabled = false;
+            connect.textContent = 'Connect';
+            toastError(err, 'Sign-in failed');
+        }
+    };
+    const cancel = document.createElement('button');
+    cancel.textContent = 'Cancel';
+    cancel.onclick = () => {
+        if (claudeSignin) {
+            void apiJson('/api/webchat/claude-auth/cancel', {
+                method: 'POST',
+                body: { sessionId: claudeSignin.sessionId },
+            }).catch(() => { });
+        }
+        claudeSignin = null;
+        render();
+    };
+    const row = document.createElement('div');
+    row.className = 'wiz-actions';
+    row.append(codeInput, connect, cancel);
+    box.append(link, row);
     return box;
 }
 // ── Step: local model (engine = local only) ─────────────────────────────────

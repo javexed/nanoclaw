@@ -521,3 +521,10 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; margin: 6px 0 
   cursor: pointer;
 }
 #manage-footer button:hover { color: var(--text, #e6e9f0); }
+
+/* Wizard: Claude sign-in block */
+.wiz-auth { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
+.wiz-auth a { color: var(--accent); font-size: 0.9rem; }
+.wiz-actions { display: flex; gap: 8px; align-items: center; }
+.wiz-actions input { flex: 1; min-width: 0; }
+.wiz-ok { color: #4cc38a; }

@@ -81,6 +81,9 @@ import {
 } from './server/routes-manage.js';
 import {
   rBearerGeneratePost,
+  rClaudeAuthStartPost,
+  rClaudeAuthCodePost,
+  rClaudeAuthCancelPost,
   rOnboardingGet,
   rOnboardingPut,
   rRestartPost,
@@ -566,6 +569,9 @@ const API_ROUTES: ApiRoute[] = [
   { method: 'GET', path: '/api/webchat/onboarding', h: rOnboardingGet },
   { method: 'PUT', path: '/api/webchat/onboarding', guards: ['csrf'], h: rOnboardingPut },
   { method: 'POST', path: '/api/webchat/auth/bearer/generate', guards: ['csrf'], h: rBearerGeneratePost },
+  { method: 'POST', path: '/api/webchat/claude-auth/start', guards: ['csrf'], h: rClaudeAuthStartPost },
+  { method: 'POST', path: '/api/webchat/claude-auth/code', guards: ['csrf'], h: rClaudeAuthCodePost },
+  { method: 'POST', path: '/api/webchat/claude-auth/cancel', guards: ['csrf'], h: rClaudeAuthCancelPost },
   { method: 'POST', path: '/api/webchat/restart', guards: ['csrf'], h: rRestartPost },
   { method: 'GET', path: '/api/webchat/tailscale-https', h: rTailscaleHttpsGet },
   { method: 'POST', path: '/api/webchat/tailscale-https', guards: ['csrf'], h: rTailscaleHttpsPost },
