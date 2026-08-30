@@ -63,6 +63,7 @@ import {
   rModelIdPut,
   rModelsDefaultPut,
   rModelsDiscoverPost,
+  rModelsProbeEndpointPost,
   rModelsGet,
   rModelsPost,
   rModelsProbePost,
@@ -563,6 +564,7 @@ const API_ROUTES: ApiRoute[] = [
   { method: 'PUT', path: RE_MODEL, guards: ['csrf'], h: rModelIdPut },
   { method: 'DELETE', path: RE_MODEL, guards: ['csrf'], h: rModelIdDelete },
   { method: 'POST', path: '/api/models/discover', guards: ['csrf'], h: rModelsDiscoverPost },
+  { method: 'POST', path: '/api/models/probe-endpoint', guards: ['csrf'], h: rModelsProbeEndpointPost },
   { method: 'POST', path: '/api/models/probe', guards: ['csrf'], h: rModelsProbePost },
   { method: 'POST', path: '/api/models/reachability', guards: ['csrf'], h: rModelsReachabilityPost },
   // Setup: onboarding wizard, bearer token, restart, Tailscale

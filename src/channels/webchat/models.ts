@@ -511,6 +511,35 @@ export async function discoverOllamaModels(endpoint: string): Promise<string[]> 
 }
 
 /**
+ * Two-pass endpoint probe: detect what's serving (Ollama vs OpenAI-compatible —
+ * LiteLLM, vLLM, llama.cpp server all speak /v1/models), then list its models.
+ */
+export async function probeEndpointKind(
+  endpoint: string,
+): Promise<{ kind: 'ollama' | 'openai-compatible'; models: string[] }> {
+  const base = endpoint.replace(/\/+$/, '');
+  const errors: string[] = [];
+  try {
+    return { kind: 'ollama', models: await discoverOllamaModels(base) };
+  } catch (err) {
+    errors.push(`Ollama probe: ${(err as Error).message}`);
+  }
+  try {
+    const res = await safeFetch(`${base}/v1/models`, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) throw new Error(`/v1/models returned ${res.status}`);
+    const body = (await res.json()) as { data?: Array<{ id?: string }> };
+    if (!body || !Array.isArray(body.data)) throw new Error('/v1/models response missing data[]');
+    return {
+      kind: 'openai-compatible',
+      models: body.data.map((m) => m.id).filter((n): n is string => typeof n === 'string'),
+    };
+  } catch (err) {
+    errors.push(`OpenAI-compatible probe: ${(err as Error).message}`);
+  }
+  throw new Error(`Nothing answered at ${base} — ${errors.join('; ')}`);
+}
+
+/**
  * Check that an Ollama endpoint is reachable and serves the named model.
  * Returns null on success, or an error message string on failure.
  */

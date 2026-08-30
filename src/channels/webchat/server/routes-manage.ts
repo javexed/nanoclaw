@@ -31,6 +31,7 @@ import {
 import {
   KNOWN_ANTHROPIC_MODELS,
   discoverOllamaModels,
+  probeEndpointKind,
   probeEndpoint,
   validateModel,
   writeAgentSettingsForAssignedModel,
@@ -293,6 +294,19 @@ export async function rModelsDefaultPut(ctx: RouteCtx): Promise<void> {
   await setDefaultModelId(body.model_id as string | null);
   await refreshUnassignedGroupsForDefaultModel('default-model-change');
   return json(ctx.res, 200, { ok: true });
+}
+
+/** Two-pass custom-endpoint probe: detect the server kind, then its models. */
+export async function rModelsProbeEndpointPost(ctx: RouteCtx): Promise<void> {
+  const body = await parseBody<{ endpoint?: unknown }>(ctx);
+  if (!body) return;
+  const endpoint = typeof body.endpoint === 'string' ? body.endpoint.trim() : '';
+  if (!endpoint) return json(ctx.res, 400, { error: 'endpoint required' });
+  try {
+    return json(ctx.res, 200, await probeEndpointKind(endpoint));
+  } catch (err) {
+    return json(ctx.res, 502, { error: (err as Error).message });
+  }
 }
 
 export async function rModelsDiscoverPost(ctx: RouteCtx): Promise<void> {

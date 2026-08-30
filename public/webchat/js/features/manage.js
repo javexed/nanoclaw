@@ -212,14 +212,10 @@ async function renderModels() {
             nm.className = 'mrow-name';
             nm.textContent = 'Claude — built-in default';
             head.append(dot, nm);
-            const meta = document.createElement('div');
-            meta.className = 'mrow-meta';
-            meta.textContent =
-                'Agents use the Claude provider\u2019s default model until you register one here and make it the default.';
-            builtin.append(head, meta);
+            builtin.append(head);
             rows.push(builtin);
         }
-        pane.replaceChildren(msection('Your models'), ...rows, msection('On this machine'), ollamaBox, msection('Add Claude model'), buildClaudePicker(data.known_anthropic), buildAdvancedForm());
+        pane.replaceChildren(msection('Your models'), ...rows, msection('On this machine'), ollamaBox, msection('Add custom endpoint'), buildCustomEndpoint(rosterKeys));
         void renderOllamaInto(ollamaBox, rosterKeys);
         void probeRosterDots(pane, data.models);
     }
@@ -315,121 +311,81 @@ async function probeRosterDots(pane, models) {
         }
     }));
 }
-function buildClaudePicker(knownAnthropic) {
+function buildCustomEndpoint(rosterKeys) {
     const box = document.createElement('div');
     box.className = 'mrow mcreate';
-    const sel = document.createElement('select');
-    for (const k of knownAnthropic) {
-        const o = document.createElement('option');
-        o.value = k;
-        o.textContent = k;
-        sel.appendChild(o);
-    }
-    const add = document.createElement('button');
-    add.className = 'mprimary';
-    add.textContent = 'Add';
-    add.addEventListener('click', async () => {
-        if (!sel.value)
-            return;
-        add.disabled = true;
-        try {
-            await apiJson('/api/models', {
-                method: 'POST',
-                body: { name: sel.value, kind: 'anthropic', model_id: sel.value },
-            });
-            showToast('Model added', { kind: 'success' });
-            void renderModels();
-        }
-        catch (err) {
-            add.disabled = false;
-            toastError(err, 'Add failed');
-        }
-    });
-    const row = document.createElement('div');
-    row.className = 'mactions';
-    row.append(sel, add);
-    box.appendChild(row);
-    return box;
-}
-/** The old free-form add box, folded away — remote Ollama and OpenAI-compatible hosts. */
-function buildAdvancedForm() {
-    const details = document.createElement('details');
-    details.className = 'madv';
-    const summary = document.createElement('summary');
-    summary.textContent = 'Advanced: custom endpoint…';
-    details.appendChild(summary);
-    const box = document.createElement('div');
-    box.className = 'mrow mcreate';
-    const name = document.createElement('input');
-    name.placeholder = 'Display name';
-    const kind = document.createElement('select');
-    for (const k of ['ollama', 'openai-compatible', 'anthropic']) {
-        const o = document.createElement('option');
-        o.value = k;
-        o.textContent = k;
-        kind.appendChild(o);
-    }
     const endpoint = document.createElement('input');
-    endpoint.placeholder = 'Endpoint (http://host:11434)';
-    const modelId = document.createElement('input');
-    modelId.placeholder = 'Model id (e.g. qwen3:8b)';
-    modelId.setAttribute('list', 'discovered-models');
-    const datalist = document.createElement('datalist');
-    datalist.id = 'discovered-models';
-    const discover = document.createElement('button');
-    discover.textContent = 'Discover models';
-    discover.addEventListener('click', async () => {
-        const ep = endpoint.value.trim();
-        if (!ep) {
-            showToast('Enter the endpoint first', { kind: 'error' });
+    endpoint.placeholder = 'http://host:port';
+    endpoint.value = 'http://127.0.0.1:11434';
+    const probe = document.createElement('button');
+    probe.className = 'mprimary';
+    probe.textContent = 'Probe';
+    const results = document.createElement('div');
+    results.className = 'mprobe-results';
+    probe.addEventListener('click', async () => {
+        const ep = endpoint.value.trim().replace(/\/$/, '');
+        if (!ep)
             return;
-        }
-        discover.disabled = true;
+        probe.disabled = true;
+        probe.textContent = 'Probing…';
+        results.replaceChildren();
         try {
-            const { models } = (await apiJson('/api/models/discover', { method: 'POST', body: { endpoint: ep } }));
-            datalist.replaceChildren(...models.map((mm) => {
-                const o = document.createElement('option');
-                o.value = mm;
-                return o;
-            }));
-            showToast(models.length ? `${models.length} models on that host — pick in the model-id box` : 'Host has no models', { kind: 'info' });
+            // Pass 1 detects what is serving (ollama vs openai-compatible);
+            // pass 2 is the model list that came back with it.
+            const r = (await apiJson('/api/models/probe-endpoint', { method: 'POST', body: { endpoint: ep } }));
+            const kindLine = document.createElement('div');
+            kindLine.className = 'mrow-meta';
+            kindLine.textContent =
+                r.kind === 'ollama' ? 'Detected: Ollama' : 'Detected: OpenAI-compatible (LiteLLM, vLLM, …)';
+            results.appendChild(kindLine);
+            if (r.models.length === 0) {
+                const none = document.createElement('div');
+                none.className = 'mrow-meta';
+                none.textContent = 'The server answered but lists no models.';
+                results.appendChild(none);
+            }
+            for (const modelId of r.models) {
+                const row = document.createElement('div');
+                row.className = 'mrow-head';
+                const nm = document.createElement('span');
+                nm.className = 'mrow-name';
+                nm.textContent = modelId;
+                const inRoster = rosterKeys.has(`${ep}|${modelId}`);
+                const add = document.createElement('button');
+                add.textContent = inRoster ? 'In roster' : 'Add';
+                add.disabled = inRoster;
+                add.addEventListener('click', async () => {
+                    add.disabled = true;
+                    try {
+                        await apiJson('/api/models', {
+                            method: 'POST',
+                            body: { name: modelId, kind: r.kind, endpoint: ep, model_id: modelId },
+                        });
+                        showToast('Added to roster', { kind: 'success' });
+                        void renderModels();
+                    }
+                    catch (err) {
+                        add.disabled = false;
+                        toastError(err, 'Add failed');
+                    }
+                });
+                row.append(nm, add);
+                results.appendChild(row);
+            }
         }
         catch (err) {
-            toastError(err, 'Discovery failed');
+            toastError(err, 'Probe failed');
         }
         finally {
-            discover.disabled = false;
-        }
-    });
-    const add = document.createElement('button');
-    add.className = 'mprimary';
-    add.textContent = 'Add model';
-    add.addEventListener('click', async () => {
-        add.disabled = true;
-        try {
-            await apiJson('/api/models', {
-                method: 'POST',
-                body: {
-                    name: name.value.trim() || modelId.value.trim(),
-                    kind: kind.value,
-                    endpoint: endpoint.value.trim() || undefined,
-                    model_id: modelId.value.trim(),
-                },
-            });
-            showToast('Model added', { kind: 'success' });
-            void renderModels();
-        }
-        catch (err) {
-            add.disabled = false;
-            toastError(err, 'Add failed');
+            probe.disabled = false;
+            probe.textContent = 'Probe';
         }
     });
     const actions = document.createElement('div');
     actions.className = 'mactions';
-    actions.append(discover, add);
-    box.append(name, kind, endpoint, modelId, datalist, actions);
-    details.appendChild(box);
-    return details;
+    actions.append(endpoint, probe);
+    box.append(actions, results);
+    return box;
 }
 // ── Ollama section (lives inside the Models tab) ──────────────────────────────────────────────────────────────
 async function renderOllamaInto(pane, rosterKeys) {

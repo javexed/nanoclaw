@@ -528,3 +528,6 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; margin: 6px 0 
 .wiz-actions { display: flex; gap: 8px; align-items: center; }
 .wiz-actions input { flex: 1; min-width: 0; }
 .wiz-ok { color: #4cc38a; }
+
+.mprobe-results { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.mactions input { flex: 1; min-width: 0; }
