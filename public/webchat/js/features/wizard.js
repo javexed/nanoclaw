@@ -552,12 +552,23 @@ function renderAccess() {
     bTitle.textContent = 'Access token (any network)';
     const bDesc = document.createElement('div');
     bDesc.className = 'mrow-meta';
-    bDesc.textContent = state?.bearerConfigured
-        ? 'A token is already configured.'
-        : 'Generates a token and opens the port to your network. You log in with the token; keep it safe. Requires a restart.';
+    if (state?.bearerConfigured) {
+        // Same rule as the Tailscale card: no dead button under a done state.
+        const row = document.createElement('div');
+        row.className = 'wiz-creds-row';
+        const st = document.createElement('span');
+        st.className = 'wiz-creds-status is-connected';
+        st.textContent = 'Token configured';
+        row.appendChild(st);
+        bDesc.textContent = 'To replace it, remove WEBCHAT_TOKEN from .env and restart, then generate here again.';
+        bearer.append(bTitle, row, bDesc);
+        box.append(ts, bearer, nav({}));
+        return box;
+    }
+    bDesc.textContent =
+        'Generates a token and opens the port to your network. You log in with the token; keep it safe. Requires a restart.';
     const bBtn = document.createElement('button');
     bBtn.textContent = 'Generate token';
-    bBtn.disabled = state?.bearerConfigured === true;
     bBtn.onclick = async () => {
         bBtn.disabled = true;
         try {
