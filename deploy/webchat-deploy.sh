@@ -4,7 +4,8 @@
 #
 # The SINGLE SOURCE OF TRUTH for a non-interactive webchat install: build the
 # app, run the non-interactive setup driver, write the .env (network + bearer +
-# optional Tailscale), and install a systemd service. Called by BOTH the Proxmox
+# optional Tailscale), and install a service — systemd on Linux (system or
+# --user), a launchd LaunchAgent on macOS. Called by BOTH the Proxmox
 # community-script (install/nanoclaw-install.sh) AND a clean-VM install, so any
 # change to the deploy flow lives here — never duplicated per installer.
 #
@@ -28,7 +29,7 @@
 #   --tz TZ              timezone (default: system tz, else UTC)
 #   --onecli-url URL     OneCLI gateway URL (default: derive docker-bridge:10254)
 #   --no-tailscale       don't set WEBCHAT_TAILSCALE=true (it's on by default)
-#   --no-service         don't install a systemd service
+#   --no-service         don't install a service (systemd / launchd)
 #   --display-name NAME  how agents address the operator (default: operator)
 #   --localhost          loopback-only, single-user: bind 127.0.0.1, NO bearer
 #                        token and NO Tailscale (so the localhost auto-owner
@@ -54,7 +55,7 @@ while [ $# -gt 0 ]; do
     # Loopback-only: bind 127.0.0.1, no token, no Tailscale (keep auto-owner).
     # An explicit --host/--token/--tz after this still wins (last flag applies).
     --localhost) LOCALHOST=1; HOST=127.0.0.1; TAILSCALE=0; shift ;;
-    -h|--help) sed -n '2,37p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
     *) echo "webchat-deploy: unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -64,6 +65,7 @@ done
 [ -n "$DIR" ] || DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$DIR" || { echo "webchat-deploy: cannot cd to $DIR" >&2; exit 1; }
 say() { echo "→ $*"; }
+OS="$(uname -s)"
 
 # ── 0. Prerequisites (opt-in) ────────────────────────────────────────────────
 # Turn a bare Debian/Ubuntu VM into a ready host, using DISTRO packages only —
@@ -140,11 +142,21 @@ fi
 # The OneCLI gateway (started by setup:auto) binds the docker bridge, not
 # loopback. The host needs its URL to hand credentials to agent containers.
 if [ -z "$ONECLI_URL" ]; then
-  bridge=$(ip -4 -o addr show docker0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
-  ONECLI_URL="http://${bridge:-172.17.0.1}:10254"
+  if [ "$OS" = Darwin ]; then
+    # Docker Desktop: no host-visible bridge; published ports land on loopback.
+    ONECLI_URL="http://127.0.0.1:10254"
+  else
+    bridge=$(ip -4 -o addr show docker0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+    ONECLI_URL="http://${bridge:-172.17.0.1}:10254"
+  fi
 fi
 env_set ONECLI_URL "$ONECLI_URL"
-[ -n "$TZ_VAL" ] || TZ_VAL="$(timedatectl show -p Timezone --value 2>/dev/null || echo UTC)"
+if [ -z "$TZ_VAL" ]; then
+  TZ_VAL="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+  # macOS (and minimal Linuxes): /etc/localtime symlinks into zoneinfo.
+  [ -n "$TZ_VAL" ] || TZ_VAL="$(readlink /etc/localtime 2>/dev/null | sed 's|.*zoneinfo/||' || true)"
+  [ -n "$TZ_VAL" ] || TZ_VAL=UTC
+fi
 env_set TZ "$TZ_VAL"
 say "Wrote .env (webchat on ${HOST}:${PORT})"
 
@@ -156,7 +168,54 @@ say "Wrote .env (webchat on ${HOST}:${PORT})"
 UNIT_NAME="$(cd "$DIR" && node -e 'const {createHash}=require("crypto");console.log("nanoclaw-v2-"+createHash("sha1").update(process.cwd()).digest("hex").slice(0,8))')"
 say "Service unit: ${UNIT_NAME}.service"
 
-if [ "$SERVICE" = 1 ] && [ "$(id -u)" = 0 ] && command -v systemctl >/dev/null 2>&1; then
+if [ "$SERVICE" = 1 ] && [ "$OS" = Darwin ]; then
+  # macOS: a per-user launchd LaunchAgent — same label derivation as
+  # src/install-slug.ts getLaunchdLabel (com.nanoclaw-v2-<slug>), same shape as
+  # setup/service.ts, plus the wait-for-onecli ordering the systemd units get
+  # (launchd has no ExecStartPre, so the wait runs inside a bash -c wrapper).
+  LABEL="com.${UNIT_NAME}"
+  PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
+  NODE_BIN="$(command -v node)"
+  mkdir -p "$HOME/Library/LaunchAgents" "$DIR/logs"
+  cat >"$PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>bash '$DIR/deploy/wait-for-onecli.sh' || true; exec '$NODE_BIN' '$DIR/dist/index.js'</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>$DIR</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:$HOME/.local/bin</string>
+        <key>HOME</key>
+        <string>$HOME</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>$DIR/logs/nanoclaw.log</string>
+    <key>StandardErrorPath</key>
+    <string>$DIR/logs/nanoclaw.error.log</string>
+</dict>
+</plist>
+PLIST
+  # Unload first: launchd caches a loaded plist's ProgramArguments — a bare
+  # re-load keeps the OLD command even after the file changes on disk.
+  launchctl unload "$PLIST" 2>/dev/null || true
+  launchctl load "$PLIST"
+  say "Installed + started ${LABEL} as a launchd LaunchAgent"
+elif [ "$SERVICE" = 1 ] && [ "$(id -u)" = 0 ] && command -v systemctl >/dev/null 2>&1; then
   NODE_BIN="$(command -v node)"
   cat >"/etc/systemd/system/${UNIT_NAME}.service" <<UNIT
 [Unit]
@@ -218,7 +277,7 @@ UNIT
   command -v loginctl >/dev/null 2>&1 && loginctl enable-linger "$(id -un)" 2>/dev/null || true
   say "Installed + started ${UNIT_NAME}.service as a systemd --user service"
 elif [ "$SERVICE" = 1 ]; then
-  say "Skipped service install (needs root+systemd, or --localhost for a --user service) — start manually: node $DIR/dist/index.js"
+  say "Skipped service install (needs root+systemd, --localhost for a --user unit, or macOS for launchd) — start manually: node $DIR/dist/index.js"
 fi
 
 echo ""

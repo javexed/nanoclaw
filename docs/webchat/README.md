@@ -42,13 +42,27 @@ identity.
 One command on a prepared host (Node 22, pnpm, Docker):
 
 ```bash
-bash deploy/webchat-deploy.sh --localhost   # loopback, no token, --user service
-sudo bash deploy/webchat-deploy.sh --install-deps --port 3100   # networked
+bash deploy/webchat-deploy.sh --localhost   # loopback, no token, per-user service
+sudo bash deploy/webchat-deploy.sh --install-deps --port 3100   # networked (Linux)
 ```
 
-The networked path writes a bearer token into `.env`, installs a systemd
-service (with `wait-for-onecli.sh` ordering the OneCLI gateway ahead of the
-host), and prints the URL + token.
+The networked path writes a bearer token into `.env`, installs a service, and
+prints the URL + token. Per platform:
+
+- **Linux** — systemd: a `--user` unit for `--localhost`, a system unit (root)
+  for networked deploys. `--install-deps` (Debian/Ubuntu, apt) can bootstrap
+  Node/pnpm/Docker first. Both units run `wait-for-onecli.sh` so the OneCLI
+  gateway is up before the host probes it.
+- **macOS** — a per-user launchd LaunchAgent (`com.nanoclaw-v2-<slug>`), same
+  shape as the interactive setup's; the OneCLI wait runs inside the launch
+  command. Prereqs (Node 22, pnpm, Docker Desktop) must already be installed —
+  there is no `--install-deps` on macOS.
+- **Windows** — via WSL2 only: Docker Desktop with WSL integration, then the
+  Linux path inside the distro (the `--user` unit needs systemd enabled in
+  `/etc/wsl.conf`; otherwise `--no-service` and start manually).
+
+Service names are slug-scoped (sha1 of the checkout path), so multiple
+installs on one machine never clobber each other.
 
 ## Client build
 

@@ -528,38 +528,69 @@ function renderAccess(): HTMLElement {
   const tsTitle = document.createElement('div');
   tsTitle.className = 'mrow-name';
   tsTitle.textContent = 'Tailscale HTTPS';
-  const tsDesc = document.createElement('div');
-  tsDesc.className = 'mrow-meta';
-  tsDesc.textContent = state?.tailscale.available
-    ? state.tailscale.active
-      ? `Already serving at ${state.tailscale.url ?? 'your tailnet name'}.`
-      : 'Tailscale is up — one click puts the chat on your tailnet with a real HTTPS cert (installable as an app on your phone).'
-    : 'Tailscale is not running on this machine. Install it (tailscale.com) and sign in, then re-run this from the wizard or Settings.';
-  const tsBtn = document.createElement('button');
-  tsBtn.textContent = 'Enable HTTPS on my tailnet';
-  tsBtn.disabled = !state?.tailscale.available || state?.tailscale.active === true;
-  tsBtn.onclick = async () => {
-    tsBtn.disabled = true;
-    try {
-      const r = (await apiJson('/api/webchat/tailscale-https', { method: 'POST' })) as {
-        ok: boolean;
-        url?: string;
-        error?: string;
-        hint?: string;
-      };
-      if (r.ok) {
-        tsDesc.textContent = `Serving at ${r.url}. Open that URL on any tailnet device.`;
-        showToast('Tailscale HTTPS enabled', { kind: 'success' });
-      } else {
-        tsDesc.textContent = `${r.error ?? 'Failed'}${r.hint ? ` — ${r.hint}` : ''}`;
-        tsBtn.disabled = false;
-      }
-    } catch (err) {
-      toastError(err, 'Could not enable');
-      tsBtn.disabled = false;
+  // Integrations-row: dot + state text; an action button ONLY when there is an
+  // action. 'Already serving' with a disabled enable-button read as broken.
+  const tsRow = document.createElement('div');
+  tsRow.className = 'wiz-creds-row';
+  const tsStatus = document.createElement('span');
+  tsStatus.className = 'wiz-creds-status';
+  const tsHint = document.createElement('div');
+  tsHint.className = 'mrow-meta';
+  const showServing = (url: string | null): void => {
+    tsStatus.classList.add('is-connected');
+    tsStatus.textContent = 'Serving on your tailnet';
+    tsHint.replaceChildren();
+    if (url) {
+      const a = document.createElement('a');
+      a.href = url;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.textContent = url;
+      tsHint.append('Open on any tailnet device: ', a);
     }
   };
-  ts.append(tsTitle, tsDesc, tsBtn);
+  if (state?.tailscale.active) {
+    showServing(state.tailscale.url);
+    tsRow.appendChild(tsStatus);
+  } else if (state?.tailscale.available) {
+    tsStatus.textContent = 'Tailscale is up — not serving yet';
+    tsHint.textContent = 'Puts the chat on your tailnet with a real HTTPS cert (installable as an app on your phone).';
+    const tsBtn = document.createElement('button');
+    tsBtn.className = 'mprimary';
+    tsBtn.textContent = 'Enable HTTPS';
+    tsBtn.onclick = async () => {
+      tsBtn.disabled = true;
+      try {
+        const r = (await apiJson('/api/webchat/tailscale-https', { method: 'POST' })) as {
+          ok: boolean;
+          url?: string;
+          error?: string;
+          hint?: string;
+        };
+        if (r.ok) {
+          if (state) {
+            state.tailscale.active = true;
+            state.tailscale.url = r.url ?? null;
+          }
+          showServing(r.url ?? null);
+          tsBtn.remove();
+          showToast('Tailscale HTTPS enabled', { kind: 'success' });
+        } else {
+          tsHint.textContent = `${r.error ?? 'Failed'}${r.hint ? ` — ${r.hint}` : ''}`;
+          tsBtn.disabled = false;
+        }
+      } catch (err) {
+        toastError(err, 'Could not enable');
+        tsBtn.disabled = false;
+      }
+    };
+    tsRow.append(tsStatus, tsBtn);
+  } else {
+    tsStatus.textContent = 'Not detected on this machine';
+    tsHint.textContent = 'Install Tailscale (tailscale.com) and sign in, then re-run this step from the wizard.';
+    tsRow.appendChild(tsStatus);
+  }
+  ts.append(tsTitle, tsRow, tsHint);
 
   const bearer = document.createElement('div');
   bearer.className = 'mrow';
