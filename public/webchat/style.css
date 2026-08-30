@@ -596,3 +596,14 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; margin: 6px 0 
 #manage .mrow textarea { width: 100%; box-sizing: border-box; resize: vertical; margin-bottom: 8px; }
 
 .min-roster { color: #4cc38a; font-size: 0.82rem; white-space: nowrap; }
+
+/* Every step is a flex column with the nav pinned to the card bottom, and a
+   floor on the height — Next stays in one place across steps instead of
+   riding each screen's content height. */
+#wizard-body > div {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 360px;
+}
+#wizard-body > div > .wiz-nav { margin-top: auto; }
