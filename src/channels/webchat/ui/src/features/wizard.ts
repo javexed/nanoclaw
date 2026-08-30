@@ -128,36 +128,47 @@ function renderEngine(): HTMLElement {
   box.append(heading('Which model powers your agents?'));
   const choices = document.createElement('div');
   choices.className = 'wiz-choices';
-  const mk = (id: 'claude' | 'local', title: string, desc: string): HTMLElement => {
-    const c = document.createElement('button');
-    c.type = 'button';
+  // Accordion cards: the selected card holds its own setup body, so toggling
+  // expands in place instead of shuffling content below both cards.
+  const mk = (id: 'claude' | 'local', title: string, desc: string, body: () => HTMLElement): HTMLElement => {
+    const c = document.createElement('div');
     c.className = 'wiz-choice' + (engine === id ? ' selected' : '');
+    const head = document.createElement('button');
+    head.type = 'button';
+    head.className = 'wiz-choice-head';
     const t = document.createElement('div');
     t.className = 'wiz-choice-title';
     t.textContent = title;
     const d = document.createElement('div');
     d.className = 'wiz-choice-desc';
     d.textContent = desc;
-    c.append(t, d);
-    c.onclick = () => {
-      engine = id;
-      render();
+    head.append(t, d);
+    head.onclick = () => {
+      if (engine !== id) {
+        engine = id;
+        render();
+      }
     };
+    c.appendChild(head);
+    if (engine === id) {
+      const b = body();
+      b.classList.add('wiz-choice-body');
+      c.appendChild(b);
+    }
     return c;
   };
   choices.append(
-    mk('claude', 'Claude (Anthropic)', 'Most capable — sign in with your Claude account.'),
+    mk('claude', 'Claude (Anthropic)', 'Most capable — sign in with your Claude account.', renderClaudeAuth),
     mk(
       'local',
       'Local model (Ollama)',
       state?.ollama.reachable
         ? 'Private, no cloud — pull a model and chat.'
-        : 'Private, no cloud. Not detected yet; the next step can install it.',
+        : 'Private, no cloud. Not detected yet; select to install it.',
+      buildLocalModels,
     ),
   );
-  box.append(choices);
-  box.appendChild(engine === 'claude' ? renderClaudeAuth() : buildLocalModels());
-  box.append(nav({}));
+  box.append(choices, nav({}));
   return box;
 }
 
@@ -375,7 +386,7 @@ function buildLocalModels(): HTMLElement {
     probeBtn.disabled = true;
     probeBtn.textContent = 'Probing…';
     statusLine.textContent = '';
-    statusLine.classList.remove('wiz-err', 'wiz-ok');
+    statusLine.className = 'wiz-text';
     try {
       const r = (await apiJson('/api/models/probe-endpoint', { method: 'POST', body: { endpoint: ep } })) as {
         kind: 'ollama' | 'openai-compatible';
@@ -391,17 +402,18 @@ function buildLocalModels(): HTMLElement {
       const checkedId = def && (def.endpoint ?? '').replace(/\/$/, '') === ep ? def.model_id : null;
       renderList(r.models, checkedId);
       const n = r.models.length;
+      const kindName = r.kind === 'ollama' ? 'Ollama' : 'OpenAI-compatible server';
+      statusLine.className = 'wiz-creds-status is-connected';
       statusLine.textContent =
         n === 0
-          ? `Nothing installed at ${ep} yet — pull a model below.`
-          : `Found ${n} model${n === 1 ? '' : 's'} at ${ep} — pick one to make it the default.`;
-      statusLine.classList.add('wiz-ok');
+          ? `${kindName} detected — nothing installed yet, pull a model below.`
+          : `${kindName} detected — ${n} model${n === 1 ? '' : 's'}, pick one to make it the default.`;
       pullRow.hidden = r.kind !== 'ollama' || !isLocal();
     } catch (err) {
       probed = null;
       renderList([], null);
+      statusLine.className = 'wiz-text wiz-err';
       statusLine.textContent = (err as Error).message;
-      statusLine.classList.add('wiz-err');
       installRow.hidden = !isLocal() || Boolean(state?.ollama.canInstall) === false;
       pullRow.hidden = !isLocal();
     } finally {

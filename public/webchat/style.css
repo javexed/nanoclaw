@@ -362,10 +362,26 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent-soft
 .wiz-text { margin: 0; color: var(--text-dim); font-size: 0.9rem; }
 .wiz-choices { display: grid; gap: 10px; }
 .wiz-choice {
-  text-align: left;
+  padding: 0;
+  overflow: hidden;
+}
+.wiz-choice-head {
   display: grid;
   gap: 4px;
+  width: 100%;
+  text-align: left;
   padding: 12px 14px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.wiz-choice-body {
+  padding: 0 14px 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  margin: 0 0 0;
 }
 .wiz-choice.selected { border-color: var(--accent); background: var(--accent-soft); }
 .wiz-choice-title { font-weight: 600; }
