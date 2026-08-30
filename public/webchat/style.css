@@ -573,7 +573,7 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; margin: 6px 0 
 
 /* Wizard: local-model radio list */
 .wiz-model-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 180px; overflow-y: auto; }
-.wiz-model-list label { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 0.9rem; }
+.wiz-model-list label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
 .wiz-model-list input[type='radio'] { accent-color: var(--accent); }
 
 .wiz-token-row { display: flex; gap: 8px; align-items: stretch; }
