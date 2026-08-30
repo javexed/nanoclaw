@@ -475,7 +475,7 @@ function buildLocalModels(): HTMLElement {
         };
         const p = pulls.find((x) => x.model.includes(model));
         if (!p) return;
-        if (p.status === 'done') {
+        if (p.status === 'success') {
           if (pullTimer) {
             clearInterval(pullTimer);
             pullTimer = null;
@@ -486,12 +486,13 @@ function buildLocalModels(): HTMLElement {
           await selectModel(model); // …and it becomes the default
           const radio = list.querySelector<HTMLInputElement>(`input[value="${CSS.escape(model)}"]`);
           if (radio) radio.checked = true;
-        } else if (p.status === 'error') {
+        } else if (p.status === 'error' || p.status === 'cancelled') {
           if (pullTimer) {
             clearInterval(pullTimer);
             pullTimer = null;
           }
-          progress.textContent = `Pull failed: ${p.error ?? 'unknown error'}`;
+          progress.textContent =
+            p.status === 'cancelled' ? 'Pull cancelled.' : `Pull failed: ${p.error ?? 'unknown error'}`;
           pullBtn.disabled = false;
         } else {
           const pct = p.total ? Math.round(((p.completed ?? 0) / p.total) * 100) : 0;

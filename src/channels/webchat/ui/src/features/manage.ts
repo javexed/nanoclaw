@@ -622,10 +622,12 @@ async function renderOllamaInto(pane: HTMLElement, rosterKeys: Set<string>): Pro
             row.textContent =
               p.status === 'error'
                 ? `✗ ${p.model} — ${p.error ?? 'failed'}`
-                : p.status === 'done'
+                : p.status === 'success'
                   ? `✓ ${p.model} pulled`
-                  : `↓ ${p.model} ${pct !== null ? `${pct}%` : p.status}`;
-            if (p.status !== 'done' && p.status !== 'error') {
+                  : p.status === 'cancelled'
+                    ? `— ${p.model} cancelled`
+                    : `↓ ${p.model} ${pct !== null ? `${pct}%` : p.status}`;
+            if (p.status === 'pulling') {
               const cancel = document.createElement('button');
               cancel.textContent = 'Cancel';
               cancel.addEventListener('click', async () => {
@@ -639,7 +641,7 @@ async function renderOllamaInto(pane: HTMLElement, rosterKeys: Set<string>): Pro
             return row;
           }),
         );
-        if (pulls.some((p) => p.status === 'done')) void refreshModels();
+        if (pulls.some((p) => p.status === 'success')) void refreshModels();
       } catch {
         /* transient */
       }
