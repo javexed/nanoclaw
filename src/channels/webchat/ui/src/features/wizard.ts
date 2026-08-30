@@ -391,15 +391,18 @@ function buildLocalModels(): HTMLElement {
       const r = (await apiJson('/api/models/probe-endpoint', { method: 'POST', body: { endpoint: ep } })) as {
         kind: 'ollama' | 'openai-compatible';
         models: string[];
+        endpoint?: string;
       };
-      probed = { kind: r.kind, endpoint: ep };
+      const resolved = (r.endpoint ?? ep).replace(/\/$/, '');
+      probed = { kind: r.kind, endpoint: resolved };
+      urlInput.value = resolved; // reflect what actually answered
       // Mark the current default's radio when it lives on this endpoint.
       const roster = (await apiJson('/api/models').catch(() => null)) as {
         models: Array<{ id: string; model_id: string; endpoint: string | null }>;
         default_model_id: string | null;
       } | null;
       const def = roster?.models.find((m) => m.id === roster.default_model_id);
-      const checkedId = def && (def.endpoint ?? '').replace(/\/$/, '') === ep ? def.model_id : null;
+      const checkedId = def && (def.endpoint ?? '').replace(/\/$/, '') === probed.endpoint ? def.model_id : null;
       renderList(r.models, checkedId);
       const n = r.models.length;
       const kindName = r.kind === 'ollama' ? 'Ollama' : 'OpenAI-compatible server';

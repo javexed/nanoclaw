@@ -514,29 +514,50 @@ export async function discoverOllamaModels(endpoint: string): Promise<string[]> 
  * Two-pass endpoint probe: detect what's serving (Ollama vs OpenAI-compatible —
  * LiteLLM, vLLM, llama.cpp server all speak /v1/models), then list its models.
  */
+/**
+ * Meet loose input halfway: 'localhost' → ['http://localhost:11434',
+ * 'http://localhost'] — scheme added when missing, and when no port was given
+ * the Ollama default is tried first. Explicit scheme+port is used as-is.
+ */
+export function endpointCandidates(raw: string): string[] {
+  let v = raw.trim().replace(/\/+$/, '');
+  if (!/^https?:\/\//i.test(v)) v = `http://${v}`;
+  try {
+    const u = new URL(v);
+    if (!u.port && u.protocol === 'http:') {
+      return [`http://${u.hostname}:11434${u.pathname === '/' ? '' : u.pathname}`, v];
+    }
+  } catch {
+    /* fall through — the probe will surface the parse error */
+  }
+  return [v];
+}
+
 export async function probeEndpointKind(
   endpoint: string,
-): Promise<{ kind: 'ollama' | 'openai-compatible'; models: string[] }> {
-  const base = endpoint.replace(/\/+$/, '');
+): Promise<{ kind: 'ollama' | 'openai-compatible'; models: string[]; endpoint: string }> {
   const errors: string[] = [];
-  try {
-    return { kind: 'ollama', models: await discoverOllamaModels(base) };
-  } catch (err) {
-    errors.push(`Ollama probe: ${(err as Error).message}`);
+  for (const base of endpointCandidates(endpoint)) {
+    try {
+      return { kind: 'ollama', models: await discoverOllamaModels(base), endpoint: base };
+    } catch (err) {
+      errors.push(`Ollama probe (${base}): ${(err as Error).message}`);
+    }
+    try {
+      const res = await safeFetch(`${base}/v1/models`, { signal: AbortSignal.timeout(5000) });
+      if (!res.ok) throw new Error(`/v1/models returned ${res.status}`);
+      const body = (await res.json()) as { data?: Array<{ id?: string }> };
+      if (!body || !Array.isArray(body.data)) throw new Error('/v1/models response missing data[]');
+      return {
+        kind: 'openai-compatible',
+        models: body.data.map((m) => m.id).filter((n): n is string => typeof n === 'string'),
+        endpoint: base,
+      };
+    } catch (err) {
+      errors.push(`OpenAI-compatible probe (${base}): ${(err as Error).message}`);
+    }
   }
-  try {
-    const res = await safeFetch(`${base}/v1/models`, { signal: AbortSignal.timeout(5000) });
-    if (!res.ok) throw new Error(`/v1/models returned ${res.status}`);
-    const body = (await res.json()) as { data?: Array<{ id?: string }> };
-    if (!body || !Array.isArray(body.data)) throw new Error('/v1/models response missing data[]');
-    return {
-      kind: 'openai-compatible',
-      models: body.data.map((m) => m.id).filter((n): n is string => typeof n === 'string'),
-    };
-  } catch (err) {
-    errors.push(`OpenAI-compatible probe: ${(err as Error).message}`);
-  }
-  throw new Error(`Nothing answered at ${base} — ${errors.join('; ')}`);
+  throw new Error(`Nothing answered at ${endpoint.trim()} — ${errors.join('; ')}`);
 }
 
 /**

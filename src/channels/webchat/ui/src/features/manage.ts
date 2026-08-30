@@ -386,7 +386,10 @@ function buildCustomEndpoint(rosterKeys: Set<string>): HTMLElement {
       const r = (await apiJson('/api/models/probe-endpoint', { method: 'POST', body: { endpoint: ep } })) as {
         kind: 'ollama' | 'openai-compatible';
         models: string[];
+        endpoint?: string;
       };
+      const resolved = (r.endpoint ?? ep).replace(/\/$/, '');
+      endpoint.value = resolved;
       const kindLine = document.createElement('div');
       kindLine.className = 'mrow-meta';
       kindLine.textContent =
@@ -404,7 +407,7 @@ function buildCustomEndpoint(rosterKeys: Set<string>): HTMLElement {
         const nm = document.createElement('span');
         nm.className = 'mrow-name';
         nm.textContent = modelId;
-        const inRoster = rosterKeys.has(`${ep}|${modelId}`);
+        const inRoster = rosterKeys.has(`${resolved}|${modelId}`);
         const add = document.createElement('button');
         add.textContent = inRoster ? 'In roster' : 'Add';
         add.disabled = inRoster;
@@ -413,7 +416,7 @@ function buildCustomEndpoint(rosterKeys: Set<string>): HTMLElement {
           try {
             await apiJson('/api/models', {
               method: 'POST',
-              body: { name: modelId, kind: r.kind, endpoint: ep, model_id: modelId },
+              body: { name: modelId, kind: r.kind, endpoint: resolved, model_id: modelId },
             });
             showToast('Added to roster', { kind: 'success' });
             void renderModels();
