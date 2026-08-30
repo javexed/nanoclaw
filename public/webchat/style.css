@@ -43,6 +43,12 @@ button {
 }
 button:hover { border-color: var(--accent); }
 
+/* Links: accent everywhere, visited included — the UA's navy/purple defaults
+   are unreadable on this dark ground (the tailnet link was the reported case). */
+a,
+a:visited { color: var(--accent); }
+a:hover { filter: brightness(1.15); }
+
 input, textarea, select {
   font: inherit;
   color: var(--text);
@@ -190,7 +196,6 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent-soft
 }
 .msg-content code { font-family: ui-monospace, 'Cascadia Code', Menlo, monospace; font-size: 0.88em; }
 .msg-content img { max-width: 100%; border-radius: 6px; }
-.msg-content a { color: var(--accent); }
 .msg-content table { border-collapse: collapse; }
 .msg-content td, .msg-content th { border: 1px solid var(--border); padding: 4px 8px; }
 .msg-content blockquote {
@@ -540,7 +545,7 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; margin: 6px 0 
 
 /* Wizard: Claude sign-in block */
 .wiz-auth { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
-.wiz-auth a { color: var(--accent); font-size: 0.9rem; }
+.wiz-auth a { font-size: 0.9rem; }
 .wiz-actions { display: flex; gap: 8px; align-items: center; }
 .wiz-actions input { flex: 1; min-width: 0; }
 .wiz-ok { color: #4cc38a; }
