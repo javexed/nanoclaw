@@ -528,6 +528,7 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; margin: 6px 0 
 .wiz-actions { display: flex; gap: 8px; align-items: center; }
 .wiz-actions input { flex: 1; min-width: 0; }
 .wiz-ok { color: #4cc38a; }
+.wiz-err { color: #e5534b; margin-top: 6px; }
 .wiz-creds-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .wiz-creds-status {
   font-size: 0.9rem;

@@ -622,15 +622,28 @@ async function offerLocalInstall(list: HTMLElement, onReady: () => Promise<void>
         toastError(err, 'Install failed to start');
         return;
       }
-      // Poll until the local daemon answers, then refresh the model list.
+      // Poll until the local daemon answers — or the installer exits nonzero,
+      // in which case surface why instead of spinning out the full window.
       for (let i = 0; i < 200; i++) {
         await new Promise((r) => setTimeout(r, 3000));
         try {
-          const st = (await apiJson('/api/ollama/local')) as { reachable: boolean };
+          const st = (await apiJson('/api/ollama/local')) as {
+            reachable: boolean;
+            running?: boolean;
+            lines?: string[];
+            exitCode?: number | null;
+          };
           if (st.reachable) {
             showToast('Ollama is running', { kind: 'success' });
             btn.remove();
             void onReady();
+            return;
+          }
+          if (!st.running && st.exitCode !== null && st.exitCode !== undefined && st.exitCode !== 0) {
+            const lastLine = (st.lines ?? []).filter((l) => l.trim()).pop() ?? '';
+            btn.disabled = false;
+            btn.textContent = 'Install Ollama on this machine';
+            showToast(`Install failed (exit ${st.exitCode})${lastLine ? `: ${lastLine}` : ''}`, { kind: 'error' });
             return;
           }
         } catch {

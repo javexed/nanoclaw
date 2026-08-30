@@ -276,20 +276,42 @@ function renderModel(): HTMLElement {
     const installBtn = document.createElement('button');
     installBtn.textContent = state?.ollama.canInstall ? 'Install Ollama on this machine' : 'Ollama not detected';
     installBtn.disabled = !state?.ollama.canInstall;
+    const installErr = document.createElement('div');
+    installErr.className = 'wiz-text wiz-err';
     installBtn.onclick = async () => {
       installBtn.disabled = true;
       installBtn.textContent = 'Installing…';
+      installErr.textContent = '';
       await apiJson('/api/ollama/install', { method: 'POST' }).catch((e) => toastError(e, 'Install failed to start'));
       pullTimer = setInterval(async () => {
-        const st = (await apiJson('/api/ollama/local').catch(() => null)) as { reachable?: boolean } | null;
-        if (st?.reachable) {
+        const st = (await apiJson('/api/ollama/local').catch(() => null)) as {
+          reachable?: boolean;
+          running?: boolean;
+          lines?: string[];
+          exitCode?: number | null;
+        } | null;
+        if (!st) return;
+        if (st.reachable) {
           if (state) state.ollama.reachable = true;
           showToast('Ollama is up', { kind: 'success' });
           render();
+          return;
+        }
+        // Installer finished without a daemon: surface why instead of
+        // spinning on "Installing…" forever.
+        if (!st.running && st.exitCode !== null && st.exitCode !== undefined && st.exitCode !== 0) {
+          if (pullTimer) {
+            clearInterval(pullTimer);
+            pullTimer = null;
+          }
+          const lastLine = (st.lines ?? []).filter((l) => l.trim()).pop() ?? '';
+          installErr.textContent = `Install failed (exit ${st.exitCode})${lastLine ? `: ${lastLine}` : ''}`;
+          installBtn.disabled = false;
+          installBtn.textContent = 'Install Ollama on this machine';
         }
       }, 3000);
     };
-    installRow.appendChild(installBtn);
+    installRow.append(installBtn, installErr);
   }
 
   const progress = document.createElement('div');
