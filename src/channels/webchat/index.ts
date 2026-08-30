@@ -72,14 +72,19 @@ function createAdapter(): ChannelAdapter {
 
     async setup(config: ChannelSetup): Promise<void> {
       server = await startWebchatServer({
-        onInbound: async (roomId, message) => {
-          // Surface the room's display name to the router so messaging_groups
-          // keeps a friendly label (mirrors discord/slack adapters).
-          const room = await getWebchatRoom(roomId);
-          if (room) {
-            config.onMetadata(roomId, room.name, true);
+        onInbound: (roomId, message) => {
+          // onInbound is fire-and-forget from the transport's view; route it and
+          // catch both sync throws and async rejections (config.onInbound is
+          // typed void but returns routeInbound's promise), so a transient DB
+          // error surfaces with context instead of a bare unhandledRejection
+          // that silently loses the message.
+          try {
+            void Promise.resolve(config.onInbound(roomId, null, message)).catch((err: unknown) => {
+              log.error('Webchat: inbound routing rejected', { roomId, err });
+            });
+          } catch (err) {
+            log.error('Webchat: inbound routing threw', { roomId, err });
           }
-          void config.onInbound(roomId, null, message);
         },
         onAction: (questionId, selectedOption, userId) => {
           config.onAction(questionId, selectedOption, userId);

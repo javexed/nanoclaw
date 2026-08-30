@@ -31,8 +31,12 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
+  // Only handle same-origin GETs. A cross-origin request (e.g. the connectivity
+  // probe to gstatic) must pass through untouched — answering it from cache
+  // would make an offline client look "online but server down".
+  if (url.origin !== location.origin || e.request.method !== 'GET') return;
   // Never intercept the API or the socket — realtime must hit the network.
-  if (url.pathname.startsWith('/api/') || url.pathname === '/ws' || e.request.method !== 'GET') return;
+  if (url.pathname.startsWith('/api/') || url.pathname === '/ws') return;
   e.respondWith(
     caches.match(e.request).then(
       (hit) =>
@@ -47,7 +51,11 @@ self.addEventListener('fetch', (e) => {
             }
             return res;
           })
-          .catch(() => caches.match('/index.html').then((shell) => shell || Response.error())),
+          .catch(() =>
+            e.request.mode === 'navigate'
+              ? caches.match('/index.html').then((shell) => shell || Response.error())
+              : Response.error(),
+          ),
     ),
   );
 });

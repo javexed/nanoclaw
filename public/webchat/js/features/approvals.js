@@ -8,7 +8,6 @@
 //     as a persistent toast with the same buttons.
 // Both call POST /api/approvals/:id/respond, which routes through the exact
 // dispatch a platform button-click takes (claim guard included).
-import { $ } from '../core/dom.js';
 import { apiJson } from '../core/api.js';
 import { showToast, toastError } from '../core/toast.js';
 async function respond(questionId, value) {
@@ -28,7 +27,11 @@ function optionButtons(questionId, options, onDone) {
         btn.type = 'button';
         btn.className = 'appr-btn' + (opt.value === 'approve' ? ' appr-approve' : '');
         btn.textContent = opt.label;
-        btn.addEventListener('click', async () => {
+        btn.addEventListener('click', async (e) => {
+            // Don't let the click bubble to the toast's click-to-dismiss — that would
+            // tear the card down mid-POST, and the error path would re-enable buttons
+            // no longer in the DOM.
+            e.stopPropagation();
             // Disable immediately — the server's claim guard makes a double-click
             // harmless, but a frozen row reads better than two spinners.
             row.querySelectorAll('button').forEach((b) => (b.disabled = true));
@@ -146,5 +149,3 @@ export async function fetchPendingApprovals() {
         /* next reconnect retries */
     }
 }
-// Referenced from transcript.ts at render time; keep $ imported for future use.
-export { $ };

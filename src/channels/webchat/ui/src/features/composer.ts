@@ -2,6 +2,7 @@
 // Textarea + send + the slash menu. Slash commands are ordinary messages the
 // agent-runner interprets; the menu is autocomplete, not execution.
 import { $ } from '../core/dom.js';
+import { showToast } from '../core/toast.js';
 import { state } from '../core/state.js';
 import { appendOptimistic } from './transcript.js';
 
@@ -15,10 +16,13 @@ const SLASH_COMMANDS: Array<{ cmd: string; hint: string }> = [
 
 let seq = 0;
 
-export function sendMessage(text: string): void {
+export function sendMessage(text: string): boolean {
   const content = text.trim();
-  if (!content || !state.currentRoom) return;
-  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+  if (!content || !state.currentRoom) return false;
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+    showToast('Reconnecting… your message was not sent. Try again in a moment.', { kind: 'error' });
+    return false;
+  }
   // Unique per send — the server dedups on it (flaky-socket resend) and the
   // echo upgrades the optimistic row it keys.
   const clientId = `local-${++seq}-${Date.now()}`;
@@ -26,6 +30,7 @@ export function sendMessage(text: string): void {
   state.userScrolledAway = false;
   $('#transcript')!.scrollTop = $('#transcript')!.scrollHeight;
   state.ws.send(JSON.stringify({ type: 'message', content, client_id: clientId }));
+  return true;
 }
 
 export function wireComposer(): void {
@@ -125,9 +130,10 @@ export function wireComposer(): void {
 
   form.addEventListener('submit', (e) => {
     e.preventDefault();
-    sendMessage(input.value);
-    input.value = '';
-    autoGrow(input);
+    if (sendMessage(input.value)) {
+      input.value = '';
+      autoGrow(input);
+    }
     closeMenu();
   });
 

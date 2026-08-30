@@ -50,7 +50,7 @@ import {
   updateWebchatRoomName,
   type FileMeta,
 } from './db.js';
-import { redactSensitiveData } from './redact.js';
+import { redactMessageContent } from './redact.js';
 import { handleFileServe, handleMultipartUpload, uploadsDir } from './files.js';
 import { ensureDrafterIdentity } from './drafter.js';
 import {
@@ -64,11 +64,9 @@ import {
   rModelIdDelete,
   rModelIdPut,
   rModelsDefaultPut,
-  rModelsDiscoverPost,
   rModelsProbeEndpointPost,
   rModelsGet,
   rModelsPost,
-  rModelsProbePost,
   rModelsReachabilityPost,
   rOllamaDeletePost,
   rOllamaHostsGet,
@@ -490,7 +488,7 @@ async function rHistoryGet({ res, url }: RouteCtx, m: RegExpMatchArray): Promise
   if (!(await getWebchatRoom(roomId))) return json(res, 404, { error: 'Room not found' });
   const before = url.searchParams.get('before');
   const after = url.searchParams.get('after');
-  const limit = Math.min(Number(url.searchParams.get('limit')) || 50, 200);
+  const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 50, 1), 200);
   const messages = before
     ? await getWebchatMessagesBeforeId(roomId, before, limit)
     : after
@@ -498,7 +496,7 @@ async function rHistoryGet({ res, url }: RouteCtx, m: RegExpMatchArray): Promise
       : await getWebchatMessages(roomId, limit);
   return json(res, 200, {
     room_id: roomId,
-    messages: messages.map((msg) => ({ ...msg, content: redactSensitiveData(msg.content) })),
+    messages: messages.map((msg) => ({ ...msg, content: redactMessageContent(msg.message_type, msg.content) })),
   });
 }
 
@@ -568,9 +566,7 @@ const API_ROUTES: ApiRoute[] = [
   { method: 'PUT', path: '/api/models/default', guards: ['csrf'], h: rModelsDefaultPut },
   { method: 'PUT', path: RE_MODEL, guards: ['csrf'], h: rModelIdPut },
   { method: 'DELETE', path: RE_MODEL, guards: ['csrf'], h: rModelIdDelete },
-  { method: 'POST', path: '/api/models/discover', guards: ['csrf'], h: rModelsDiscoverPost },
   { method: 'POST', path: '/api/models/probe-endpoint', guards: ['csrf'], h: rModelsProbeEndpointPost },
-  { method: 'POST', path: '/api/models/probe', guards: ['csrf'], h: rModelsProbePost },
   { method: 'POST', path: '/api/models/reachability', guards: ['csrf'], h: rModelsReachabilityPost },
   // Setup: onboarding wizard, bearer token, restart, Tailscale
   { method: 'GET', path: '/api/webchat/onboarding', h: rOnboardingGet },

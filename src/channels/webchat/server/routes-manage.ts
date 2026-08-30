@@ -30,9 +30,7 @@ import {
 } from '../db.js';
 import {
   KNOWN_ANTHROPIC_MODELS,
-  discoverOllamaModels,
   probeEndpointKind,
-  probeEndpoint,
   validateModel,
   writeAgentSettingsForAssignedModel,
 } from '../models.js';
@@ -53,6 +51,7 @@ import { resolveGroupFolderPath } from '../../../group-folder.js';
 import { reloadAgentModelEnv, refreshUnassignedGroupsForDefaultModel } from './model-wiring.js';
 import { wireAgentToRoom } from '../server.js';
 import { broadcastRooms } from '../state.js';
+import { clearPrimeAgentForAgentGroup } from '../db.js';
 
 async function parseBody<T>(ctx: RouteCtx): Promise<T | null> {
   const raw = await readJsonBody(ctx.req, ctx.res);
@@ -164,6 +163,7 @@ export async function rAgentDelete(ctx: RouteCtx, m: RegExpMatchArray): Promise<
     await unwireAgentFromWebchatRoom(room.id, id);
   }
   await unassignModelFromAgent(id);
+  await clearPrimeAgentForAgentGroup(id); // no ghost prime row pointing at the deleted agent
   await deleteAgentGroup(id);
   await broadcastRooms();
   return json(ctx.res, 200, { ok: true });
@@ -309,26 +309,6 @@ export async function rModelsProbeEndpointPost(ctx: RouteCtx): Promise<void> {
   } catch (err) {
     return json(ctx.res, 502, { error: (err as Error).message });
   }
-}
-
-export async function rModelsDiscoverPost(ctx: RouteCtx): Promise<void> {
-  const body = await parseBody<{ endpoint?: unknown }>(ctx);
-  if (!body) return;
-  const endpoint = typeof body.endpoint === 'string' ? body.endpoint.trim() : '';
-  if (!endpoint) return json(ctx.res, 400, { error: 'endpoint required' });
-  try {
-    return json(ctx.res, 200, { models: await discoverOllamaModels(endpoint) });
-  } catch (err) {
-    return json(ctx.res, 502, { error: err instanceof Error ? err.message : String(err) });
-  }
-}
-
-export async function rModelsProbePost(ctx: RouteCtx): Promise<void> {
-  const body = await parseBody<{ endpoint?: unknown }>(ctx);
-  if (!body) return;
-  const endpoint = typeof body.endpoint === 'string' ? body.endpoint.trim() : '';
-  if (!endpoint) return json(ctx.res, 400, { error: 'endpoint required' });
-  return json(ctx.res, 200, await probeEndpoint(endpoint));
 }
 
 /** Container-vantage reachability: can the AGENT's container see this endpoint? */

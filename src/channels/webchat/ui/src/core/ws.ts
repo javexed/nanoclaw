@@ -251,11 +251,13 @@ export function wireVisibilityReconnect(): void {
 /** Fetch messages after the last-seen anchor (visibility catch-up). */
 export async function catchUpSince(): Promise<void> {
   if (!state.currentRoom || !state.lastSeenMessageId) return;
+  const room = state.currentRoom; // pin against a mid-fetch room switch
   try {
     const res = await authFetch(
-      `/api/history/${encodeURIComponent(state.currentRoom)}?after=${encodeURIComponent(state.lastSeenMessageId)}`,
+      `/api/history/${encodeURIComponent(room)}?after=${encodeURIComponent(state.lastSeenMessageId)}`,
     );
     if (!res.ok) return;
+    if (state.currentRoom !== room) return; // switched rooms — don't cross-contaminate
     const data = (await res.json()) as { messages: Array<{ id?: string }> };
     if (!data.messages?.length) return;
     const wasNearBottom = isNearBottom();

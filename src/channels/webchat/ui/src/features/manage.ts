@@ -645,6 +645,7 @@ async function renderOllamaInto(pane: HTMLElement, rosterKeys: Set<string>): Pro
       }
     });
 
+    const refreshedFor = new Set<string>(); // pulls whose success already triggered one refresh
     const refreshPulls = async (): Promise<void> => {
       try {
         const { pulls } = (await apiJson('/api/ollama/pulls')) as { pulls: PullRow[] };
@@ -675,7 +676,13 @@ async function renderOllamaInto(pane: HTMLElement, rosterKeys: Set<string>): Pro
             return row;
           }),
         );
-        if (pulls.some((p) => p.status === 'success')) void refreshModels();
+        // Edge-trigger: refresh once when a pull first reaches success, not on
+        // every tick while it sits in the server's 10-minute finished list.
+        const fresh = pulls.filter((p) => p.status === 'success' && !refreshedFor.has(`${p.host}|${p.model}`));
+        if (fresh.length > 0) {
+          for (const p of fresh) refreshedFor.add(`${p.host}|${p.model}`);
+          void refreshModels();
+        }
       } catch {
         /* transient */
       }

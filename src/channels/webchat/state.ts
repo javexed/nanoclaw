@@ -12,7 +12,7 @@ import { WebSocket } from 'ws';
 
 import { log } from '../../log.js';
 import { getAllWebchatRooms, getRoomLastActivity, type WebchatRoom } from './db.js';
-import { redactSensitiveData } from './redact.js';
+import { redactMessageContent } from './redact.js';
 
 export interface WSClient {
   id: string;
@@ -64,9 +64,10 @@ export function getActiveTurns(roomId: string): string[] {
 }
 
 export async function broadcast(roomId: string, msg: object, excludeId?: string): Promise<void> {
-  const isMessage = (msg as { type?: string }).type === 'message';
+  const m = msg as { type?: string; content?: string; message_type?: Parameters<typeof redactMessageContent>[0] };
+  const isMessage = m.type === 'message';
   const outgoing = isMessage
-    ? { ...msg, content: redactSensitiveData((msg as { content?: string }).content || '') }
+    ? { ...msg, content: redactMessageContent(m.message_type ?? 'text', m.content || '') }
     : msg;
   const payload = JSON.stringify(outgoing);
   const notifyPayload = isMessage ? JSON.stringify({ type: 'unread', room_id: roomId }) : '';

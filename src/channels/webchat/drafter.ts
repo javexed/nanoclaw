@@ -172,6 +172,11 @@ async function buildDrafterTransport(): Promise<{
   if (cachedTransport && cachedTransport.expiresAt > Date.now()) {
     return { dispatcher: cachedTransport.dispatcher, authHeaders: cachedTransport.authHeaders };
   }
+  // Superseding an expired transport: close its keep-alive socket pool, else
+  // undici holds the sockets/FDs open until GC eventually reaps the agent.
+  const superseded = cachedTransport;
+  cachedTransport = null;
+  if (superseded) void superseded.dispatcher.close().catch(() => {});
   const cfg = await onecli.getContainerConfig({ agent: DRAFTER_AGENT_ID });
   const rawProxy = cfg.env.HTTPS_PROXY ?? cfg.env.HTTP_PROXY;
   if (!rawProxy) throw new DraftError('OneCLI gateway returned no proxy URL', 503);
@@ -216,14 +221,14 @@ async function buildDrafterTransport(): Promise<{
 
 /** Drop the cached transport — invoked on 401 (likely stale token / mode). */
 function invalidateTransportCache(): void {
+  const superseded = cachedTransport;
   cachedTransport = null;
+  if (superseded) void superseded.dispatcher.close().catch(() => {});
 }
 
 /**
  * One Anthropic Messages call routed through the OneCLI proxy — the shared
  * host-side credentialed path (the host never holds a raw Anthropic key).
- * Used by the drafter below and by the approval pre-judge
- * (src/modules/approvals/prejudge.ts) for anthropic-kind judge models.
  * Reuses the drafter's OneCLI identity + transport cache; throws DraftError
  * on any failure (callers either surface it or fail safe). Returns the
  * response's joined text content.
@@ -295,11 +300,12 @@ export async function anthropicMessagesViaOneCLI(call: AnthropicMessagesCall): P
     throw new DraftError(`Anthropic upstream returned ${res.status}`, 502);
   }
 
-  // Read response as text first so we can size-cap before JSON.parse.
-  // 16 KB is far above what these small max_tokens budgets can produce,
-  // but caps a misbehaving upstream from filling memory if it ever happens.
+  // Buffer the body, then reject anything oversized before JSON.parse. 16 KB is
+  // far above what these small max_tokens budgets produce; the cap is a
+  // backstop against a misbehaving upstream, not a streaming memory bound (the
+  // body is fully read first — acceptable given the tiny expected size).
   const rawResponseText = await res.text();
-  if (rawResponseText.length > MAX_RESPONSE_BYTES) {
+  if (Buffer.byteLength(rawResponseText) > MAX_RESPONSE_BYTES) {
     throw new DraftError('Anthropic upstream returned an oversized response', 502);
   }
   let responseBody: { content?: Array<{ type: string; text?: string }> };
@@ -405,7 +411,8 @@ async function runDraftViaModel(prompt: string, model: WebchatModel): Promise<Dr
     throw new DraftError(`Drafter model returned ${res.status}`, 502);
   }
   const raw = await res.text();
-  if (raw.length > MAX_RESPONSE_BYTES) throw new DraftError('Drafter upstream returned an oversized response', 502);
+  if (Buffer.byteLength(raw) > MAX_RESPONSE_BYTES)
+    throw new DraftError('Drafter upstream returned an oversized response', 502);
   let body: { choices?: Array<{ message?: { content?: string } }> };
   try {
     body = JSON.parse(raw);

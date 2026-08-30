@@ -137,7 +137,12 @@ export function _resetPullsForTest(): void {
  * unambiguously invalid in an Ollama ref, so stripping it is safe.
  */
 export function normalizeOllamaModelName(raw: string): string {
-  return raw.trim().toLowerCase().replace(/\s+/g, '');
+  const trimmed = raw.trim().replace(/\s+/g, '');
+  // Path-style refs (hf.co/<Org>/<Repo-GGUF>) are CASE-SENSITIVE and appear
+  // mixed-case in /api/tags, so lowercasing one the UI just listed would send a
+  // name the daemon can't match. Only lowercase bare registry short refs, where
+  // it forgives a natural typo like "Qwen3:8B".
+  return trimmed.includes('/') ? trimmed : trimmed.toLowerCase();
 }
 
 /**
@@ -197,14 +202,20 @@ export async function startPull(host: string, rawModel: string): Promise<PullJob
       signal: abort.signal,
     });
   } catch (err) {
-    pullAborts.delete(key);
-    job.status = 'error';
-    job.error = err instanceof Error ? err.message : String(err);
+    // Only reclaim the slot if it's still ours (a cancel during this await
+    // may already have cleared it and started nothing new).
+    if (pullAborts.get(key) === abort) pullAborts.delete(key);
+    // A cancel during the initial connect aborts this fetch; don't overwrite
+    // the 'cancelled' status cancelPull set with a spurious 'error'.
+    if (job.status !== 'cancelled') {
+      job.status = 'error';
+      job.error = err instanceof Error ? err.message : String(err);
+    }
     job.finishedAt = Date.now();
     throw err;
   }
 
-  void consumePullStream(job, res, key);
+  void consumePullStream(job, res, key, abort);
   return job;
 }
 
@@ -230,7 +241,7 @@ export function cancelPull(host: string, rawModel: string): boolean {
   return true;
 }
 
-async function consumePullStream(job: PullJob, res: Response, key: string): Promise<void> {
+async function consumePullStream(job: PullJob, res: Response, key: string, abort: AbortController): Promise<void> {
   try {
     if (!res.ok || !res.body) {
       // A 400/404 here almost always means the model ref doesn't exist in the
@@ -284,7 +295,10 @@ async function consumePullStream(job: PullJob, res: Response, key: string): Prom
     job.status = 'error';
     job.error = err instanceof Error ? err.message : String(err);
   } finally {
-    pullAborts.delete(key);
+    // Ownership check: a cancel-then-repull for the same model installs a fresh
+    // controller under this key; deleting unconditionally would strand the new
+    // pull uncancellable. Only clear the slot if it's still ours.
+    if (pullAborts.get(key) === abort) pullAborts.delete(key);
     if (job.status !== 'cancelled') job.finishedAt = Date.now();
   }
 }
@@ -316,6 +330,10 @@ function installChainEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
  * Stops on the first non-zero exit or thrown callback. Shared by the roster
  * refresh and the routing install so the spawn/log boilerplate lives once.
  */
+// A single install step may legitimately run long (a multi-GB model/tarball
+// download), but not forever; past this it's a stall, not progress.
+const STEP_TIMEOUT_MS = 30 * 60 * 1000;
+
 function runInstallChain(state: InstallState, steps: InstallStep[], root: string): void {
   // Line-buffered append. Chunks rarely align with lines: progress output
   // (health-check dots, docker/ollama status) arrives newline-free or
@@ -382,13 +400,22 @@ function runInstallChain(state: InstallState, steps: InstallStep[], root: string
     const child = spawn(cmd, args, { cwd: root, env: installChainEnv(step.env) });
     child.stdout.on('data', append);
     child.stderr.on('data', append);
+    let closed = false;
+    // Watchdog: a stalled step (dead network, wedged package manager) would
+    // otherwise leave state.running=true forever, so every retry returns
+    // 'already-running' with no recovery short of a host restart. Kill it.
+    const watchdog = setTimeout(() => {
+      if (closed) return;
+      append(`✗ step timed out after ${Math.round(STEP_TIMEOUT_MS / 60000)} min — aborting\n`);
+      child.kill('SIGKILL');
+    }, STEP_TIMEOUT_MS);
     // A missing binary (ENOENT — e.g. node/pnpm not on the service PATH) emits
     // 'error', not 'close'. Without this listener it becomes an uncaughtException
     // → process.exit(1), taking down the whole host on one install click.
-    let closed = false;
     child.on('error', (err) => {
       if (closed) return;
       closed = true;
+      clearTimeout(watchdog);
       append(`✗ ${err instanceof Error ? err.message : String(err)}\n`);
       flush();
       fail(1);
@@ -396,6 +423,7 @@ function runInstallChain(state: InstallState, steps: InstallStep[], root: string
     child.on('close', (code) => {
       if (closed) return; // 'error' already finalized this step
       closed = true;
+      clearTimeout(watchdog);
       flush();
       if (code !== 0) return fail(code ?? 1);
       runStep(i + 1);
@@ -408,7 +436,7 @@ function runInstallChain(state: InstallState, steps: InstallStep[], root: string
 export function upsertEnv(root: string, key: string, val: string): void {
   const envFile = path.join(root, '.env');
   // Strip CR/LF so a value can never inject an extra KEY=value line (e.g. a
-  // crafted ElevenLabs key rebinding WEBCHAT_HOST). Keys here are constants.
+  // crafted value rebinding WEBCHAT_HOST). Keys here are constants.
   const safeVal = String(val).replace(/[\r\n]/g, '');
   let raw = fs.existsSync(envFile) ? fs.readFileSync(envFile, 'utf8') : '';
   raw = raw
@@ -418,7 +446,7 @@ export function upsertEnv(root: string, key: string, val: string): void {
   if (raw && !raw.endsWith('\n')) raw += '\n';
   fs.writeFileSync(envFile, raw + `${key}=${safeVal}\n`, { mode: 0o600 });
   // mode only applies on create; force 0600 on the (usual) pre-existing file so
-  // WEBCHAT_STT_API_KEY never lands in a group/world-readable .env.
+  // a secret value (e.g. WEBCHAT_TOKEN) never lands in a group/world-readable .env.
   try {
     fs.chmodSync(envFile, 0o600);
   } catch {
@@ -551,7 +579,7 @@ mkdir -p "$HOME/.local"
 tmp="/tmp/ollama-dl-$arch.tar.zst"
 total=$(curl -sIL --max-time 15 "$url" | tr -d "\r" | awk 'tolower($1)=="content-length:"{s=$2} END{print int(s/1048576)}')
 echo "downloading $url (~\${total:-?} MB, resuming if partial) …"
-curl -fSL -C - --no-progress-meter -o "$tmp" "$url" &
+curl -fSL -C - --speed-time 60 --speed-limit 1024 --no-progress-meter -o "$tmp" "$url" &
 dl=$!
 while kill -0 "$dl" 2>/dev/null; do
   sleep 5
@@ -586,6 +614,7 @@ else
   echo "no systemd session — starting ollama with nohup …"
   OLLAMA_HOST=0.0.0.0 nohup "$bin" serve >/tmp/ollama.log 2>&1 &
 fi
+echo "note: Ollama binds 0.0.0.0:11434 so agent containers can reach it — this exposes it to your LAN; firewall the port if the host is on an untrusted network."
 echo "waiting for Ollama to come up …"
 for i in $(seq 1 60); do
   curl -sf http://127.0.0.1:11434/api/tags >/dev/null && { echo "Ollama is running."; exit 0; }

@@ -325,15 +325,9 @@ export async function findActiveAgentForWebchatRoom(roomId: string): Promise<Web
 }
 
 // ── Prime agent designation ─────────────────────────────────────────────────
-// v1: the room's single wired agent IS the prime. The table stays because the
-// wiring routes (server/agent-wiring.ts) stamp engage patterns off it.
-
-export async function getPrimeAgentForWebchatRoom(roomId: string): Promise<string | null> {
-  const row = (await getDb().get(`SELECT agent_group_id FROM webchat_room_primes WHERE room_id = ?`, roomId)) as
-    | { agent_group_id: string }
-    | undefined;
-  return row?.agent_group_id ?? null;
-}
+// v1: the room's single wired agent IS the prime. setPrime is stamped by
+// wireAgentToRoom (server.ts); deleting an agent clears any prime rows that
+// pointed at it so getPrime never returns a ghost.
 
 export async function setPrimeAgentForWebchatRoom(roomId: string, agentGroupId: string): Promise<void> {
   await getDb().run(
@@ -346,8 +340,8 @@ export async function setPrimeAgentForWebchatRoom(roomId: string, agentGroupId: 
   );
 }
 
-export async function clearPrimeAgentForWebchatRoom(roomId: string): Promise<void> {
-  await getDb().run(`DELETE FROM webchat_room_primes WHERE room_id = ?`, roomId);
+export async function clearPrimeAgentForAgentGroup(agentGroupId: string): Promise<void> {
+  await getDb().run(`DELETE FROM webchat_room_primes WHERE agent_group_id = ?`, agentGroupId);
 }
 
 // ── Messages ────────────────────────────────────────────────────────────────
@@ -491,16 +485,20 @@ export async function getWebchatMessagesAfterId(
   afterId: string,
   limit = 500,
 ): Promise<WebchatMessage[]> {
-  const anchor = (await getDb().get(`SELECT created_at FROM webchat_messages WHERE id = ?`, afterId)) as
-    | { created_at: number }
+  const anchor = (await getDb().get(`SELECT created_at, id FROM webchat_messages WHERE id = ?`, afterId)) as
+    | { created_at: number; id: string }
     | undefined;
   if (!anchor) return [];
+  // (created_at, id) keyset: same-millisecond siblings tie-break on id instead
+  // of being dropped by a strict created_at comparison.
   const rows = (await getDb().all(
     `SELECT * FROM webchat_messages
-       WHERE room_id = ? AND created_at > ?
-       ORDER BY created_at LIMIT ?`,
+       WHERE room_id = ? AND (created_at > ? OR (created_at = ? AND id > ?))
+       ORDER BY created_at, id LIMIT ?`,
     roomId,
     anchor.created_at,
+    anchor.created_at,
+    anchor.id,
     limit,
   )) as WebchatMessageRow[];
   return rows.map(rowToMessage);
@@ -517,16 +515,18 @@ export async function getWebchatMessagesBeforeId(
   beforeId: string,
   limit = 50,
 ): Promise<WebchatMessage[]> {
-  const anchor = (await getDb().get(`SELECT created_at FROM webchat_messages WHERE id = ?`, beforeId)) as
-    | { created_at: number }
+  const anchor = (await getDb().get(`SELECT created_at, id FROM webchat_messages WHERE id = ?`, beforeId)) as
+    | { created_at: number; id: string }
     | undefined;
   if (!anchor) return [];
   const rows = (await getDb().all(
     `SELECT * FROM webchat_messages
-       WHERE room_id = ? AND created_at < ?
-       ORDER BY created_at DESC LIMIT ?`,
+       WHERE room_id = ? AND (created_at < ? OR (created_at = ? AND id < ?))
+       ORDER BY created_at DESC, id DESC LIMIT ?`,
     roomId,
     anchor.created_at,
+    anchor.created_at,
+    anchor.id,
     limit,
   )) as WebchatMessageRow[];
   return rows.reverse().map(rowToMessage);

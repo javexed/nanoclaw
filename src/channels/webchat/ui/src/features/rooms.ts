@@ -1,5 +1,5 @@
 // ── Room list + join ─────────────────────────────────────────────────────────
-import { $, esc } from '../core/dom.js';
+import { $ } from '../core/dom.js';
 import { apiJson } from '../core/api.js';
 import { showToast, toastError } from '../core/toast.js';
 import { confirmDialog } from '../core/confirm.js';
@@ -68,6 +68,10 @@ export function joinRoom(roomId: string, roomName: string): void {
 
 /** Back to the no-room state — after deleting, or when the room vanishes. */
 export function leaveRoom(): void {
+  // Tidy an open rename editor (title element stays in the DOM, only hidden).
+  const editing = document.getElementById('room-title-edit');
+  if (editing) editing.remove();
+  $('#room-title')!.hidden = false;
   state.currentRoom = null;
   state.currentRoomName = '';
   localStorage.removeItem('lastRoom');
@@ -87,11 +91,14 @@ export function wireRoomRename(): void {
   const title = $('#room-title')!;
   title.title = 'Click to rename';
   title.addEventListener('click', () => {
-    if (!state.currentRoom) return;
+    if (!state.currentRoom || document.getElementById('room-title-edit')) return;
     const input = document.createElement('input');
     input.id = 'room-title-edit';
     input.value = state.currentRoomName;
-    title.replaceWith(input);
+    // Insert as a sibling and hide the title rather than detaching it, so
+    // leaveRoom (delete from another tab mid-edit) can always reach #room-title.
+    title.hidden = true;
+    title.after(input);
     input.focus();
     input.select();
     let done = false;
@@ -99,10 +106,13 @@ export function wireRoomRename(): void {
       if (done) return;
       done = true;
       const name = input.value.trim();
-      input.replaceWith(title);
-      if (!save || !name || name === state.currentRoomName) return;
+      const room = state.currentRoom; // pin: don't rename whatever room is open when this resolves
+      input.remove();
+      title.hidden = false;
+      if (!save || !name || !room || name === state.currentRoomName) return;
       try {
-        await apiJson(`/api/rooms/${encodeURIComponent(state.currentRoom!)}/name`, { method: 'PUT', body: { name } });
+        await apiJson(`/api/rooms/${encodeURIComponent(room)}/name`, { method: 'PUT', body: { name } });
+        if (state.currentRoom !== room) return; // switched away mid-request
         state.currentRoomName = name;
         title.textContent = name;
         showToast('Room renamed', { kind: 'success' });
@@ -189,5 +199,3 @@ export function wireRoomCreate(): void {
     }
   });
 }
-
-export { esc };

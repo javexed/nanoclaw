@@ -298,7 +298,13 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
   });
 
   const adapter = getDeliveryAdapter();
-  if (adapter) {
+  if (!adapter) {
+    // No delivery adapter → no card was sent. Firing the "card delivered"
+    // listener here would announce an inbox card that doesn't exist.
+    log.warn('Approval requested but no delivery adapter is registered', { action, approvalId });
+    return;
+  }
+  {
     try {
       await adapter.deliver(
         target.messagingGroup.channel_type,

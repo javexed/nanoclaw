@@ -375,12 +375,29 @@ function extractAttachmentFiles(
     // require that: an adapter may hand over files it staged, nothing else.
     let hostPath: string | null = null;
     if (rawHostPath !== null) {
-      const resolved = path.resolve(rawHostPath);
-      if (!isPathInside(path.resolve(DATA_DIR), resolved)) {
-        log.warn('Refused attachment hostPath outside the data dir', { messageId, hostPath: rawHostPath });
+      // Scope to the attachment-staging root, not all of DATA_DIR — the latter
+      // also holds every session's DBs and the central v2.db, so a symlink
+      // staged there pointing at a sibling's data would exfiltrate it into this
+      // inbox. lstat+realpath reject a source symlink and re-check the REAL
+      // target (path.resolve alone is lexical and symlink-blind), matching the
+      // outbox-read discipline below.
+      const stagingRoot = path.resolve(DATA_DIR, 'webchat', 'uploads');
+      try {
+        const lst = fs.lstatSync(rawHostPath);
+        if (!lst.isFile() || lst.isSymbolicLink()) {
+          log.warn('Refused non-file / symlink attachment hostPath', { messageId, hostPath: rawHostPath });
+          continue;
+        }
+        const real = fs.realpathSync(rawHostPath);
+        if (!isPathInside(stagingRoot, real)) {
+          log.warn('Refused attachment hostPath outside the staging root', { messageId, hostPath: rawHostPath });
+          continue;
+        }
+        hostPath = real;
+      } catch {
+        log.warn('Refused unreadable attachment hostPath', { messageId, hostPath: rawHostPath });
         continue;
       }
-      hostPath = resolved;
     }
 
     const rawName = deriveAttachmentName(att);

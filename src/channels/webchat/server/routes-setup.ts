@@ -77,6 +77,8 @@ export async function rBearerGeneratePost({ res, userId }: RouteCtx): Promise<vo
   // 24 random bytes → 32 base64url chars, comfortably over the 24-char floor.
   const token = randomBytes(24).toString('base64url');
   upsertEnv(process.cwd(), 'WEBCHAT_TOKEN', token);
+  // A token only matters if the port is reachable — opening the bind is the
+  // point. This is disclosed in the response so the UI can warn, not silent.
   upsertEnv(process.cwd(), 'WEBCHAT_HOST', '0.0.0.0');
   try {
     await grantRole({
@@ -89,7 +91,7 @@ export async function rBearerGeneratePost({ res, userId }: RouteCtx): Promise<vo
   } catch {
     /* already granted — idempotent enough */
   }
-  return json(res, 200, { token, restartRequired: true });
+  return json(res, 200, { token, restartRequired: true, bindsAllInterfaces: true });
 }
 
 /**

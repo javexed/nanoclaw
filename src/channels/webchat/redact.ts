@@ -84,6 +84,20 @@ function maskValue(value: string, label: string, keep?: { prefix?: number; suffi
  * Scan text for sensitive patterns and replace them with masked versions.
  * Returns the original text if nothing sensitive is found.
  */
+/**
+ * Redact only message types whose content is free-form prose. Approval cards
+ * (`approval`/`approval_resolved`) store JSON in `content`; running the greedy
+ * secret patterns over it eats the closing quote and yields invalid JSON,
+ * breaking exactly the credential approvals the patterns would trip on.
+ */
+export function redactMessageContent(
+  messageType: 'text' | 'file' | 'approval' | 'approval_resolved' | 'context-divider',
+  content: string,
+): string {
+  if (messageType === 'text' || messageType === 'file') return redactSensitiveData(content);
+  return content;
+}
+
 export function redactSensitiveData(text: string): string {
   let result = text;
   for (const { pattern, label, keep } of PATTERNS) {

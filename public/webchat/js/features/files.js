@@ -15,6 +15,10 @@ function uploadFile(file) {
     const input = $('#composer-input');
     const caption = input.value.trim();
     input.value = '';
+    const restoreCaption = () => {
+        if (caption && !input.value)
+            input.value = caption; // give the typed caption back on failure
+    };
     const row = document.createElement('div');
     row.className = 'msg mine';
     const bubble = document.createElement('div');
@@ -48,11 +52,13 @@ function uploadFile(file) {
             catch {
                 /* keep status */
             }
+            restoreCaption();
             toastError(new Error(detail), 'Upload failed');
         }
     };
     xhr.onerror = () => {
         row.remove();
+        restoreCaption();
         toastError(new Error('Network error'), 'Upload failed');
     };
     xhr.send(form);

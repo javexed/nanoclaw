@@ -121,10 +121,22 @@ pnpm exec tsx scripts/upgrade-state.ts set
 [ -f .env ] || touch .env
 env_has() { grep -q "^$1=" .env; }
 env_set() { env_has "$1" || printf '%s=%s\n' "$1" "$2" >> .env; }
+# Authoritative upsert: overwrite an existing value. The bind/port keys MUST be
+# force-set — an add-if-missing left a prior deploy's WEBCHAT_HOST=0.0.0.0 in
+# place while the banner claimed "localhost only", misrepresenting exposure.
+env_force() {
+  if env_has "$1"; then
+    local tmp
+    tmp="$(grep -v "^$1=" .env)"
+    printf '%s\n%s=%s\n' "$tmp" "$1" "$2" > .env
+  else
+    printf '%s=%s\n' "$1" "$2" >> .env
+  fi
+}
 
 env_set WEBCHAT_ENABLED true
-env_set WEBCHAT_HOST "$HOST"
-env_set WEBCHAT_PORT "$PORT"
+env_force WEBCHAT_HOST "$HOST"
+env_force WEBCHAT_PORT "$PORT"
 # Bearer token: LAN-exposed, so the server needs one; the first browser login
 # becomes owner. Preserve any existing token (rotating it locks out current
 # logins); else use --token; else generate.
@@ -135,6 +147,10 @@ env_set WEBCHAT_PORT "$PORT"
 if [ "$LOCALHOST" != 1 ] && ! env_has WEBCHAT_TOKEN; then
   [ -n "$TOKEN" ] || TOKEN=$(head -c 24 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)
   env_set WEBCHAT_TOKEN "$TOKEN"
+elif [ "$LOCALHOST" = 1 ] && [ -n "$TOKEN" ]; then
+  # An explicit --token wins even in localhost mode (the "explicit auth after
+  # --localhost still applies" contract); it disables the loopback auto-owner.
+  env_force WEBCHAT_TOKEN "$TOKEN"
 fi
 # Tailscale identity up front: reach this over the tailnet and the first Tailscale
 # login becomes owner. Harmless when unused — the bearer token is checked first.
@@ -215,7 +231,7 @@ PLIST
   launchctl unload "$PLIST" 2>/dev/null || true
   launchctl load "$PLIST"
   say "Installed + started ${LABEL} as a launchd LaunchAgent"
-elif [ "$SERVICE" = 1 ] && [ "$(id -u)" = 0 ] && command -v systemctl >/dev/null 2>&1; then
+elif [ "$SERVICE" = 1 ] && [ "$LOCALHOST" != 1 ] && [ "$(id -u)" = 0 ] && command -v systemctl >/dev/null 2>&1; then
   NODE_BIN="$(command -v node)"
   cat >"/etc/systemd/system/${UNIT_NAME}.service" <<UNIT
 [Unit]
@@ -283,7 +299,11 @@ fi
 echo ""
 if [ "$LOCALHOST" = 1 ]; then
   echo "✓ NanoClaw webchat deployed on 127.0.0.1:${PORT} (localhost only)."
-  echo "  Open http://127.0.0.1:${PORT}/ — you're signed in as owner automatically."
+  if grep -q "^WEBCHAT_TOKEN=" .env; then
+    echo "  A bearer token is set, so log in with it (the loopback auto-owner is off): $(grep '^WEBCHAT_TOKEN=' .env | cut -d= -f2-)"
+  else
+    echo "  Open http://127.0.0.1:${PORT}/ — you're signed in as owner automatically."
+  fi
 else
   TOKEN_OUT=$(grep '^WEBCHAT_TOKEN=' .env | cut -d= -f2- || true)
   echo "✓ NanoClaw webchat deployed on ${HOST}:${PORT}."

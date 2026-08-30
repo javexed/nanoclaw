@@ -17,7 +17,7 @@ import { log } from '../../log.js';
 import type { InboundMessage } from '../adapter.js';
 import { WSClient, clients, addClient, removeClient, broadcast, annotateRooms, getActiveTurns } from './state.js';
 import { deleteWebchatMessage, getWebchatMessages, getWebchatRoom, storeWebchatMessage } from './db.js';
-import { redactSensitiveData } from './redact.js';
+import { redactMessageContent } from './redact.js';
 import { getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import { getRunningSessions } from '../../db/sessions.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
@@ -222,7 +222,7 @@ export function setupWebSocket(
           room_id: room.id,
           messages: (await getWebchatMessages(room.id, 50)).map((m) => ({
             ...m,
-            content: redactSensitiveData(m.content),
+            content: redactMessageContent(m.message_type, m.content),
           })),
         });
         // Replay any in-progress agent turn so a re-join mid-turn re-shows the
@@ -277,7 +277,7 @@ export function setupWebSocket(
           },
         });
 
-        send({ ...outgoing, content: redactSensitiveData(stored.content) });
+        send({ ...outgoing, content: redactMessageContent(stored.message_type, stored.content) });
         return;
       }
 

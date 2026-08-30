@@ -55,6 +55,9 @@ export function setStatusAdapter(a: StatusAdapter): void {
  * (including all activity in subsequent turns, since seq is monotonic) flows.
  */
 const watermarks = new Map<string, number>();
+// Guards against the 1s active poll and 60s sweep poll forwarding a session's
+// frames concurrently (delivery.ts calls this after each deliverSessionMessages).
+const sweeping = new Set<string>();
 
 /**
  * Sessions with a turn currently in progress (a 'start' was forwarded, no
@@ -91,7 +94,18 @@ function openOutboundReadonly(session: Session): Database.Database | null {
  */
 export async function agentStatusSweep(session: Session): Promise<void> {
   if (!adapter?.sendStatus) return;
+  if (sweeping.has(session.id)) return; // a concurrent poll is already draining this session
+  sweeping.add(session.id);
+  try {
+    await agentStatusSweepInner(session);
+  } finally {
+    sweeping.delete(session.id);
+  }
+}
 
+async function agentStatusSweepInner(session: Session): Promise<void> {
+  const sendStatus = adapter?.sendStatus;
+  if (!sendStatus) return;
   const mg = await (session.messaging_group_id ? getMessagingGroup(session.messaging_group_id) : undefined);
   if (!mg || !mg.platform_id) return;
 
@@ -124,10 +138,10 @@ export async function agentStatusSweep(session: Session): Promise<void> {
             cleared.delete(session.id); // a fresh turn re-arms reconcile
           } else if (kind === 'done') turnActive.delete(session.id);
           try {
-            await adapter.sendStatus(
+            await sendStatus(
               mg.channel_type,
               mg.platform_id,
-              null,
+              session.thread_id ?? null,
               { kind, text: ev.text, detail: ev.detail, agentName },
               mg.instance,
             );
@@ -174,7 +188,7 @@ async function reconcileStaleBubble(
     await adapter.sendStatus(
       mg.channel_type,
       mg.platform_id,
-      null,
+      session.thread_id ?? null,
       { kind: 'done', text: null, detail: null, agentName },
       mg.instance,
     );
@@ -190,8 +204,13 @@ async function reconcileStaleBubble(
  * an explanation instead of vanishing silently. Clean idle exits no-op.
  */
 export async function notifySessionStopped(session: Session): Promise<void> {
-  if (!turnActive.has(session.id)) return; // clean exit, or already handled
+  const wasMidTurn = turnActive.has(session.id);
+  // Container is gone — forget the session so watermarks/turnActive/cleared
+  // don't grow one dead entry per session for the host's lifetime.
+  watermarks.delete(session.id);
   turnActive.delete(session.id);
+  cleared.delete(session.id);
+  if (!wasMidTurn) return; // clean exit — nothing to warn about
   if (!adapter?.sendStatus) return;
 
   const mg = await (session.messaging_group_id ? getMessagingGroup(session.messaging_group_id) : undefined);
@@ -201,7 +220,7 @@ export async function notifySessionStopped(session: Session): Promise<void> {
     await adapter.sendStatus(
       mg.channel_type,
       mg.platform_id,
-      null,
+      session.thread_id ?? null,
       {
         kind: 'stalled',
         text: 'The agent stopped responding. You may want to resend your message.',
@@ -213,13 +232,6 @@ export async function notifySessionStopped(session: Session): Promise<void> {
   } catch {
     // Best-effort.
   }
-}
-
-/** Forget a session's tracking when it's torn down so the maps can't leak. */
-export function stopSessionStatus(sessionId: string): void {
-  watermarks.delete(sessionId);
-  turnActive.delete(sessionId);
-  cleared.delete(sessionId);
 }
 
 // ── status_events readers ────────────────────────────────────────────────────

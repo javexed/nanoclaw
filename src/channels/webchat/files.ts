@@ -258,7 +258,15 @@ export function handleFileServe(res: http.ServerResponse, roomId: string, filena
   // Path-traversal guard: the URL roomId is sanitized at write time, so
   // refuse anything that looks unsafe here too. Filenames are uuid+ext we
   // generated; reject suspicious shapes.
-  if (filename.includes('..') || filename.includes('/') || roomId.includes('..') || roomId.includes('/')) {
+  if (
+    !filename ||
+    !roomId ||
+    filename === '.' ||
+    filename.includes('..') ||
+    filename.includes('/') ||
+    roomId.includes('..') ||
+    roomId.includes('/')
+  ) {
     res.writeHead(403);
     res.end();
     return;
@@ -270,6 +278,11 @@ export function handleFileServe(res: http.ServerResponse, roomId: string, filena
   try {
     stat = fs.statSync(filePath);
   } catch {
+    return json(res, 404, { error: 'File not found' });
+  }
+  // A directory (e.g. filename '.') would make createReadStream throw EISDIR
+  // with no listener — an unhandled 'error' event exits the whole process.
+  if (!stat.isFile()) {
     return json(res, 404, { error: 'File not found' });
   }
   // Strip CR/LF/quote/backslash from the filename before inlining into a
@@ -285,5 +298,13 @@ export function handleFileServe(res: http.ServerResponse, roomId: string, filena
     'Content-Security-Policy': 'sandbox',
     'X-Content-Type-Options': 'nosniff',
   });
-  fs.createReadStream(filePath).pipe(res);
+  const stream = fs.createReadStream(filePath);
+  // A stat/open race (file deleted mid-request) or any read error must not
+  // become an unhandled 'error' event — that reaches the global handler and
+  // exits the host process.
+  stream.on('error', () => {
+    if (!res.headersSent) res.writeHead(500);
+    res.end();
+  });
+  stream.pipe(res);
 }

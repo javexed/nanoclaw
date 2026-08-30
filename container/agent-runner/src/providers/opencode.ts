@@ -125,6 +125,10 @@ function buildOpenCodeConfig(options: ProviderOptions): Record<string, unknown> 
   const provider = process.env.OPENCODE_PROVIDER || 'anthropic';
   const model = process.env.OPENCODE_MODEL;
   const smallModel = process.env.OPENCODE_SMALL_MODEL;
+  // ANTHROPIC_BASE_URL is the wire-contract name the host maps cfg.baseURL to;
+  // for a non-Anthropic OpenCode provider it carries the LOCAL endpoint's base
+  // URL (Ollama / OpenAI-compat), not an Anthropic host. Named for the SDK var,
+  // not the provider.
   const proxyUrl = process.env.ANTHROPIC_BASE_URL;
 
   const providerModelId = model ? model.replace(new RegExp(`^${provider}/`), '') : undefined;
@@ -224,6 +228,7 @@ type SharedRuntime = {
 let sharedRuntime: SharedRuntime | null = null;
 let sharedConfigKey: string | null = null;
 let sharedInit: Promise<SharedRuntime> | null = null;
+let sharedInitKey: string | null = null;
 
 function runtimeConfigKey(options: ProviderOptions): string {
   return JSON.stringify({
@@ -238,8 +243,11 @@ async function ensureSharedRuntime(options: ProviderOptions): Promise<SharedRunt
   const key = runtimeConfigKey(options);
   if (sharedRuntime && sharedConfigKey === key) return sharedRuntime;
 
-  if (sharedInit) return sharedInit;
+  // Only join an in-flight init if it's for the SAME config — otherwise a
+  // differing key would silently receive the old-config runtime.
+  if (sharedInit && sharedInitKey === key) return sharedInit;
 
+  sharedInitKey = key;
   sharedInit = (async () => {
     if (sharedRuntime) {
       destroySharedRuntime();
@@ -259,6 +267,7 @@ async function ensureSharedRuntime(options: ProviderOptions): Promise<SharedRunt
     };
     sharedConfigKey = key;
     sharedInit = null;
+    sharedInitKey = null;
     return sharedRuntime;
   })();
 
@@ -277,6 +286,7 @@ export function destroySharedRuntime(): void {
     sharedConfigKey = null;
   }
   sharedInit = null;
+  sharedInitKey = null;
 }
 
 function sessionErrorMessage(props: { error?: unknown }): string {
@@ -413,7 +423,12 @@ export class OpenCodeProvider implements AgentProvider {
 
             switch (ev.type) {
               case 'message.updated': {
-                const info = ev.properties.info as { id?: string; role?: string } | undefined;
+                const info = ev.properties.info as { id?: string; role?: string; sessionID?: string } | undefined;
+                // Filter to this turn's session: the SSE stream is shared across
+                // turns, and events buffered past session.idle would otherwise
+                // seed the NEXT turn's maps with the previous turn's assistant
+                // text (duplicate reply + defeated stall-retry).
+                if (info?.sessionID !== sessionId) break;
                 if (info?.id && info?.role) {
                   roleByMessageId.set(info.id, info.role);
                 }
@@ -425,12 +440,14 @@ export class OpenCodeProvider implements AgentProvider {
                       type?: string;
                       id?: string;
                       messageID?: string;
+                      sessionID?: string;
                       text?: string;
                       tool?: string;
                       callID?: string;
                       state?: { status?: string; input?: Record<string, unknown> };
                     }
                   | undefined;
+                if (part?.sessionID !== sessionId) break; // ignore other turns' buffered parts
                 if (part?.type === 'text' && part.messageID && part.text) {
                   partTextByMessageId.set(part.messageID, part.text);
                 } else if (part?.type === 'reasoning' && part.id && typeof part.text === 'string') {

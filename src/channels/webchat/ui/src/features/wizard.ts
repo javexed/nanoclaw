@@ -322,6 +322,7 @@ function buildLocalModels(): HTMLElement {
     installBtn.textContent = 'Installing…';
     installErr.textContent = '';
     await apiJson('/api/ollama/install', { method: 'POST' }).catch((e) => toastError(e, 'Install failed to start'));
+    if (pullTimer) clearInterval(pullTimer);
     pullTimer = setInterval(async () => {
       const st = (await apiJson('/api/ollama/local').catch(() => null)) as {
         reachable?: boolean;
@@ -469,6 +470,7 @@ function buildLocalModels(): HTMLElement {
     pullBtn.disabled = true;
     try {
       await apiJson('/api/ollama/pull', { method: 'POST', body: { host: 'http://127.0.0.1:11434', model } });
+      if (pullTimer) clearInterval(pullTimer);
       pullTimer = setInterval(async () => {
         const { pulls } = (await apiJson('/api/ollama/pulls').catch(() => ({ pulls: [] }))) as {
           pulls: Array<{ model: string; status: string; completed?: number; total?: number; error?: string | null }>;
@@ -634,7 +636,9 @@ function renderAccess(): HTMLElement {
     if (disarm) clearTimeout(disarm);
     bBtn.disabled = true;
     try {
-      const { token } = (await apiJson('/api/webchat/auth/bearer/generate', { method: 'POST' })) as { token: string };
+      const { token } = (await apiJson('/api/webchat/auth/bearer/generate', { method: 'POST' })) as {
+        token: string;
+      };
       const tokenBox = document.createElement('code');
       tokenBox.className = 'wiz-token';
       tokenBox.textContent = token;
@@ -654,7 +658,7 @@ function renderAccess(): HTMLElement {
       row.className = 'wiz-token-row';
       row.append(tokenBox, copyBtn);
       bDesc.textContent =
-        'Save this token now — it is shown once. It becomes active after the restart at the end of the wizard.';
+        'Save this token now — it is shown once. This also opens the port to your network (binds 0.0.0.0); it becomes active after the restart at the end of the wizard.';
       bearer.insertBefore(row, bBtn);
       bBtn.remove(); // spent — the token row replaces it
     } catch (err) {

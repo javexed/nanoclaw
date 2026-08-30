@@ -11,6 +11,9 @@
  * terminal-emulated reconstruction of the screen, and stores it in the vault.
  */
 import { spawn, execFile, type ChildProcessWithoutNullStreams } from 'child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { randomUUID } from 'crypto';
 
 import { log } from '../../log.js';
@@ -365,27 +368,46 @@ export async function hasClaudeCredential(): Promise<boolean> {
 }
 
 /**
+ * Hand a secret to onecli via a 0600 temp file rather than --value: process
+ * arguments are world-readable through /proc/<pid>/cmdline while onecli runs,
+ * which would leak the install credential to any local process. onecli reads
+ * the value off disk with --file; the temp file is unlinked immediately.
+ */
+async function withSecretFile<T>(content: string, fn: (path: string) => Promise<T>): Promise<T> {
+  const dir = mkdtempSync(join(tmpdir(), 'nc-secret-'));
+  const path = join(dir, 'value');
+  writeFileSync(path, content, { mode: 0o600 });
+  try {
+    return await fn(path);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
  * Persist the minted token: update the existing anthropic secret in place
  * (agents already reference it) or create the install's first one.
  */
 export async function storeClaudeCredential(token: string): Promise<void> {
   const existing = await listAnthropicSecrets().catch(() => []);
   if (existing.length > 0) {
-    await onecli(['secrets', 'update', '--id', existing[0].id, '--value', token]);
+    await withSecretFile(token, (path) => onecli(['secrets', 'update', '--id', existing[0].id, '--file', path]));
     log.info('Claude sign-in: vault secret updated', { secretId: existing[0].id });
     return;
   }
-  await onecli([
-    'secrets',
-    'create',
-    '--name',
-    'NanoClaw webchat',
-    '--type',
-    'anthropic',
-    '--value',
-    token,
-    '--host-pattern',
-    'api.anthropic.com',
-  ]);
+  await withSecretFile(token, (path) =>
+    onecli([
+      'secrets',
+      'create',
+      '--name',
+      'NanoClaw webchat',
+      '--type',
+      'anthropic',
+      '--file',
+      path,
+      '--host-pattern',
+      'api.anthropic.com',
+    ]),
+  );
   log.info('Claude sign-in: vault secret created');
 }

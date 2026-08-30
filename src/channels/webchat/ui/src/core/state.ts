@@ -43,5 +43,4 @@ export const state = {
 
 export function setLastSeenMessageId(id: string | null): void {
   state.lastSeenMessageId = id;
-  if (id) sessionStorage.setItem('lastSeenMessageId', id);
 }

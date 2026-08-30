@@ -5,7 +5,7 @@
 // was earned by a bug); the DOM building replaces its Vue template.
 import { marked } from '/marked.min.js';
 import DOMPurify from '/dompurify.min.js';
-import { $, esc } from '../core/dom.js';
+import { $ } from '../core/dom.js';
 import { authFetch } from '../core/api.js';
 import { state } from '../core/state.js';
 import { buildApprovalCard } from './approvals.js';
@@ -257,9 +257,14 @@ export function clearMissed() {
 export async function loadOlderMessages() {
     if (!state.currentRoom || !state.oldestMessageId || state.noMoreOlder || state.loadingOlder)
         return;
+    const room = state.currentRoom; // pin: a mid-fetch room switch must not apply here
     state.loadingOlder = true;
     try {
-        const res = await authFetch(`/api/history/${encodeURIComponent(state.currentRoom)}?before=${encodeURIComponent(state.oldestMessageId)}`);
+        const res = await authFetch(`/api/history/${encodeURIComponent(room)}?before=${encodeURIComponent(state.oldestMessageId)}`);
+        // Room changed while the page was in flight — dropping it avoids rendering
+        // room A's history into room B and poisoning B's pagination anchor.
+        if (state.currentRoom !== room)
+            return;
         const data = (await res.json());
         const older = data.messages ?? [];
         if (older.length === 0) {
@@ -311,4 +316,3 @@ export function hideAgentTyping() {
     typingTimer = null;
     $('#typing-line').hidden = true;
 }
-export { esc };

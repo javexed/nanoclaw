@@ -17,7 +17,13 @@ export function showToast(message, { kind = 'info', timeout } = {}) {
         toast.classList.add('toast-out');
         setTimeout(() => toast.remove(), 180);
     };
-    toast.addEventListener('click', remove);
+    // Dismiss on a click of the toast surface itself — not one bubbling up from
+    // an interactive child (e.g. an approval card's buttons), which must own their
+    // own click semantics.
+    toast.addEventListener('click', (e) => {
+        if (e.target === toast)
+            remove();
+    });
     container.appendChild(toast);
     const ms = timeout ?? (kind === 'error' ? 7000 : 4000);
     setTimeout(remove, ms);
