@@ -460,9 +460,16 @@ function buildCustomEndpoint(rosterKeys: Set<string>): HTMLElement {
         nm.className = 'mrow-name';
         nm.textContent = modelId;
         const inRoster = rosterKeys.has(`${resolved}|${modelId}`);
+        if (inRoster) {
+          const mark = document.createElement('span');
+          mark.className = 'min-roster';
+          mark.textContent = '✓ in roster';
+          row.append(nm, mark);
+          results.appendChild(row);
+          continue;
+        }
         const add = document.createElement('button');
-        add.textContent = inRoster ? 'In roster' : 'Add';
-        add.disabled = inRoster;
+        add.textContent = 'Add';
         add.addEventListener('click', async () => {
           add.disabled = true;
           try {
@@ -544,9 +551,19 @@ async function renderOllamaInto(pane: HTMLElement, rosterKeys: Set<string>): Pro
               }
             });
             const inRoster = rosterKeys.has(`${hostSel.value.replace(/\/$/, '')}|${mm.name}`);
+            if (inRoster) {
+              const mark = document.createElement('span');
+              mark.className = 'min-roster';
+              mark.textContent = '✓ in roster';
+              head.append(nm, mark, del);
+              const meta0 = document.createElement('div');
+              meta0.className = 'mrow-meta';
+              meta0.textContent = `${(mm.size / 1e9).toFixed(1)} GB`;
+              row.append(head, meta0);
+              return row;
+            }
             const add = document.createElement('button');
-            add.textContent = inRoster ? 'In roster' : 'Add to roster';
-            add.disabled = inRoster;
+            add.textContent = 'Add to roster';
             add.addEventListener('click', async () => {
               add.disabled = true;
               try {
