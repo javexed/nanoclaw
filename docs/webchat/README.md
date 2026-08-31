@@ -3,6 +3,10 @@
 A single-user chat PWA built into this NanoClaw fork. In-tree — no overlay
 repo, no install skill; `WEBCHAT_ENABLED=true` in `.env` turns it on.
 
+**Using it?** See the [user guide](USAGE.md) — the wizard, the chat surface,
+rooms, the ⚙ management drawer, and access. This page is the operator/
+architecture reference (enable, env, deploy, internals).
+
 The interactive setup (`nanoclaw.sh`) offers this as a yes/no step —
 "Enable the built-in web chat UI?" — ahead of the phone-channel question.
 Choosing yes writes `WEBCHAT_ENABLED=true` + `WEBCHAT_HOST=127.0.0.1`
