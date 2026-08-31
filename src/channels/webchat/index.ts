@@ -28,7 +28,13 @@ import { randomUUID } from 'crypto';
 import { log } from '../../log.js';
 import { createMessagingGroup, getMessagingGroup, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import { registerChannelAdapter } from '../channel-registry.js';
-import type { AgentActivityStatus, ChannelAdapter, ChannelSetup, OutboundMessage } from '../adapter.js';
+import type {
+  AgentActivityStatus,
+  ChannelAdapter,
+  ChannelDefaults,
+  ChannelSetup,
+  OutboundMessage,
+} from '../adapter.js';
 import { redactSensitiveData } from './redact.js';
 import { startWebchatServer, stopWebchatServer, type WebchatServer } from './server.js';
 import {
@@ -55,6 +61,19 @@ import {
 
 export const CHANNEL_TYPE = 'webchat';
 
+// Wiring-time defaults, declared so offline creation paths (setup, ncl,
+// init-first-agent) don't fall back to the legacy static schema. Matches the
+// values wireAgentToRoom / createWebchatRoom actually stamp: one agent per
+// room answering everything (pattern '.'), a shared session (rooms aren't
+// threaded), a public room policy (single-user install — access is the bearer
+// token, not per-sender gating), and no mention concept (there is no @-mention
+// in the web UI; the '.' pattern engages on every message regardless).
+const WEBCHAT_DEFAULTS: ChannelDefaults = {
+  dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'public' },
+  group: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'public' },
+  mentions: 'never',
+};
+
 function isEnabled(): boolean {
   return process.env.WEBCHAT_ENABLED === 'true';
 }
@@ -65,6 +84,7 @@ function createAdapter(): ChannelAdapter {
   const adapter: ChannelAdapter = {
     name: 'webchat',
     channelType: CHANNEL_TYPE,
+    defaults: WEBCHAT_DEFAULTS,
     // A room is ONE conversation with one agent: no thread routing. The
     // router strips thread ids for supportsThreads=false adapters, so a room
     // maps to exactly one session.
@@ -292,4 +312,5 @@ registerApprovalResolvedHandler(async (event) => {
 
 registerChannelAdapter('webchat', {
   factory: () => (isEnabled() ? createAdapter() : null),
+  defaults: WEBCHAT_DEFAULTS,
 });
