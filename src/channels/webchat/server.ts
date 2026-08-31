@@ -5,7 +5,7 @@
  * auth, dispatches a declarative route table, and upgrades /ws to the
  * realtime protocol (ws.ts).
  *
- * The predecessor's server.ts was 4,000 lines carrying ~180 routes; this one
+ * An earlier multi-user server carried far more routes; this one
  * keeps the same skeleton (security headers, pre-auth static serving, route
  * table with guards, in-memory compressed asset cache, SW cache-version
  * stamping) with only the routes the single-user build needs. Management

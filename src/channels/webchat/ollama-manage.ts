@@ -3,7 +3,7 @@
  * to operator-supplied Ollama endpoints go through models.ts's safeFetch SSRF
  * gate.
  *
- * Kept from the predecessor's 2,100-line console: host model listing
+ * Kept from an earlier, larger console: host model listing
  * (/api/tags merged with /api/ps VRAM state), the streamed pull manager with
  * polled progress snapshots, model delete, the install-chain runner (spawned
  * steps with a capped rolling log) plus the rootless local-Ollama and

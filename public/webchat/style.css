@@ -1,5 +1,5 @@
 /* nanoclaw-web — minimal chat stylesheet.
-   One dark theme, mobile-first, ~300 lines against the predecessor's 9,100.
+   One dark theme, mobile-first, kept intentionally small.
    Tokens up top; components stay flat and greppable. */
 
 :root {

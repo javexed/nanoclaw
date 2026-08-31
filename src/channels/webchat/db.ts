@@ -6,7 +6,7 @@
  * routing/delivery still flows through the per-session DBs like every other
  * channel.
  *
- * Ported from nanoclaw-webchat's db.ts (2,462 lines) minus everything the
+ * Trimmed from a larger multi-user db layer, minus everything the
  * single-user build dropped: threads, FTS search, per-user reads/pins/
  * archives/hides/handles, push subscriptions, a2a surfacing, skill drafts,
  * credential modes, template/skill sources, topology.

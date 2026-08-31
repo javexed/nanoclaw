@@ -1,6 +1,6 @@
 // ── Boot ─────────────────────────────────────────────────────────────────────
-// The whole wiring, in order. The predecessor needed a 2,275-line composition
-// root to sequence 150 modules; at this size the order fits on one screen.
+// The whole wiring, in order. An earlier, larger build needed a big composition
+// root to sequence many modules; at this size the order fits on one screen.
 import { ensureAuthenticated } from './features/auth.js';
 import { connect, wireVisibilityReconnect, catchUpSince } from './core/ws.js';
 import { wireComposer } from './features/composer.js';

@@ -1,10 +1,10 @@
 /**
  * Webchat schema — consolidated migrations.
  *
- * The predecessor project (nanoclaw-webchat, the overlay repo) reached this
- * shape through 38 incremental migrations. nanoclaw-web has no installed
- * base to migrate, so the FINAL shapes are declared here directly, in three
- * feature-scoped migrations. Rules carried over from the overlay:
+ * An earlier, multi-user version of this webchat reached its schema through
+ * many incremental migrations. This single-user build has no installed base
+ * to migrate, so the FINAL shapes are declared here directly, in three
+ * feature-scoped migrations. Rules carried over:
  *
  *   - Rooms are NOT a webchat table. A room IS its `messaging_groups` row
  *     (`channel_type = 'webchat'`, `platform_id` = room id) — one source of
