@@ -673,6 +673,44 @@ async function main(): Promise<void> {
   // v1 → v2 migration is handled by `bash migrate-v2.sh`, not the setup flow.
   // Users migrating from v1 run that script before (or instead of) setup.
 
+  // ── Web chat UI ────────────────────────────────────────────────────────────
+  // Webchat is in-tree (not a channels-branch skill): enabling it is just an
+  // env flag, so this is a plain yes/no rather than the SKILL.md channel flow.
+  // Headless (deploy scripts run with </dev/null) is gated the same way the
+  // welcome/image prompts are — a select that reads EOF would cancel the whole
+  // setup at exit 0. deploy/webchat-deploy.sh writes these env keys itself, so
+  // headless never needs this prompt.
+  if (!skip.has('webchat') && process.env.NANOCLAW_REEXEC_SG !== '1' && process.stdin.isTTY) {
+    const enableWebchat = ensureAnswer(
+      await brightSelect<'yes' | 'no'>({
+        message: 'Enable the built-in web chat UI?',
+        options: [
+          { value: 'yes', label: 'Yes', hint: 'a browser chat on this machine — no phone app needed' },
+          { value: 'no', label: 'No', hint: 'you can enable it later in .env (WEBCHAT_ENABLED=true)' },
+        ],
+        initialValue: 'yes',
+      }),
+    );
+    setupLog.userInput('webchat_enabled', String(enableWebchat));
+    phEmit('webchat_choice', { enabled: enableWebchat === 'yes' });
+    if (enableWebchat === 'yes') {
+      // Localhost-only: bind loopback, no token — the loopback auto-owner signs
+      // the operator in. Opening the port + a bearer token is offered later from
+      // the in-app first-run wizard (which also handles first agent + model).
+      upsertEnvVar('WEBCHAT_ENABLED', 'true');
+      upsertEnvVar('WEBCHAT_HOST', '127.0.0.1');
+      const webchatPort = process.env.WEBCHAT_PORT || '3100';
+      p.log.success(
+        brandBody(
+          wrapForGutter(
+            `Web chat enabled — once your assistant is running, open ${k.bold(`http://127.0.0.1:${webchatPort}/`)}. The first visit walks you through picking a model and creating an agent.`,
+            4,
+          ),
+        ),
+      );
+    }
+  }
+
   let channelChoice: ChannelChoice = 'skip';
 
   if (!skip.has('channel') && templateAgentOutcome !== 'restamped') {
