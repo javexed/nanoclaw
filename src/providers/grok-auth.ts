@@ -388,6 +388,16 @@ export function listCredentialOwners(): Array<{
 export interface RefreshSweepDeps extends RefreshDeps {
   onInfo?: (message: string) => void;
   onError?: (message: string) => void;
+  /**
+   * Per-credential outcome, structured.
+   *
+   * `onInfo`/`onError` exist to be written to a log and take a finished
+   * sentence. These two exist to be ACTED on — re-arming a notice, or waking
+   * a human — so they hand over the label and the raw error rather than a
+   * string a caller would have to parse back apart.
+   */
+  onCredentialRenewed?: (label: string) => void;
+  onCredentialFailed?: (label: string, err: unknown) => void;
 }
 
 /**
@@ -415,10 +425,19 @@ export async function refreshDueCredentials(deps: RefreshSweepDeps = {}): Promis
       owner.write(next);
       refreshed += 1;
       deps.onInfo?.(`Grok credential renewed (${owner.label}) — valid until ${next.expiresAt}`);
+      deps.onCredentialRenewed?.(owner.label);
     } catch (err) {
       deps.onError?.(
         `Grok credential refresh failed (${owner.label}): ${err instanceof Error ? err.message : String(err)}`,
       );
+      // Never awaited and never allowed to throw: notifying a human about
+      // one dead credential must not stop the next one being renewed, which
+      // is the same reason the catch exists at all.
+      try {
+        deps.onCredentialFailed?.(owner.label, err);
+      } catch {
+        /* a failing notifier is not the sweep's problem */
+      }
     }
   }
   return refreshed;

@@ -19,7 +19,7 @@ The mechanical steps under **Install** carry `nc:` directive fences: an agent re
 
 Check whether the payload is already wired. All of these present means installed — skip to **Authenticate**:
 
-- `src/providers/grok.ts` and `src/providers/grok-auth.ts`
+- `src/providers/grok.ts`, `src/providers/grok-auth.ts` and `src/providers/grok-reauth.ts`
 - `container/agent-runner/src/providers/grok.ts` and `grok-acp.ts`
 - `setup/providers/grok.ts`
 - `import './grok.js';` in all three provider barrels
@@ -34,8 +34,10 @@ Fetch the **`providers-grok`** branch and copy the payload into all three trees 
 ```nc:copy from-branch:providers-grok
 src/providers/grok.ts
 src/providers/grok-auth.ts
+src/providers/grok-reauth.ts
 src/providers/grok.test.ts
 src/providers/grok-auth.test.ts
+src/providers/grok-reauth.test.ts
 container/agent-runner/src/providers/grok.ts
 container/agent-runner/src/providers/grok-acp.ts
 container/agent-runner/src/providers/grok.test.ts
@@ -75,7 +77,7 @@ pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit
 ### 4. Validate
 
 ```nc:run effect:test
-pnpm vitest run src/providers/grok.test.ts src/providers/grok-auth.test.ts setup/providers/grok.test.ts container/grok-cli-pin.test.ts
+pnpm vitest run src/providers/grok.test.ts src/providers/grok-auth.test.ts src/providers/grok-reauth.test.ts setup/providers/grok.test.ts container/grok-cli-pin.test.ts
 ```
 ```nc:run effect:test
 cd container/agent-runner && bun install --frozen-lockfile && bun test src/providers/grok-acp.test.ts src/providers/grok.test.ts src/providers/grok-registration.test.ts
@@ -115,6 +117,14 @@ Do **not** change `DEFAULT_AGENT_PROVIDER` — installed is not authenticated, a
 ## Notes and troubleshooting
 
 **"grok: not found" at spawn.** The image was built without the CLI, or the Dockerfile edit was lost. Check `ARG GROK_VERSION` is present in `container/Dockerfile` and rebuild.
+
+**The sign-in expired and nobody said anything.** It should now say so. The
+5-minute sweep renews the 6h access token silently; when the REFRESH token
+itself dies (revoked, or rotated away) that is not recoverable, so an admin
+gets a DM instead of a log line — at most once an hour per credential, and
+only for failures retrying cannot fix (400/401/403, never a 429 or a timeout).
+Where a device login can be run headlessly the DM carries the URL and code
+directly; otherwise it points at Settings → Grok. See `src/providers/grok-reauth.ts`.
 
 **Every room goes silent after switching.** Check credentials exist: `data/grok/credentials.json` should be present and `0600`. If missing, re-run the auth step.
 
