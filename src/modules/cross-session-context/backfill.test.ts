@@ -50,7 +50,7 @@ const NEW_SESSION = {
   thread_id: 'slack:D1:2.0',
 } as never;
 
-function chat(text: string, sender = 'Gavriel', senderId = 'U1'): string {
+function chat(text: string, sender = 'Alex', senderId = 'U1'): string {
   return JSON.stringify({ text, sender, senderId });
 }
 
@@ -66,7 +66,7 @@ beforeEach(() => {
 describe('backfillNewSession', () => {
   it('seeds the new session with sibling roots + top-level agent posts, ordered by time', async () => {
     outboundRows = [
-      { timestamp: '2026-08-01T19:14:00Z', content: JSON.stringify({ text: 'Hey Gavriel! I am Pete… tour?' }) },
+      { timestamp: '2026-08-01T19:14:00Z', content: JSON.stringify({ text: 'Hey Alex! I am Pete… tour?' }) },
     ];
     inboundRows = [{ timestamp: '2026-08-01T19:10:00Z', content: chat('hello there') }];
 
@@ -82,7 +82,7 @@ describe('backfillNewSession', () => {
     const first = JSON.parse(written[0]!.content as string) as Record<string, unknown>;
     const second = JSON.parse(written[1]!.content as string) as Record<string, unknown>;
     expect(first.text).toBe('hello there');
-    expect(second.text).toBe('Hey Gavriel! I am Pete… tour?');
+    expect(second.text).toBe('Hey Alex! I am Pete… tour?');
     expect(second.sender).toBe('Pete');
     expect((second.echo as Record<string, unknown>).surface).toBe('dm-timeline');
     expect(second.self).toBe(true);

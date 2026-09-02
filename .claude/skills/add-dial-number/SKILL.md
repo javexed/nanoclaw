@@ -8,125 +8,144 @@ description: Add another phone number to an existing Dial channel — a second (
 One NanoClaw install can serve **multiple Dial numbers** at once. Each number is
 its own **public, threaded line** — its own messaging group (`platform_id` = the
 Dial number), each remote correspondent a thread inside it — and the agent
-replies from whichever number a person texted. Use this to run, say, a personal
-line and a support line side by side, pointed at the same agent or at different
-agents.
+replies from whichever number a person texted.
 
-This skill is for adding a number to an **already-installed** Dial channel. If
-Dial isn't installed yet, run `/add-dial` first.
+This skill is for adding a number to an **already-installed** Dial channel. Its
+mechanical steps use `nc:` directives so an agent and the deterministic skill
+engine perform the same validated, idempotent workflow.
 
-## Prerequisites
+## Pre-flight
 
-### Dial is already installed
+Confirm Dial is installed and registered. If this fails, run `/add-dial` first,
+then retry:
 
-Confirm the channel exists (otherwise use `/add-dial`):
-
-```bash
-ls src/channels/dial.ts && grep -q "import './dial.js';" src/channels/index.ts && echo "Dial installed"
+```nc:run effect:check
+test -f src/channels/dial.ts && grep -q "import './dial.js';" src/channels/index.ts
 ```
 
-### The multi-number adapter
+Adding another number requires the multi-number adapter, which routes on the
+line each event arrived on (`data.to`). If this fails, run `/update-skills` to
+refresh the installed adapter, rebuild, and retry:
 
-Adding a second number only works if the installed adapter routes on the number
-each event arrived on (`data.to`) rather than a single hardcoded number. Check:
-
-```bash
-grep -q "eventLine" src/channels/dial.ts && echo "multi-number adapter OK" || echo "OLD single-number adapter — refresh first"
+```nc:run effect:check
+grep -q "eventLine" src/channels/dial.ts
 ```
 
-If it reports OLD, refresh the adapter before continuing (`/update-skills`, or
-re-copy from the `channels` branch and rebuild):
+Resolve the Dial CLI and the install's user-agent token once for every account
+request below:
 
-```bash
-git fetch origin channels
-git show origin/channels:src/channels/dial.ts > src/channels/dial.ts
-git show origin/channels:src/channels/dial-user-agent.ts > src/channels/dial-user-agent.ts
-pnpm run build
+```nc:run capture:dial_path validate:^/.+ effect:fetch
+command -v dial
 ```
 
-`dial.ts` imports `dial-user-agent.js`, so refresh the two together — pulling the
-adapter alone leaves a dangling import and the build fails.
-
-A stale single-number adapter will misfile the new number's messages into the
-first line and reply from the wrong number.
-
-## Steps
-
-### 1. Get the number (Dial side)
-
-Reuse a number already on the account, or buy a new US number:
-
-```bash
-dial number list --json                                  # numbers already on the account
-dial number purchase \
-  --inbound-instruction "You are the support line for …" \
-  --explicit-programmatic-consent "<account-holder consent attestation>"
+```nc:run capture:dial_ua validate:^nanoclaw/\S+$ effect:fetch
+node -p "'nanoclaw/'+(require('./package.json').version||'unknown')" 2>/dev/null || echo nanoclaw/unknown
 ```
 
-`--inbound-instruction` is the system prompt Dial's AI receptionist uses for
-voice calls to *this* number; change it later with
-`dial number set <number> --inbound-instruction "…"`.
+## Choose the number
 
-Pick the number you want to add and note its E.164 (e.g. `+14155550123`).
+List the account's current numbers:
 
-### 2. Choose the agent group
-
-List agent groups and decide which one answers this number — the same one as
-your first line, or a different one for a separate persona:
-
-```bash
-pnpm exec tsx scripts/q.ts data/v2.db "SELECT id, name FROM agent_groups"
+```nc:run capture:dial_numbers effect:fetch
+DIAL_USER_AGENT={{dial_ua}} "{{dial_path}}" number list --json | jq -r 'if (.numbers|length)==0 then "none" else [.numbers[].number] | join(", ") end'
 ```
 
-### 3. Wire it as a public line
+Tell the operator what is available. Buying a number spends account funds, so
+leave that explicit: if they need a new one, they should purchase it with
+`dial number purchase --inbound-instruction "…" --explicit-programmatic-consent
+"<account-holder consent attestation>"`, then enter the returned number below.
 
-Host service must be running (`ncl` is socket-only). No pairing is needed — the
-install already has an owner.
-
-Decide who may text THIS number before you run the command: `public` for a line
-strangers can start conversations on, `strict` to admit only the owner and anyone
-you add as a member. It's a per-line choice — this number's answer is independent
-of your first line's, so a public support line can sit next to a private personal
-one:
-
-```bash
-ncl messaging-groups create --channel-type dial --platform-id "+1NEWNUMBER" --is-group 1 --name "<label>" --unknown-sender-policy public
-ncl wirings create --messaging-group-id <new-mg-id> --agent-group-id <ag-id>
+```nc:operator
+Dial numbers on this account: {{dial_numbers}}. Choose one that is not already wired to NanoClaw. If you need a new number, purchase it first; this may charge the Dial account.
 ```
 
-Pass `--unknown-sender-policy` explicitly. The adapter declares `strict` for
-creation, so omitting the flag gives you an owner-only line that silently refuses
-strangers — not what you want for a public number. `--is-group 1` is what makes
-each texter their own thread instead of collapsing everyone into one session;
-`threads` comes from the adapter declaration. (`/manage-channels` walks the same
-two commands if you'd rather be guided.)
-
-### 4. Restart and verify
-
-```bash
-source setup/lib/install-slug.sh
-launchctl kickstart -k gui/$(id -u)/$(launchd_label)   # macOS
-# systemctl --user restart $(systemd_unit)             # Linux
+```nc:prompt platform_id validate:^[+][1-9]\d{6,14}$ normalize:trim
+Which Dial number should be added? Enter its E.164 value, for example +14155550123.
 ```
 
-Confirm both lines are wired:
+Verify that the chosen number belongs to the signed-in account:
 
-```bash
-pnpm exec tsx scripts/q.ts data/v2.db \
-  "SELECT platform_id, unknown_sender_policy FROM messaging_groups WHERE channel_type='dial'"
+```nc:run effect:check
+DIAL_USER_AGENT={{dial_ua}} "{{dial_path}}" number list --json | jq -e --arg number '{{platform_id}}' '.numbers[] | select(.number==$number)' >/dev/null
 ```
 
-Then text or call the new number — it reaches the agent as a **separate** line,
-and replies go out from that number. Your existing line is unaffected.
+## Choose the agent
+
+List the agent groups:
+
+```nc:run capture:agent_groups effect:fetch
+ncl groups list --json | jq -r 'if (.data|length)==0 then "no agent groups yet" else [.data[] | "\(.id) (\(.name))"] | join(", ") end'
+```
+
+```nc:operator
+Agent groups on this install: {{agent_groups}}.
+```
+
+```nc:prompt agent_group_id validate:^ag-[A-Za-z0-9-]+$ normalize:trim
+Which agent group should answer this number? Enter its ag-… id.
+```
+
+Reject a typo before creating anything:
+
+```nc:run effect:check
+ncl groups list --json | jq -e --arg id '{{agent_group_id}}' '.data[] | select(.id==$id)' >/dev/null
+```
+
+Choose a safe display name and who may start conversations on this line.
+`strict` admits only known users; `public` lets anyone who knows the number reach
+the agent. The choice belongs to this number and does not change existing lines:
+
+```nc:prompt line_name validate:^[A-Za-z0-9][A-Za-z0-9_.-]*(\x20[A-Za-z0-9][A-Za-z0-9_.-]*)*$ normalize:trim
+What should this line be called? Use letters, numbers, spaces, dots, dashes, or underscores.
+```
+
+```nc:prompt inbound_access validate:^(strict|public)$ normalize:trim
+Who may text this line: strict or public?
+```
+
+## Wire the line
+
+Create the threaded Dial messaging group. This is idempotent on the number, so
+a re-run returns an existing row without resetting later policy changes:
+
+```nc:run effect:wire
+ncl messaging-groups create --channel-type dial --platform-id {{platform_id}} --is-group 1 --name "{{line_name}}" --unknown-sender-policy {{inbound_access}}
+```
+
+Wire it to the selected agent group. The adapter's declaration supplies the
+thread and engagement defaults:
+
+```nc:run effect:wire
+ncl wirings create --channel-type dial --platform-id {{platform_id}} --agent-group-id {{agent_group_id}}
+```
+
+## Restart and verify
+
+Restart the service so the new line is picked up consistently:
+
+```nc:run effect:restart
+bash setup/lib/restart.sh
+```
+
+Verify the exact messaging-group and wiring pair exists:
+
+```nc:run effect:check
+mg=$(ncl messaging-groups list --json | jq -er --arg number '{{platform_id}}' '.data[] | select(.channel_type=="dial" and .platform_id==$number) | .id') && ncl wirings list --json | jq -e --arg mg "$mg" --arg ag '{{agent_group_id}}' '.data[] | select(.messaging_group_id==$mg and .agent_group_id==$ag)' >/dev/null
+```
+
+The new number now reaches the selected agent as a separate threaded line, and
+replies leave from the number that received the message. Existing lines are
+unchanged.
 
 ## Troubleshooting
 
-- **New number's texts land in the old line's conversation, or replies come from
-  the wrong number** → the adapter is the old single-number version; refresh it
-  (Prerequisites above) and restart.
-- **New number never delivers inbound** → the `dial listen` daemon fans out
-  events for the whole account, so one daemon covers all numbers; confirm it's
-  running (`dial doctor --json` → `listen.running: true`) and that the command
-  target is registered (`dial local-target list --json`).
-- **`ncl` errors** → the host service must be running; `ncl` connects over a Unix
-  socket.
+- **The multi-number check fails** → run `/update-skills`, rebuild, and retry.
+- **The selected number is rejected** → sign in to the correct Dial account or
+  purchase the number first, then copy its exact E.164 value.
+- **New texts land in an old line or replies use the wrong number** → the running
+  service still has the old adapter; refresh it and restart again.
+- **New inbound events never arrive** → one `dial listen` daemon covers the
+  whole account; confirm `dial doctor --json` reports `listen.running: true` and
+  `dial local-target list --json` contains NanoClaw's command target.
+- **`ncl` errors** → the host service must be running; `ncl` connects over a
+  Unix socket.

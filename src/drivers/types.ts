@@ -408,9 +408,14 @@ export interface MountPolicy {
   materialsRoot: string;
 }
 
-export function validateSpec(spec: SessionSpec, policy: MountPolicy): void {
-  if (spec.runtimeTier !== 'container') {
-    throw specInvalid(`runtimeTier '${spec.runtimeTier}' not in capabilities`);
+export function validateSpec(spec: SessionSpec, policy: MountPolicy, capabilities?: DriverCapabilities): void {
+  // The tier check is against the caller's declared capabilities — features
+  // gate on capabilities, never on driver identity. A caller without a
+  // capabilities handle gets the floor every realization ships ('container'),
+  // which keeps the two-argument form's behavior exactly.
+  const tiers = capabilities?.isolationTiers ?? ['container'];
+  if (!tiers.includes(spec.runtimeTier)) {
+    throw specInvalid(`runtimeTier '${spec.runtimeTier}' not in driver isolation tiers [${tiers.join(', ')}]`);
   }
   if (spec.containers.filter((c) => c.role === 'agent').length !== 1) {
     // Exactly one, not at-least-one: the agent is the session's one required
