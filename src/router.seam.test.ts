@@ -238,7 +238,9 @@ describe('turn gate + session-key override', () => {
 
     // ag-b vetoed: no inbound rows; drop recorded with the module's reason.
     expect(await rowsFor('ag-b')).toHaveLength(0);
-    const drops = await getDb().all(`SELECT reason FROM unregistered_senders WHERE agent_group_id = 'ag-b'`) as Array<{ reason: string }>;
+    const drops = (await getDb().all(
+      `SELECT reason FROM unregistered_senders WHERE agent_group_id = 'ag-b'`,
+    )) as Array<{ reason: string }>;
     expect(drops).toHaveLength(1);
     expect(drops[0].reason).toBe('test-policy-requires-setup');
 
@@ -257,14 +259,14 @@ describe('turn gate + session-key override', () => {
 
     await router.routeInbound(makeEvent());
 
-    const cSessions = await getDb().all(`SELECT thread_id FROM sessions WHERE agent_group_id = 'ag-c'`) as Array<{
+    const cSessions = (await getDb().all(`SELECT thread_id FROM sessions WHERE agent_group_id = 'ag-c'`)) as Array<{
       thread_id: string | null;
     }>;
     expect(cSessions).toHaveLength(1);
     expect(cSessions[0].thread_id).toBe('member:alice');
 
     // Un-overridden agents keep the stock null-thread session.
-    const aSessions = await getDb().all(`SELECT thread_id FROM sessions WHERE agent_group_id = 'ag-a'`) as Array<{
+    const aSessions = (await getDb().all(`SELECT thread_id FROM sessions WHERE agent_group_id = 'ag-a'`)) as Array<{
       thread_id: string | null;
     }>;
     expect(aSessions).toHaveLength(1);
