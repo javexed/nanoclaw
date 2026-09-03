@@ -13,6 +13,8 @@ const envConfig = readEnvFile([
   'ONECLI_API_KEY',
   'TZ',
   'DEFAULT_AGENT_PROVIDER',
+  'NANOCLAW_DEFAULT_MODEL',
+  'NANOCLAW_FAST_MODE',
   'CONTAINER_CPU_LIMIT',
   'CONTAINER_MEMORY_LIMIT',
   'CONTAINER_PIDS_LIMIT',
@@ -38,6 +40,20 @@ export const DEFAULT_AGENT_PROVIDER = (
   envConfig.DEFAULT_AGENT_PROVIDER ||
   'claude'
 ).toLowerCase();
+
+// Instance-wide default model for agent containers, applied when the group has
+// no model of its own. Unset means the provider SDK's own default, which is
+// what every existing install gets. Unlike DEFAULT_AGENT_PROVIDER this is read
+// at spawn rather than stamped at creation, so changing it takes effect on the
+// next container start for every group that has not set one.
+export const DEFAULT_MODEL = process.env.NANOCLAW_DEFAULT_MODEL || envConfig.NANOCLAW_DEFAULT_MODEL || '';
+
+// Fast serving tier for every agent container: faster output at a higher
+// per-token price. Off unless explicitly turned on, and only by '1' or 'true' —
+// a typo must not silently start charging the faster rate.
+export const FAST_MODE = ['1', 'true'].includes(
+  (process.env.NANOCLAW_FAST_MODE || envConfig.NANOCLAW_FAST_MODE || '').toLowerCase(),
+);
 
 /**
  * @deprecated WhatsApp adapter copies now read the ASSISTANT_HAS_OWN_NUMBER

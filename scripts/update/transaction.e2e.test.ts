@@ -10,12 +10,14 @@ import {
   cleanupUpdate,
   cutoverUpdate,
   finishUpdate,
+  loadState,
   prepareUpdate,
   pruneTransactions,
   rollbackUpdate,
   validateUpdate,
   type UpdateRuntime,
 } from './transaction.js';
+import { stopService } from './service.js';
 import type { CommandRunner, ServiceHandle } from './service.js';
 
 const roots: string[] = [];
@@ -329,5 +331,159 @@ describe('update-nanoclaw transaction end to end', () => {
     state = await finishUpdate(fixture.install, state.id, runtime);
     expect(state.phase).toBe('complete');
     expect(state.requirements[0].rollback).toBe('Restore onecli-gateway to 1.0.0');
+  });
+
+  it('rolls back even though cutover already stopped the service (stale handle must not be re-stopped)', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const { runtime, events } = fakeRuntime(fixture.install);
+
+    // A launchd-faithful RUNNER under the REAL stopService: `launchctl
+    // bootout` of a not-loaded job fails with "Boot-out failed: 3: No such
+    // process", exactly as it does live. The idempotency under test is
+    // stopService's own contract, not a fake's.
+    let running = true;
+    const launchdRunner: CommandRunner = {
+      run(command, args) {
+        if (command === 'launchctl' && args[0] === 'bootout') {
+          if (!running) {
+            throw new Error(`Command failed: launchctl bootout ${args[1]}\nBoot-out failed: 3: No such process`);
+          }
+          running = false;
+          events.push('service stop');
+          return '';
+        }
+        return '';
+      },
+      tryRun: () => ({ ok: true, stdout: '' }),
+    };
+    runtime.detectService = () => ({ mode: 'launchd', active: true, name: 'nanoclaw-test' });
+    runtime.stopService = (handle) =>
+      stopService(handle, {
+        platform: 'darwin',
+        home: os.homedir(),
+        uid: 501,
+        runner: launchdRunner,
+        sleep: async () => {},
+      });
+    runtime.startService = () => {
+      running = true;
+      events.push('service start');
+    };
+    // Building the TARGET fails (post-reset tree contains 'new'); the
+    // rollback's rebuild of the original tree succeeds.
+    const baseRun = runtime.runner.run.bind(runtime.runner);
+    runtime.runner.run = (command, args, cwd = fixture.install) => {
+      if (command === 'pnpm' && args[1] === 'build') {
+        if (fs.readFileSync(path.join(fixture.install, 'src/value.ts'), 'utf8').includes('new')) {
+          throw new Error('target build failed');
+        }
+      }
+      return baseRun(command, args, cwd);
+    };
+
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    state = await validateUpdate(fixture.install, state.id, runtime);
+    await expect(cutoverUpdate(fixture.install, state.id, runtime)).rejects.toThrow('target build failed');
+
+    state = loadState(fixture.install, state.id);
+    expect(state.phase).toBe('rolled-back');
+    expect(exec(fixture.install, 'git', ['rev-parse', 'HEAD'])).toBe(fixture.originalHead);
+    // Exactly one stop (cutover's own); the rollback re-detected a stopped
+    // service instead of re-stopping the stale captured handle.
+    expect(events.filter((event) => event === 'service stop')).toHaveLength(1);
+    expect(events).toContain('service start');
+    expect(running).toBe(true);
+  });
+
+  it('re-runs cutover after a failed rollback left a populated snapshot (read-only files must not EACCES)', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    // Mutable state containing a read-only file, the way git pack files are:
+    // the first snapshot copies it 0444, and a naive re-snapshot cannot
+    // overwrite its own previous copy.
+    write(fixture.install, 'data/objects/pack-test.idx', 'immutable\n');
+    fs.chmodSync(path.join(fixture.install, 'data/objects/pack-test.idx'), 0o444);
+
+    // First cutover: target build fails, and the rollback ALSO fails (health
+    // verification refuses) — phase stays validated with the snapshot
+    // directory populated. That is the state a second attempt starts from.
+    let failTargetBuild = true;
+    const { runtime } = fakeRuntime(fixture.install, { health: [false, true] });
+    const baseRun = runtime.runner.run.bind(runtime.runner);
+    runtime.runner.run = (command, args, cwd = fixture.install) => {
+      if (command === 'pnpm' && args[1] === 'build' && failTargetBuild) {
+        if (fs.readFileSync(path.join(fixture.install, 'src/value.ts'), 'utf8').includes('new')) {
+          throw new Error('target build failed');
+        }
+      }
+      return baseRun(command, args, cwd);
+    };
+
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    state = await validateUpdate(fixture.install, state.id, runtime);
+    await expect(cutoverUpdate(fixture.install, state.id, runtime)).rejects.toThrow();
+    state = loadState(fixture.install, state.id);
+    expect(state.phase).toBe('validated');
+    expect(fs.existsSync(path.join(state.transactionRoot, 'snapshot', 'data/objects/pack-test.idx'))).toBe(true);
+
+    // Second attempt with the cause fixed: must re-snapshot over the
+    // read-only remains of the first and complete.
+    failTargetBuild = false;
+    state = await cutoverUpdate(fixture.install, state.id, runtime);
+    expect(state.phase).toBe('cutover');
+  });
+
+  it('a snapshot that fails midway on a RETRY never lets the automatic rollback restore a partial copy', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+
+    // Attempt 1: target build fails AND the rollback health-check refuses, so
+    // the phase stays `validated` with a COMPLETE snapshot on disk — the
+    // state a second attempt starts from.
+    let failTargetBuild = true;
+    const { runtime } = fakeRuntime(fixture.install, { health: [false, true] });
+    const baseRun = runtime.runner.run.bind(runtime.runner);
+    runtime.runner.run = (command, args, cwd = fixture.install) => {
+      if (command === 'pnpm' && args[1] === 'build' && failTargetBuild) {
+        if (fs.readFileSync(path.join(fixture.install, 'src/value.ts'), 'utf8').includes('new')) {
+          throw new Error('target build failed');
+        }
+      }
+      return baseRun(command, args, cwd);
+    };
+
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    state = await validateUpdate(fixture.install, state.id, runtime);
+    await expect(cutoverUpdate(fixture.install, state.id, runtime)).rejects.toThrow();
+    state = loadState(fixture.install, state.id);
+    expect(state.phase).toBe('validated');
+
+    // Attempt 2's snapshot dies midway: an unreadable file that sorts BEFORE
+    // v2.db makes copyEntry throw with the copy incomplete. The persisted
+    // state still carries attempt 1's entry list, so the failure path will
+    // run an automatic rollback — which must see a COMPLETE snapshot.
+    failTargetBuild = false;
+    write(fixture.install, 'data/aaa-unreadable', 'secret');
+    fs.chmodSync(path.join(fixture.install, 'data/aaa-unreadable'), 0o000);
+    try {
+      await expect(cutoverUpdate(fixture.install, state.id, runtime)).rejects.toThrow(/EACCES|permission denied/i);
+
+      // Live mutable state survived: the rollback restored the re-instated
+      // complete prior snapshot, not the partial one.
+      expect(fs.readFileSync(path.join(fixture.install, 'data/v2.db'), 'utf8')).toBe('old-schema');
+      state = loadState(fixture.install, state.id);
+      const snapshotDb = path.join(state.transactionRoot, 'snapshot', 'data/v2.db');
+      expect(fs.existsSync(snapshotDb)).toBe(true);
+      expect(fs.existsSync(path.join(state.transactionRoot, 'snapshot.prev'))).toBe(false);
+    } finally {
+      // A successful rollback legitimately removes the planted file (the
+      // prior snapshot never contained it); re-chmod only if it survived.
+      const planted = path.join(fixture.install, 'data/aaa-unreadable');
+      if (fs.existsSync(planted)) fs.chmodSync(planted, 0o644);
+    }
   });
 });

@@ -20,7 +20,7 @@ import { DockerSessionDriver } from './docker-driver.js';
 import { FakeCli } from './fake-cli.js';
 import { withSessionEvents, type SessionEventsDriver } from './session-events.js';
 import { FIXTURE_POLICY, fixtureSpec, fixtureSpecWithAux } from './spec-fixture.js';
-import { GROUP_FOLDER_LABEL, LABELS, validateSpec, type SessionSpec } from './types.js';
+import { GROUP_FOLDER_LABEL, LABELS, validateSpec, type DriverCapabilities, type SessionSpec } from './types.js';
 
 vi.mock('../log.js', () => ({
   log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
@@ -284,6 +284,61 @@ describe('conformance: the multi-container contract (validateSpec is the shared 
       kind: 'spec-invalid',
       retryable: false,
     });
+    expect(h.cli.calls.some((c) => c.args[0] === 'create')).toBe(false);
+  });
+});
+
+describe('conformance: the isolation-tier rule (validateSpec is the shared layer)', () => {
+  const capabilities = (tiers: ('container' | 'vm')[]): DriverCapabilities => ({
+    isolationTiers: tiers,
+    admissionEnforced: false,
+    networkPolicy: 'topology',
+    encryptedVolumes: false,
+    unrealized: [],
+    sharedNetworkNamespace: false,
+    auxiliaryContainers: false,
+    imageBuild: true,
+  });
+
+  it('accepts any tier the capabilities declare', () => {
+    const spec = fixtureSpec();
+    spec.runtimeTier = 'vm';
+    expect(() => validateSpec(spec, FIXTURE_POLICY, capabilities(['container', 'vm']))).not.toThrow();
+    spec.runtimeTier = 'container';
+    expect(() => validateSpec(spec, FIXTURE_POLICY, capabilities(['container', 'vm']))).not.toThrow();
+  });
+
+  it('refuses an undeclared tier, naming the requested tier and the tiers the driver supports', () => {
+    const spec = fixtureSpec();
+    spec.runtimeTier = 'vm';
+    let thrown: unknown;
+    try {
+      validateSpec(spec, FIXTURE_POLICY, capabilities(['container']));
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toMatchObject({ kind: 'spec-invalid', retryable: false });
+    expect(String((thrown as Error).message)).toContain("'vm'");
+    expect(String((thrown as Error).message)).toContain('[container]');
+  });
+
+  it('holds the container floor for a caller without a capabilities handle', () => {
+    // The two-argument form predates the capabilities parameter; its behavior
+    // is pinned — 'container' passes, anything else refuses.
+    expect(() => validateSpec(fixtureSpec(), FIXTURE_POLICY)).not.toThrow();
+    const spec = fixtureSpec();
+    spec.runtimeTier = 'vm';
+    expect(() => validateSpec(spec, FIXTURE_POLICY)).toThrow(/spec-invalid/);
+  });
+
+  eachDriver('a driver validates the tier against its own declared capabilities', async (h) => {
+    const spec = fixtureSpec();
+    spec.runtimeTier = 'vm';
+    if (h.driver.capabilities().isolationTiers.includes('vm')) {
+      await expect(h.driver.prepare(spec)).resolves.toBeDefined();
+      return;
+    }
+    await expect(h.driver.prepare(spec)).rejects.toMatchObject({ kind: 'spec-invalid', retryable: false });
     expect(h.cli.calls.some((c) => c.args[0] === 'create')).toBe(false);
   });
 });

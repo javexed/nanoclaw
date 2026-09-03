@@ -107,12 +107,32 @@ function statePath(transactionRoot: string): string {
   return path.join(transactionRoot, 'state.json');
 }
 
+/**
+ * Resolve to a canonical physical path. `path.resolve` alone is not enough on
+ * macOS, where `os.tmpdir()` and `/var` are symlinks into `/private` — one
+ * side of a comparison records the symlinked spelling and the other the real
+ * one, and every equality check below then refuses a perfectly matched state.
+ */
+function realResolve(p: string): string {
+  const resolved = path.resolve(p);
+  try {
+    return fs.realpathSync(resolved);
+  } catch {
+    // The leaf may legitimately not exist (a cleaned-up stage worktree in a
+    // terminal transaction). Canonicalize the nearest existing ancestor and
+    // re-append, so /var vs /private/var still compares equal.
+    const parent = path.dirname(resolved);
+    if (parent === resolved) return resolved;
+    return path.join(realResolve(parent), path.basename(resolved));
+  }
+}
+
 function hasSafeStatePaths(state: UpdateState, projectRoot: string, transactionRoot: string, id: string): boolean {
   return (
     state.id === id &&
-    path.resolve(state.projectRoot) === path.resolve(projectRoot) &&
-    path.resolve(state.transactionRoot) === path.resolve(transactionRoot) &&
-    path.resolve(state.stageRoot) === path.join(path.resolve(transactionRoot), 'worktree') &&
+    realResolve(state.projectRoot) === realResolve(projectRoot) &&
+    realResolve(state.transactionRoot) === realResolve(transactionRoot) &&
+    realResolve(state.stageRoot) === path.join(realResolve(transactionRoot), 'worktree') &&
     state.stageBranch === `update-nanoclaw/${id}` &&
     /^backup\/pre-update-[0-9a-f]{8}-\d{14}-[0-9a-f]{8}$/.test(state.backupBranch) &&
     /^pre-update-[0-9a-f]{8}-\d{14}-[0-9a-f]{8}$/.test(state.backupTag)
@@ -128,7 +148,10 @@ function saveState(state: UpdateState): void {
 }
 
 export function loadState(projectRoot: string, id: string): UpdateState {
-  const expectedTransactionRoot = path.join(defaultTransactionsRoot(path.resolve(projectRoot)), id);
+  // Same canonicalization as the safety comparisons: the slug is derived from
+  // the path's spelling, so a symlink-spelled --project-root must land on the
+  // root the (realpathed) prepare wrote under, not an ENOENT sibling.
+  const expectedTransactionRoot = path.join(defaultTransactionsRoot(realResolve(projectRoot)), id);
   const target = statePath(expectedTransactionRoot);
   const state = JSON.parse(fs.readFileSync(target, 'utf8')) as UpdateState;
   if (state.schema !== 'nanoclaw-update/v1') throw new Error(`Unsupported update state in ${target}`);
@@ -369,12 +392,32 @@ function copyEntry(source: string, destination: string): void {
 
 function createSnapshot(state: UpdateState): SnapshotEntry[] {
   const snapshotRoot = path.join(state.transactionRoot, 'snapshot');
-  fs.mkdirSync(snapshotRoot, { recursive: true, mode: 0o700 });
+  // Complete-or-old BY CONSTRUCTION: the copy builds into `snapshot.new` and
+  // is renamed into place only after it finishes, so the literal `snapshot/`
+  // directory — the one every restore path reads — is only ever a completed
+  // copy (this attempt's or a prior one's), never partial. That holds across
+  // in-process failures AND hard crashes mid-copy: a retried cutover whose
+  // persisted entry list still points at `snapshot/` can never feed a partial
+  // copy to the automatic rollback, which would delete live mutable state and
+  // then report the rollback as a success. (Also the fix for plain retry:
+  // copyFileSync cannot overwrite files a previous attempt copied read-only —
+  // git pack files are 0444 — so copy-in-place died with EACCES.)
+  const buildRoot = `${snapshotRoot}.new`;
+  const supersededRoot = `${snapshotRoot}.prev`;
+  fs.rmSync(buildRoot, { recursive: true, force: true });
+  // Self-heal the rename window: a crash between the two renames leaves
+  // `snapshot/` absent with the complete prior copy still in `.prev` — put it
+  // back rather than deleting the only complete copy on disk.
+  if (!fs.existsSync(snapshotRoot) && fs.existsSync(supersededRoot)) {
+    fs.renameSync(supersededRoot, snapshotRoot);
+  }
+  fs.rmSync(supersededRoot, { recursive: true, force: true });
+  fs.mkdirSync(buildRoot, { recursive: true, mode: 0o700 });
   const bytesNeeded = MUTABLE_PATHS.reduce((total, relativePath) => {
     const source = path.join(state.projectRoot, relativePath);
     return total + (fs.existsSync(source) ? entrySize(source) : 0);
   }, 0);
-  const disk = fs.statfsSync(snapshotRoot);
+  const disk = fs.statfsSync(buildRoot);
   const bytesAvailable = Number(disk.bavail) * Number(disk.bsize);
   const reserve = 256 * 1024 * 1024;
   if (bytesAvailable < bytesNeeded + reserve) {
@@ -382,12 +425,16 @@ function createSnapshot(state: UpdateState): SnapshotEntry[] {
       `Not enough free space for mutable-state snapshot: need ${bytesNeeded + reserve}, have ${bytesAvailable}`,
     );
   }
-  return MUTABLE_PATHS.map((relativePath) => {
+  const entries = MUTABLE_PATHS.map((relativePath) => {
     const source = path.join(state.projectRoot, relativePath);
     const existed = fs.existsSync(source);
-    if (existed) copyEntry(source, path.join(snapshotRoot, relativePath));
+    if (existed) copyEntry(source, path.join(buildRoot, relativePath));
     return { relativePath, existed };
   });
+  if (fs.existsSync(snapshotRoot)) fs.renameSync(snapshotRoot, supersededRoot);
+  fs.renameSync(buildRoot, snapshotRoot);
+  fs.rmSync(supersededRoot, { recursive: true, force: true });
+  return entries;
 }
 
 function entrySize(source: string): number {
@@ -400,6 +447,9 @@ function entrySize(source: string): number {
 function restoreSnapshot(state: UpdateState): void {
   if (!state.snapshot) throw new Error('No mutable-state snapshot exists');
   const snapshotRoot = path.join(state.transactionRoot, 'snapshot');
+  // Abort BEFORE touching live state when the snapshot is gone — discovering
+  // it entry-by-entry would delete live targets and then fail anyway.
+  if (!fs.existsSync(snapshotRoot)) throw new Error(`Mutable-state snapshot missing: ${snapshotRoot}`);
   for (const entry of state.snapshot) {
     const target = path.join(state.projectRoot, entry.relativePath);
     fs.rmSync(target, { recursive: true, force: true });
@@ -420,6 +470,13 @@ function installAndBuild(root: string, state: UpdateState, runtime: UpdateRuntim
 
 async function rollbackLocal(state: UpdateState, runtime: UpdateRuntime): Promise<void> {
   if (!state.service) throw new Error('Update state has no captured service handle for rollback');
+  // On the cutover failure path the service was already stopped by cutover
+  // itself; `stopService` is idempotent per mode (already-stopped is success
+  // in the manager's own vocabulary — see its header), so this cannot abort
+  // the restore for a service that is simply gone, while a service that is
+  // genuinely still running still aborts loudly BEFORE anything is destroyed.
+  // Deliberately not a fresh detection: an under-reporting detection would
+  // skip the stop and reset the checkout under a live service.
   await runtime.stopService(state.service);
   git(runtime, state.projectRoot, ['reset', '--hard', state.originalHead]);
   restoreSnapshot(state);
@@ -582,7 +639,7 @@ export function pruneTransactions(
   runtime = createUpdateRuntime(),
 ): PruneReport {
   const resolvedProjectRoot = fs.realpathSync(projectRoot);
-  const root = path.resolve(defaultTransactionsRoot(resolvedProjectRoot));
+  const root = realResolve(defaultTransactionsRoot(resolvedProjectRoot));
   const filesystemRoot = path.parse(root).root;
   if (root === filesystemRoot || root === resolvedProjectRoot || resolvedProjectRoot.startsWith(`${root}${path.sep}`)) {
     throw new Error(`Unsafe transaction root: ${root}`);

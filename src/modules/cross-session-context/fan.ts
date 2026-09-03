@@ -56,7 +56,7 @@ export function echoRowId(origMessageId: string, targetSessionId: string): strin
   return `${origMessageId}:echo:${targetSessionId}`;
 }
 
-/** Human label for the source conversation, e.g. '#Pixel room' / 'DM with Gavriel'. */
+/** Human label for the source conversation, e.g. '#Pixel room' / 'DM with Alex'. */
 export function buildEchoLabel(
   mg: Pick<MessagingGroup, 'name' | 'platform_id' | 'is_group'>,
   senderName?: string | null,
