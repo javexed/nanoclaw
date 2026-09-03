@@ -183,6 +183,72 @@ export async function refreshCredentials(creds: GrokCredentials, deps: RefreshDe
 }
 
 /**
+ * In-flight refreshes, keyed by the credential FILE being renewed.
+ *
+ * The refresh token rotates on use, and two independent things renew it: the
+ * 5-minute sweep, and spawn-time materializeContainerAuth, which fires a
+ * background refresh whenever a credential is inside the expiry skew. Neither
+ * knew about the other, so a container spawning inside that window while the
+ * sweep ran presented the SAME refresh token twice — the loser got
+ * `invalid_grant`, and depending on which write landed last the file could be
+ * left holding a token that had already been rotated away.
+ *
+ * That presents as "Grok logged itself out for no reason", which is
+ * unattributable after the fact — the surviving evidence is a dead credential
+ * and no cause. Found by reading rather than by reproduction: it needs a spawn
+ * inside the skew window while the sweep fires.
+ *
+ * Both callers live in the HOST process, so an in-process map is enough; this
+ * is deliberately not a file lock, because there is no second writer to
+ * coordinate with. The key is the file path rather than the agent group: the
+ * shared credential is renewed on behalf of many groups, and keying by group
+ * would let two of them race over the same file.
+ */
+interface InFlightRefresh {
+  promise: Promise<GrokCredentials>;
+  /**
+   * Set the instant the promise settles, BEFORE any awaiting caller resumes.
+   * Clearing on a derived `.finally()` chain instead would delete the entry one
+   * tick too late: a caller that awaited and immediately asked again would be
+   * handed the finished promise and skip a refresh it was due.
+   */
+  settled: boolean;
+}
+
+const inFlightRefreshes = new Map<string, InFlightRefresh>();
+
+/**
+ * Refresh a credential, coalescing concurrent callers for the same file: the
+ * second caller awaits the first's result instead of spending the (already
+ * rotated) refresh token a second time.
+ */
+export function refreshCredentialsOnce(
+  credentialPath: string,
+  creds: GrokCredentials,
+  deps: RefreshDeps = {},
+): Promise<GrokCredentials> {
+  const existing = inFlightRefreshes.get(credentialPath);
+  if (existing && !existing.settled) return existing.promise;
+  const entry: InFlightRefresh = { promise: refreshCredentials(creds, deps), settled: false };
+  inFlightRefreshes.set(credentialPath, entry);
+  // Registered here, so it runs before any caller's own continuation and the
+  // entry is already marked done by the time one resumes. Both arms are given
+  // so a rejection is observed on THIS chain (no unhandled rejection) while
+  // still reaching every awaiting caller through `entry.promise`.
+  const done = (): void => {
+    entry.settled = true;
+    if (inFlightRefreshes.get(credentialPath) === entry) inFlightRefreshes.delete(credentialPath);
+  };
+  void entry.promise.then(done, done);
+  return entry.promise;
+}
+
+/** Test seam: forget any in-flight refresh so cases start from a clean map. */
+export function __resetRefreshSingleFlightForTest(): void {
+  inFlightRefreshes.clear();
+}
+
+/**
  * The container-visible auth.json, in the CLI's own shape but WITHOUT the
  * refresh token. Keyed `<issuer>::<clientId>`, which is how the CLI indexes it.
  *
@@ -256,7 +322,9 @@ export function materializeContainerAuth(
   // Write a refresh back to whichever file it came from: persisting a rotated
   // token to the per-group path when it was read from the shared one would
   // silently fork the identity and leave the shared file stale.
-  const persist = fs.existsSync(hostCredentialsPath(agentGroupId))
+  const ownsGroupFile = fs.existsSync(hostCredentialsPath(agentGroupId));
+  const credentialPath = ownsGroupFile ? hostCredentialsPath(agentGroupId) : sharedCredentialsPath();
+  const persist = ownsGroupFile
     ? (next: GrokCredentials) => writeHostCredentials(agentGroupId, next)
     : writeSharedCredentials;
 
@@ -265,7 +333,7 @@ export function materializeContainerAuth(
   if (needsRefresh(creds, (deps.now ?? Date.now)())) {
     // Background: the spawn must not wait on a network round-trip, and Grok
     // hot-reloads auth.json when the fresher token lands.
-    void refreshCredentials(creds, deps)
+    void refreshCredentialsOnce(credentialPath, creds, deps)
       .then((next) => {
         persist(next);
         writeContainerAuth(grokSharedPath, next);
@@ -278,11 +346,22 @@ export function materializeContainerAuth(
 /** Every credential file this install owns: the shared one, plus any per-group overrides. */
 export function listCredentialOwners(): Array<{
   label: string;
+  path: string;
   read: () => GrokCredentials | null;
   write: (c: GrokCredentials) => void;
 }> {
-  const owners: Array<{ label: string; read: () => GrokCredentials | null; write: (c: GrokCredentials) => void }> = [
-    { label: 'shared', read: () => readCredentialFile(sharedCredentialsPath()), write: writeSharedCredentials },
+  const owners: Array<{
+    label: string;
+    path: string;
+    read: () => GrokCredentials | null;
+    write: (c: GrokCredentials) => void;
+  }> = [
+    {
+      label: 'shared',
+      path: sharedCredentialsPath(),
+      read: () => readCredentialFile(sharedCredentialsPath()),
+      write: writeSharedCredentials,
+    },
   ];
   const root = path.join(DATA_DIR, 'v2-sessions');
   let groups: string[] = [];
@@ -298,6 +377,7 @@ export function listCredentialOwners(): Array<{
     if (!fs.existsSync(hostCredentialsPath(id))) continue;
     owners.push({
       label: `group ${id}`,
+      path: hostCredentialsPath(id),
       read: () => readCredentialFile(hostCredentialsPath(id)),
       write: (c: GrokCredentials) => writeHostCredentials(id, c),
     });
@@ -341,7 +421,7 @@ export async function refreshDueCredentials(deps: RefreshSweepDeps = {}): Promis
     const creds = owner.read();
     if (!creds || !needsRefresh(creds, now)) continue;
     try {
-      const next = await refreshCredentials(creds, deps);
+      const next = await refreshCredentialsOnce(owner.path, creds, deps);
       owner.write(next);
       refreshed += 1;
       deps.onInfo?.(`Grok credential renewed (${owner.label}) — valid until ${next.expiresAt}`);

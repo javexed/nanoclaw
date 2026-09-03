@@ -31,6 +31,8 @@ const {
   needsRefresh,
   readHostCredentials,
   refreshCredentials,
+  refreshCredentialsOnce,
+  __resetRefreshSingleFlightForTest,
   writeContainerAuth,
   writeHostCredentials,
   writeSharedCredentials,
@@ -72,12 +74,20 @@ describe('the refresh token never reaches the container', () => {
     // authenticated" even though the access token is valid. create_time was
     // missing in the first cut of this module and cost a live debugging round.
     const entry = containerAuthJson(creds())['https://auth.x.ai::client-1'] as Record<string, unknown>;
-    for (const required of ['key', 'auth_mode', 'create_time', 'expires_at', 'user_id', 'oidc_issuer', 'oidc_client_id']) {
+    for (const required of [
+      'key',
+      'auth_mode',
+      'create_time',
+      'expires_at',
+      'user_id',
+      'oidc_issuer',
+      'oidc_client_id',
+    ]) {
       expect(entry[required], `missing required field ${required}`).toBeDefined();
     }
   });
 
-  it('prefers the CLI\'s own create_time over a synthesised one', () => {
+  it("prefers the CLI's own create_time over a synthesised one", () => {
     const entry = containerAuthJson(creds({ createdAt: '2026-08-18T23:11:24.793Z' }))[
       'https://auth.x.ai::client-1'
     ] as Record<string, unknown>;
@@ -153,14 +163,19 @@ describe('refreshCredentials', () => {
 
   it('adopts a rotated refresh token, since dropping it would strand the group', async () => {
     const fetchFn = (async () =>
-      okResponse({ access_token: 'access-BBB', refresh_token: 'refresh-ROTATED', expires_in: 3600 })) as unknown as typeof fetch;
+      okResponse({
+        access_token: 'access-BBB',
+        refresh_token: 'refresh-ROTATED',
+        expires_in: 3600,
+      })) as unknown as typeof fetch;
     const next = await refreshCredentials(creds(), { fetchFn });
     expect(next.refreshToken).toBe('refresh-ROTATED');
     expect(next.accessToken).toBe('access-BBB');
   });
 
   it('keeps the existing refresh token when the response omits one', async () => {
-    const fetchFn = (async () => okResponse({ access_token: 'access-BBB', expires_in: 3600 })) as unknown as typeof fetch;
+    const fetchFn = (async () =>
+      okResponse({ access_token: 'access-BBB', expires_in: 3600 })) as unknown as typeof fetch;
     expect((await refreshCredentials(creds(), { fetchFn })).refreshToken).toBe('refresh-SECRET');
   });
 
@@ -281,8 +296,7 @@ describe('materializeContainerAuth', () => {
 });
 
 describe('the periodic refresh sweep', () => {
-  const ok = (body: unknown) =>
-    ({ ok: true, status: 200, json: async () => body, text: async () => '' }) as Response;
+  const ok = (body: unknown) => ({ ok: true, status: 200, json: async () => body, text: async () => '' }) as Response;
 
   // The sweep visits EVERY credential this install owns, so per-group files
   // left by earlier cases would be swept too. Start each case from one owner.
@@ -298,7 +312,11 @@ describe('the periodic refresh sweep', () => {
   it('renews a credential that is due', async () => {
     writeSharedCredentials(creds({ expiresAt: new Date(Date.now() + 1000).toISOString() }));
     const fetchFn = (async () =>
-      ok({ access_token: 'access-SWEPT', refresh_token: 'refresh-SWEPT', expires_in: 3600 })) as unknown as typeof fetch;
+      ok({
+        access_token: 'access-SWEPT',
+        refresh_token: 'refresh-SWEPT',
+        expires_in: 3600,
+      })) as unknown as typeof fetch;
 
     const count = await refreshDueCredentials({ fetchFn });
 
@@ -326,7 +344,7 @@ describe('the periodic refresh sweep', () => {
     const fetchFn = (async (_url: string, init: RequestInit) =>
       String(init.body).includes('refresh-SECRET')
         ? ok({ access_token: 'access-OK', expires_in: 3600 })
-        : ({ ok: false, status: 400, text: async () => 'invalid_grant' }) as Response) as unknown as typeof fetch;
+        : ({ ok: false, status: 400, text: async () => 'invalid_grant' } as Response)) as unknown as typeof fetch;
 
     const count = await refreshDueCredentials({ fetchFn, onError: (m) => errors.push(m) });
 
@@ -352,5 +370,92 @@ describe('the periodic refresh sweep', () => {
     const stop = startGrokCredentialRefresh({ fetchFn: (async () => ok({})) as unknown as typeof fetch });
     expect(typeof stop).toBe('function');
     stop();
+  });
+});
+
+describe('refreshCredentialsOnce (single-flight)', () => {
+  // The refresh token rotates ON USE, and two independent things renew it: the
+  // 5-minute sweep and spawn-time materializeContainerAuth. Before this, a
+  // container spawning inside the expiry skew while the sweep ran presented the
+  // SAME token twice — the loser got invalid_grant, and whichever write landed
+  // last could leave the file holding a token already rotated away. It presents
+  // as "Grok logged itself out for no reason", with a dead credential and no
+  // cause surviving to explain it.
+  const okResponse = (body: unknown) =>
+    ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) }) as Response;
+
+  beforeEach(() => __resetRefreshSingleFlightForTest());
+
+  it('spends the rotating token ONCE when both callers race the same file', async () => {
+    let calls = 0;
+    let release: (() => void) | null = null;
+    const gate = new Promise<void>((r) => (release = r));
+    const fetchFn = (async () => {
+      calls += 1;
+      await gate; // hold both callers in flight together, as the real race does
+      return okResponse({ access_token: 'access-ROTATED', expires_in: 3600 });
+    }) as unknown as typeof fetch;
+
+    const a = refreshCredentialsOnce('/creds/shared.json', creds(), { fetchFn });
+    const b = refreshCredentialsOnce('/creds/shared.json', creds(), { fetchFn });
+    release!();
+    const [ra, rb] = await Promise.all([a, b]);
+
+    expect(calls).toBe(1);
+    // The second caller gets the FIRST one's result, so both writers persist the
+    // same token — the outcome the race used to corrupt.
+    expect(ra.accessToken).toBe('access-ROTATED');
+    expect(rb.accessToken).toBe('access-ROTATED');
+  });
+
+  it('does not coalesce across DIFFERENT credential files', async () => {
+    // Keying by file, not by group: the shared credential is renewed on behalf
+    // of many groups, but two distinct files are two distinct tokens.
+    let calls = 0;
+    const fetchFn = (async () => {
+      calls += 1;
+      return okResponse({ access_token: `access-${calls}`, expires_in: 3600 });
+    }) as unknown as typeof fetch;
+
+    await Promise.all([
+      refreshCredentialsOnce('/creds/shared.json', creds(), { fetchFn }),
+      refreshCredentialsOnce('/creds/group-a.json', creds(), { fetchFn }),
+    ]);
+
+    expect(calls).toBe(2);
+  });
+
+  it('refreshes again once the in-flight one settles', async () => {
+    // Coalescing is per-attempt, not a cache: the next DUE refresh must issue a
+    // real request or a credential would never renew twice.
+    let calls = 0;
+    const fetchFn = (async () => {
+      calls += 1;
+      return okResponse({ access_token: `access-${calls}`, expires_in: 3600 });
+    }) as unknown as typeof fetch;
+
+    await refreshCredentialsOnce('/creds/shared.json', creds(), { fetchFn });
+    await refreshCredentialsOnce('/creds/shared.json', creds(), { fetchFn });
+
+    expect(calls).toBe(2);
+  });
+
+  it('gives every awaiting caller the failure, and clears for a retry', async () => {
+    let calls = 0;
+    const fetchFn = (async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('invalid_grant');
+      return okResponse({ access_token: 'access-LATER', expires_in: 3600 });
+    }) as unknown as typeof fetch;
+
+    const a = refreshCredentialsOnce('/creds/shared.json', creds(), { fetchFn });
+    const b = refreshCredentialsOnce('/creds/shared.json', creds(), { fetchFn });
+    await expect(a).rejects.toThrow(/invalid_grant/);
+    await expect(b).rejects.toThrow(/invalid_grant/);
+    expect(calls).toBe(1);
+
+    // A failed attempt must not poison the slot — the next tick retries.
+    const later = await refreshCredentialsOnce('/creds/shared.json', creds(), { fetchFn });
+    expect(later.accessToken).toBe('access-LATER');
   });
 });
