@@ -94,34 +94,8 @@ jobs:
           echo "  old: ${OLD:-<none>}"
           echo "  new: $NEW"
 
-      # Can this runner reach the registry at all?
-      #
-      # Every check below reads the image FROM ECR, so on a mirror or fork with
-      # no pull role they do not fail a pin — they fail for want of a login, and
-      # do it on every carry that crosses an upstream repin. A check that can
-      # only ever be red stops being a signal and starts being something people
-      # merge past, which is worse than not running it.
-      #
-      # The distinction that keeps this honest:
-      #   role configured + verification fails  -> RED (uncertainty about a pin)
-      #   role configured at all missing        -> SKIP (no claim was made)
-      # Absent a role there is nothing to be uncertain ABOUT: this environment
-      # never had the standing to verify. Where the role IS set, nothing here
-      # changes — the steps run exactly as before and a broken login is still
-      # a red job, because `capable` is true and the login step will fail.
-      - name: Can this runner verify the image?
-        id: capable
-        run: |
-          set -euo pipefail
-          if [ -z '${{ vars.AGENT_IMAGE_CI_ROLE_ARN }}' ]; then
-            echo 'capable=false' >> "$GITHUB_OUTPUT"
-            echo '::notice::No AGENT_IMAGE_CI_ROLE_ARN — this checkout has no registry access, so image verification is skipped. Pins reaching users are verified where that role exists.'
-          else
-            echo 'capable=true' >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Assume the pull-only role
-        if: steps.pin.outputs.changed == 'true' && steps.capable.outputs.capable == 'true'
+        if: steps.pin.outputs.changed == 'true'
         id: aws
         continue-on-error: true
         uses: aws-actions/configure-aws-credentials@v4
@@ -130,7 +104,7 @@ jobs:
           aws-region: us-east-1
 
       - name: Registry login
-        if: steps.pin.outputs.changed == 'true' && steps.capable.outputs.capable == 'true' && steps.aws.outcome == 'success'
+        if: steps.pin.outputs.changed == 'true' && steps.aws.outcome == 'success'
         run: |
           set -euo pipefail
           REF='${{ steps.pin.outputs.new }}'
@@ -140,7 +114,7 @@ jobs:
 
       # Everything below is BLOCKING. A red job here cannot merge at all.
       - name: Manifest is a multi-arch index covering both platforms
-        if: steps.pin.outputs.changed == 'true' && steps.capable.outputs.capable == 'true'
+        if: steps.pin.outputs.changed == 'true'
         run: |
           set -euo pipefail
           REF='${{ steps.pin.outputs.new }}'
@@ -167,7 +141,7 @@ jobs:
           PY
 
       - name: Pull and check the image's own claims
-        if: steps.pin.outputs.changed == 'true' && steps.capable.outputs.capable == 'true'
+        if: steps.pin.outputs.changed == 'true'
         run: |
           set -euo pipefail
           REF='${{ steps.pin.outputs.new }}'
@@ -197,7 +171,7 @@ jobs:
           echo "  lock label matches; image declares itself hardened"
 
       - name: Size delta is plausible
-        if: steps.pin.outputs.changed == 'true' && steps.capable.outputs.capable == 'true' && steps.pin.outputs.old != ''
+        if: steps.pin.outputs.changed == 'true' && steps.pin.outputs.old != ''
         run: |
           set -euo pipefail
           total() {
@@ -233,7 +207,7 @@ jobs:
       # verifying it wherever it lives still says something true about these
       # exact bytes.
       - name: Verify publisher signature
-        if: steps.pin.outputs.changed == 'true' && steps.capable.outputs.capable == 'true'
+        if: steps.pin.outputs.changed == 'true'
         id: sig
         continue-on-error: true
         run: |

@@ -33,11 +33,6 @@ import {
   resolveContainerEnv,
   runSessionPrepareHooks,
 } from './container-runtime.js';
-// Upstream RENAMED claude-md-compose -> project-doc-compose (composeGroupClaudeMd
-// -> composeGroupProjectDoc, plus DEFAULT_PROJECT_DOC). The call site below already
-// takes upstream's form, so the seam's old import is dropped, not merged.
-// NOTE: repo B carries patches named src__claude-md-compose*.patch against the
-// file this rename deletes — they must be re-derived against the new name.
 import { composeGroupProjectDoc, DEFAULT_PROJECT_DOC } from './project-doc-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import {
