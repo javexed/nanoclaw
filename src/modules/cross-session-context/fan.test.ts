@@ -69,7 +69,7 @@ function session(
 }
 
 const ROOM_MG = mg('mg-room', 'C123', 1, 'pixel-room');
-const DM_MG = mg('mg-dm', 'D456', 0, 'Gavriel');
+const DM_MG = mg('mg-dm', 'D456', 0, 'Alex');
 const ROOM2_MG = mg('mg-room2', 'C789', 1, null);
 const DM2_MG = mg('mg-dm2', 'D999', 0, 'Someone');
 
@@ -93,7 +93,7 @@ function readEchoRows(sessionId: string): Array<Record<string, unknown>> {
 }
 
 function chatContent(text: string): string {
-  return JSON.stringify({ text, sender: 'Gavriel', senderId: 'slack:U1' });
+  return JSON.stringify({ text, sender: 'Alex', senderId: 'slack:U1' });
 }
 
 beforeEach(async () => {
@@ -173,11 +173,11 @@ describe('fanInboundMessage', () => {
     expect(sibRows[0].source_session_id).toBe('s-dm');
     const sibContent = JSON.parse(sibRows[0].content as string);
     expect(sibContent.text).toBe('private note');
-    expect(sibContent.sender).toBe('Gavriel');
+    expect(sibContent.sender).toBe('Alex');
     expect(sibContent.senderId).toBe('slack:U1');
     expect(sibContent.echo).toEqual({
       surface: ECHO_SIBLING_SURFACE,
-      label: 'another conversation with Gavriel',
+      label: 'another conversation with Alex',
     });
 
     // Nothing else in the group hears it: not task sessions, not rooms, not
@@ -315,7 +315,7 @@ describe('fanOutboundMessage', () => {
     expect(sibContent.senderId).toBe(AG);
     expect(sibContent.echo).toEqual({
       surface: ECHO_SIBLING_SURFACE,
-      label: 'another conversation with Gavriel',
+      label: 'another conversation with Alex',
     });
   });
 
@@ -475,13 +475,13 @@ describe('label + truncation helpers', () => {
   it('buildEchoLabel renders room and DM labels', async () => {
     expect(buildEchoLabel({ name: 'pixel-room', platform_id: 'C1', is_group: 1 })).toBe('#pixel-room room');
     expect(buildEchoLabel({ name: null, platform_id: 'C1', is_group: 1 })).toBe('#C1 room');
-    expect(buildEchoLabel({ name: null, platform_id: 'D1', is_group: 0 }, 'Gavriel')).toBe('DM with Gavriel');
+    expect(buildEchoLabel({ name: null, platform_id: 'D1', is_group: 0 }, 'Alex')).toBe('DM with Alex');
     expect(buildEchoLabel({ name: null, platform_id: 'D1', is_group: 0 }, null)).toBe('DM (D1)');
   });
 
   it('buildSiblingEchoLabel renders same-DM sibling labels with sensible fallbacks', async () => {
-    expect(buildSiblingEchoLabel({ name: 'Gavriel', platform_id: 'D1', is_group: 0 })).toBe(
-      'another conversation with Gavriel',
+    expect(buildSiblingEchoLabel({ name: 'Alex', platform_id: 'D1', is_group: 0 })).toBe(
+      'another conversation with Alex',
     );
     expect(buildSiblingEchoLabel({ name: null, platform_id: 'D1', is_group: 0 }, 'Gav')).toBe(
       'another conversation with Gav',

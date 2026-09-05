@@ -39,7 +39,11 @@ import {
   writeSessionMessage,
   writeOutboundDirect,
 } from './session-manager.js';
-import { wakeContainer } from './container-runner.js';
+// Upstream routed every wake through request-wake.js — a pure delegation to
+// wakeContainer, kept byte-equivalent until durable wake_signals rows become
+// authoritative. The seam has no stake in which one it calls, so take
+// upstream's chokepoint; `wakeContainer` is no longer referenced here.
+import { requestWake } from './request-wake.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from './types.js';
 import type { InboundEvent } from './channels/adapter.js';
@@ -475,12 +479,12 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       if (!expectation) continue;
       const planWake = expectation === 'expected';
       if (planWake) {
-          // Both gates became async upstream (the central DB is async now), and
-          // the seam's plan branch is the one caller that still read them
-          // synchronously — an un-awaited promise is truthy, so `.allowed` on it
-          // read undefined and every gate silently PASSED.
-          const pAccessOk = !accessGate || (await accessGate(event, userId, mg, agent.agent_group_id)).allowed;
-          const pScopeOk = !senderScopeGate || (await senderScopeGate(event, userId, mg, agent)).allowed;
+        // Both gates became async upstream (the central DB is async now), and
+        // the seam's plan branch is the one caller that still read them
+        // synchronously — an un-awaited promise is truthy, so `.allowed` on it
+        // read undefined and every gate silently PASSED.
+        const pAccessOk = !accessGate || (await accessGate(event, userId, mg, agent.agent_group_id)).allowed;
+        const pScopeOk = !senderScopeGate || (await senderScopeGate(event, userId, mg, agent)).allowed;
         if (!pAccessOk || !pScopeOk) continue;
       }
       await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, planWake, {
@@ -672,12 +676,7 @@ async function deliverToAgent(
     sessionThreadId = keyOverride.threadId;
   }
 
-  const { session, created } = await resolveSession(
-        agent.agent_group_id,
-        mg.id,
-        sessionThreadId,
-        effectiveSessionMode,
-      );
+  const { session, created } = await resolveSession(agent.agent_group_id, mg.id, sessionThreadId, effectiveSessionMode);
 
   // The inbound row's (channel_type, platform_id, thread_id) is the address
   // the agent's reply will be delivered to. Normally it mirrors the source
@@ -827,8 +826,8 @@ async function deliverToAgent(
     );
     const freshSession = await getSession(session.id);
     if (freshSession) {
-      const woke = await wakeContainer(freshSession);
-      // wakeContainer never throws — it returns false on transient spawn
+      const woke = await requestWake(freshSession, 'inbound-message');
+      // requestWake never throws — it returns false on transient spawn
       // failure (host-sweep retries). Stop the typing indicator we just
       // started so it doesn't leak; the inbound row stays pending.
       if (!woke) stopTypingRefresh(freshSession.id);

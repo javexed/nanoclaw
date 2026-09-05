@@ -161,6 +161,11 @@ export function mountPolicy(env: NodeJS.ProcessEnv = process.env): MountPolicy {
     surfaceRoots: [
       path.join(projectRoot, 'container', 'agent-runner', 'src'),
       path.join(projectRoot, 'container', 'skills'),
+      // Not mounted any more — the composer reads it on the host. The root
+      // stays because it is what forces install-surface (and therefore
+      // read-only) on an operator additionalMount whose allowlisted root
+      // happens to cover the project tree. Without it the agent could get a
+      // writable mount of the base document inlined into its prompt.
       path.join(projectRoot, 'container', 'CLAUDE.md'),
     ],
     // Must resolve to the same path an egress overlay's provisioner writes
@@ -200,6 +205,16 @@ export function createSessionDriver(kind: DriverKind, overrides: Partial<MountPo
   // Boot-scoped marker; see the crash-loop caveat at the top of this file.
   log.info('Session runtime driver selected', { driver: driver.kind, capabilities: driver.capabilities() });
   return driver;
+}
+
+/**
+ * The already-selected driver, or null — never instantiates. For consumers
+ * that must arm only when a runtime is actually in use: the boot sequence
+ * selects the driver before the sweep starts, while a unit suite that never
+ * selected one sees null instead of triggering selection as a side effect.
+ */
+export function peekSessionDriver(): SessionEventsDriver | null {
+  return installed;
 }
 
 /** Test seam: drop the memoized driver so a suite can select another one. */

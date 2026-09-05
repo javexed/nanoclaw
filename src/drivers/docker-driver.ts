@@ -104,7 +104,7 @@ export class DockerSessionDriver implements SessionDriver {
   }
 
   async prepare(spec: SessionSpec): Promise<SessionHandle> {
-    validateSpec(spec, this.#policy);
+    validateSpec(spec, this.#policy, this.capabilities());
 
     const extra = spec.containers.filter((c) => c.role !== 'agent');
     if (extra.length > 0) {

@@ -1,0 +1,136 @@
+# This fork's own CI. Fork-owned, additive, never conflicts on an upstream merge.
+#
+# WHY THIS DIRECTORY EXISTS
+#
+# Forgejo resolves workflows first-match-wins: .forgejo/workflows, then
+# .gitea/workflows, then .github/workflows — and it stops at the first directory
+# that exists, whether or not it holds any workflows (modules/actions/workflows.go).
+# So this directory's presence makes Forgejo ignore upstream's .github/workflows
+# on this repo, and that is the point. What upstream's set does on a PR into
+# this branch:
+#
+#   ci.yml                 pull_request: branches: [main]  -> never runs here.
+#                          This fork's PRs target pub/module-hooks, so upstream's
+#                          test job has never gated one of them.
+#   verify-agent-image.yml every check reads the agent image from a registry
+#                          this fork has no pull role for, so it can only ever
+#                          be red. A check that can only be red is worse than
+#                          none: it teaches people to merge past it.
+#   label-pr.yml           GitHub labeling bots (github-script, labeler);
+#   label-area.yml         nothing for them to do on a Forgejo instance.
+#   release / refresh /    workflow_dispatch and workflow_run only; never fire
+#   approve-agent-image    on a PR.
+#
+# Net: upstream's .github/ is untouched — byte-identical, nothing to reconcile
+# on a merge — and this fork gets the one job it was missing.
+#
+# On GitHub this directory is inert — GitHub reads only .github/workflows. That
+# is intended: the public mirror receives pushes, not PRs, and none of upstream's
+# push-triggered workflows watch this branch, so nothing runs there at all.
+#
+# WHAT THIS CI IS FOR
+#
+# Not "is upstream healthy" — upstream tests that, on both Node majors, with
+# its own registry access. This fork's risk is narrower: after merging upstream,
+# do the fork's hook points still attach and do their tests still pass? That is
+# a typecheck of both trees and one run of each suite, on the Node the tree pins.
+#
+# This file is fork-owned. It is not a copy of upstream's ci.yml and must not
+# be maintained as one; when upstream changes its CI, nothing here needs to
+# follow unless this fork's own needs change.
+#
+# WHY THE SUITES RUN AS AN UNPRIVILEGED USER
+#
+# Job containers run as root, and root bypasses permission bits. Upstream
+# routinely writes tests that plant a permission failure with chmod and assert
+# on it — three at the time of writing, across both suites:
+#
+#   setup/uninstall/remove.test.ts                       chmod 0o555, backup must fail
+#   scripts/update/transaction.e2e.test.ts               chmod 0o000, copy must EACCES
+#   container/agent-runner/src/mailbox/registry.test.ts  mode 0o000, read must fail
+#
+# Under root none of those failures happen, so the assertions trip. Nothing is
+# wrong with the code under test. Excluding them one by one is a treadmill:
+# every new one reds this job until someone adds it to a list, and each one
+# silently drops an upstream test. Running the suites as a real unprivileged
+# user closes the whole class, so every test runs and the list never exists.
+# The toolchain is installed by root into world-readable places (/opt, the
+# 777 toolcache) so the user switch costs nothing but a chown.
+
+name: seam-ci
+
+on:
+  pull_request:
+    branches: [pub/module-hooks]
+  # This branch is also updated by direct pushes, not only through PRs, so a
+  # push trigger is the only way those updates get tested at all.
+  push:
+    branches: [pub/module-hooks]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Read the pins from the tree rather than restating them, so a carry that
+      # bumps Bun, Node or pnpm in upstream's files needs no matching edit here.
+      - name: Read runtime pins
+        id: pins
+        run: |
+          set -euo pipefail
+          bun=$(sed -n 's/^ARG BUN_VERSION=//p' container/Dockerfile | head -1)
+          pnpm=$(sed -n 's/.*"packageManager": *"pnpm@\([^"]*\)".*/\1/p' package.json)
+          [ -n "$bun" ]  || { echo '::error::container/Dockerfile has no ARG BUN_VERSION'; exit 1; }
+          [ -n "$pnpm" ] || { echo '::error::package.json has no packageManager pnpm@<version>'; exit 1; }
+          echo "bun=$bun"   >> "$GITHUB_OUTPUT"
+          echo "pnpm=$pnpm" >> "$GITHUB_OUTPUT"
+          echo "node=$(cat .nvmrc) pnpm=$pnpm bun=$bun"
+
+      # Toolchain, installed by root into places any user can execute from.
+      # setup-node lands in the toolcache (world-writable in this image); pnpm
+      # goes into that node's global bin; bun into /opt. No $HOME involved, so
+      # nothing here is trapped under /root when the user switches below.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Install pnpm and bun
+        run: |
+          set -euo pipefail
+          npm install -g "pnpm@${{ steps.pins.outputs.pnpm }}" >/dev/null
+          BUN_INSTALL=/opt/bun bash -c 'curl -fsSL https://bun.sh/install | bash -s "bun-v${{ steps.pins.outputs.bun }}"' >/dev/null
+          echo /opt/bun/bin >> "$GITHUB_PATH"
+
+      # The unprivileged user the suites run as, and the one-line wrapper every
+      # step below goes through. sudo's secure_path would drop the toolchain
+      # from PATH, hence the explicit env PATH= after it; -E keeps TMPDIR and
+      # VITEST_MAX_WORKERS from the runner config; -H gives pnpm a real HOME.
+      - name: Create the unprivileged test user
+        run: |
+          set -euo pipefail
+          useradd -m -u 1001 ci
+          chown -R ci:ci "$GITHUB_WORKSPACE"
+          printf '#!/bin/bash\nexec sudo -u ci -H -E env PATH="$PATH" "$@"\n' > /usr/local/bin/as-ci
+          chmod 755 /usr/local/bin/as-ci
+          as-ci bash -c 'echo "running as $(id -un) node=$(node --version) pnpm=$(pnpm --version) bun=$(bun --version) TMPDIR=${TMPDIR:-unset}"'
+
+      - run: as-ci pnpm install --frozen-lockfile
+      - name: Install agent-runner deps (Bun)
+        working-directory: container/agent-runner
+        run: as-ci bun install --frozen-lockfile
+
+      - name: Format check
+        run: as-ci pnpm run format:check
+
+      - name: Typecheck host
+        run: as-ci pnpm exec tsc --noEmit
+
+      - name: Typecheck container
+        run: as-ci pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit
+
+      - name: Host tests
+        run: as-ci pnpm exec vitest run
+
+      - name: Container tests
+        working-directory: container/agent-runner
+        run: as-ci bun test
