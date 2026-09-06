@@ -32,10 +32,15 @@ import { backfillNewSession, fanInboundMessage } from './modules/cross-session-c
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
+import { planForAgent, reKeyedTurn, resolveInboundDeliveryPlan, vetoTurn } from './seam/routing-hooks.js';
+import { resolveSessionKeyOverride } from './seam/session-hooks.js';
 import { requestWake } from './request-wake.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from './types.js';
 import type { InboundEvent } from './channels/adapter.js';
+
+// Seam: deliverToAgent rebinds these three for a re-keyed turn (see reKeyedTurn). A thunk, so nothing is read at load.
+const seamUpstream = () => ({ resolveSession, writeSessionMessage, fanInboundMessage });
 
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -370,6 +375,9 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   let engagedCount = 0;
   let accumulatedCount = 0;
   let subscribed = false;
+  // Seam: agent-authored loop-backs carry their producer; a module may plan this event's delivery outright.
+  const senderAgentGroupId = event.message.senderAgentGroupId;
+  const plan = resolveInboundDeliveryPlan(mg, event.threadId, messageText, senderAgentGroupId);
 
   for (const agent of agents) {
     const agentGroup = await getAgentGroup(agent.agent_group_id);
@@ -389,6 +397,32 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       supportsThreads,
     );
     const effectiveThreadId = threadsEnabled ? event.threadId : null;
+
+    // Seam: an agent never re-engages on its own loop-back; a module plan replaces engage evaluation.
+    if (senderAgentGroupId && agent.agent_group_id === senderAgentGroupId) continue;
+    const planned = plan ? planForAgent(plan, agent.agent_group_id) : null;
+    if (plan && !planned) continue;
+    if (planned) {
+      const gatesOk =
+        !planned.wake ||
+        ((!accessGate || (await accessGate(event, userId, mg, agent.agent_group_id)).allowed) &&
+          (!senderScopeGate || (await senderScopeGate(event, userId, mg, agent)).allowed));
+      if (!gatesOk) continue;
+      await deliverToAgent(
+        agent,
+        agentGroup,
+        mg,
+        event,
+        userId,
+        threadsEnabled,
+        effectiveThreadId,
+        planned.wake,
+        planned.hints,
+      );
+      if (planned.wake) engagedCount++;
+      else accumulatedCount++;
+      continue;
+    }
 
     const engages = await evaluateEngage(agent, messageText, isMention, mg, effectiveThreadId);
 
@@ -523,6 +557,7 @@ async function deliverToAgent(
   threadsEnabled: boolean,
   effectiveThreadId: string | null,
   wake: boolean,
+  hints?: Record<string, unknown>, // seam: delivery-plan hints, merged into the content JSON
 ): Promise<void> {
   // Apply the resolved thread policy (wiring override AND channel declaration
   // AND adapter capability — resolveThreadPolicy at fanout): thread-enabled
@@ -534,6 +569,19 @@ async function deliverToAgent(
   if (threadsEnabled && effectiveSessionMode !== 'agent-shared' && mg.is_group !== 0) {
     effectiveSessionMode = 'per-thread';
   }
+
+  // Seam: a module gate may veto this turn; a module resolver may re-key it (a different session, its own
+  // inbound write, no cross-session fan). The three calls below are rebound to the seam's wrappers for the rest
+  // of this function — their lines are upstream's, unchanged.
+  if (await vetoTurn(mg, agent.agent_group_id, userId, event)) return;
+  const keyOverride = await resolveSessionKeyOverride(mg, agent.agent_group_id, userId, effectiveThreadId);
+  const { resolveSession, writeSessionMessage, fanInboundMessage } = reKeyedTurn(seamUpstream(), {
+    keyOverride,
+    wake,
+    hints,
+    roomId: mg.platform_id,
+    currentMessageId: event.message.id,
+  });
 
   const { session, created } = await resolveSession(
     agent.agent_group_id,

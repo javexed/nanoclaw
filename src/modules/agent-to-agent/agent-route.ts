@@ -28,6 +28,7 @@ import { getSession } from '../../db/sessions.js';
 import { requestWake } from '../../request-wake.js';
 import { GuardDenyError, guard } from '../../guard/index.js';
 import { log } from '../../log.js';
+import { notifyA2aRouteObservers } from '../../seam/a2a-hooks.js';
 import { resolveSession, sessionDir, withExistingMailboxSession, writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval, Session } from '../../types.js';
 import { requestApproval } from '../approvals/index.js';
@@ -354,6 +355,11 @@ async function performAgentRoute(
     a2aMsgId,
     forwardedFileCount: countForwardedFiles(forwardedContent),
   });
+  notifyA2aRouteObservers({
+    fromAgentGroupId: session.agent_group_id,
+    toAgentGroupId: targetAgentGroupId,
+    content: msg.content,
+  }); // seam
   const fresh = await getSession(targetSession.id);
   if (fresh) await requestWake(fresh, 'inbound-message');
 }

@@ -28,6 +28,12 @@ import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-con
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
+import {
+  notifyContainerExit,
+  resolveContainerEnv,
+  runSessionPrepareHooks,
+  seamGatewayKey,
+} from './seam/spawn-hooks.js';
 import { composeGroupProjectDoc, DEFAULT_PROJECT_DOC } from './project-doc-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import {
@@ -323,10 +329,12 @@ async function spawnContainer(session: Session): Promise<void> {
   // as the old wiring was: contribute() throwing aborts the spawn, the inbound
   // row stays pending, and the sweep retries. Network selection is NOT here —
   // topology is driver-private (see `drivers/index.ts`).
+  await runSessionPrepareHooks(agentGroup.id, session.thread_id); // seam: module pre-spawn hooks
   const gateway = await getGatewayProvider().contribute({
     key: { installSlug: INSTALL_SLUG, agentGroupId: agentGroup.id, sessionId: session.id },
     groupName: agentGroup.name,
     capabilities: driver.capabilities(),
+    ...seamGatewayKey(agentGroup.id, session.thread_id, session.id), // seam: a module may re-point the credential identity
   });
   if (gateway.containers?.length && !driver.capabilities().auxiliaryContainers) {
     // Named at composition, where the error can say which side to change —
@@ -381,6 +389,7 @@ async function spawnContainer(session: Session): Promise<void> {
       handle,
       onTerminal: (failure) => {
         void finishAndResolve(session.id, runtime, failure);
+        notifyContainerExit(session); // seam
       },
       afterStart: () => {
         return markContainerRunning(session.id);
@@ -977,6 +986,7 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
   const contributedEnv: Record<string, string> = {
     ...(contribution.env ?? {}),
     ...(gateway.env ?? {}),
+    ...resolveContainerEnv(agentGroup.id, session.thread_id), // seam: module env, last so it wins a collision
   };
 
   const hostUid = process.getuid?.();
