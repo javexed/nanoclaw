@@ -62,6 +62,8 @@ export interface InboundEvent {
     isMention?: boolean;
     /** True when the source is a group/channel thread, false for DMs. */
     isGroup?: boolean;
+    /** Set when an agent authored this inbound (loop-back); see the seam's InboundMessage augmentation. */
+    senderAgentGroupId?: string;
   };
   replyTo?: DeliveryAddress;
 }

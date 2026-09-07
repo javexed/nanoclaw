@@ -11,6 +11,7 @@
  * so even if this table is stale the host's enforcement is authoritative.
  */
 import { getAgentMailbox } from './mailbox/index.js';
+import { resolvePromptSections } from './seam/prompt-sections.js';
 import type { Destination } from './mailbox/types.js';
 
 export interface DestinationEntry {
@@ -125,6 +126,7 @@ function buildDestinationsSection(mode: SessionMode): string {
   lines.push(
     'For a short turn, do not narrate. For longer work, send one acknowledgment and then updates only at meaningful milestones, especially before slow operations. Never narrate micro-steps; finish with the outcome, not a play-by-play.',
   );
+  for (const section of resolvePromptSections(all)) lines.push('', section); // seam
   return lines.join('\n');
 }
 
