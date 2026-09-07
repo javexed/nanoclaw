@@ -79,6 +79,14 @@ export interface ProviderExchange {
  * providers; individual providers may ignore any they don't need.
  */
 export interface ProviderOptions {
+  /**
+   * Seam: module-owned per-query markers, read by a registered query-options
+   * contributor on the way in; core never interprets them. A FIELD, not a side
+   * table keyed by this object: the markers must survive a wrapper copying the
+   * input (`{...input}`), where a WeakMap silently drops them — and for the
+   * learning review that means losing its restricted toolset.
+   */
+  moduleInput?: Record<string, unknown>;
   assistantName?: string;
   mcpServers?: Record<string, McpServerConfig>;
   env?: Record<string, string | undefined>;
