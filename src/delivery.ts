@@ -31,6 +31,7 @@ import { isUnguarded, type Unguarded } from './guard/index.js';
 import { mapConcurrent } from './concurrency.js';
 import { fanOutboundMessage } from './modules/cross-session-context/index.js';
 import { log } from './log.js';
+import { runSessionDeliveryObservers } from './seam/delivery-hooks.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, readOutboxFiles, withExistingMailboxSession } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
@@ -247,6 +248,7 @@ export async function deliverSessionMessages(session: Session): Promise<void> {
 
   try {
     await drainSession(session);
+    await runSessionDeliveryObservers(session); // seam
   } finally {
     inflightDeliveries.delete(session.id);
   }
@@ -542,6 +544,7 @@ async function deliverMessage(
     msg.content,
     files,
     deliverInstance,
+    { sessionId: session.id, agentGroupId: session.agent_group_id }, // seam: producing session
   );
   log.info('Message delivered', {
     id: msg.id,
