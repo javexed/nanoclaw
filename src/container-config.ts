@@ -10,6 +10,7 @@
  */
 import fs from 'fs';
 import path from 'path';
+import { resolveContainerConfigAugmentation } from './seam/spawn-hooks.js';
 
 import { DEFAULT_MODEL, FAST_MODE, GROUPS_DIR, TIMEZONE } from './config.js';
 import { getContainerConfig } from './db/container-configs.js';
@@ -414,6 +415,7 @@ export async function materializeContainerJson(agentGroupId: string): Promise<Co
   if (!row) throw new Error(`Container config not found for agent group: ${agentGroupId}`);
 
   const config = configFromDb(row, group);
+  Object.assign(config, resolveContainerConfigAugmentation(agentGroupId)); // seam: module-contributed fields win
 
   const p = path.join(GROUPS_DIR, group.folder, 'container.json');
   const dir = path.dirname(p);
