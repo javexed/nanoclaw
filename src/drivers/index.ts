@@ -45,6 +45,7 @@ import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import '../provider-contracts/index.js';
 import { protectedProviderDocumentSourcePaths } from '../provider-contracts/realize.js';
+import { resolveNetworkPolicy } from '../seam/network-hooks.js';
 
 import { DockerSessionDriver, agentContainerName } from './docker-driver.js';
 import {
@@ -79,12 +80,18 @@ export function readSetting(key: (typeof SETTINGS)[number], env: NodeJS.ProcessE
  */
 function dockerNetworkArgs(spec: SessionSpec): string[] {
   if (spec.networkAccess.target.kind === 'session-container') return [];
+  // Seam: a module's resolver first, then the spec's own declared intent (which upstream declares but never read).
+  const fromModule = resolveNetworkPolicy(spec);
+  if (fromModule) return fromModule;
+  if (spec.network === 'none') return ['--network', 'none'];
   if (ensureEgressNetwork(spec.networkAccess)) {
     log.info('Egress lockdown active', { containerName: agentContainerName(spec), network: EGRESS_NETWORK });
     return egressNetworkArgs();
   }
   return os.platform() === 'linux' ? [`--add-host=${spec.networkAccess.endpoint}:host-gateway`] : [];
 }
+/** Seam, test-only: the network decision above, reachable without exporting upstream's function. */
+export const __dockerNetworkArgsForTest = dockerNetworkArgs;
 
 registerSessionDriver(
   DEFAULT_DRIVER_KIND,
