@@ -5,6 +5,7 @@ import path from 'path';
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/container-state.js';
+import { notifyProviderMessage, resolveProviderQueryOptions } from './hooks.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
 import { shimCwd } from './cwd-shim.js';
@@ -252,6 +253,7 @@ const preToolUseHook: HookCallback = async (input) => {
   } catch (err) {
     log(`PreToolUse: failed to record container_state: ${err instanceof Error ? err.message : String(err)}`);
   }
+  if (toolName) notifyProviderMessage({ kind: 'tool_use', toolName, toolInput: i.tool_input }); // seam
   return { continue: true };
 };
 
@@ -585,6 +587,9 @@ export class ClaudeProvider implements AgentProvider {
           PostToolUseFailure: [{ hooks: [postToolUseHook] }],
           PreCompact: [{ hooks: [createPreCompactHook(this.assistantName)] }],
         },
+        // Seam: module per-query options — allowedTools REPLACES the allowlist, model overrides the turn model,
+        // forkSession keeps the query off the main transcript. Last, so they win; {} when nothing registers.
+        ...resolveProviderQueryOptions(input),
       },
     });
 

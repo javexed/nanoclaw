@@ -23,6 +23,7 @@ import { runGuarded, type DeliveryGuardSpec, type GuardedDeliveryHandler } from 
 import { isUnguarded, type Unguarded } from './guard/index.js';
 import { fanOutboundMessage } from './modules/cross-session-context/index.js';
 import { log } from './log.js';
+import { runSessionDeliveryObservers } from './seam/delivery-hooks.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, readOutboxFiles, withExistingMailboxSession } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
@@ -175,6 +176,7 @@ async function pollActive(): Promise<void> {
     const sessions = await getRunningSessions();
     for (const session of sessions) {
       await deliverSessionMessages(session);
+      await runSessionDeliveryObservers(session); // seam
     }
   } catch (err) {
     log.error('Active delivery poll error', { err });
@@ -190,6 +192,7 @@ async function pollSweep(): Promise<void> {
     const sessions = await getActiveSessions();
     for (const session of sessions) {
       await deliverSessionMessages(session);
+      await runSessionDeliveryObservers(session); // seam
     }
   } catch (err) {
     log.error('Sweep delivery poll error', { err });
@@ -498,6 +501,7 @@ async function deliverMessage(
     msg.content,
     files,
     deliverInstance,
+    { sessionId: session.id, agentGroupId: session.agent_group_id }, // seam: producing session
   );
   log.info('Message delivered', {
     id: msg.id,
