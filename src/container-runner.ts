@@ -28,6 +28,12 @@ import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-con
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
+import {
+  notifyContainerExit,
+  resolveContainerEnv,
+  runSessionPrepareHooks,
+  seamGatewayKey,
+} from './seam/spawn-hooks.js';
 import { composeGroupProjectDoc, DEFAULT_PROJECT_DOC } from './project-doc-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import {
@@ -296,6 +302,7 @@ async function retryPendingAdoption(session: Session): Promise<boolean> {
       groupName: group.name,
       containerName: snapshot.handle.name,
       capabilities: driver.capabilities(),
+      ...seamGatewayKey(session.agent_group_id, session.thread_id, session.id), // seam: adoption keeps the identity it was created with
     });
   } catch (err) {
     await releaseClaimQuietly(session.id, claimIncarnation);
@@ -394,6 +401,7 @@ async function spawnContainer(session: Session): Promise<void> {
   const driver = getSessionDriver();
   // Core calls the same idempotent provider operation for new and surviving
   // sessions. The returned typed contribution enters driver validation whole.
+  await runSessionPrepareHooks(agentGroup.id, session.thread_id); // seam: module pre-spawn hooks
   const gatewaySession = await ensureGatewaySession({
     disposition: 'create',
     key: { installSlug: INSTALL_SLUG, agentGroupId: agentGroup.id, sessionId: session.id },
@@ -405,6 +413,7 @@ async function spawnContainer(session: Session): Promise<void> {
     groupName: agentGroup.name,
     containerName,
     capabilities: driver.capabilities(),
+    ...seamGatewayKey(agentGroup.id, session.thread_id, session.id), // seam: a module may re-point the credential identity
   });
   const admissionGeneration = gatewayAdmissionGeneration;
   const gateway = gatewaySession.lease.contribution;
@@ -468,6 +477,7 @@ async function spawnContainer(session: Session): Promise<void> {
     handle,
     onTerminal: (failure) => {
       void finishAndResolve(session.id, runtime, failure);
+      notifyContainerExit(session); // seam
     },
     afterStart: () => {
       return markContainerRunning(session.id);
@@ -847,6 +857,7 @@ export async function adoptRunningSessions(): Promise<{ adopted: number; stopped
         groupName: agentGroup.name,
         containerName: handle.name,
         capabilities: driver.capabilities(),
+        ...seamGatewayKey(session.agent_group_id, session.thread_id, session.id), // seam: adoption keeps the identity it was created with
       });
       await driver.reconcileNetworkAccess?.(gatewaySession.lease.contribution.networkAccess);
     } catch (err) {
@@ -1267,6 +1278,7 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
   const contributedEnv: Record<string, string> = {
     ...(contribution.env ?? {}),
     ...(gateway.env ?? {}),
+    ...resolveContainerEnv(agentGroup.id, session.thread_id), // seam: module env, last so it wins a collision
   };
 
   const hostUid = process.getuid?.();

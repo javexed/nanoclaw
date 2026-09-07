@@ -22,6 +22,7 @@
  * if either module becomes genuinely optional (see REFACTOR_PLAN open q #3).
  */
 import { normalizeOptions, type RawOption } from '../../channels/ask-question.js';
+import { notifyApprovalRequested, runApprovalIntercepts } from '../../seam/approval-hooks.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { createPendingApproval, deletePendingApproval, getSession } from '../../db/sessions.js';
 import { getDeliveryAdapter } from '../../delivery.js';
@@ -80,6 +81,10 @@ export function registerApprovalHandler(action: string, handler: ApprovalHandler
     log.warn('Approval handler re-registered (overwriting)', { action });
   }
   approvalHandlers.set(action, handler);
+}
+
+export function listRegisteredApprovalActions(): string[] {
+  return [...approvalHandlers.keys()].sort();
 }
 
 export function getApprovalHandler(action: string): ApprovalHandler | undefined {
@@ -262,6 +267,19 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
     // The DM'd approver is the identity this card was routed to; recording it
     // makes resolution exact — only that user may decide the row.
     approver_user_id: approverUserId ?? target.userId ?? null,
+  });
+
+  // Seam: an intercept may resolve the hold outright; listeners mirror the card.
+  if (await runApprovalIntercepts(approvalId, session, question)) return;
+  notifyApprovalRequested({
+    approvalId,
+    session,
+    action,
+    title,
+    question,
+    options: APPROVAL_OPTIONS,
+    approvers,
+    agentName,
   });
 
   const adapter = getDeliveryAdapter();
