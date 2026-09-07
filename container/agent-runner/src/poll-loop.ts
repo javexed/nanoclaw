@@ -36,6 +36,16 @@ import type { ProviderRuntimeContract } from './provider-contracts/registry.js';
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
 
+import { notifyProviderExchange, notifyProviderMessage } from './providers/hooks.js';
+import {
+  notifyTurnCompletion,
+  retryTurnAfterFailure,
+  runDeferredRunnerCommand,
+  scanRunnerCommand,
+  type RunnerCommandSpec,
+  type RunnerTurnContext,
+} from './runner-hooks.js';
+
 /** Consecutive driver-classified failures before a fresh runner is required. */
 const MAILBOX_FAILURE_STREAK_EXIT = 10;
 
@@ -154,6 +164,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     const ids = messages.map((m) => m.id);
     markProcessing(ids);
+    notifyProviderMessage({ kind: 'batch_start' }); // seam
 
     const routing = extractRouting(messages);
 
@@ -162,6 +173,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // the runner handles directly is /clear (session reset).
     const normalMessages: MessageInRow[] = [];
     const commandIds: string[] = [];
+    const deferredCommands: Array<{ spec: RunnerCommandSpec; text: string }> = []; // seam
 
     for (const msg of messages) {
       if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && isClearCommand(msg)) {
@@ -194,12 +206,33 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         commandIds.push(msg.id);
         continue;
       }
+      // Seam: module-registered commands, consulted after the built-ins decline.
+      const cmd = scanRunnerCommand(msg, config.provider);
+      if (cmd?.action === 'defer') {
+        deferredCommands.push(cmd);
+        commandIds.push(msg.id);
+        continue;
+      }
+      if (cmd?.action === 'rewrite') {
+        normalMessages.push(cmd.msg);
+        continue;
+      }
       normalMessages.push(msg);
     }
 
     if (commandIds.length > 0) {
       markCompleted(commandIds);
     }
+
+    // Seam: batch context for the hooks; deferred module commands run at this idle point, before the
+    // empty-batch exit below (such commands usually arrive alone, which is exactly the shape it skips).
+    const turnContext: RunnerTurnContext = {
+      routing,
+      batchMessages: messages,
+      getContinuation: () => continuation,
+      config,
+    };
+    for (const d of deferredCommands) await runDeferredRunnerCommand(d.spec, d.text, turnContext);
 
     if (normalMessages.length === 0) {
       const remainingIds = ids.filter((id) => !commandIds.includes(id));
@@ -261,6 +294,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const abortActiveQuery = () => query.abort();
     if (config.signal?.aborted) abortActiveQuery();
     else config.signal?.addEventListener('abort', abortActiveQuery, { once: true });
+    notifyProviderMessage({ kind: 'turn_start' }); // seam
     try {
       const result = await processQuery(
         query,
@@ -272,6 +306,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         continuation,
         midTurnCompleteDelivery,
         config.signal,
+        turnContext, // seam
       );
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
@@ -290,6 +325,40 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         clearContinuation(config.providerName);
       }
 
+      // Seam: a module may re-run this turn on another provider; a claimed retry replaces the error path.
+      const retried = await retryTurnAfterFailure({
+        failure: { message: errMsg },
+        prompt,
+        routing,
+        config,
+        run: (q, providerName, provider) =>
+          processQuery(
+            q,
+            routing,
+            processingIds,
+            providerName,
+            provider.onExchangeComplete?.bind(provider),
+            prompt,
+            undefined,
+            // The retry runs a DIFFERENT provider, so config.providerContract
+            // does not describe it. Read its legacy flag the way upstream reads
+            // a contractless provider's (see the `legacy` cast in runPollLoop).
+            ((provider as { emitsMidTurnText?: boolean }).emitsMidTurnText ?? false),
+            config.signal, // seam: same abort as the first attempt
+            turnContext,
+          ),
+      });
+      if (retried) {
+        if (retried.continuation && retried.continuation !== continuation) {
+          continuation = retried.continuation;
+          setContinuation(config.providerName, continuation);
+        }
+        markCompleted(processingIds);
+        log(`Turn recovered by a retry handler — ${processingIds.length} message(s) completed`);
+        notifyProviderMessage({ kind: 'turn_done' });
+        continue;
+      }
+
       // processQuery owns failure notices: it knows which active and queued
       // turns the failure abandoned. The opening batch may already be done.
 
@@ -306,6 +375,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // (e.g. stream closed unexpectedly).
     markCompleted(processingIds);
     log(`Completed ${ids.length} message(s)`);
+    notifyProviderMessage({ kind: 'turn_done' }); // seam
   }
 }
 
@@ -370,6 +440,7 @@ export async function processQuery(
    */
   midTurnCompleteDelivery = false,
   signal?: AbortSignal,
+  turnContext?: RunnerTurnContext, // seam: per-turn observers fire at each result event (hub queries stay open for hours)
 ): Promise<QueryResult> {
   // adoptTurn mutates routing in place; keep the caller's batch route intact.
   routing = { ...routing };
@@ -528,6 +599,7 @@ export async function processQuery(
         const keptIds = keep.map((m) => m.id);
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
+        notifyProviderMessage({ kind: 'turn_start', resetFeed: true }); // seam
         query.push(prompt);
         archivePrompts.push(prompt);
         const next: QueuedTurn = {
@@ -605,6 +677,7 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        notifyProviderMessage({ kind: 'turn_done' }); // seam
         const resultText = event.text ?? '';
         const failed = event.isError === true;
         if (resultText || failed) {
@@ -684,6 +757,7 @@ export async function processQuery(
         midTurnSent = 0;
         turnStartSeq = maxOutboundSeq();
         midTurnTail = '';
+        if (turnContext) notifyTurnCompletion(turnContext); // seam
         const next = queuedTurns.shift();
         if (next) adoptTurn(next);
         else answering = false;
@@ -744,6 +818,7 @@ function notifyExchangeComplete(
   hook: ((exchange: ProviderExchange) => void) | undefined,
   exchange: ProviderExchange,
 ): void {
+  notifyProviderExchange(exchange); // seam: observers first — a throwing hook must not cost a module its record
   if (!hook) return;
   try {
     hook(exchange);
@@ -767,6 +842,7 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
       break;
     case 'progress':
       log(`Progress: ${event.message}`);
+      notifyProviderMessage({ kind: 'progress', text: event.message }); // seam
       break;
   }
 }
