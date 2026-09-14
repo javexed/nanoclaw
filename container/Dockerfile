@@ -113,6 +113,7 @@ COPY cli-tools.json install-cli-tools.sh /tmp/
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     sh /tmp/install-cli-tools.sh /tmp/cli-tools.json
 
+# >>> nanoclaw:image-layers
 # ---- Grok Build CLI (grok provider payload) -----------------------------------
 # NOT in cli-tools.json: that manifest is npm-shaped and installs through pnpm,
 # while grok ships as a native linux binary from x.ai. Pinned by ARG and never
@@ -144,6 +145,7 @@ RUN curl -fsSL https://x.ai/cli/install.sh \
     rm -rf /root/.grok && \
     /usr/local/bin/grok --version && \
     test ! -e /home/node/.grok/bin/grok
+# <<< nanoclaw:image-layers
 
 # ---- ncl CLI wrapper ----------------------------------------------------------
 # Actual script lives in the mounted source at /app/src/cli/ncl.ts.
