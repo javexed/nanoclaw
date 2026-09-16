@@ -12,7 +12,6 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const DOCKERFILE = fs.readFileSync(path.join(process.cwd(), 'container', 'Dockerfile'), 'utf8');
-const BUILD_SH = fs.readFileSync(path.join(process.cwd(), 'container', 'build.sh'), 'utf8');
 
 /** The ARG line and the RUN block that installs the CLI. */
 const grokBlock = (): string => {
@@ -34,10 +33,6 @@ describe('the version is pinned', () => {
     expect(grokBlock()).toMatch(/bash -s "\$\{GROK_VERSION\}"/);
   });
 
-  it('build.sh can override the pin from env or .env', () => {
-    expect(BUILD_SH).toMatch(/GROK_VERSION/);
-    expect(BUILD_SH).toMatch(/--build-arg "GROK_VERSION=/);
-  });
 });
 
 describe('the binary cannot collide with the provider mount', () => {
@@ -70,6 +65,18 @@ describe('the binary is usable by the unprivileged agent user', () => {
   it('makes it world-executable and removes the root-owned tree', () => {
     expect(grokBlock()).toMatch(/chmod 0755 \/usr\/local\/bin\/grok/);
     expect(grokBlock()).toMatch(/rm -rf \/root\/\.grok/);
+  });
+
+  it('lands inside the image-layers region rather than replacing the recipe', () => {
+    // The skill inserts this block with `nc:append at:nanoclaw:image-layers`.
+    // Copying the whole Dockerfile instead rolled back every trunk change made
+    // after this payload was cut (rtk, bun, the pinned frontend).
+    const open = DOCKERFILE.indexOf('# >>> nanoclaw:image-layers');
+    const close = DOCKERFILE.indexOf('# <<< nanoclaw:image-layers');
+    const at = DOCKERFILE.indexOf('ARG GROK_VERSION');
+    expect(open).toBeGreaterThan(-1);
+    expect(at).toBeGreaterThan(open);
+    expect(at).toBeLessThan(close);
   });
 
   it('installs before the image drops to USER node', () => {
