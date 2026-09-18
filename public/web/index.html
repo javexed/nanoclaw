@@ -52,6 +52,11 @@
     <form id="composer" hidden>
       <button id="attach-btn" type="button" title="Attach a file" aria-label="Attach a file">📎</button>
       <input id="attach-input" type="file" multiple hidden>
+      <!-- Staged attachments live here until Send, so a picture and its caption
+           leave as ONE message. Before this, picking a file uploaded it at once
+           with whatever was typed at that instant as the caption, so
+           attach-then-type produced two separate messages. -->
+      <div id="attach-tray" hidden aria-label="Attachments ready to send"></div>
       <textarea id="composer-input" rows="1" placeholder="Message… (/ for commands)"></textarea>
       <button id="stop-btn" type="button" title="Stop the agent" aria-label="Stop the agent" hidden>■</button>
       <button id="send-btn" type="submit" title="Send" aria-label="Send">➤</button>
