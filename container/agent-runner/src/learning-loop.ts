@@ -224,14 +224,20 @@ export function hasSkillProposalSince(seq: number): boolean {
 /**
  * A second provider query with the toolset dropped to draft_skill alone — the
  * review can propose a skill and say one sentence, and can do nothing else.
- * Runs over the exchange digest as a FRESH query; with no digest yet (a
- * container's first message was /learn) it simply starts blank.
+ *
+ * Context comes from one of two places. DEFAULT: the exchange digest, as a
+ * FRESH query — nothing replayed, a few thousand tokens, the main
+ * conversation untouched by construction. FALLBACK, when no exchange has
+ * been recorded yet (a container whose first message was /learn): fork the
+ * live continuation so the full transcript is in context; the fork's own
+ * session id is discarded, so the next real turn resumes the main
+ * conversation unaware the review happened.
  */
 export async function runLearningReview(
   config: PollLoopConfig,
   routing: RoutingContext,
   reviewPrompt: string,
-  opts: { announceDecline?: boolean; digest?: string | null } = {},
+  opts: { announceDecline?: boolean; digest?: string | null; continuation?: string } = {},
 ): Promise<LearningReviewOutcome> {
   const announceDecline = opts.announceDecline !== false;
   const digest = opts.digest ?? null;
@@ -240,6 +246,7 @@ export async function runLearningReview(
   appendStatusEvent('start', null);
   const reviewInput: QueryInput = {
     prompt: digest !== null ? buildDigestReviewPrompt(reviewPrompt, digest) : reviewPrompt,
+    continuation: digest !== null ? undefined : opts.continuation,
     cwd: config.cwd,
     systemContext: config.systemContext,
     moduleInput: { learningReview: true, reviewModel: resolveReviewModel(config.learning) },
@@ -363,6 +370,7 @@ registerRunnerCommand({
     log('Learning review requested (/learn)');
     await runLearningReview(ctx.config, ctx.routing, buildLearnReviewPrompt(text), {
       digest: buildReviewDigest(exchangeLog),
+      continuation: ctx.getContinuation(),
     });
   },
 });
@@ -391,6 +399,7 @@ registerTurnCompletionObserver((ctx: RunnerTurnContext) => {
       await runLearningReview(ctx.config, ctx.routing, LEARNING_REVIEW_PROMPT, {
         announceDecline: false,
         digest: buildReviewDigest(exchangeLog),
+        continuation: ctx.getContinuation(),
       });
     } catch (err) {
       log(`Auto learning review failed: ${err instanceof Error ? err.message : String(err)}`);

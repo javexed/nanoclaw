@@ -10,6 +10,8 @@ import { json, readJsonBody } from './http.js';
 import type { RouteCtx } from '../server.js';
 import { log } from '../../../log.js';
 import { getAgentLearning } from '../../../modules/learning/settings.js';
+import { listSkillDrafts, resolveSkillDraft } from '../../../modules/learning/db.js';
+import { notifySkillDraftResolved } from '../../../modules/learning/events.js';
 import { createAgentGroup, deleteAgentGroup, getAgentGroup, getAllAgentGroups } from '../../../db/agent-groups.js';
 import { initGroupFilesystem } from '../../../group-init.js';
 import type { AgentGroup } from '../../../types.js';
@@ -166,6 +168,12 @@ export async function rAgentDelete(ctx: RouteCtx, m: RegExpMatchArray): Promise<
   }
   await unassignModelFromAgent(id);
   await clearPrimeAgentForAgentGroup(id); // no ghost prime row pointing at the deleted agent
+  // Pending skill drafts: the FK cascade drops the rows, but the staged bodies
+  // live on disk — resolve them so nothing is orphaned, and flip their cards.
+  for (const d of await listSkillDrafts(id)) {
+    await resolveSkillDraft(d.id, 'discarded');
+    notifySkillDraftResolved({ draftId: d.id, outcome: 'discarded', by: 'agent-deleted' });
+  }
   await deleteAgentGroup(id);
   await broadcastRooms();
   return json(ctx.res, 200, { ok: true });
