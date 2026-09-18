@@ -7,7 +7,7 @@ import { OVERLAP_FLAG, OVERLAP_SHORTLIST, gatherOverlapCandidates, overlapScore 
 
 describe('overlapScore', () => {
   it('flags an identical skill', () => {
-    const a = { name: 'branded-pdf-export', description: 'Export a branded PDF report from the estimator' };
+    const a = { name: 'branded-pdf-export', description: 'Export a branded PDF report from the app' };
     expect(overlapScore(a, a)).toBeGreaterThanOrEqual(OVERLAP_FLAG);
   });
   it('catches sibling-name twins the exact-name dedup cannot', () => {
