@@ -10,6 +10,12 @@ export type ProviderSpeed = string;
 
 export interface AgentProvider {
   /**
+   * Optional. True when the provider can run a QueryInput.moduleInput.learningReview
+   * query with the toolset restricted and off the main transcript. Advertising
+   * this without enforcing it would hand a "restricted" review the full toolset.
+   */
+  readonly supportsRestrictedReview?: boolean;
+  /**
    * Register shared memory through the provider's native session-start
    * mechanism. `memory` is the contract's resolved memory capability (core
    * calls the contract's `memory` function with the hook, or takes its
@@ -106,6 +112,9 @@ export interface QueryInput {
 
   /** Working directory inside the container. */
   cwd: string;
+
+  /** Opaque per-query input for installed modules — read by their query-options contributors. */
+  moduleInput?: Record<string, unknown>;
 
   /**
    * System context to inject. Providers translate this into whatever their

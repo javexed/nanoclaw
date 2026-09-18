@@ -14,7 +14,7 @@
 # Idempotent: preserves an existing WEB_TOKEN and re-runs cleanly.
 #
 # Clean-VM usage — one command, from bare Debian/Ubuntu (installs Node/Docker too):
-#   git clone https://github.com/nanocoai/nanoclaw.git nanoclaw && cd nanoclaw
+#   git clone -b nanoclaw-web https://github.com/javexed/nanoclaw.git nanoclaw && cd nanoclaw
 #   sudo bash deploy/web-deploy.sh --install-deps --port 3100
 # (drop --install-deps if Node 22 + pnpm + Docker are already present).
 #

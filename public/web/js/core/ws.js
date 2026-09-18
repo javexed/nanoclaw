@@ -11,6 +11,7 @@ import { appendMessage, appendSystem, upgradeOptimistic, clearTranscript, setEmp
 import { joinRoom, renderRooms, updateUnreadDots } from '../features/rooms.js';
 import { handleStatusEvent } from '../features/thinking.js';
 import { fetchPendingApprovals, handleApprovalEvent, handleApprovalResolved } from '../features/approvals.js';
+import { handleSkillDraftResolved } from '../features/learning.js';
 export function setConnectionBanner(text) {
     const banner = $('#connection-banner');
     if (!banner)
@@ -207,6 +208,9 @@ export function connect() {
                 break;
             case 'approval_resolved':
                 handleApprovalResolved(msg);
+                break;
+            case 'skill_draft_resolved':
+                handleSkillDraftResolved(msg);
                 break;
             case 'error':
                 console.error('WS error:', msg.error);

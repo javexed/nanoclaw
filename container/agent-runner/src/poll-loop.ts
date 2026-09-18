@@ -32,6 +32,16 @@ import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import { notifyProviderMessage } from './providers/hooks.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
+// learning: the runner + provider seams the learning loop attaches through.
+import { notifyProviderExchange } from './providers/hooks.js';
+import {
+  chatRowText,
+  matchRunnerCommand,
+  notifyTurnCompletion,
+  runDeferredRunnerCommands,
+  type DeferredRunnerCommand,
+} from './runner-hooks.js';
+import type { LearningConfig } from './learning-loop.js';
 import type { ProviderRuntimeContract } from './provider-contracts/registry.js';
 
 const POLL_INTERVAL_MS = 1000;
@@ -49,6 +59,8 @@ function generateId(): string {
 }
 
 export interface PollLoopConfig {
+  /** Learning-loop behavior from container.json (learning-loop.ts). */
+  learning?: LearningConfig;
   provider: AgentProvider;
   /** Declared provider runtime behavior. Contractless providers keep legacy defaults. */
   providerContract?: Pick<ProviderRuntimeContract, 'textDelivery' | 'commands'>;
@@ -179,6 +191,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // the runner handles directly is /clear (session reset).
     const normalMessages: MessageInRow[] = [];
     const commandIds: string[] = [];
+    // Module commands (runner-hooks): matched after the built-ins decline,
+    // executed at the batch idle point below.
+    const deferredCommands: DeferredRunnerCommand[] = [];
 
     for (const msg of messages) {
       if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && isClearCommand(msg)) {
@@ -211,11 +226,28 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         commandIds.push(msg.id);
         continue;
       }
+      if (!isSessionEcho(msg)) {
+        const cmdText = chatRowText(msg);
+        const spec = cmdText !== null ? matchRunnerCommand(cmdText) : null;
+        if (spec && cmdText !== null) {
+          deferredCommands.push({ spec, text: cmdText });
+          commandIds.push(msg.id);
+          continue;
+        }
+      }
       normalMessages.push(msg);
     }
 
     if (commandIds.length > 0) {
       markCompleted(commandIds);
+    }
+    if (deferredCommands.length > 0) {
+      await runDeferredRunnerCommands(deferredCommands, {
+        config,
+        routing,
+        batchMessages: messages,
+        getContinuation: () => continuation,
+      });
     }
 
     if (normalMessages.length === 0) {
@@ -329,6 +361,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     log(`Completed ${ids.length} message(s)`);
 
     // Observers see the turn end even when it produced no user-facing message.
+    notifyTurnCompletion({ config, routing, batchMessages: messages, getContinuation: () => continuation });
     notifyProviderMessage({ kind: 'turn_done' });
   }
 }
@@ -790,6 +823,7 @@ function notifyExchangeComplete(
   hook: ((exchange: ProviderExchange) => void) | undefined,
   exchange: ProviderExchange,
 ): void {
+  notifyProviderExchange(exchange);
   if (!hook) return;
   try {
     hook(exchange);

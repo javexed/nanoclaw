@@ -21,6 +21,8 @@ export interface RunnerConfig {
   model?: string;
   effort?: string;
   speed?: ProviderSpeed;
+  /** Learning-loop behavior (learning-loop.ts): autoTrigger, cooldownMinutes, reviewModel. */
+  learning?: { autoTrigger?: boolean; cooldownMinutes?: number; reviewModel?: string };
 }
 
 const DEFAULT_MAX_MESSAGES = 10;
@@ -58,6 +60,7 @@ export function runnerConfigFromRaw(raw: Record<string, unknown>): RunnerConfig 
     model: (raw.model as string) || undefined,
     effort: (raw.effort as string) || undefined,
     speed: readSpeed(raw),
+    learning: raw.learning as RunnerConfig['learning'],
   };
 }
 
