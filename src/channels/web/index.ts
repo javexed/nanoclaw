@@ -297,7 +297,7 @@ registerSkillDraftProposedListener((e) => {
       agentName: e.agentName,
     });
     await broadcast(mg.platform_id, { type: 'message', ...card });
-  })();
+  })().catch((err) => log.warn('Web: skill-draft card failed', { draftId: e.draftId, err }));
 });
 
 // Keep/Discard (or a supersede) flips the card in place, live on every open tab.
@@ -306,7 +306,7 @@ registerSkillDraftResolvedListener((e) => {
     const roomId = await markRoomSkillDraftResolved(e.draftId, e.outcome, e.by);
     if (!roomId) return;
     await broadcast(roomId, { type: 'skill_draft_resolved', draftId: e.draftId, outcome: e.outcome, resolvedBy: e.by });
-  })();
+  })().catch((err) => log.warn('Web: skill-draft card flip failed', { draftId: e.draftId, err }));
 });
 
 registerApprovalRequestedListener(async (e) => {

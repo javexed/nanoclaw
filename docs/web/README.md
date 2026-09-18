@@ -113,11 +113,14 @@ same review by itself after a busy turn (≥ 5 tool calls), at most once per
 30 minutes per container. Auto reviews are silent unless they find something;
 the card is the announcement.
 
-**The review can't act.** It is a second, fresh query with the toolset
-dropped to `draft_skill` alone — no shell, no files, no destinations. It runs
-over a bounded digest of the session's recent exchanges (last 12, ≤ 24k
-chars), so it costs a few thousand tokens and leaves the main conversation
-untouched. The authoring prompt carries a denylist (environment-specific
+**The review can't act.** It is a second query with the toolset dropped to
+`draft_skill` alone — no shell, no files, no destinations. It runs over a
+bounded digest of the session's recent exchanges (last 12, ≤ 24k chars) as a
+fresh query, so it costs a few thousand tokens and leaves the main
+conversation untouched; on a container that has recorded no exchange yet, it
+forks the live session instead and discards the fork. For `/learn` the
+one-line outcome — "drafted X" or "nothing worth keeping" — lands in the
+room; a failed review says so too. The authoring prompt carries a denylist (environment-specific
 breakage, transient errors, one-off narratives) and the rule that an empty
 answer is a good answer. It is shown the skills the agent already has and
 must **patch** one rather than create a near-duplicate; a colliding create is
@@ -138,8 +141,9 @@ agent's own copy and leaves the pool alone.
 | `NANOCLAW_OVERLAP_URL` | `http://127.0.0.1:11434` | Anthropic-format `/v1/messages` endpoint for it (Ollama serves one) |
 
 Where things live: drafts in `skill_drafts` (body at
-`data/skill-drafts/<id>/SKILL.md`); the switch in `learning_agent_settings`,
-materialized into the agent's `container.json` as `learning`; kept skills in
+`data/skill-drafts/<id>/SKILL.md`; deleting an agent discards its pending
+drafts); the switch in `learning_agent_settings`, materialized into the
+agent's `container.json` as `learning`; kept skills in
 `data/v2-sessions/<agent>/.claude-shared/skills/<name>/`. Host side is
 `src/modules/learning/`, container side `container/agent-runner/src/learning-loop.ts`
 and `mcp-tools/draft-skill.ts`; the web channel only draws the card.
