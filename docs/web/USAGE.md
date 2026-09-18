@@ -6,6 +6,8 @@ architecture, see [README.md](README.md).
 ## Opening it
 
 Open **http://127.0.0.1:3100/** (or your configured `WEB_PORT`) in a browser.
+If you enabled the web UI during setup, it offered to open this for you at the
+end; on a headless machine it printed the URL instead.
 
 - **Localhost, no token** (the default): you are signed in automatically as
   the owner — loopback is trusted.
@@ -19,8 +21,9 @@ never need to hard-refresh.
 
 ## First run: the wizard
 
-On a fresh install (no agents, no rooms) a short wizard opens by itself. You
-can reopen it any time from **⚙ → Run setup wizard…**. Every step is
+On a fresh install (no agents, no rooms) a short wizard opens by itself —
+this is where setup hands off when you enabled the web UI in the terminal.
+You can reopen it any time from **⚙ → Run setup wizard…**. Every step is
 skippable.
 
 **1. Which model powers your agents?** Two cards:
