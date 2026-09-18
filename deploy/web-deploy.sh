@@ -109,8 +109,14 @@ pnpm run build
 # owns them), and so is its systemd --user service — a root system service is
 # installed below instead.
 say "Running the non-interactive setup driver…"
+# `verify` is skipped too: this invocation deliberately skips the service (a
+# root system service is installed below instead) and leaves the first agent to
+# the browser wizard, so verify's two headline checks — service running, at
+# least one agent group — cannot truthfully pass here. Left in, it printed a
+# failed step and a "add a messaging app with /add-telegram" note into every
+# deploy's output, which is the wrong next step for a web install.
 NANOCLAW_BOOTSTRAPPED=1 NANOCLAW_DISPLAY_NAME="$DISPLAY_NAME" \
-  NANOCLAW_SKIP='auth,channel,first-chat,cli-agent,timezone,service' \
+  NANOCLAW_SKIP='auth,channel,first-chat,cli-agent,timezone,service,verify' \
   pnpm run setup:auto </dev/null
 # Stamp the upgrade marker: a fetched tree carries none, so the first-boot
 # dev-pull tripwire would otherwise refuse to start and crash-loop. This deploy
