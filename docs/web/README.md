@@ -16,6 +16,37 @@ opening the port and minting a token comes later, from the in-app wizard.
 Headless installs (`deploy/web-deploy.sh`) write the env keys directly and
 skip the prompt.
 
+## Install
+
+The web UI lives on the `nanoclaw-web` branch — upstream `main` does not
+carry it — so clone the branch, not the default:
+
+```bash
+git clone -b nanoclaw-web https://github.com/javexed/nanoclaw.git nanoclaw-v2
+cd nanoclaw-v2
+```
+
+Then one of three paths.
+
+**Interactive, from a fresh machine.** `bash nanoclaw.sh` installs Node, pnpm
+and Docker if they are missing and walks you to a running install; answer
+yes to "Enable the built-in web UI?". When it finishes, open
+**http://127.0.0.1:3100/** — the first visit runs a short wizard (model →
+access → first agent).
+
+**An install you already have.** In Claude Code, run `/add-web`; or by hand:
+
+```bash
+pnpm exec tsx scripts/enable-web.ts   # WEB_ENABLED=true, WEB_HOST=127.0.0.1
+bash setup/lib/restart.sh
+```
+
+**Headless, on a server.** See [Deploy](#deploy) — one command writes the
+env, mints a token and installs a service.
+
+All three leave it localhost-only with no token. Reaching it from another
+device is offered from inside the app (⚙ → Run setup wizard… → access).
+
 ## What it is
 
 - **Chat** — rooms (one agent each), paginated history, live WebSocket
