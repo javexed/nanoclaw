@@ -9,12 +9,15 @@ fetch: `WEB_ENABLED=true` in `.env` turns it on.
 **Using it?** See the [user guide](USAGE.md). This page is the operator and
 architecture reference: enable, auth, env, deploy, internals.
 
-The interactive setup (`nanoclaw.sh`) offers it as a yes/no step — "Enable the
-built-in web UI?" — ahead of the phone-channel question. Choosing yes writes
-`WEB_ENABLED=true` and `WEB_HOST=127.0.0.1` (localhost-only, no token);
-opening the port and minting a token comes later, from the in-app wizard.
-Headless installs (`deploy/web-deploy.sh`) write the env keys directly and
-skip the prompt.
+The interactive setup (`nanoclaw.sh`) asks "Enable the built-in web UI?" up
+front, before the image build. Yes writes `WEB_ENABLED=true` and
+`WEB_HOST=127.0.0.1` (localhost-only, no token), and changes what the rest of
+the run does: the terminal handles only what a browser can't — the image, the
+gateway, the service — then waits for the web UI to come up and offers to
+open it. The in-app wizard takes it from there (model → access → first agent),
+so the phone-channel, first-agent and first-chat steps are skipped. No keeps
+the phone-channel flow. Headless installs (`deploy/web-deploy.sh`) write the
+env keys directly and never see the prompt.
 
 ## Install
 
@@ -29,10 +32,10 @@ cd nanoclaw-v2
 Then one of three paths.
 
 **Interactive, from a fresh machine.** `bash nanoclaw.sh` installs Node, pnpm
-and Docker if they are missing and walks you to a running install; answer
-yes to "Enable the built-in web UI?". When it finishes, open
-**http://127.0.0.1:3100/** — the first visit runs a short wizard (model →
-access → first agent).
+and Docker if they are missing. Answer yes to "Enable the built-in web UI?"
+— it's the first real question — then let it build. When the service is up it
+offers to open the web UI: press Enter, or open **http://127.0.0.1:3100/**
+yourself. The rest of setup happens there (model → access → first agent).
 
 **An install you already have.** In Claude Code, run `/add-web`; or by hand:
 

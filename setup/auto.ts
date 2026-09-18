@@ -85,6 +85,7 @@ import { claudeCliAvailable, resolveTimezoneViaClaude } from './lib/tz-from-clau
 import * as setupLog from './logs.js';
 import { ensureAnswer, fail, runQuietChild, runQuietStep, spawnQuiet } from './lib/runner.js';
 import { emit as phEmit } from './lib/diagnostics.js';
+import { offerToOpenWeb } from './lib/web-open.js';
 import {
   accentGreen,
   brandBody,
@@ -256,6 +257,55 @@ async function main(): Promise<void> {
   }
   if (!isResume) {
     await runTemplateSetup(savedPickBridged, await detectRegisteredGroups(process.cwd()));
+  }
+
+  // ── Web UI ─────────────────────────────────────────────────────────────────
+  // Asked up front, before the long image build, because the answer decides
+  // what the rest of this run does. Yes → the terminal handles only what a
+  // browser can't (image, gateway, service) and hands off at the end: the
+  // in-app wizard does model → access → first agent, so the channel,
+  // first-agent and first-chat steps are skipped here. No → the phone-channel
+  // flow as before. Headless (no TTY) never prompts — deploy/web-deploy.sh
+  // writes the env keys itself. A re-exec pass (sg docker, fail-retry) skips
+  // the prompt and reads the first pass's answer back from .env.
+  let webPortEnabled: string | null = null;
+  if (!skip.has('web') && process.env.NANOCLAW_REEXEC_SG !== '1' && process.stdin.isTTY) {
+    const enableWeb = ensureAnswer(
+      await brightSelect<'yes' | 'no'>({
+        message: 'Enable the built-in web UI?',
+        options: [
+          { value: 'yes', label: 'Yes', hint: 'chat in your browser — the rest of setup continues there' },
+          { value: 'no', label: 'No', hint: 'set up a phone channel here; enable the web UI later with /add-web' },
+        ],
+        initialValue: 'yes',
+      }),
+    );
+    setupLog.userInput('web_enabled', String(enableWeb));
+    phEmit('web_choice', { enabled: enableWeb === 'yes' });
+    if (enableWeb === 'yes') {
+      // Localhost-only: bind loopback, no token — the loopback auto-owner signs
+      // the operator in. Opening the port + a bearer token are offered from
+      // the in-app wizard.
+      upsertEnvVar('WEB_ENABLED', 'true');
+      upsertEnvVar('WEB_HOST', '127.0.0.1');
+      webPortEnabled = process.env.WEB_PORT || '3100';
+    }
+  } else if (process.env.NANOCLAW_REEXEC_SG === '1' && readEnvKey('WEB_ENABLED')?.trim() === 'true') {
+    webPortEnabled = process.env.WEB_PORT || readEnvKey('WEB_PORT')?.trim() || '3100';
+  }
+  if (webPortEnabled !== null) {
+    // The browser wizard replaces these three terminal steps.
+    skip.add('cli-agent');
+    skip.add('first-chat');
+    skip.add('channel');
+    p.log.success(
+      brandBody(
+        wrapForGutter(
+          'Web UI enabled. Once NanoClaw is running, setup opens it in your browser to finish: pick a model and create your first agent.',
+          4,
+        ),
+      ),
+    );
   }
 
   if (!skip.has('container')) {
@@ -574,44 +624,6 @@ async function main(): Promise<void> {
     }
   }
 
-  // ── Web UI ─────────────────────────────────────────────────────────────────
-  // Web is in-tree (not a channels-branch skill): enabling it is just an
-  // env flag, so this is a plain yes/no rather than the SKILL.md channel flow.
-  // Headless (deploy scripts run with </dev/null) is gated the same way the
-  // welcome/image prompts are — a select that reads EOF would cancel the whole
-  // setup at exit 0. deploy/web-deploy.sh writes these env keys itself, so
-  // headless never needs this prompt.
-  if (!skip.has('web') && process.env.NANOCLAW_REEXEC_SG !== '1' && process.stdin.isTTY) {
-    const enableWeb = ensureAnswer(
-      await brightSelect<'yes' | 'no'>({
-        message: 'Enable the built-in web UI?',
-        options: [
-          { value: 'yes', label: 'Yes', hint: 'a browser chat on this machine — no phone app needed' },
-          { value: 'no', label: 'No', hint: 'you can enable it later in .env (WEB_ENABLED=true)' },
-        ],
-        initialValue: 'yes',
-      }),
-    );
-    setupLog.userInput('web_enabled', String(enableWeb));
-    phEmit('web_choice', { enabled: enableWeb === 'yes' });
-    if (enableWeb === 'yes') {
-      // Localhost-only: bind loopback, no token — the loopback auto-owner signs
-      // the operator in. Opening the port + a bearer token is offered later from
-      // the in-app first-run wizard (which also handles first agent + model).
-      upsertEnvVar('WEB_ENABLED', 'true');
-      upsertEnvVar('WEB_HOST', '127.0.0.1');
-      const webPort = process.env.WEB_PORT || '3100';
-      p.log.success(
-        brandBody(
-          wrapForGutter(
-            `Web UI enabled. Once NanoClaw starts (next step), open ${k.bold(`http://127.0.0.1:${webPort}/`)} — the first visit walks you through picking a model and creating an agent.`,
-            4,
-          ),
-        ),
-      );
-    }
-  }
-
   if (!skip.has('service')) {
     const res = await runQuietStep('service', {
       running: 'Starting NanoClaw in the background…',
@@ -922,6 +934,10 @@ async function main(): Promise<void> {
   setupLog.complete(Date.now() - RUN_START);
   phEmit('setup_completed', { duration_ms: Date.now() - RUN_START });
 
+  // Web UI: the service is up by here, so hand off to the browser (confirm-
+  // gated, headless-aware — see setup/lib/web-open.ts).
+  const webOpened = webPortEnabled !== null && !skip.has('service') ? await offerToOpenWeb(webPortEnabled) : false;
+
   const dmTarget = channelDmLabel(channelChoice);
   if (slackStatus === 'awaiting_approval' || slackStatus === 'installing') {
     note(
@@ -944,6 +960,8 @@ async function main(): Promise<void> {
     // as the last thing before outro.
     note(`${brandBold('→')} ${k.bold(`Check your ${dmTarget} — your assistant is saying hi.`)}`, 'Go say hi');
     p.outro(k.green("You're set."));
+  } else if (webOpened) {
+    p.outro(k.green("You're set — the web UI is in your browser."));
   } else {
     p.outro(k.green("You're ready! Chat with `pnpm run chat hi`."));
   }
