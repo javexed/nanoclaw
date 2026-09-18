@@ -42,7 +42,14 @@ export interface WebMessage {
   sender: string;
   sender_type: string;
   content: string;
-  message_type: 'text' | 'file' | 'approval' | 'approval_resolved' | 'context-divider';
+  message_type:
+    | 'text'
+    | 'file'
+    | 'approval'
+    | 'approval_resolved'
+    | 'context-divider'
+    | 'skill_draft'
+    | 'skill_draft_resolved';
   file_meta?: FileMeta | null;
   created_at: number;
 }
@@ -656,4 +663,66 @@ export async function assignModelToAgent(agentGroupId: string, modelId: string):
 
 export async function unassignModelFromAgent(agentGroupId: string): Promise<void> {
   await getDb().run(`DELETE FROM web_agent_models WHERE agent_group_id = ?`, agentGroupId);
+}
+
+/**
+ * Store an ACTIONABLE skill-draft card in the agent's room. `message_type =
+ * 'skill_draft'`; content carries the draft summary. Keyed by a deterministic
+ * id so the card can be flipped in place on Keep/Discard.
+ */
+export async function storeWebSkillDraftCard(
+  roomId: string,
+  sender: string,
+  payload: {
+    draftId: string;
+    skillName: string;
+    description: string;
+    kind: 'create' | 'patch';
+    targetSkill: string | null;
+    agentName: string;
+  },
+): Promise<WebMessage> {
+  const msg: WebMessage = {
+    id: `draft-card-${payload.draftId}`,
+    room_id: roomId,
+    sender,
+    sender_type: 'agent',
+    content: JSON.stringify(payload),
+    message_type: 'skill_draft',
+    file_meta: null,
+    created_at: Date.now(),
+  };
+  await getDb().run(
+    `INSERT OR REPLACE INTO web_messages (id, room_id, sender, sender_type, content, message_type, file_meta, created_at)
+       VALUES (@id, @room_id, @sender, @sender_type, @content, @message_type, @file_meta, @created_at)`,
+    { ...msg, file_meta: null },
+  );
+  return msg;
+}
+
+/** Flip an in-room draft card to resolved. Returns the room it lives in (null if no card). */
+export async function markRoomSkillDraftResolved(
+  draftId: string,
+  outcome: 'kept' | 'discarded',
+  resolvedBy: string,
+): Promise<string | null> {
+  const id = `draft-card-${draftId}`;
+  const row = (await getDb().get(`SELECT room_id, content FROM web_messages WHERE id = ?`, id)) as
+    | { room_id: string; content: string }
+    | undefined;
+  if (!row) return null;
+  let payload: Record<string, unknown> = {};
+  try {
+    payload = JSON.parse(row.content) as Record<string, unknown>;
+  } catch {
+    /* keep empty */
+  }
+  payload.outcome = outcome;
+  payload.resolvedBy = resolvedBy;
+  await getDb().run(
+    `UPDATE web_messages SET message_type = 'skill_draft_resolved', content = ? WHERE id = ?`,
+    JSON.stringify(payload),
+    id,
+  );
+  return row.room_id;
 }

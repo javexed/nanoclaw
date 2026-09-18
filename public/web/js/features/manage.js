@@ -63,6 +63,50 @@ async function renderAgents() {
         toastError(err, 'Could not load agents');
     }
 }
+/**
+ * Auto-learn — per agent. Busy turns (≥5 tool calls) run a skill review by
+ * themselves; it only ever stages a draft for the Keep/Discard card. Takes
+ * effect on the agent's next container start.
+ */
+function buildAutoLearnSeg(a) {
+    const wrap = document.createElement('div');
+    wrap.className = 'seg';
+    const label = document.createElement('span');
+    label.textContent = 'Auto-learn';
+    const btns = document.createElement('div');
+    btns.className = 'seg-btns';
+    btns.setAttribute('role', 'group');
+    btns.setAttribute('aria-label', `Auto-learn for ${a.name}`);
+    let current = a.auto_learn;
+    const make = (on) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = on ? 'On' : 'Off';
+        b.setAttribute('aria-pressed', String(current === on));
+        if (current === on)
+            b.classList.add('selected');
+        onAsync(b, 'click', async () => {
+            if (current === on)
+                return;
+            try {
+                await apiJson(`/api/agents/${encodeURIComponent(a.id)}/learning`, { method: 'PUT', body: { autoTrigger: on } });
+                current = on;
+                for (const x of btns.querySelectorAll('button')) {
+                    const sel = x.textContent === (on ? 'On' : 'Off');
+                    x.classList.toggle('selected', sel);
+                    x.setAttribute('aria-pressed', String(sel));
+                }
+            }
+            catch (err) {
+                toastError(err, 'Could not update auto-learn');
+            }
+        });
+        return b;
+    };
+    btns.append(make(false), make(true));
+    wrap.append(label, btns);
+    return wrap;
+}
 function buildAgentRow(a, models, defaultModelId) {
     const row = document.createElement('div');
     row.className = 'mrow';
@@ -86,7 +130,7 @@ function buildAgentRow(a, models, defaultModelId) {
             toastError(err, 'Delete failed');
         }
     });
-    head.append(name, del);
+    head.append(name, buildAutoLearnSeg(a), del);
     const modelSel = document.createElement('select');
     const none = document.createElement('option');
     none.value = '';

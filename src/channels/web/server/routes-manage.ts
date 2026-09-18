@@ -9,6 +9,7 @@ import { randomUUID } from 'crypto';
 import { json, readJsonBody } from './http.js';
 import type { RouteCtx } from '../server.js';
 import { log } from '../../../log.js';
+import { getAgentLearning } from '../../../modules/learning/settings.js';
 import { createAgentGroup, deleteAgentGroup, getAgentGroup, getAllAgentGroups } from '../../../db/agent-groups.js';
 import { initGroupFilesystem } from '../../../group-init.js';
 import type { AgentGroup } from '../../../types.js';
@@ -124,6 +125,7 @@ export async function rAgentsDetailGet({ res }: RouteCtx): Promise<void> {
         name: g.name,
         folder: g.folder,
         model_id: (await getAssignedModelForAgent(g.id))?.id ?? null,
+        auto_learn: (await getAgentLearning(g.id)).autoTrigger,
         rooms: await getWebRoomsForAgent(g.id),
       })),
     ),

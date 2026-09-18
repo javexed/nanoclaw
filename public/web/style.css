@@ -631,3 +631,11 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; margin: 6px 0 
 @media (min-width: 700px) {
   body.drawer-open #toasts { right: 436px; }
 }
+
+/* ── segmented Off/On (binary controls) ─────────────────────────────────── */
+.seg { display: inline-flex; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--text-dim); }
+.seg-btns { display: inline-flex; border: 1px solid var(--border, rgba(128,128,128,.35)); border-radius: 6px; overflow: hidden; }
+.seg-btns button { font-size: 0.78rem; padding: 2px 9px; border: 0; border-radius: 0; background: transparent; color: var(--text-dim); }
+.seg-btns button.selected { background: #1d4428; color: #fff; }
+/* skill-draft card body (View) */
+.draft-body { white-space: pre-wrap; font-size: 0.8rem; max-height: 320px; overflow: auto; padding: 8px; border-radius: 6px; background: rgba(128,128,128,.12); }

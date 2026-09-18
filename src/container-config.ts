@@ -9,6 +9,8 @@
  *   - `configFromDb()` — builds a `ContainerConfig` from a DB row + agent group
  */
 import fs from 'fs';
+// learning: the per-agent auto-learn settings ride container.json.
+import { learningConfigFor } from './modules/learning/settings.js';
 import path from 'path';
 
 import { DEFAULT_MODEL, FAST_MODE, GROUPS_DIR, TIMEZONE } from './config.js';
@@ -237,6 +239,8 @@ export interface AdditionalMountConfig {
 
 /** Shape of the materialized `container.json` file read by the container runner. */
 export interface ContainerConfig {
+  /** Learning-loop behavior for the runner (modules/learning). */
+  learning?: { autoTrigger?: boolean; cooldownMinutes?: number };
   mcpServers: Record<string, McpServerConfig>;
   packages: { apt: string[]; npm: string[] };
   imageTag?: string;
@@ -414,6 +418,7 @@ export async function materializeContainerJson(agentGroupId: string): Promise<Co
   if (!row) throw new Error(`Container config not found for agent group: ${agentGroupId}`);
 
   const config = configFromDb(row, group);
+  config.learning = await learningConfigFor(agentGroupId);
 
   const p = path.join(GROUPS_DIR, group.folder, 'container.json');
   const dir = path.dirname(p);

@@ -91,6 +91,59 @@ and the client; `pnpm run build:ui` just the client. The emitted `js/` is
 committed. The service worker's cache name is stamped per request from a
 content hash of the public dir, so a deploy busts caches on its own.
 
+## Learning
+
+An agent can distill a reusable lesson from its own session into a
+`SKILL.md`; a person keeps or discards it from the room; a kept skill lands
+on **that agent only**. Nothing the loop produces ever runs without someone
+keeping it first.
+
+```
+/learn  ·  busy turn (auto)      Keep / Discard card        kept
+        │                              │                       │
+        ▼                              ▼                       ▼
+ isolated review pass ──► staged draft (never live) ──► agent's scoped skills
+ (draft_skill is its only tool)                        → agent restarts
+```
+
+**Two triggers, one code path.** `/learn` in the composer runs a review now
+(trailing text steers it: `/learn keep the rsync part even though it's
+well-known`). **Auto-learn** — per agent, default on, ⚙ → Agents — runs the
+same review by itself after a busy turn (≥ 5 tool calls), at most once per
+30 minutes per container. Auto reviews are silent unless they find something;
+the card is the announcement.
+
+**The review can't act.** It is a second, fresh query with the toolset
+dropped to `draft_skill` alone — no shell, no files, no destinations. It runs
+over a bounded digest of the session's recent exchanges (last 12, ≤ 24k
+chars), so it costs a few thousand tokens and leaves the main conversation
+untouched. The authoring prompt carries a denylist (environment-specific
+breakage, transient errors, one-off narratives) and the rule that an empty
+answer is a good answer. It is shown the skills the agent already has and
+must **patch** one rather than create a near-duplicate; a colliding create is
+coerced into a patch, a patch of a nonexistent skill is rejected.
+
+**Keep runs an overlap check.** Token similarity against the agent's scoped
+skills, its other pending drafts and the shared pool — always; plus a local
+model's judgment when `NANOCLAW_OVERLAP_MODEL` is set. A hit asks "keep
+anyway?". Keep then writes the skill under the agent's scoped dir, stamps
+`.origin.json` with `learned`, and restarts the agent's containers. A new
+skill may not shadow a pooled one; patching a pooled skill forks it into the
+agent's own copy and leaves the pool alone.
+
+| Env var | Default | |
+|---|---|---|
+| `NANOCLAW_LEARNING_MODEL` | (turn model) | model for the review pass |
+| `NANOCLAW_OVERLAP_MODEL` | — | local model for the Keep overlap judge; unset = heuristic only |
+| `NANOCLAW_OVERLAP_URL` | `http://127.0.0.1:11434` | Anthropic-format `/v1/messages` endpoint for it (Ollama serves one) |
+
+Where things live: drafts in `skill_drafts` (body at
+`data/skill-drafts/<id>/SKILL.md`); the switch in `learning_agent_settings`,
+materialized into the agent's `container.json` as `learning`; kept skills in
+`data/v2-sessions/<agent>/.claude-shared/skills/<name>/`. Host side is
+`src/modules/learning/`, container side `container/agent-runner/src/learning-loop.ts`
+and `mcp-tools/draft-skill.ts`; the web channel only draws the card.
+
 ## Architecture notes
 
 - Rooms are `messaging_groups(channel_type='web')`. `web_messages` mirrors the

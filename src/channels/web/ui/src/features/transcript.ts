@@ -10,6 +10,7 @@ import { $ } from '../core/dom.js';
 import { authFetch } from '../core/api.js';
 import { state } from '../core/state.js';
 import { buildApprovalCard } from './approvals.js';
+import { buildSkillDraftCard } from './learning.js';
 import { closeTurnFor } from './thinking.js';
 
 const list = () => $('#messages')!;
@@ -77,6 +78,9 @@ function buildRow(msg: ServerMessage, statusText?: string): HTMLElement {
   } else if (msg.message_type === 'approval' || msg.message_type === 'approval_resolved') {
     bubble.classList.add('msg-approval');
     bubble.appendChild(buildApprovalCard(msg));
+  } else if (msg.message_type === 'skill_draft' || msg.message_type === 'skill_draft_resolved') {
+    bubble.classList.add('msg-approval');
+    bubble.appendChild(buildSkillDraftCard(msg));
   } else {
     const body = document.createElement('div');
     body.className = 'msg-content';

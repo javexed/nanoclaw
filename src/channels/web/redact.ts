@@ -91,7 +91,14 @@ function maskValue(value: string, label: string, keep?: { prefix?: number; suffi
  * breaking exactly the credential approvals the patterns would trip on.
  */
 export function redactMessageContent(
-  messageType: 'text' | 'file' | 'approval' | 'approval_resolved' | 'context-divider',
+  messageType:
+    | 'text'
+    | 'file'
+    | 'approval'
+    | 'approval_resolved'
+    | 'context-divider'
+    | 'skill_draft'
+    | 'skill_draft_resolved',
   content: string,
 ): string {
   if (messageType === 'text' || messageType === 'file') return redactSensitiveData(content);

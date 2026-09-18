@@ -81,6 +81,14 @@ import {
   rRoomAgentsPost,
 } from './server/routes-manage.js';
 import {
+  rAgentLearningGet,
+  rAgentLearningPut,
+  rSkillDraftDiscardPost,
+  rSkillDraftGet,
+  rSkillDraftKeepPost,
+  rSkillDraftsGet,
+} from './server/routes-learning.js';
+import {
   rBearerGeneratePost,
   rClaudeAuthStartPost,
   rClaudeAuthCodePost,
@@ -541,6 +549,10 @@ async function rApprovalRespondPost(ctx: RouteCtx, m: RegExpMatchArray): Promise
   return json(res, 200, { ok: true });
 }
 
+const RE_AGENT_LEARNING = /^\/api\/agents\/([^/]+)\/learning$/;
+const RE_SKILL_DRAFT = /^\/api\/skill-drafts\/([^/]+)$/;
+const RE_SKILL_DRAFT_KEEP = /^\/api\/skill-drafts\/([^/]+)\/keep$/;
+const RE_SKILL_DRAFT_DISCARD = /^\/api\/skill-drafts\/([^/]+)\/discard$/;
 const RE_AGENT = /^\/api\/agents\/([^/]+)$/;
 const RE_AGENT_MODEL = /^\/api\/agents\/([^/]+)\/model$/;
 const RE_AGENT_INSTRUCTIONS = /^\/api\/agents\/([^/]+)\/instructions$/;
@@ -550,6 +562,13 @@ const RE_MODEL = /^\/api\/models\/([^/]+)$/;
 const API_ROUTES: ApiRoute[] = [
   { method: 'GET', path: '/api/approvals/pending', h: rApprovalsPendingGet },
   { method: 'POST', path: RE_APPROVE, guards: ['csrf'], h: rApprovalRespondPost },
+  // Learning: skill drafts + the per-agent auto-learn switch
+  { method: 'GET', path: '/api/skill-drafts', h: rSkillDraftsGet },
+  { method: 'GET', path: RE_SKILL_DRAFT, h: rSkillDraftGet },
+  { method: 'POST', path: RE_SKILL_DRAFT_KEEP, guards: ['csrf'], h: rSkillDraftKeepPost },
+  { method: 'POST', path: RE_SKILL_DRAFT_DISCARD, guards: ['csrf'], h: rSkillDraftDiscardPost },
+  { method: 'GET', path: RE_AGENT_LEARNING, h: rAgentLearningGet },
+  { method: 'PUT', path: RE_AGENT_LEARNING, guards: ['csrf'], h: rAgentLearningPut },
   // Management: agents
   { method: 'GET', path: '/api/agents/detail', h: rAgentsDetailGet },
   { method: 'POST', path: '/api/agents', guards: ['csrf'], h: rAgentsPost },

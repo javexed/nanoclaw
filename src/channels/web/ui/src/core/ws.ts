@@ -24,6 +24,7 @@ import {
 import { joinRoom, renderRooms, updateUnreadDots } from '../features/rooms.js';
 import { handleStatusEvent } from '../features/thinking.js';
 import { fetchPendingApprovals, handleApprovalEvent, handleApprovalResolved } from '../features/approvals.js';
+import { handleSkillDraftResolved } from '../features/learning.js';
 
 /**
  * The socket, plus the one marker we hang on it. `_intentionalClose` tells the
@@ -215,6 +216,9 @@ export function connect(): void {
         break;
       case 'approval_resolved':
         handleApprovalResolved(msg);
+        break;
+      case 'skill_draft_resolved':
+        handleSkillDraftResolved(msg);
         break;
       case 'error':
         console.error('WS error:', msg.error);
