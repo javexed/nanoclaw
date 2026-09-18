@@ -868,6 +868,9 @@ async function main(): Promise<void> {
         notes.push('• Slack approval expired. Review the existing app in the portal before restarting Slack setup.');
       } else if (
         !res.terminal?.fields.CONFIGURED_CHANNELS &&
+        // On the web path the browser wizard is the next step, not a phone
+        // channel — suggesting /add-telegram here points the wrong way.
+        res.terminal?.fields.WIRING !== 'pending_web_wizard' &&
         !['awaiting_approval', 'installing'].includes(slackInstall ?? '')
       ) {
         notes.push(
