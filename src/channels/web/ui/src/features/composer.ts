@@ -12,6 +12,7 @@ const SLASH_COMMANDS: Array<{ cmd: string; hint: string }> = [
   { cmd: '/context', hint: 'Show how full the context window is' },
   { cmd: '/cost', hint: 'Show token usage for this session' },
   { cmd: '/files', hint: 'List files in the agent workspace' },
+  { cmd: '/learn', hint: 'Distill a reusable skill from this conversation — you review it before it goes live' },
 ];
 
 let seq = 0;

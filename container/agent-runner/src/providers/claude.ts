@@ -21,6 +21,7 @@ import { archiveClaudeTranscript, rotateClaudeContinuation } from './claude-hist
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
 import { shimCwd } from './cwd-shim.js';
 import { notifyProviderMessage } from './hooks.js';
+import { resolveProviderQueryOptions } from './hooks.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
@@ -219,6 +220,9 @@ const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WIN
 const STALE_SESSION_RE = /no conversation found|ENOENT.*\.jsonl|session.*not found/i;
 
 export class ClaudeProvider implements AgentProvider {
+  // Both halves hold for the learning review: allowedTools drops to
+  // draft_skill alone, and the SDK's forkSession keeps it off the transcript.
+  readonly supportsRestrictedReview = true;
   private assistantName?: string;
   private mcp: ReturnType<typeof resolveClaudeMcpServers>;
   private inference: ReturnType<typeof resolveClaudeInference>;
@@ -307,6 +311,10 @@ export class ClaudeProvider implements AgentProvider {
           PostToolUseFailure: [{ hooks: [postToolUseHook] }],
           PreCompact: [{ hooks: [createPreCompactHook(this.assistantName)] }],
         },
+        // Seam: module per-query options — allowedTools REPLACES the allowlist, model
+        // overrides the turn model, forkSession keeps the query off the main transcript.
+        // Last, so they win; {} when nothing registers.
+        ...resolveProviderQueryOptions(input),
       },
     });
 

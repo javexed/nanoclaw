@@ -59,6 +59,13 @@ empty just finishes.
 - **Thinking bubble** — while an agent works, a live bubble shows its tool
   activity and streaming reasoning, with a per-agent **Stop** to interrupt the
   turn. It closes when the turn ends, or if the container dies mid-turn.
+- **Learning** — type `/learn` and the agent reviews the conversation for a
+  reusable lesson; if it finds one, a card appears in the room with the
+  proposed skill. **View** shows the full text, **Keep** wires it to that
+  agent (it restarts to pick it up), **Discard** drops it. If a similar skill
+  already exists, Keep asks first. Words after `/learn` steer the review.
+  With **Auto-learn** on for an agent (⚙ → Agents), the review also runs by
+  itself after a busy turn — you only hear about it when there is a card.
 - **Approvals** — when an agent needs sign-off (installing a package, say) the
   request appears as an actionable card in the room, and the owner also gets
   it as an inbox toast. Approve or reject from either.
@@ -84,6 +91,8 @@ Two tabs.
   - **Instructions** — an editor for the agent's standing instructions (its
     `CLAUDE.md` persona). Saving applies on the agent's next session.
   - **Delete** — removes the agent. Its rooms stay but stop routing to it.
+  - **Auto-learn** Off/On — busy turns run a skill review by themselves.
+    Only ever stages a draft for the card; takes effect on the agent's next start.
 
 ### Models
 

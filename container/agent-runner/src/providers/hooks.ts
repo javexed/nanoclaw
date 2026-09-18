@@ -1,13 +1,20 @@
 /**
- * Provider message seam — the one registry providers notify with raw turn
- * activity, so consumers (the status feed) need no per-provider wiring.
+ * Provider seam — the registries providers notify with raw turn activity, so
+ * consumers need no per-provider wiring. Three registries:
  *
- * The predecessor's seam carried three registries (message observer, query-
- * options contributor, exchange observer); nanoclaw-web keeps only the
- * message observer — the other two served the learning loop, which was
- * dropped. Contract: a registered observer must never break the tool call it
- * observes; notify wraps every call in try/catch.
+ *   - message observer: raw activity (tool calls, turn boundaries, progress).
+ *     The status feed consumes it; the learning loop counts tool calls off it.
+ *   - query-options contributor: per-query option overrides a module wants the
+ *     provider to apply. The learning loop uses it to run its review pass with
+ *     a restricted toolset. Contributions merge, last wins, `{}` when nothing
+ *     registers.
+ *   - exchange observer: every completed prompt/result pair. The learning loop
+ *     keeps its bounded digest from it.
+ *
+ * Contract: a registered hook must never break the call it observes; every
+ * notify wraps each call in try/catch.
  */
+import type { ProviderExchange, QueryInput } from './types.js';
 
 /**
  * Raw provider activity surfaced to observers. `tool_use` fires from the
@@ -45,15 +52,75 @@ export function notifyProviderMessage(ev: ProviderMessageEvent): void {
   }
 }
 
+/** Per-query overrides a module may ask the provider to apply. */
+export interface ProviderQueryOptionsContribution {
+  /** REPLACES the provider's tool allowlist for this query. */
+  allowedTools?: string[];
+  /** Overrides the turn model for this query. */
+  model?: string;
+  /** Run the query on a fork of the continuation, leaving the main transcript untouched. */
+  forkSession?: boolean;
+}
+
+type QueryOptionsContributor = (input: QueryInput) => ProviderQueryOptionsContribution | null;
+
+const queryOptionsContributors: QueryOptionsContributor[] = [];
+
+export function registerProviderQueryOptionsContributor(fn: QueryOptionsContributor): void {
+  queryOptionsContributors.push(fn);
+}
+
+export function resolveProviderQueryOptions(input: QueryInput): ProviderQueryOptionsContribution {
+  const merged: ProviderQueryOptionsContribution = {};
+  for (const fn of queryOptionsContributors) {
+    try {
+      const c = fn(input);
+      if (!c) continue;
+      // Only keys the contributor actually set — an explicit undefined must
+      // not clobber an earlier contributor's value.
+      for (const [k, v] of Object.entries(c)) {
+        if (v !== undefined) (merged as Record<string, unknown>)[k] = v;
+      }
+    } catch {
+      // A contributor bug must never break the turn — skip its contribution.
+    }
+  }
+  return merged;
+}
+
+type ProviderExchangeObserver = (exchange: ProviderExchange) => void;
+
+const exchangeObservers: ProviderExchangeObserver[] = [];
+
+export function registerProviderExchangeObserver(fn: ProviderExchangeObserver): void {
+  exchangeObservers.push(fn);
+}
+
+export function notifyProviderExchange(exchange: ProviderExchange): void {
+  for (const fn of exchangeObservers) {
+    try {
+      fn(exchange);
+    } catch {
+      // An observer bug must never break the exchange it observes.
+    }
+  }
+}
+
 /**
- * Snapshot the registry and return a restore function. bun runs every test
+ * Snapshot every registry and return a restore function. bun runs every test
  * file in ONE process, so a test must never wipe registrations other modules
  * made at import time — it snapshots, registers its own, and restores.
  */
 export function __snapshotProviderHooksForTest(): () => void {
-  const observers = [...messageObservers];
+  const m = [...messageObservers];
+  const q = [...queryOptionsContributors];
+  const x = [...exchangeObservers];
   return () => {
     messageObservers.length = 0;
-    messageObservers.push(...observers);
+    messageObservers.push(...m);
+    queryOptionsContributors.length = 0;
+    queryOptionsContributors.push(...q);
+    exchangeObservers.length = 0;
+    exchangeObservers.push(...x);
   };
 }

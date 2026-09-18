@@ -47,6 +47,8 @@ import { resolvePluginServer } from './plugin-mcp.js';
 import { registerProviderMemorySessionHook } from './provider-contracts/realize.js';
 import type { McpServerConfig } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
+// learning: side-effect import registers /learn, the digest, and the auto-trigger on the seams.
+import './learning-loop.js';
 
 function log(msg: string): void {
   console.error(`[agent-runner] ${msg}`);
@@ -135,6 +137,7 @@ async function main(): Promise<void> {
       providerName,
       cwd: CWD,
       systemContext: { instructions },
+      learning: config.learning,
     });
   } finally {
     await mailbox.stop();
