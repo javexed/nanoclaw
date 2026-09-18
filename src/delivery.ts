@@ -31,10 +31,13 @@ import { isUnguarded, type Unguarded } from './guard/index.js';
 import { mapConcurrent } from './concurrency.js';
 import { fanOutboundMessage } from './modules/cross-session-context/index.js';
 import { log } from './log.js';
+import { agentStatusSweep, setStatusAdapter } from './modules/agent-status/index.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, readOutboxFiles, withExistingMailboxSession } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
 import type { OutboundFile } from './channels/adapter.js';
+// web: status feed. Separate import so upstream's line above stays byte-identical.
+import type { AgentActivityStatus } from './channels/adapter.js';
 import type { PendingApproval, Session } from './types.js';
 import type { OutboundMessage } from './mailbox/index.js';
 
@@ -127,6 +130,14 @@ export interface ChannelDeliveryAdapter {
     status?: string,
     statusKind?: 'auto' | 'agent',
   ): Promise<void>;
+  /** Push a live agent-activity frame (thinking bubble) — see agent-status. */
+  sendStatus?(
+    channelType: string,
+    platformId: string,
+    threadId: string | null,
+    status: AgentActivityStatus,
+    instance?: string,
+  ): Promise<void>;
 }
 
 let deliveryAdapter: ChannelDeliveryAdapter | null = null;
@@ -165,6 +176,9 @@ export function setDeliveryAdapter(adapter: ChannelDeliveryAdapter): void {
   // Forward to the typing module so it can fire setTyping on its own
   // interval. Direct call, not a registry — typing is a default module.
   setTypingAdapter(adapter);
+  // Same pattern for the agent-status module (thinking bubble): it tails
+  // status_events on the delivery polls below and forwards via sendStatus.
+  setStatusAdapter(adapter);
   for (const cb of adapterReadyCallbacks) {
     void Promise.resolve()
       .then(() => cb(adapter))
@@ -247,6 +261,11 @@ export async function deliverSessionMessages(session: Session): Promise<void> {
 
   try {
     await drainSession(session);
+    // Thinking bubble: forward any status_events rows this session's container
+    // wrote since the last tick. Best-effort; runs for every session the two
+    // polls fan out through deliverToSessions. Kept inside the drain so it
+    // rides upstream's concurrent delivery rather than a serial loop.
+    await agentStatusSweep(session);
   } finally {
     inflightDeliveries.delete(session.id);
   }

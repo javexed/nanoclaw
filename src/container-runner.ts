@@ -43,6 +43,7 @@ import {
 import { getHostInstanceId } from './host-instance.js';
 import { getDb, hasTable } from './db/connection.js';
 import { getSession } from './db/sessions.js';
+import { notifySessionStopped } from './modules/agent-status/index.js';
 import { getSessionDriver, isSessionEventsDriver } from './drivers/index.js';
 import type { SupervisedHandle, SupervisedSnapshot } from './drivers/session-events.js';
 import { GROUP_FOLDER_LABEL, labelValueLegal, specInvalid } from './drivers/types.js';
@@ -567,6 +568,14 @@ async function finish(sessionId: string, runtime: ActiveSessionRuntime, failure?
     stopTypingRefresh(sessionId);
   } catch (err) {
     log.error('Failed to stop typing refresh', { sessionId, containerName, err });
+  }
+  // Thinking bubble: a mid-turn death must close the bubble with a notice
+  // rather than leaving it spinning. Clean idle exits no-op inside the module.
+  try {
+    const session = await getSession(sessionId);
+    if (session) await notifySessionStopped(session);
+  } catch (err) {
+    log.error('Failed to notify agent-status of container exit', { sessionId, containerName, err });
   }
 
   if (failure && failure.kind !== 'started-then-died') {

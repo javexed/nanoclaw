@@ -5,6 +5,8 @@
  * to instantiate and set up all registered adapters.
  */
 import type { ChannelAdapter, ChannelDefaults, ChannelRegistration, ChannelSetup, OutboundFile } from './adapter.js';
+// web: status feed. Separate import so upstream's line above stays byte-identical.
+import type { AgentActivityStatus } from './adapter.js';
 import type { ChannelDeliveryAdapter } from '../delivery.js';
 import { log } from '../log.js';
 
@@ -123,6 +125,16 @@ export function createChannelDeliveryAdapter(): ChannelDeliveryAdapter {
     ): Promise<void> {
       const adapter = getChannelAdapterExact(instance ?? channelType);
       await adapter?.setTyping?.(platformId, threadId, status, statusKind);
+    },
+    async sendStatus(
+      channelType: string,
+      platformId: string,
+      threadId: string | null,
+      status: AgentActivityStatus,
+      instance?: string,
+    ): Promise<void> {
+      const adapter = getChannelAdapterExact(instance ?? channelType);
+      await adapter?.sendStatus?.(platformId, threadId, status);
     },
   };
 }

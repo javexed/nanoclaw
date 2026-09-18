@@ -1,0 +1,7 @@
+[41m[1m FAIL [22m[49m setup/auto.auth.test.ts[2m > [22msetup wizard provider authentication failures[2m > [22mroutes a runAuth error through assistance before aborting, without saving a default
+[41m[1m FAIL [22m[49m setup/auto.auth.test.ts[2m > [22msetup wizard provider authentication failures[2m > [22mroutes a runInstallCheck error through assistance before aborting, without saving a default
+[41m[1m FAIL [22m[49m setup/auto.auth.test.ts[2m > [22msetup wizard interactive provider choice[2m > [22moffers a choice with claude highlighted when no provider is preset
+[41m[1m FAIL [22m[49m setup/auto.auth.test.ts[2m > [22msetup wizard interactive provider choice[2m > [22moffers a choice with opencode highlighted when no provider is preset
+[41m[1m FAIL [22m[49m setup/auto.auth.test.ts[2m > [22msetup wizard interactive provider choice[2m > [22moffers an uninstalled OpenCode skill on a fresh install and applies the selected skill
+[2m Test Files [22m [1m[31m1 failed[39m[22m[2m | [22m[33m1 skipped[39m[90m (2)[39m
+DONE

@@ -167,7 +167,12 @@ async function main(): Promise<void> {
   // work begins. Default lands on standard so Enter is the happy path.
   // On sg re-exec, the user already chose — skip straight to standard.
   let startChoice: 'default' | 'advanced' = 'default';
-  if (process.env.NANOCLAW_REEXEC_SG !== '1') {
+  // Headless (stdin is not a TTY — deploy scripts run with </dev/null): the
+  // welcome select would render, read EOF, and cancel — and ensureAnswer's
+  // cancel is exit 0, so a `set -e` deploy sails past the ENTIRE setup as if
+  // it succeeded (no container image, no vault; the first message then fails
+  // with image-unavailable). Headless means standard setup, by definition.
+  if (process.env.NANOCLAW_REEXEC_SG !== '1' && process.stdin.isTTY) {
     startChoice = ensureAnswer(
       await brightSelect<'default' | 'advanced'>({
         message: 'How would you like to begin?',
@@ -565,6 +570,44 @@ async function main(): Promise<void> {
         'container',
         'Could not finish Echo setup.',
         error instanceof Error ? error.message : 'Retry the image setup step.',
+      );
+    }
+  }
+
+  // ── Web UI ─────────────────────────────────────────────────────────────────
+  // Web is in-tree (not a channels-branch skill): enabling it is just an
+  // env flag, so this is a plain yes/no rather than the SKILL.md channel flow.
+  // Headless (deploy scripts run with </dev/null) is gated the same way the
+  // welcome/image prompts are — a select that reads EOF would cancel the whole
+  // setup at exit 0. deploy/web-deploy.sh writes these env keys itself, so
+  // headless never needs this prompt.
+  if (!skip.has('web') && process.env.NANOCLAW_REEXEC_SG !== '1' && process.stdin.isTTY) {
+    const enableWeb = ensureAnswer(
+      await brightSelect<'yes' | 'no'>({
+        message: 'Enable the built-in web UI?',
+        options: [
+          { value: 'yes', label: 'Yes', hint: 'a browser chat on this machine — no phone app needed' },
+          { value: 'no', label: 'No', hint: 'you can enable it later in .env (WEB_ENABLED=true)' },
+        ],
+        initialValue: 'yes',
+      }),
+    );
+    setupLog.userInput('web_enabled', String(enableWeb));
+    phEmit('web_choice', { enabled: enableWeb === 'yes' });
+    if (enableWeb === 'yes') {
+      // Localhost-only: bind loopback, no token — the loopback auto-owner signs
+      // the operator in. Opening the port + a bearer token is offered later from
+      // the in-app first-run wizard (which also handles first agent + model).
+      upsertEnvVar('WEB_ENABLED', 'true');
+      upsertEnvVar('WEB_HOST', '127.0.0.1');
+      const webPort = process.env.WEB_PORT || '3100';
+      p.log.success(
+        brandBody(
+          wrapForGutter(
+            `Web UI enabled. Once NanoClaw starts (next step), open ${k.bold(`http://127.0.0.1:${webPort}/`)} — the first visit walks you through picking a model and creating an agent.`,
+            4,
+          ),
+        ),
       );
     }
   }
@@ -1402,6 +1445,17 @@ async function chooseImageSource(): Promise<ImageSource | undefined> {
   if (!readAgentImagePin()) return;
   if (portalEnabled()) {
     await runImagePortal();
+    return;
+  }
+
+  // Headless (deploy scripts, stdin at /dev/null): the select below would
+  // cancel on EOF and exit the whole setup as a "success" — same failure the
+  // welcome prompt had. Headless takes the local build: it needs no account
+  // and no interactive device flow, so it is the only choice that can be
+  // honoured without a human present.
+  if (!process.stdin.isTTY) {
+    setupLog.userInput('image_source', 'local (headless default)');
+    writeImageSource('local');
     return;
   }
 
