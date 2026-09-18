@@ -152,6 +152,7 @@ export async function run(_args: string[]): Promise<void> {
     'IMESSAGE_ENABLED',
     'PHOTON_PROJECT_ID',
     'PHOTON_PROJECT_SECRET',
+    'WEB_ENABLED',
   ]);
 
   const has = (key: string) => !!(process.env[key] || envVars[key]);
@@ -222,6 +223,13 @@ export async function run(_args: string[]): Promise<void> {
     configuredChannels.length > 0 &&
     configuredChannels.every((c) => DEFER_WIRE_CHANNELS.has(c));
 
+  // The web path (setup/auto.ts: `webPortEnabled !== null`) deliberately skips
+  // the cli-agent, channel and first-chat steps — the in-app wizard does model
+  // → access → first agent in the browser. So zero groups is the expected state
+  // here, not a broken install, and failing on it strands the operator: the
+  // verify failure returns before the hand-off that opens the browser.
+  const webPending = registeredGroups === 0 && (process.env.WEB_ENABLED || envVars.WEB_ENABLED) === 'true';
+
   // The detached Slack worker applies the channel after foreground setup
   // releases its checkout lock. No credentials/groups yet is expected here.
   const slackInstall = slackJobStatus(await readSlackJob(projectRoot));
@@ -234,6 +242,7 @@ export async function run(_args: string[]): Promise<void> {
     credentials,
     registeredGroups,
     wiringPending,
+    webPending,
     slackInstall,
     configuredChannels,
   });
@@ -242,6 +251,7 @@ export async function run(_args: string[]): Promise<void> {
     status,
     channelAuth,
     wiringPending,
+    webPending,
     slackInstall,
     imageSource,
     imageSourceActual: image.source,
@@ -269,7 +279,13 @@ export async function run(_args: string[]): Promise<void> {
     IMAGE_DIGEST: image.registryDigest ?? '',
     DERIVED_GROUPS: derivedGroups,
     ...(slackInstall ? { SLACK_INSTALL: slackInstall } : {}),
-    ...(slackWiringPending ? { WIRING: 'pending_slack_install' } : wiringPending ? { WIRING: 'pending_first_dm' } : {}),
+    ...(slackWiringPending
+      ? { WIRING: 'pending_slack_install' }
+      : wiringPending
+        ? { WIRING: 'pending_first_dm' }
+        : webPending
+          ? { WIRING: 'pending_web_wizard' }
+          : {}),
     STATUS: status,
     LOG: 'logs/setup.log',
   });
@@ -299,6 +315,8 @@ export function determineVerifyStatus(input: {
   registeredGroups: number;
   /** Zero groups but every configured channel defers wiring to the first DM. */
   wiringPending?: boolean;
+  /** Zero groups because the web UI's in-app wizard creates the first agent. */
+  webPending?: boolean;
   slackInstall?: SlackJob['status'];
   configuredChannels?: string[];
 }): 'success' | 'failed' {
@@ -308,6 +326,7 @@ export function determineVerifyStatus(input: {
     input.slackInstall !== 'expired' &&
     (input.registeredGroups > 0 ||
       input.wiringPending === true ||
+      input.webPending === true ||
       canDeferSlackWiring(input.slackInstall, input.configuredChannels ?? []))
     ? 'success'
     : 'failed';

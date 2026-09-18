@@ -13,6 +13,29 @@ describe('determineVerifyStatus', () => {
     expect(determineVerifyStatus(healthyBase)).toBe('success');
   });
 
+  it('passes with zero groups when the web wizard will create the first agent', () => {
+    // The web path skips cli-agent/channel/first-chat in setup/auto.ts — the
+    // browser wizard creates the first agent. Failing here strands the
+    // operator before the hand-off that opens the browser.
+    expect(
+      determineVerifyStatus({
+        ...healthyBase,
+        registeredGroups: 0,
+        webPending: true,
+      }),
+    ).toBe('success');
+  });
+
+  it('still fails with zero groups when the web UI is not enabled', () => {
+    expect(
+      determineVerifyStatus({
+        ...healthyBase,
+        registeredGroups: 0,
+        webPending: false,
+      }),
+    ).toBe('failed');
+  });
+
   it('fails when no agent groups are registered', () => {
     expect(
       determineVerifyStatus({
