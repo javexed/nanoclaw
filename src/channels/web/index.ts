@@ -58,6 +58,12 @@ import {
   registerApprovalRequestedListener,
   registerApprovalResolvedHandler,
 } from '../../modules/approvals/primitive.js';
+// Learning loop: the module registers propose_skill + its schema; the channel draws the cards.
+import {
+  registerSkillDraftProposedListener,
+  registerSkillDraftResolvedListener,
+} from '../../modules/learning/index.js';
+import { markRoomSkillDraftResolved, storeWebSkillDraftCard } from './db.js';
 
 export const CHANNEL_TYPE = 'web';
 
@@ -276,6 +282,33 @@ function guessMime(filename: string): string {
 // (in addition to the owner's inbox), so the operator can act without hunting.
 // The room is also indexed so the resolved-handler below clears the card on
 // response. Best-effort; web rooms only.
+// A staged skill draft becomes an actionable Keep/Discard card in the
+// proposing agent's own room, so the person acts where the work happened.
+registerSkillDraftProposedListener((e) => {
+  void (async () => {
+    const mg = await (e.session.messaging_group_id ? getMessagingGroup(e.session.messaging_group_id) : null);
+    if (!mg || mg.channel_type !== 'web') return;
+    const card = await storeWebSkillDraftCard(mg.platform_id, e.agentName || 'agent', {
+      draftId: e.draftId,
+      skillName: e.skillName,
+      description: e.description,
+      kind: e.kind,
+      targetSkill: e.targetSkill,
+      agentName: e.agentName,
+    });
+    await broadcast(mg.platform_id, { type: 'message', ...card });
+  })().catch((err) => log.warn('Web: skill-draft card failed', { draftId: e.draftId, err }));
+});
+
+// Keep/Discard (or a supersede) flips the card in place, live on every open tab.
+registerSkillDraftResolvedListener((e) => {
+  void (async () => {
+    const roomId = await markRoomSkillDraftResolved(e.draftId, e.outcome, e.by);
+    if (!roomId) return;
+    await broadcast(roomId, { type: 'skill_draft_resolved', draftId: e.draftId, outcome: e.outcome, resolvedBy: e.by });
+  })().catch((err) => log.warn('Web: skill-draft card flip failed', { draftId: e.draftId, err }));
+});
+
 registerApprovalRequestedListener(async (e) => {
   const mg = await (e.session.messaging_group_id ? getMessagingGroup(e.session.messaging_group_id) : null);
   if (!mg || mg.channel_type !== 'web') return;
