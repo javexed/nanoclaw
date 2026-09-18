@@ -5,6 +5,7 @@ import { $ } from '../core/dom.js';
 import { showToast } from '../core/toast.js';
 import { state } from '../core/state.js';
 import { appendOptimistic } from './transcript.js';
+import { hasStagedFiles, sendStagedFiles } from './files.js';
 const SLASH_COMMANDS = [
     { cmd: '/clear', hint: 'Start a fresh conversation (context is cleared)' },
     { cmd: '/compact', hint: 'Compress the conversation context' },
@@ -121,7 +122,12 @@ export function wireComposer() {
     input.addEventListener('blur', () => setTimeout(closeMenu, 150));
     form.addEventListener('submit', (e) => {
         e.preventDefault();
-        if (sendMessage(input.value)) {
+        // Staged attachments win: the composer text becomes their caption, so the
+        // picture and its words go as ONE message. sendMessage() refuses an empty
+        // string, which is exactly the "attach, say nothing, send" case — hence the
+        // branch rather than sending both.
+        const sent = hasStagedFiles() ? sendStagedFiles(input.value.trim()) : sendMessage(input.value);
+        if (sent) {
             input.value = '';
             autoGrow(input);
         }
