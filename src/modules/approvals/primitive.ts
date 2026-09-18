@@ -109,6 +109,41 @@ export type ApprovalResolvedHandler = (event: ApprovalResolvedEvent) => Promise<
 
 const approvalResolvedHandlers: ApprovalResolvedHandler[] = [];
 
+/**
+ * Fired the moment an approval request has been queued and its card delivered
+ * to the approver's inbox. Lets a rich channel (web) ALSO surface an
+ * actionable card in the requesting agent's own room, so the operator can act
+ * where the work is happening instead of hunting in an inbox. Best-effort:
+ * a throwing listener never breaks the request.
+ */
+export interface ApprovalRequestedEvent {
+  approvalId: string;
+  session: Session;
+  agentName: string;
+  action: string;
+  title: string;
+  question: string;
+  options: typeof APPROVAL_OPTIONS;
+  approvers: string[];
+}
+
+type ApprovalRequestedListener = (event: ApprovalRequestedEvent) => void | Promise<void>;
+const approvalRequestedListeners: ApprovalRequestedListener[] = [];
+
+export function registerApprovalRequestedListener(listener: ApprovalRequestedListener): void {
+  approvalRequestedListeners.push(listener);
+}
+
+export async function notifyApprovalRequested(event: ApprovalRequestedEvent): Promise<void> {
+  for (const listener of approvalRequestedListeners) {
+    try {
+      await listener(event);
+    } catch (err) {
+      log.error('Approval-requested listener threw', { approvalId: event.approvalId, err });
+    }
+  }
+}
+
 export function registerApprovalResolvedHandler(handler: ApprovalResolvedHandler): void {
   approvalResolvedHandlers.push(handler);
 }
@@ -292,5 +327,22 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
     }
   }
 
+  // web: no delivery adapter → no card was sent, so firing the "card
+  // delivered" listener below would announce an inbox card that doesn't exist.
+  // Placed after upstream's block so that block stays byte-identical.
+  if (!adapter) {
+    log.warn('Approval requested but no delivery adapter is registered', { action, approvalId });
+    return;
+  }
   log.info('Approval requested', { action, approvalId, agentName, approver: target.userId });
+  await notifyApprovalRequested({
+    approvalId,
+    session,
+    agentName,
+    action,
+    title,
+    question,
+    options: APPROVAL_OPTIONS,
+    approvers,
+  });
 }

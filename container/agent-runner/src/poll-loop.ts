@@ -30,6 +30,7 @@ import {
 } from './formatter.js';
 import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
+import { notifyProviderMessage } from './providers/hooks.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 import type { ProviderRuntimeContract } from './provider-contracts/registry.js';
 
@@ -126,6 +127,18 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     if (config.signal?.aborted) return;
     // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
     const messages = getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system');
+    // web: an 'interrupt' row reaching THIS loop is stale — it targeted a
+    // stream that has already ended (the mid-stream poll below is where a live
+    // one lands). Consume it and splice it out IN PLACE, so upstream's line
+    // above and every downstream use of `messages` stay byte-identical.
+    // Formatted into a prompt, an interrupt would read as content.
+    const staleInterrupts = messages.filter((m) => m.kind === 'interrupt');
+    if (staleInterrupts.length > 0) {
+      markCompleted(staleInterrupts.map((m) => m.id));
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].kind === 'interrupt') messages.splice(i, 1);
+      }
+    }
     isFirstPoll = false;
     pollCount++;
 
@@ -154,6 +167,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     const ids = messages.map((m) => m.id);
     markProcessing(ids);
+
+    // Tell observers a fresh batch was accepted — the status feed resets its
+    // display here. Inert when nothing registered.
+    notifyProviderMessage({ kind: 'batch_start' });
 
     const routing = extractRouting(messages);
 
@@ -261,6 +278,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const abortActiveQuery = () => query.abort();
     if (config.signal?.aborted) abortActiveQuery();
     else config.signal?.addEventListener('abort', abortActiveQuery, { once: true });
+
+    // A real query runs from here — observers see the turn start (and the
+    // matching turn_done after completion below).
+    notifyProviderMessage({ kind: 'turn_start' });
     try {
       const result = await processQuery(
         query,
@@ -306,6 +327,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // (e.g. stream closed unexpectedly).
     markCompleted(processingIds);
     log(`Completed ${ids.length} message(s)`);
+
+    // Observers see the turn end even when it produced no user-facing message.
+    notifyProviderMessage({ kind: 'turn_done' });
   }
 }
 
@@ -472,6 +496,18 @@ export async function processQuery(
         // not end: end() lets an in-flight turn run to completion, which
         // can block the command (e.g. /clear during a long task) for as
         // long as the turn takes.
+        // GUI stop button: an 'interrupt' control row aborts the active
+        // stream. Consume the row here — unlike slash commands it must NOT
+        // stay pending for the outer loop, which would read it as content.
+        const interrupts = pending.filter((m) => m.kind === 'interrupt');
+        if (interrupts.length > 0) {
+          log('Interrupt received — aborting active stream');
+          markCompleted(interrupts.map((m) => m.id));
+          endedForCommand = true;
+          query.abort();
+          return;
+        }
+
         if (pending.some((m) => isRunnerCommand(m, providerName))) {
           log('Pending slash command — aborting active stream so outer loop can process');
           endedForCommand = true;
@@ -528,6 +564,11 @@ export async function processQuery(
         const keptIds = keep.map((m) => m.id);
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
+        unwrappedNudged = false;
+        taskBlockNudged = false;
+        // A follow-up pushed into the active query is a new sub-turn for
+        // observers; resetFeed tells the status feed to cycle its display.
+        notifyProviderMessage({ kind: 'turn_start', resetFeed: true });
         query.push(prompt);
         archivePrompts.push(prompt);
         const next: QueuedTurn = {
@@ -605,6 +646,11 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        // Settle the sub-turn for observers: interim results inside a
+        // still-open query never reach the outer-loop turn_done (that fires
+        // only when the whole query ends). The next follow-up re-seeds
+        // turn_start via the resetFeed push.
+        notifyProviderMessage({ kind: 'turn_done' });
         const resultText = event.text ?? '';
         const failed = event.isError === true;
         if (resultText || failed) {
@@ -767,6 +813,13 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
       break;
     case 'progress':
       log(`Progress: ${event.message}`);
+      // Forward milestones to observers (status feed; cosmetic).
+      notifyProviderMessage({ kind: 'progress', text: event.message });
+      break;
+    case 'reasoning':
+      // A provider's reasoning line — forward to observers (cosmetic; never
+      // logged here, it can be voluminous).
+      notifyProviderMessage({ kind: 'reasoning', text: event.message });
       break;
   }
 }

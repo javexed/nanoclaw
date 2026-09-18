@@ -1,0 +1,7 @@
+✘ [ERROR] Unexpected ")"
+
+    setup/auto.ts:549:2:
+      549 │   ) {
+          ╵   ^
+
+1 error

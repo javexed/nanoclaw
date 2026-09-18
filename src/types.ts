@@ -174,7 +174,7 @@ export interface Session {
 
 // ── Session DB entities ──
 
-export type MessageInKind = 'chat' | 'chat-sdk' | 'task' | 'webhook' | 'system';
+export type MessageInKind = 'chat' | 'chat-sdk' | 'task' | 'webhook' | 'system' | 'interrupt';
 export type MessageInStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled';
 
 export interface MessageIn {

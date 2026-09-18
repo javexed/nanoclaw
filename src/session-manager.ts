@@ -368,7 +368,44 @@ function extractAttachmentFiles(
 
   let changed = false;
   for (const att of attachments) {
-    if (typeof att.data !== 'string') continue;
+    // Two delivery forms. `data` is inline base64. `hostPath` points at a
+    // file the adapter already staged on disk — web uses it above 25MB so
+    // a large upload is never base64-encoded. (The predecessor handled only
+    // `data` here; hostPath attachments were silently skipped — the row kept
+    // a bare filename, no bytes reached the container, and nothing logged.)
+    const inlineData = typeof att.data === 'string' ? (att.data as string) : null;
+    const rawHostPath = typeof att.hostPath === 'string' ? (att.hostPath as string) : null;
+    if (inlineData === null && rawHostPath === null) continue;
+
+    // A hostPath is a stronger primitive than supplied bytes — it copies
+    // whatever the path names. Legitimate producers stage into DATA_DIR, so
+    // require that: an adapter may hand over files it staged, nothing else.
+    let hostPath: string | null = null;
+    if (rawHostPath !== null) {
+      // Scope to the attachment-staging root, not all of DATA_DIR — the latter
+      // also holds every session's DBs and the central v2.db, so a symlink
+      // staged there pointing at a sibling's data would exfiltrate it into this
+      // inbox. lstat+realpath reject a source symlink and re-check the REAL
+      // target (path.resolve alone is lexical and symlink-blind), matching the
+      // outbox-read discipline below.
+      const stagingRoot = path.resolve(DATA_DIR, 'web', 'uploads');
+      try {
+        const lst = fs.lstatSync(rawHostPath);
+        if (!lst.isFile() || lst.isSymbolicLink()) {
+          log.warn('Refused non-file / symlink attachment hostPath', { messageId, hostPath: rawHostPath });
+          continue;
+        }
+        const real = fs.realpathSync(rawHostPath);
+        if (!isPathInside(stagingRoot, real)) {
+          log.warn('Refused attachment hostPath outside the staging root', { messageId, hostPath: rawHostPath });
+          continue;
+        }
+        hostPath = real;
+      } catch {
+        log.warn('Refused unreadable attachment hostPath', { messageId, hostPath: rawHostPath });
+        continue;
+      }
+    }
 
     const rawName = deriveAttachmentName(att);
     const filename = isSafeAttachmentName(rawName) ? rawName : `attachment-${Date.now()}`;
@@ -392,7 +429,13 @@ function extractAttachmentFiles(
       // wx = exclusive create. Refuses to follow a pre existing symlink or
       // overwrite any existing file. The host expects to be the sole writer
       // of these attachments.
-      fs.writeFileSync(filePath, Buffer.from(att.data as string, 'base64'), { flag: 'wx' });
+      if (inlineData !== null) {
+        fs.writeFileSync(filePath, Buffer.from(inlineData, 'base64'), { flag: 'wx' });
+      } else {
+        // COPYFILE_EXCL mirrors the `wx` guarantee: fail rather than follow a
+        // pre-placed symlink or overwrite an existing file.
+        fs.copyFileSync(hostPath as string, filePath, fs.constants.COPYFILE_EXCL);
+      }
     } catch (err: unknown) {
       const e = err as NodeJS.ErrnoException;
       if (e.code === 'EEXIST') {
@@ -408,6 +451,7 @@ function extractAttachmentFiles(
     att.name = filename;
     att.localPath = `inbox/${messageId}/${filename}`;
     delete att.data;
+    delete att.hostPath;
     changed = true;
     log.debug('Saved attachment to inbox', { messageId, filename, size: att.size });
   }
