@@ -12,7 +12,7 @@ import k from 'kleur';
 import os from 'os';
 
 import { getTailscaleServeState } from '../../src/channels/web/tailscale-serve.js';
-import { readEnvKey } from '../set-env.js';
+import { readEnvKey } from '../environment.js';
 
 import { confirmThenOpen } from './browser.js';
 import { reachInstructions, reachableWebUrl } from './web-reach.js';
