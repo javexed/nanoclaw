@@ -9,7 +9,7 @@ fetch: `WEB_ENABLED=true` in `.env` turns it on.
 **Using it?** See the [user guide](USAGE.md). This page is the operator and
 architecture reference: enable, auth, env, deploy, internals.
 
-The interactive setup (`nanoclaw.sh`) asks "Enable the built-in web UI?" up
+The interactive setup (`nanoclaw.sh`) asks "Enable the web UI?" up
 front, before the image build. Yes writes `WEB_ENABLED=true` and
 `WEB_HOST=127.0.0.1` (localhost-only, no token), and changes what the rest of
 the run does: the terminal handles only what a browser can't — the image, the
@@ -32,7 +32,7 @@ cd nanoclaw-v2
 Then one of three paths.
 
 **Interactive, from a fresh machine.** `bash nanoclaw.sh` installs Node, pnpm
-and Docker if they are missing. Answer yes to "Enable the built-in web UI?"
+and Docker if they are missing. Answer yes to "Enable the web UI?"
 — it's the first real question — then let it build. When the service is up it
 offers to open the web UI: press Enter, or open **http://127.0.0.1:3100/**
 yourself. The rest of setup happens there (model → access → first agent).

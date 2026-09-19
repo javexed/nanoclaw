@@ -272,10 +272,10 @@ async function main(): Promise<void> {
   if (!skip.has('web') && process.env.NANOCLAW_REEXEC_SG !== '1' && process.stdin.isTTY) {
     const enableWeb = ensureAnswer(
       await brightSelect<'yes' | 'no'>({
-        message: 'Enable the built-in web UI?',
+        message: 'Enable the web UI?',
         options: [
-          { value: 'yes', label: 'Yes', hint: 'chat in your browser — the rest of setup continues there' },
-          { value: 'no', label: 'No', hint: 'set up a phone channel here; enable the web UI later with /add-web' },
+          { value: 'yes', label: 'Yes' },
+          { value: 'no', label: 'No' },
         ],
         initialValue: 'yes',
       }),
@@ -309,14 +309,6 @@ async function main(): Promise<void> {
     // the webPending branch there, which now covers credentials as well as
     // groups.
     skip.add('auth');
-    p.log.success(
-      brandBody(
-        wrapForGutter(
-          'Web UI enabled. Once NanoClaw is running, setup opens it in your browser to finish: sign in, pick a model and create your first agent.',
-          4,
-        ),
-      ),
-    );
   }
 
   if (!skip.has('container')) {
@@ -975,7 +967,7 @@ async function main(): Promise<void> {
     note(`${brandBold('→')} ${k.bold(`Check your ${dmTarget} — your assistant is saying hi.`)}`, 'Go say hi');
     p.outro(k.green("You're set."));
   } else if (webOpened) {
-    p.outro(k.green("You're set — the web UI is in your browser."));
+    p.outro(k.green('Done.'));
   } else {
     p.outro(k.green("You're ready! Chat with `pnpm run chat hi`."));
   }
