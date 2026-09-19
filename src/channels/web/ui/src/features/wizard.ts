@@ -527,10 +527,15 @@ function renderAccess(): HTMLElement {
   if (access === null) {
     access = state?.tailscale.active ? 'tailscale' : state?.bearerConfigured ? 'token' : 'local';
   }
+  // Titles only. Each of these had a second line explaining it ("Only this
+  // computer. No login.") and the explanation was the same sentence as the
+  // title with more words around it. The title now says the whole thing, and
+  // the cards that need more — Tailscale, the token — say it in their body,
+  // where it is tied to a button instead of floating above one.
   const choices = choiceCards<Access>(access, (id) => (access = id), [
-    { id: 'local', title: 'This device', desc: 'Only this computer. No login.' },
-    { id: 'tailscale', title: 'Tailscale', desc: 'Your other devices, over HTTPS. No login.', body: buildTailscale },
-    { id: 'token', title: 'Access token', desc: 'Any network. Log in with a token.', body: buildBearer },
+    { id: 'local', title: 'Only from this device' },
+    { id: 'tailscale', title: 'Tailscale', body: buildTailscale },
+    { id: 'token', title: 'Only from your network with a token', body: buildBearer },
   ]);
   box.append(choices, nav({}));
   return box;
