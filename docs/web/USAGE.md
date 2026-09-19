@@ -102,10 +102,10 @@ Two tabs.
 - **Your models** — the roster. Each row has a live status dot: green means
   reachable from agent containers, red means unreachable (tap it for the
   reason), grey means cloud/Anthropic. Star one as the default; ✕ removes it.
-  An empty roster shows "Claude — built-in default": agents fall back to the
+  An empty roster shows "Claude": agents fall back to the
   provider's built-in Claude model until you register something.
 - **On this machine** — the local Ollama console: your host's models with
-  sizes, an **Add to roster** shortcut per model, a **Pull** box with streamed
+  sizes, an **Add** shortcut per model, a **Pull** box with streamed
   progress and cancel, and a one-click installer when local Ollama is down.
 - **Add custom endpoint** — a two-pass probe. Type any endpoint (prefilled
   localhost) and **Probe** detects what is serving it — Ollama, or something

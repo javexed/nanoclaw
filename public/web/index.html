@@ -15,7 +15,6 @@
 <div id="login-screen" hidden>
   <form id="login-form">
     <h1>NanoClaw</h1>
-    <p>Enter the access token for this install.</p>
     <input id="login-token" type="password" autocomplete="current-password" placeholder="Access token">
     <p id="login-error" class="login-error" hidden></p>
     <button type="submit">Connect</button>
@@ -35,7 +34,6 @@
   </aside>
 
   <main id="chat">
-    <div id="no-room-hint">Pick a chat, or start one with the + button.</div>
     <header id="chat-header">
       <button id="back-btn" type="button" aria-label="Back to rooms">‹</button>
       <span id="room-title">Pick a chat</span>
@@ -58,7 +56,7 @@
            with whatever was typed at that instant as the caption, so
            attach-then-type produced two separate messages. -->
       <div id="attach-tray" hidden aria-label="Attachments ready to send"></div>
-      <textarea id="composer-input" rows="1" placeholder="Message… (/ for commands)"></textarea>
+      <textarea id="composer-input" rows="1" placeholder="Message…"></textarea>
       <button id="stop-btn" type="button" title="Stop the agent" aria-label="Stop the agent" hidden>■</button>
       <button id="send-btn" type="submit" title="Send" aria-label="Send">➤</button>
     </form>
@@ -94,10 +92,10 @@
     <h2>New chat</h2>
     <label>Name <input id="new-room-name" type="text" maxlength="80" required></label>
     <label>Instructions
-      <textarea id="new-room-instructions" rows="3" placeholder="What should this one be? (optional)"></textarea>
+      <textarea id="new-room-instructions" rows="3" placeholder="Instructions"></textarea>
     </label>
     <menu>
-      <button id="new-room-draft" type="button">✨ Suggest from prompt</button>
+      <button id="new-room-draft" type="button">✨ Draft</button>
       <button id="new-room-cancel" type="button">Cancel</button>
       <button type="submit" value="create">Create</button>
     </menu>
@@ -109,10 +107,10 @@
     <h2>Chat settings</h2>
     <label>Model <select id="room-set-model"></select></label>
     <label>Instructions
-      <textarea id="room-set-instructions" rows="8" placeholder="Standing instructions (markdown)"></textarea>
+      <textarea id="room-set-instructions" rows="8" placeholder="Instructions"></textarea>
     </label>
     <label class="inline">
-      <input id="room-set-autolearn" type="checkbox"> Learn from our conversations
+      <input id="room-set-autolearn" type="checkbox"> Auto-learn
     </label>
     <menu>
       <button id="room-settings-cancel" type="button">Cancel</button>
