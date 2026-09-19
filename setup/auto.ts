@@ -39,6 +39,7 @@ import { withSetupLock, launchSlackJob, readSlackJob, slackJobStatus } from '../
 // extensions (setup/channels/companions.ts) before running its install skill
 // — the wizard itself stays free of channel-specific imports.
 import { runChannelSkillWithPreStep } from './channels/run-channel-skill.js';
+import { entryOptions, entryPlan, type EntryChoice } from './lib/entry-choice.js';
 import {
   channelDmLabel,
   initialChannelOptions,
@@ -261,32 +262,43 @@ async function main(): Promise<void> {
     await runTemplateSetup(savedPickBridged, await detectRegisteredGroups(process.cwd()));
   }
 
-  // ── Web UI ─────────────────────────────────────────────────────────────────
-  // Asked up front, before the long image build, because the answer decides
-  // what the rest of this run does. Yes → the terminal handles only what a
-  // browser can't (image, gateway, service) and hands off at the end: the
-  // in-app wizard does model → access → first agent, so the channel,
-  // first-agent and first-chat steps are skipped here. No → the phone-channel
-  // flow as before. Headless (no TTY) never prompts — deploy/web-deploy.sh
-  // writes the env keys itself. A re-exec pass (sg docker, fail-retry) skips
-  // the prompt and reads the first pass's answer back from .env.
+  // ── Where you'll talk to your assistant ────────────────────────────────────
+  // ONE question, listing the web UI beside every messaging app, because the
+  // web UI is a place you talk to your assistant exactly like Slack or Telegram
+  // is. It used to be a separate yes/no in front of the chooser, which read as a
+  // different kind of decision: the operator answered "Enable the web UI?" with
+  // no idea that a list of everything else was coming, and the two questions
+  // never appeared on screen together.
+  //
+  // Still asked UP FRONT — before the long image build — because the answer
+  // rewrites the rest of this run, and a question whose answer changes what has
+  // already happened is a question asked too late.
+  //
+  // The CHOICE moves here; the channel INSTALL does not. Installing a channel
+  // runs scripts/init-first-agent.ts: it creates the agent group, wires it, and
+  // hands a /welcome to the running service over the CLI socket. That needs the
+  // built image and a live host, so it stays where it always was — below the
+  // container and service steps — reading the answer taken here.
+  //
+  // The mapping from answer to consequences lives in lib/entry-choice.ts, with
+  // tests. Headless (no TTY) never prompts — deploy/web-deploy.sh writes the
+  // env keys itself.
   let webPortEnabled: string | null = null;
+  let presetChannel: ChannelChoice | null = null;
+  let entryChoice: EntryChoice | null = null;
+  let alsoChannel = false;
   if (!skip.has('web') && process.env.NANOCLAW_REEXEC_SG !== '1' && process.stdin.isTTY) {
-    const enableWeb = ensureAnswer(
-      await brightSelect<'yes' | 'no'>({
-        message: 'Enable the web UI?',
-        options: [
-          { value: 'yes', label: 'Yes' },
-          { value: 'no', label: 'No' },
-        ],
-        initialValue: 'yes',
+    entryChoice = ensureAnswer(
+      await brightSelect<EntryChoice>({
+        message: 'Want to chat with your assistant from your browser or your phone?',
+        options: entryOptions(),
+        initialValue: 'web',
       }),
-    );
-    setupLog.userInput('web_enabled', String(enableWeb));
-    phEmit('web_choice', { enabled: enableWeb === 'yes' });
-    if (enableWeb === 'yes') {
+    ) as EntryChoice;
+    setupLog.userInput('entry_choice', String(entryChoice));
+    phEmit('web_choice', { enabled: entryChoice === 'web' });
+    if (entryChoice === 'web') {
       upsertEnvVar('WEB_ENABLED', 'true');
-      webPortEnabled = process.env.WEB_PORT || '3100';
 
       // Localhost-only is right when you are sitting at the machine: the
       // loopback auto-owner signs you in, no token, no exposure, and the in-app
@@ -315,26 +327,42 @@ async function main(): Promise<void> {
       } else {
         upsertEnvVar('WEB_HOST', '127.0.0.1');
       }
+
+      // The web UI is ADDITIVE, not exclusive — and this offer is the only
+      // place a browser-first operator is ever told the messaging apps exist.
+      // The in-app wizard is engine → model → access → first agent
+      // (src/channels/web/ui/src/features/wizard.ts); it has no channel step.
+      // So before this, choosing the web UI meant nothing anywhere offered
+      // Slack or Telegram, and the only way in was knowing to type
+      // /add-<name> in Claude Code afterwards.
+      //
+      // Default No, so the short browser path stays short for the people who
+      // picked it. Yes un-skips the chooser below, which then runs in its
+      // normal place with its normal back-navigation.
+      alsoChannel =
+        ensureAnswer(
+          await p.confirm({
+            message: 'Also connect a messaging app, so you can reach it from your phone?',
+            initialValue: false,
+          }),
+        ) === true;
+      setupLog.userInput('web_plus_channel', String(alsoChannel));
+      // Persisted for the same reason WEB_ENABLED is: a re-exec (sg docker,
+      // fail-retry) re-derives the skips below from scratch, and NANOCLAW_SKIP
+      // carries only COMPLETED STEPS (lib/runner.ts, maybeReexecUnderSg) — not
+      // an in-memory decision. Without this, the second pass would forget the
+      // channel was wanted and skip the step the operator asked for.
+      upsertEnvVar('NANOCLAW_WEB_PLUS_CHANNEL', String(alsoChannel));
     }
   } else if (process.env.NANOCLAW_REEXEC_SG === '1' && readEnvKey('WEB_ENABLED')?.trim() === 'true') {
-    webPortEnabled = process.env.WEB_PORT || readEnvKey('WEB_PORT')?.trim() || '3100';
+    entryChoice = 'web';
+    alsoChannel = readEnvKey('NANOCLAW_WEB_PLUS_CHANNEL')?.trim() === 'true';
   }
-  if (webPortEnabled !== null) {
-    // The browser wizard replaces these terminal steps.
-    skip.add('cli-agent');
-    skip.add('first-chat');
-    skip.add('channel');
-    // Auth too: the wizard's first step IS "which model powers your agents?",
-    // with a full Claude sign-in behind it (/api/web/claude-auth/start → the
-    // sign-in URL → paste the code → /api/web/claude-auth/code) for an install
-    // with no credential at all. Asking in the terminal first made the operator
-    // answer the same question twice, and contradicted this path's promise that
-    // the terminal handles only what a browser cannot. The headless sibling
-    // (deploy/web-deploy.sh) has always skipped it; this makes the interactive
-    // run agree. verify() tolerates the resulting credential-less state — see
-    // the webPending branch there, which now covers credentials as well as
-    // groups.
-    skip.add('auth');
+  if (entryChoice !== null) {
+    const plan = entryPlan(entryChoice, alsoChannel);
+    if (plan.web) webPortEnabled = process.env.WEB_PORT || readEnvKey('WEB_PORT')?.trim() || '3100';
+    presetChannel = plan.presetChannel;
+    for (const step of plan.skips) skip.add(step);
   }
 
   if (!skip.has('container')) {
@@ -812,10 +840,16 @@ async function main(): Promise<void> {
     // its first prompt and bounce the user back to the chooser without
     // restarting setup. Channels not yet wired with the back option just
     // return void and the loop exits after one pass.
+    // The entry question above already asked this, so the first pass uses that
+    // answer instead of asking again. Only the back-navigation path re-opens
+    // the chooser — which is why the chooser and its sub-flows stayed together
+    // here rather than moving up with the question.
+    let seeded = presetChannel;
     let backed = true;
     while (backed) {
       backed = false;
-      channelChoice = await askChannelChoice();
+      channelChoice = seeded ?? (await askChannelChoice());
+      seeded = null;
       if (channelChoice !== 'skip' && channelChoice !== 'other') {
         await resolveDisplayName();
       }
