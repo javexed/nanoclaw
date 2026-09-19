@@ -10,7 +10,6 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import { confirmThenOpen } from './browser.js';
-import { note } from './theme.js';
 
 /** Poll `url` until it answers 2xx, or `timeoutMs` elapses. */
 export async function waitForWeb(url: string, timeoutMs = 20_000, intervalMs = 500): Promise<boolean> {
@@ -30,19 +29,15 @@ export async function waitForWeb(url: string, timeoutMs = 20_000, intervalMs = 5
 /**
  * Offer to open the freshly enabled web UI. Returns true when the server
  * answered and the offer was made (the caller uses it to pick the outro);
- * false when the server never came up — then a note says where it will be.
+ * false when the server never came up — then the URL is printed instead.
  */
 export async function offerToOpenWeb(port: string): Promise<boolean> {
   const url = `http://127.0.0.1:${port}/`;
   const up = await waitForWeb(`${url}health`);
   if (!up) {
-    note(
-      `The web UI isn't answering yet. Once NanoClaw is up, open ${k.bold(url)} — the first visit walks you through picking a model and creating an agent.`,
-      'Web UI',
-    );
+    p.log.info(`Web UI: ${k.bold(url)}`);
     return false;
   }
-  p.log.success(`Web UI is up at ${k.bold(url)}`);
-  await confirmThenOpen(url, 'Press Enter to open the web UI');
+  await confirmThenOpen(url, `Open ${k.bold(url)}?`);
   return true;
 }
