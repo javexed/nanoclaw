@@ -119,12 +119,6 @@ async function copyText(text) {
         return false;
     }
 }
-function para(text) {
-    const p = document.createElement('p');
-    p.className = 'wiz-text';
-    p.textContent = text;
-    return p;
-}
 function heading(text) {
     const h = document.createElement('h3');
     h.textContent = text;
@@ -133,7 +127,7 @@ function heading(text) {
 // ── Step: engine ────────────────────────────────────────────────────────────
 function renderEngine() {
     const box = document.createElement('div');
-    box.append(heading('Which model powers your agents?'));
+    box.append(heading('Model'));
     const choices = document.createElement('div');
     choices.className = 'wiz-choices';
     // Accordion cards: the selected card holds its own setup body, so toggling
@@ -147,10 +141,13 @@ function renderEngine() {
         const t = document.createElement('div');
         t.className = 'wiz-choice-title';
         t.textContent = title;
-        const d = document.createElement('div');
-        d.className = 'wiz-choice-desc';
-        d.textContent = desc;
-        head.append(t, d);
+        head.append(t);
+        if (desc) {
+            const d = document.createElement('div');
+            d.className = 'wiz-choice-desc';
+            d.textContent = desc;
+            head.append(d);
+        }
         head.onclick = () => {
             if (engine !== id) {
                 engine = id;
@@ -165,9 +162,7 @@ function renderEngine() {
         }
         return c;
     };
-    choices.append(mk('claude', 'Claude (Anthropic)', 'Most capable — sign in with your Claude account.', renderClaudeAuth), mk('local', 'Local model (Ollama)', state?.ollama.reachable
-        ? 'Private, no cloud — pull a model and chat.'
-        : 'Private, no cloud. Not detected yet; select to install it.', buildLocalModels));
+    choices.append(mk('claude', 'Claude', '', renderClaudeAuth), mk('local', 'Local (Ollama)', '', buildLocalModels));
     box.append(choices, nav({}));
     return box;
 }
@@ -184,7 +179,7 @@ function renderClaudeAuth() {
     rowEl.className = 'wiz-creds-row';
     const status = document.createElement('span');
     status.className = 'wiz-creds-status' + (connected ? ' is-connected' : '');
-    status.textContent = `Claude account — ${connected ? 'connected' : 'not connected'}`;
+    status.textContent = connected ? 'Connected' : 'Not connected';
     const action = document.createElement('button');
     action.textContent = connected ? 'Reconnect' : 'Connect';
     if (!connected)
@@ -214,9 +209,9 @@ function renderClaudeAuth() {
     link.href = claudeSignin.url;
     link.target = '_blank';
     link.rel = 'noopener';
-    link.textContent = 'Open the sign-in page ↗';
+    link.textContent = 'Sign in ↗';
     const codeInput = document.createElement('input');
-    codeInput.placeholder = 'Paste the code from that page';
+    codeInput.placeholder = 'Code';
     const connect = document.createElement('button');
     connect.className = 'mprimary';
     connect.textContent = 'Connect';
@@ -284,7 +279,7 @@ function buildLocalModels() {
     const installErr = document.createElement('div');
     installErr.className = 'wiz-text wiz-err';
     const installBtn = document.createElement('button');
-    installBtn.textContent = state?.ollama.canInstall ? 'Install Ollama on this machine' : 'Ollama not detected';
+    installBtn.textContent = state?.ollama.canInstall ? 'Install Ollama' : 'Not detected';
     installBtn.disabled = !state?.ollama.canInstall;
     installBtn.onclick = async () => {
         installBtn.disabled = true;
@@ -318,7 +313,7 @@ function buildLocalModels() {
                 const lastLine = (st.lines ?? []).filter((l) => l.trim()).pop() ?? '';
                 installErr.textContent = `Install failed (exit ${st.exitCode})${lastLine ? `: ${lastLine}` : ''}`;
                 installBtn.disabled = false;
-                installBtn.textContent = 'Install Ollama on this machine';
+                installBtn.textContent = 'Install Ollama';
             }
         }, 3000);
     };
@@ -343,7 +338,7 @@ function buildLocalModels() {
                 row = created.model;
             }
             await apiJson('/api/models/default', { method: 'PUT', body: { model_id: row.id } });
-            showToast(`${modelId} is the default model`, { kind: 'success' });
+            showToast(`Default: ${modelId}`, { kind: 'success' });
         }
         catch (err) {
             toastError(err, 'Could not select that model');
@@ -387,10 +382,7 @@ function buildLocalModels() {
             const n = r.models.length;
             const kindName = r.kind === 'ollama' ? 'Ollama' : 'OpenAI-compatible server';
             statusLine.className = 'wiz-creds-status is-connected';
-            statusLine.textContent =
-                n === 0
-                    ? `${kindName} detected — nothing installed yet, pull a model below.`
-                    : `${kindName} detected — ${n} model${n === 1 ? '' : 's'}, pick one to make it the default.`;
+            statusLine.textContent = n === 0 ? `${kindName} — no models` : `${kindName} — ${n} model${n === 1 ? '' : 's'}`;
             pullRow.hidden = r.kind !== 'ollama' || !isLocal();
         }
         catch (err) {
@@ -411,7 +403,7 @@ function buildLocalModels() {
     const progress = document.createElement('div');
     progress.className = 'wiz-text';
     const pullInput = document.createElement('input');
-    pullInput.placeholder = 'Model to pull (e.g. qwen3:8b)';
+    pullInput.placeholder = 'Model';
     void apiJson('/api/ollama/recommend')
         .then((r) => {
         if (r.model)
@@ -482,7 +474,7 @@ function buildLocalModels() {
 // ── Step: access ────────────────────────────────────────────────────────────
 function renderAccess() {
     const box = document.createElement('div');
-    box.append(heading('Reach it from other devices?'), para('Right now the chat answers on this machine only. Both options below are optional — Skip is fine.'));
+    box.append(heading('Access'));
     const ts = document.createElement('div');
     ts.className = 'mrow';
     const tsTitle = document.createElement('div');
@@ -498,7 +490,7 @@ function renderAccess() {
     tsHint.className = 'mrow-meta';
     const showServing = (url) => {
         tsStatus.classList.add('is-connected');
-        tsStatus.textContent = 'Serving on your tailnet';
+        tsStatus.textContent = 'Serving';
         tsHint.replaceChildren();
         if (url) {
             const a = document.createElement('a');
@@ -506,7 +498,7 @@ function renderAccess() {
             a.target = '_blank';
             a.rel = 'noopener';
             a.textContent = url;
-            tsHint.append('Open on any tailnet device: ', a);
+            tsHint.append(a);
         }
     };
     if (state?.tailscale.active) {
@@ -514,11 +506,10 @@ function renderAccess() {
         tsRow.appendChild(tsStatus);
     }
     else if (state?.tailscale.available) {
-        tsStatus.textContent = 'Tailscale is up — not serving yet';
-        tsHint.textContent = 'Puts the chat on your tailnet with a real HTTPS cert (installable as an app on your phone).';
+        tsStatus.textContent = 'Not serving';
         const tsBtn = document.createElement('button');
         tsBtn.className = 'mprimary';
-        tsBtn.textContent = 'Enable HTTPS';
+        tsBtn.textContent = 'Enable';
         tsBtn.onclick = async () => {
             tsBtn.disabled = true;
             try {
@@ -545,8 +536,7 @@ function renderAccess() {
         tsRow.append(tsStatus, tsBtn);
     }
     else {
-        tsStatus.textContent = 'Not detected on this machine';
-        tsHint.textContent = 'Install Tailscale (tailscale.com) and sign in, then re-run this step from the wizard.';
+        tsStatus.textContent = 'Not detected';
         tsRow.appendChild(tsStatus);
     }
     ts.append(tsTitle, tsRow, tsHint);
@@ -554,7 +544,7 @@ function renderAccess() {
     bearer.className = 'mrow';
     const bTitle = document.createElement('div');
     bTitle.className = 'mrow-name';
-    bTitle.textContent = 'Access token (any network)';
+    bTitle.textContent = 'Access token';
     const bDesc = document.createElement('div');
     bDesc.className = 'mrow-meta';
     if (state?.bearerConfigured) {
@@ -563,15 +553,12 @@ function renderAccess() {
         row.className = 'wiz-creds-row';
         const st = document.createElement('span');
         st.className = 'wiz-creds-status is-connected';
-        st.textContent = 'Token configured';
+        st.textContent = 'Configured';
         row.appendChild(st);
-        bDesc.textContent = 'To replace it, remove WEB_TOKEN from .env and restart, then generate here again.';
-        bearer.append(bTitle, row, bDesc);
+        bearer.append(bTitle, row);
         box.append(ts, bearer, nav({}));
         return box;
     }
-    bDesc.textContent =
-        'Generates a token and opens the port to your network. You log in with the token; keep it safe. Requires a restart.';
     const bBtn = document.createElement('button');
     bBtn.textContent = 'Generate token';
     // Two-click arm: generation commits real install state (token + network
@@ -581,7 +568,7 @@ function renderAccess() {
     bBtn.onclick = async () => {
         if (!armed) {
             armed = true;
-            bBtn.textContent = 'Opens the port to your network — click again to confirm';
+            bBtn.textContent = 'Opens the port — click again';
             disarm = setTimeout(() => {
                 armed = false;
                 bBtn.textContent = 'Generate token';
@@ -601,7 +588,7 @@ function renderAccess() {
             copyBtn.textContent = 'Copy';
             copyBtn.onclick = async () => {
                 const ok = await copyText(token);
-                copyBtn.textContent = ok ? 'Copied ✓' : 'Select + copy manually';
+                copyBtn.textContent = ok ? 'Copied' : 'Copy failed';
                 if (ok) {
                     setTimeout(() => {
                         copyBtn.textContent = 'Copy';
@@ -611,8 +598,7 @@ function renderAccess() {
             const row = document.createElement('div');
             row.className = 'wiz-token-row';
             row.append(tokenBox, copyBtn);
-            bDesc.textContent =
-                'Save this token now — it is shown once. This also opens the port to your network (binds 0.0.0.0); it becomes active after the restart at the end of the wizard.';
+            bDesc.textContent = 'Shown once. Port opens on restart.';
             bearer.insertBefore(row, bBtn);
             bBtn.remove(); // spent — the token row replaces it
         }
@@ -629,20 +615,18 @@ function renderAccess() {
 function renderAgent() {
     const box = document.createElement('div');
     const rerun = (state?.agents ?? 0) > 0;
-    box.append(heading(rerun ? 'Add another agent (optional)' : 'Create your first agent'), para(rerun
-        ? `You already have ${state.agents} agent${state.agents === 1 ? '' : 's'} — leave the name empty to just finish.`
-        : 'A name and, optionally, what it should be. ✨ drafts both from a one-line idea.'));
+    box.append(heading(rerun ? 'Another agent' : 'First agent'));
     const name = document.createElement('input');
-    name.placeholder = 'Name (e.g. Assistant)';
+    name.placeholder = 'Name';
     const instructions = document.createElement('textarea');
     instructions.rows = 4;
-    instructions.placeholder = 'Instructions (optional)';
+    instructions.placeholder = 'Instructions';
     const draftBtn = document.createElement('button');
-    draftBtn.textContent = '✨ Draft from an idea';
+    draftBtn.textContent = '✨ Draft';
     draftBtn.onclick = async () => {
         const prompt = instructions.value.trim() || name.value.trim();
         if (!prompt) {
-            showToast('Type an idea first — a sentence is enough', { kind: 'error' });
+            showToast('Type an idea first', { kind: 'error' });
             return;
         }
         draftBtn.disabled = true;
@@ -655,18 +639,18 @@ function renderAgent() {
                 instructions.value = draft.instructions;
         }
         catch (err) {
-            toastError(err, 'Drafting failed (is a model credential set up?)');
+            toastError(err, 'Drafting failed');
         }
         finally {
             draftBtn.disabled = false;
-            draftBtn.textContent = '✨ Draft from an idea';
+            draftBtn.textContent = '✨ Draft';
         }
     };
     const row = document.createElement('div');
     row.className = 'mactions';
     row.append(draftBtn);
     box.append(name, instructions, row, nav({
-        nextLabel: rerun ? 'Finish' : 'Create & finish',
+        nextLabel: rerun ? 'Finish' : 'Create',
         next: async () => {
             // Re-run with nothing typed: there is nothing to create — the default
             // 'Assistant' name would collide with the agent the first run made.

@@ -48,7 +48,7 @@ bash setup/lib/restart.sh
 env, mints a token and installs a service.
 
 All three leave it localhost-only with no token. Reaching it from another
-device is offered from inside the app (⚙ → Run setup wizard… → access).
+device is offered from inside the app (⚙ → Setup… → Access).
 
 ## What it is
 
