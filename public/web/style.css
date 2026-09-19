@@ -639,3 +639,47 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; margin: 6px 0 
 .seg-btns button.selected { background: #1d4428; color: #fff; }
 /* skill-draft card body (View) */
 .draft-body { white-space: pre-wrap; font-size: 0.8rem; max-height: 320px; overflow: auto; padding: 8px; border-radius: 6px; background: rgba(128,128,128,.12); }
+
+/* ── Staged attachments ───────────────────────────────────────────────────────
+   Chips sit above the textarea until Send, which uploads them with the typed
+   text as the caption. Full-width so the row wraps above the composer controls
+   rather than squeezing the textarea. */
+#attach-tray {
+  flex: 0 0 100%;
+  order: -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 6px;
+}
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 6px 3px 10px;
+  border: 1px solid var(--border, #d0d0d0);
+  border-radius: 999px;
+  background: var(--bg-alt, #f3f3f3);
+  font-size: 0.85em;
+  line-height: 1.4;
+}
+.attach-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attach-chip-x {
+  border: 0;
+  background: none;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 0.9em;
+  line-height: 1;
+  color: inherit;
+  opacity: 0.6;
+}
+.attach-chip-x:hover,
+.attach-chip-x:focus-visible {
+  opacity: 1;
+}
