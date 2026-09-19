@@ -113,9 +113,10 @@ Two tabs.
   one-click **Add**. Bare hostnames are normalised (`localhost` →
   `http://localhost:11434`).
 
-Assigning a model changes which model the agent talks to. Ollama and
-OpenAI-compatible endpoints both work as-is, because each serves an
-Anthropic-compatible API — see [local models](README.md#local-models).
+Assigning a model changes which model the agent talks to. Local models —
+Ollama and OpenAI-compatible endpoints — run on OpenCode, which is installed on
+demand; until it is, a local assignment has no harness to run on. See
+[local models](README.md#local-models).
 
 ## Access
 
