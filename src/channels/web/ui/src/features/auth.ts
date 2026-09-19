@@ -40,7 +40,7 @@ function showLogin(): Promise<void> {
         resolve();
       } else {
         setAuthToken(getAuthToken() === token ? '' : getAuthToken());
-        error.textContent = 'That token was not accepted.';
+        error.textContent = 'Wrong token';
         error.hidden = false;
       }
     });

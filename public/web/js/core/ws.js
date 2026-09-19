@@ -37,7 +37,7 @@ async function probeInternet() {
 }
 async function diagnoseConnection() {
     if (!navigator.onLine) {
-        setConnectionBanner('You’re offline. Reconnecting when the network returns…');
+        setConnectionBanner('Offline');
         return;
     }
     if (Date.now() - state.lastProbeAt < 10_000) {
@@ -54,9 +54,7 @@ async function diagnoseConnection() {
     if (state.ws && state.ws.readyState === WebSocket.OPEN)
         return;
     state.lastDiagnosis = {
-        text: internetUp
-            ? 'Internet is up but the server is unreachable — it may be down, or Tailscale is off on this device.'
-            : 'No internet connection. Reconnecting…',
+        text: internetUp ? 'Server unreachable' : 'Offline',
     };
     setConnectionBanner(state.lastDiagnosis.text);
 }
@@ -111,7 +109,7 @@ export function connect() {
                     if (room)
                         joinRoom(room.id, room.name);
                     else if (rooms.length === 0)
-                        setEmptyNote('No rooms yet — create one to start.');
+                        setEmptyNote('No chats');
                 }
                 break;
             }
@@ -138,7 +136,7 @@ export function connect() {
                 state.noMoreOlder = messages.length < 50;
                 state.loadingOlder = false;
                 if (messages.length === 0 && carried.length === 0) {
-                    setEmptyNote('No messages yet. Start the conversation!');
+                    setEmptyNote('');
                 }
                 if (messages.length > 0)
                     setLastSeenMessageId(messages[messages.length - 1].id ?? null);
@@ -224,7 +222,7 @@ export function connect() {
         // change), let it own the reconnect lifecycle.
         if (state.ws !== sock)
             return;
-        setConnectionBanner('Connection lost. Reconnecting…');
+        setConnectionBanner('Reconnecting…');
         void diagnoseConnection();
         state.myIdentity = '';
         setTimeout(connect, state.reconnectDelay);
