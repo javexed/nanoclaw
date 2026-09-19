@@ -573,7 +573,11 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; margin: 6px 0 
 
 /* Wizard: local-model radio list */
 .wiz-model-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 180px; overflow-y: auto; }
-.wiz-model-list label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+/* Weight 600 to match .wiz-choice-title. These are the same KIND of thing as
+   "Claude" or "Local (Ollama)" — one of a few options you pick — and they were
+   the only ones rendered at the body weight, which read as caption text under
+   a heading rather than as the choice itself. */
+.wiz-model-list label { display: flex; align-items: center; gap: 8px; cursor: pointer; font-weight: 600; }
 .wiz-model-list input[type='radio'] { accent-color: var(--accent); }
 
 .wiz-token-row { display: flex; gap: 8px; align-items: stretch; }
