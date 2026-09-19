@@ -40,27 +40,26 @@ import {
   createWebRoom,
   getWebPendingApprovalsForUser,
   deleteWebRoom,
-  getAgentsForWebRoom,
+  getAgentForWebRoom,
   getWebMessagesBeforeId,
   getWebMessagesAfterId,
   getWebMessages,
   getWebRoom,
   sanitizeRoomName,
-  setPrimeAgentForWebRoom,
   updateWebRoomName,
+  wireAgentToRoom,
   type FileMeta,
 } from './db.js';
 import { redactMessageContent } from './redact.js';
 import { handleFileServe, handleMultipartUpload, uploadsDir } from './files.js';
 import { ensureDrafterIdentity } from './drafter.js';
 import {
-  rAgentDelete,
-  rAgentModelPut,
-  rAgentInstructionsGet,
-  rAgentInstructionsPut,
-  rAgentsDetailGet,
-  rAgentsDraftPost,
-  rAgentsPost,
+  createAgent,
+  deleteRoomAgent,
+  rRoomModelPut,
+  rRoomInstructionsGet,
+  rRoomInstructionsPut,
+  rRoomDraftPost,
   rModelIdDelete,
   rModelIdPut,
   rModelsDefaultPut,
@@ -77,12 +76,10 @@ import {
   rOllamaPullPost,
   rOllamaPullsGet,
   rOllamaRecommendGet,
-  rRoomAgentDelete,
-  rRoomAgentsPost,
 } from './server/routes-manage.js';
 import {
-  rAgentLearningGet,
-  rAgentLearningPut,
+  rRoomLearningGet,
+  rRoomLearningPut,
   rSkillDraftDiscardPost,
   rSkillDraftGet,
   rSkillDraftKeepPost,
@@ -101,8 +98,6 @@ import {
   rTailscaleInstallGet,
   rTailscaleInstallPost,
 } from './server/routes-setup.js';
-import { getAgentGroup, getAllAgentGroups } from '../../db/agent-groups.js';
-import { createMessagingGroupAgent, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 3100;
@@ -387,31 +382,21 @@ interface ApiRoute {
 
 // ── Room routes ─────────────────────────────────────────────────────────────
 
-/** Agents, for the room-create picker and (M4) the management panel. */
-async function rAgentsGet({ res }: RouteCtx): Promise<void> {
-  const groups = await getAllAgentGroups();
-  return json(
-    res,
-    200,
-    groups.map((g) => ({ id: g.id, name: g.name, folder: g.folder })),
-  );
-}
-
 async function rRoomsGet({ res }: RouteCtx): Promise<void> {
   return json(res, 200, { rooms: await annotateRooms() });
 }
 
 /**
- * Create a room, optionally wiring an agent in the same call. The wiring is a
- * `messaging_group_agents` row with the always-engage pattern — one agent per
- * room, catching every message (no @-mention dance needed in a room with one
- * agent). Also stamped as the room's prime for the management panel.
+ * Create a chat. Room and agent are one object to the user and are born
+ * together here — this is the only creation path for either. The agent group
+ * carries the workspace, memory and container config; the room carries the
+ * transcript and the routing row.
  */
 async function rRoomsPost(ctx: RouteCtx): Promise<void> {
   const { req, res } = ctx;
   const raw = await readJsonBody(req, res);
   if (raw === null) return;
-  let body: { name?: unknown; agent_group_id?: unknown };
+  let body: { name?: unknown; instructions?: unknown };
   try {
     body = JSON.parse(raw) as typeof body;
   } catch {
@@ -419,43 +404,26 @@ async function rRoomsPost(ctx: RouteCtx): Promise<void> {
   }
   const name = sanitizeRoomName(body.name);
   if (!name) return json(res, 400, { error: 'Room name required (1-80 printable chars)' });
+  const instructions = typeof body.instructions === 'string' ? body.instructions : undefined;
 
-  const agentGroupId = typeof body.agent_group_id === 'string' ? body.agent_group_id : null;
-  if (agentGroupId && !(await getAgentGroup(agentGroupId))) {
-    return json(res, 404, { error: 'Agent group not found' });
-  }
+  const created = await createAgent(name, instructions);
+  if ('error' in created) return json(res, created.status, { error: created.error });
 
   const room = await createWebRoom(name);
-  if (agentGroupId) {
-    await wireAgentToRoom(room.id, agentGroupId);
+  try {
+    await wireAgentToRoom(room.id, created.group.id);
+  } catch (err) {
+    // Leave no half-built pair behind: the room is younger than the agent and
+    // has no transcript yet, so dropping it is the clean rollback.
+    await deleteWebRoom(room.id);
+    return json(res, 500, { error: err instanceof Error ? err.message : String(err) });
   }
   await broadcastRooms();
-  return json(res, 200, { room });
-}
-
-export async function wireAgentToRoom(roomId: string, agentGroupId: string): Promise<void> {
-  const mg = await getMessagingGroupByPlatform('web', roomId);
-  if (!mg) throw new Error(`wireAgentToRoom: room ${roomId} has no messaging_groups row`);
-  const wired = await getAgentsForWebRoom(roomId);
-  if (wired.some((a) => a.id === agentGroupId)) return;
-  await createMessagingGroupAgent({
-    id: randomUUID(),
-    messaging_group_id: mg.id,
-    agent_group_id: agentGroupId,
-    engage_mode: 'pattern',
-    engage_pattern: '.', // one agent per room: it answers everything
-    sender_scope: 'all',
-    ignored_message_policy: 'accumulate',
-    session_mode: 'shared',
-    priority: 0,
-    created_at: new Date().toISOString(),
-  });
-  await setPrimeAgentForWebRoom(roomId, agentGroupId);
+  return json(res, 200, { room, agent: { id: created.group.id, name: created.group.name } });
 }
 
 const RE_ROOM_NAME = /^\/api\/rooms\/([^/]+)\/name$/;
 const RE_ROOM = /^\/api\/rooms\/([^/]+)$/;
-const RE_ROOM_AGENTS = /^\/api\/rooms\/([^/]+)\/agents$/;
 const RE_HISTORY = /^\/api\/history\/([^/]+)$/;
 
 async function rRoomNamePut({ req, res }: RouteCtx, m: RegExpMatchArray): Promise<void> {
@@ -476,18 +444,19 @@ async function rRoomNamePut({ req, res }: RouteCtx, m: RegExpMatchArray): Promis
   return json(res, 200, { ok: true });
 }
 
+/**
+ * Delete the chat: transcript, routing row, sessions, and the agent behind it.
+ * One-to-one means there is no second meaning for this — no "the room stays
+ * but stops routing" half-state to explain.
+ */
 async function rRoomDelete({ res }: RouteCtx, m: RegExpMatchArray): Promise<void> {
   const roomId = decodeURIComponent(m[1]);
   if (!(await getWebRoom(roomId))) return json(res, 404, { error: 'Room not found' });
+  const agent = await getAgentForWebRoom(roomId);
   await deleteWebRoom(roomId);
+  if (agent) await deleteRoomAgent(agent.id);
   await broadcastRooms();
   return json(res, 200, { ok: true });
-}
-
-async function rRoomAgentsGet({ res }: RouteCtx, m: RegExpMatchArray): Promise<void> {
-  const roomId = decodeURIComponent(m[1]);
-  if (!(await getWebRoom(roomId))) return json(res, 404, { error: 'Room not found' });
-  return json(res, 200, { agents: await getAgentsForWebRoom(roomId) });
 }
 
 /** Paginated history: newest page by default, or the page before `?before=<id>`. */
@@ -549,14 +518,12 @@ async function rApprovalRespondPost(ctx: RouteCtx, m: RegExpMatchArray): Promise
   return json(res, 200, { ok: true });
 }
 
-const RE_AGENT_LEARNING = /^\/api\/agents\/([^/]+)\/learning$/;
+const RE_ROOM_LEARNING = /^\/api\/rooms\/([^/]+)\/learning$/;
 const RE_SKILL_DRAFT = /^\/api\/skill-drafts\/([^/]+)$/;
 const RE_SKILL_DRAFT_KEEP = /^\/api\/skill-drafts\/([^/]+)\/keep$/;
 const RE_SKILL_DRAFT_DISCARD = /^\/api\/skill-drafts\/([^/]+)\/discard$/;
-const RE_AGENT = /^\/api\/agents\/([^/]+)$/;
-const RE_AGENT_MODEL = /^\/api\/agents\/([^/]+)\/model$/;
-const RE_AGENT_INSTRUCTIONS = /^\/api\/agents\/([^/]+)\/instructions$/;
-const RE_ROOM_AGENT = /^\/api\/rooms\/([^/]+)\/agents\/([^/]+)$/;
+const RE_ROOM_MODEL = /^\/api\/rooms\/([^/]+)\/model$/;
+const RE_ROOM_INSTRUCTIONS = /^\/api\/rooms\/([^/]+)\/instructions$/;
 const RE_MODEL = /^\/api\/models\/([^/]+)$/;
 
 const API_ROUTES: ApiRoute[] = [
@@ -567,18 +534,8 @@ const API_ROUTES: ApiRoute[] = [
   { method: 'GET', path: RE_SKILL_DRAFT, h: rSkillDraftGet },
   { method: 'POST', path: RE_SKILL_DRAFT_KEEP, guards: ['csrf'], h: rSkillDraftKeepPost },
   { method: 'POST', path: RE_SKILL_DRAFT_DISCARD, guards: ['csrf'], h: rSkillDraftDiscardPost },
-  { method: 'GET', path: RE_AGENT_LEARNING, h: rAgentLearningGet },
-  { method: 'PUT', path: RE_AGENT_LEARNING, guards: ['csrf'], h: rAgentLearningPut },
-  // Management: agents
-  { method: 'GET', path: '/api/agents/detail', h: rAgentsDetailGet },
-  { method: 'POST', path: '/api/agents', guards: ['csrf'], h: rAgentsPost },
-  { method: 'POST', path: '/api/agents/draft', guards: ['csrf'], h: rAgentsDraftPost },
-  { method: 'DELETE', path: RE_AGENT, guards: ['csrf'], h: rAgentDelete },
-  { method: 'PUT', path: RE_AGENT_MODEL, guards: ['csrf'], h: rAgentModelPut },
-  { method: 'GET', path: RE_AGENT_INSTRUCTIONS, h: rAgentInstructionsGet },
-  { method: 'PUT', path: RE_AGENT_INSTRUCTIONS, guards: ['csrf'], h: rAgentInstructionsPut },
-  { method: 'POST', path: RE_ROOM_AGENTS, guards: ['csrf'], h: rRoomAgentsPost },
-  { method: 'DELETE', path: RE_ROOM_AGENT, guards: ['csrf'], h: rRoomAgentDelete },
+  { method: 'GET', path: RE_ROOM_LEARNING, h: rRoomLearningGet },
+  { method: 'PUT', path: RE_ROOM_LEARNING, guards: ['csrf'], h: rRoomLearningPut },
   // Management: models
   { method: 'GET', path: '/api/models', h: rModelsGet },
   { method: 'POST', path: '/api/models', guards: ['csrf'], h: rModelsPost },
@@ -609,12 +566,16 @@ const API_ROUTES: ApiRoute[] = [
   { method: 'GET', path: '/api/ollama/recommend', h: rOllamaRecommendGet },
   { method: 'GET', path: '/api/ollama/local', h: rOllamaLocalGet },
   { method: 'POST', path: '/api/ollama/install', guards: ['csrf'], h: rOllamaInstallPost },
-  { method: 'GET', path: '/api/agents', h: rAgentsGet },
+  // Rooms — one noun: the room and its agent are created, configured and
+  // deleted as a single object.
   { method: 'GET', path: '/api/rooms', h: rRoomsGet },
   { method: 'POST', path: '/api/rooms', guards: ['csrf'], h: rRoomsPost },
+  { method: 'POST', path: '/api/rooms/draft', guards: ['csrf'], h: rRoomDraftPost },
   { method: 'PUT', path: RE_ROOM_NAME, guards: ['csrf'], h: rRoomNamePut },
   { method: 'DELETE', path: RE_ROOM, guards: ['csrf'], h: rRoomDelete },
-  { method: 'GET', path: RE_ROOM_AGENTS, h: rRoomAgentsGet },
+  { method: 'PUT', path: RE_ROOM_MODEL, guards: ['csrf'], h: rRoomModelPut },
+  { method: 'GET', path: RE_ROOM_INSTRUCTIONS, h: rRoomInstructionsGet },
+  { method: 'PUT', path: RE_ROOM_INSTRUCTIONS, guards: ['csrf'], h: rRoomInstructionsPut },
   { method: 'GET', path: RE_HISTORY, h: rHistoryGet },
 ];
 

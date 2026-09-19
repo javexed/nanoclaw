@@ -11,6 +11,7 @@ import { applySkillDraft } from '../../../modules/learning/apply.js';
 import { findKeepOverlaps } from '../../../modules/learning/overlap.js';
 import { notifySkillDraftResolved } from '../../../modules/learning/events.js';
 import { getAgentLearning, setAgentLearning } from '../../../modules/learning/settings.js';
+import { getAgentForWebRoom } from '../db.js';
 
 async function parseBody(ctx: RouteCtx): Promise<Record<string, unknown> | null> {
   const raw = await readJsonBody(ctx.req, ctx.res);
@@ -99,17 +100,19 @@ export async function rSkillDraftDiscardPost(ctx: RouteCtx, m: RegExpMatchArray)
   return json(res, 200, { ok: true });
 }
 
-export async function rAgentLearningGet({ res }: RouteCtx, m: RegExpMatchArray): Promise<void> {
-  const id = decodeURIComponent(m[1]);
-  if (!(await getAgentGroup(id))) return json(res, 404, { error: 'Agent not found' });
-  return json(res, 200, await getAgentLearning(id));
+/** Addressed by room id: the room's agent is the room (see migration v4). */
+export async function rRoomLearningGet({ res }: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const agent = await getAgentForWebRoom(decodeURIComponent(m[1]));
+  if (!agent) return json(res, 404, { error: 'Room not found' });
+  return json(res, 200, await getAgentLearning(agent.id));
 }
 
 /** Set the switch. Takes effect on the agent's next container spawn (container.json is materialized then). */
-export async function rAgentLearningPut(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+export async function rRoomLearningPut(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
   const { res } = ctx;
-  const id = decodeURIComponent(m[1]);
-  if (!(await getAgentGroup(id))) return json(res, 404, { error: 'Agent not found' });
+  const agent = await getAgentForWebRoom(decodeURIComponent(m[1]));
+  if (!agent) return json(res, 404, { error: 'Room not found' });
+  const id = agent.id;
   const body = await parseBody(ctx);
   if (body === null) return;
   const patch: { autoTrigger?: boolean; cooldownMinutes?: number } = {};
