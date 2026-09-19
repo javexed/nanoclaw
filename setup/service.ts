@@ -347,8 +347,47 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
         log.warn('Failed to apply setfacl workaround', { err });
       }
     } else {
-      log.warn('setfacl not installed — cannot apply automatic workaround');
+      // A minimal image ships no `acl` package — the Debian 13 LXC template, for
+      // one — so the workaround above silently did not happen and the service
+      // started anyway, straight into a crash loop the operator could only
+      // decode by reading the container-runtime FATAL and knowing it meant
+      // "group", not "docker is down". Install it and retry.
+      log.warn('setfacl not installed — installing the acl package to apply the workaround');
+      for (const install of ['sudo -n apt-get install -y -qq acl', 'sudo -n dnf install -y -q acl']) {
+        try {
+          execSync(install, { stdio: 'ignore', timeout: 120_000 });
+          break;
+        } catch {
+          /* try the next package manager */
+        }
+      }
+      if (commandExists('setfacl')) {
+        const user = execSync('whoami', { encoding: 'utf-8' }).trim();
+        try {
+          execSync(`sudo -n setfacl -m u:${user}:rw /var/run/docker.sock`, { stdio: 'inherit' });
+          log.info('Applied temporary ACL to /var/run/docker.sock (resets on docker restart or reboot)');
+          dockerGroupStale = false;
+        } catch (err) {
+          log.warn('Failed to apply setfacl workaround', { err });
+        }
+      } else {
+        log.warn('setfacl still unavailable — cannot apply the automatic workaround');
+      }
     }
+  }
+
+  // Still stale after both attempts: starting now yields a service that
+  // crash-loops with "Container runtime failed to start" while `docker info`
+  // keeps working in the operator's shell — the most confusing shape this
+  // failure takes. Say what it is, and what fixes it, before the unit starts
+  // rather than leaving it to the journal.
+  if (dockerGroupStale) {
+    log.warn(
+      'Docker is reachable from your shell but NOT from the systemd user manager, which froze ' +
+        'its group list before you joined the docker group. The service will fail to start until ' +
+        'that manager restarts: run `loginctl terminate-user $(id -un)` from another session (or ' +
+        'log out of ALL sessions and back in), then restart the unit.',
+    );
   }
 
   // Kill orphaned nanoclaw processes to avoid channel connection conflicts
@@ -356,13 +395,30 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
 
   // Enable lingering so the user service survives SSH logout.
   // Without linger, systemd terminates all user processes when the last session closes.
+  let lingerEnabled = runningAsRoot;
   if (!runningAsRoot) {
-    try {
-      execSync('loginctl enable-linger', { stdio: 'ignore' });
-      log.info('Enabled loginctl linger for current user');
-    } catch (err) {
-      log.warn('loginctl enable-linger failed — service may stop on SSH logout', { err });
+    // Unprivileged `loginctl enable-linger` exits 1 with "Access denied" on a box
+    // with no polkit agent — which is every headless SSH install — so try sudo too.
+    for (const cmd of ['loginctl enable-linger', 'sudo -n loginctl enable-linger "$(id -un)"']) {
+      try {
+        execSync(cmd, { stdio: 'ignore' });
+        break;
+      } catch {
+        /* try the next form */
+      }
     }
+    // Ask systemd what is TRUE rather than trusting an exit code. This was
+    // reported as `!runningAsRoot`, i.e. "enabled" on every non-root install
+    // whether or not it took — an install whose service then died at logout
+    // still logged linger_enabled: true.
+    try {
+      lingerEnabled =
+        execSync('loginctl show-user "$(id -un)" -p Linger --value', { encoding: 'utf-8' }).trim() === 'yes';
+    } catch {
+      lingerEnabled = false;
+    }
+    if (lingerEnabled) log.info('Enabled loginctl linger for current user');
+    else log.warn('linger is NOT enabled — the service will stop when your last session closes');
   }
 
   // Enable and start
@@ -406,7 +462,7 @@ WantedBy=${runningAsRoot ? 'multi-user.target' : 'default.target'}`;
     UNIT_PATH: unitPath,
     SERVICE_LOADED: serviceLoaded,
     ...(dockerGroupStale ? { DOCKER_GROUP_STALE: true } : {}),
-    LINGER_ENABLED: !runningAsRoot,
+    LINGER_ENABLED: lingerEnabled,
     STATUS: 'success',
     LOG: 'logs/setup.log',
   });
