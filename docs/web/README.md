@@ -201,25 +201,33 @@ and `mcp-tools/draft-skill.ts`; the web channel only draws the card.
 
 ### Local models
 
-A registered model is wired to an agent by writing `ANTHROPIC_*` into the
-agent's mounted `settings.json` (`envForModel` in
+Anything in the roster that is not an Anthropic model — Ollama, LM Studio,
+vLLM, a LiteLLM router — is a local OpenAI-compatible backend, and local
+backends run on **OpenCode**, upstream's install-on-demand harness
+(`/add-opencode`). They never run on the Claude provider. Until OpenCode is
+installed there is no harness for them: assigning one leaves the agent on the
+default provider.
+
+This is upstream's own contract, followed exactly
+(`syncAgentProviderForAssignedModel`, `syncOpenCodeBackendEnv` in
 `src/channels/web/models.ts`):
 
-- **Anthropic** models set `ANTHROPIC_MODEL`.
-- **Ollama** models set `ANTHROPIC_BASE_URL` to the bare endpoint root,
-  because Ollama serves the Anthropic API at `/v1/messages` — so a local model
-  runs on the default Claude provider with no extra harness. `localhost` is
-  rewritten to the Docker host-gateway so the container can reach the host,
-  and that host is added to `NO_PROXY` so the call bypasses the OneCLI
-  credential proxy, which fronts only known providers.
-- **OpenAI-compatible** endpoints (LiteLLM, vLLM) are consumed the same way,
-  through their Anthropic-spec surface.
+| what | where upstream reads it |
+|---|---|
+| which harness an agent uses | `container_configs.provider = 'opencode'` |
+| which model | `container_configs.model = 'openai/<id>'` — per agent; the runner strips the prefix |
+| which backend | install-wide `.env`: `OPENCODE_PROVIDER=openai`, `OPENCODE_BASE_URL=<endpoint>/v1`, `OPENCODE_MODEL`, `OPENCODE_MODEL_CONTEXT_LIMIT` + `OPENCODE_MODEL_OUTPUT_LIMIT` |
+| reaching a backend on the host | `NO_PROXY` carries the docker host alias, so the call bypasses the credential proxy |
 
-This is the whole local-model path in this build, and it needs nothing
-installed beyond Ollama itself.
+Assigning a local model to an agent writes all of that: the backend keys into
+`.env` (the two limits only if absent, so an operator's values stick — both are
+required, or OpenCode's session creation fails), the provider and model onto the
+agent's container config, and `NO_PROXY` into both `.env` and the host
+process's environment. The last is deliberate: upstream's host provider reads
+`NO_PROXY` from the process environment and does not yet fall back to `.env`,
+so the process copy is what reaches the container today.
 
-If a local harness provider is installed, an Ollama assignment switches the
-agent to it and writes `.claude-shared/local-model.json` instead. With none
-installed, `providerForModelKind` returns null, the agent stays on the default
-provider, and a stale uninstalled choice is un-wedged back to it so the group
-can still spawn (`syncAgentProviderForAssignedModel`).
+**One backend per install** is the shape upstream offers. The roster can hold
+several endpoints, but the one most recently assigned is the install's OpenCode
+backend; the model stays per agent. Anthropic models are unaffected — they set
+`ANTHROPIC_MODEL` in the agent's mounted `settings.json` as before.
