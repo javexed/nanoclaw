@@ -9,10 +9,9 @@ import { randomUUID } from 'crypto';
 import { json, readJsonBody } from './http.js';
 import type { RouteCtx } from '../server.js';
 import { log } from '../../../log.js';
-import { getAgentLearning } from '../../../modules/learning/settings.js';
 import { listSkillDrafts, resolveSkillDraft } from '../../../modules/learning/db.js';
 import { notifySkillDraftResolved } from '../../../modules/learning/events.js';
-import { createAgentGroup, deleteAgentGroup, getAgentGroup, getAllAgentGroups } from '../../../db/agent-groups.js';
+import { createAgentGroup, deleteAgentGroup, getAgentGroup } from '../../../db/agent-groups.js';
 import { initGroupFilesystem } from '../../../group-init.js';
 import type { AgentGroup } from '../../../types.js';
 import {
@@ -21,14 +20,12 @@ import {
   createWebModel,
   deleteWebModel,
   getAgentsAssignedToModel,
-  getAssignedModelForAgent,
   getDefaultModelId,
+  getAgentForWebRoom,
   getWebModel,
-  getWebRoomsForAgent,
   listWebModels,
   setDefaultModelId,
   unassignModelFromAgent,
-  unwireAgentFromWebRoom,
   type WebModelKind,
 } from '../db.js';
 import {
@@ -52,9 +49,6 @@ import { draftAgent } from '../drafter.js';
 import { readGroupPersona, writeGroupPersona } from '../../../group-persona.js';
 import { resolveGroupFolderPath } from '../../../group-folder.js';
 import { reloadAgentModelEnv, refreshUnassignedGroupsForDefaultModel } from './model-wiring.js';
-import { wireAgentToRoom } from '../server.js';
-import { broadcastRooms } from '../state.js';
-import { clearPrimeAgentForAgentGroup } from '../db.js';
 
 async function parseBody<T>(ctx: RouteCtx): Promise<T | null> {
   const raw = await readJsonBody(ctx.req, ctx.res);
@@ -86,7 +80,12 @@ function newAgentGroupId(): string {
   return 'a' + randomUUID();
 }
 
-async function createAgent(
+/**
+ * Create the agent half of a chat. Called only by the room-creation route —
+ * room and agent are born together (see `rRoomsPost` in server.ts), so there
+ * is deliberately no standalone "create agent" endpoint.
+ */
+export async function createAgent(
   name: string,
   instructions?: string,
 ): Promise<{ group: AgentGroup } | { error: string; status: number }> {
@@ -116,37 +115,23 @@ async function createAgent(
   return { group };
 }
 
-export async function rAgentsDetailGet({ res }: RouteCtx): Promise<void> {
-  const groups = await getAllAgentGroups();
-  const defaultModelId = await getDefaultModelId();
-  return json(res, 200, {
-    default_model_id: defaultModelId,
-    agents: await Promise.all(
-      groups.map(async (g) => ({
-        id: g.id,
-        name: g.name,
-        folder: g.folder,
-        model_id: (await getAssignedModelForAgent(g.id))?.id ?? null,
-        auto_learn: (await getAgentLearning(g.id)).autoTrigger,
-        rooms: await getWebRoomsForAgent(g.id),
-      })),
-    ),
-  });
-}
-
-export async function rAgentsPost(ctx: RouteCtx): Promise<void> {
-  const body = await parseBody<{ name?: unknown; instructions?: unknown; room?: unknown }>(ctx);
-  if (!body) return;
-  const name = typeof body.name === 'string' ? body.name.trim() : '';
-  if (!name || name.length > 60) return json(ctx.res, 400, { error: 'Agent name required (1-60 chars)' });
-  const instructions = typeof body.instructions === 'string' ? body.instructions : undefined;
-  const result = await createAgent(name, instructions);
-  if ('error' in result) return json(ctx.res, result.status, { error: result.error });
-  return json(ctx.res, 200, { agent: { id: result.group.id, name: result.group.name, folder: result.group.folder } });
+/**
+ * Tear down the agent half of a chat. The room half (transcript, routing row,
+ * destinations, sessions) is `deleteWebRoom`; the delete route calls both.
+ */
+export async function deleteRoomAgent(agentGroupId: string): Promise<void> {
+  await unassignModelFromAgent(agentGroupId);
+  // Pending skill drafts: the FK cascade drops the rows, but the staged bodies
+  // live on disk — resolve them so nothing is orphaned, and flip their cards.
+  for (const d of await listSkillDrafts(agentGroupId)) {
+    await resolveSkillDraft(d.id, 'discarded');
+    notifySkillDraftResolved({ draftId: d.id, outcome: 'discarded', by: 'agent-deleted' });
+  }
+  await deleteAgentGroup(agentGroupId);
 }
 
 /** LLM drafter: prompt → suggested name/instructions the create form prefills. */
-export async function rAgentsDraftPost(ctx: RouteCtx): Promise<void> {
+export async function rRoomDraftPost(ctx: RouteCtx): Promise<void> {
   const body = await parseBody<{ prompt?: unknown }>(ctx);
   if (!body) return;
   const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
@@ -158,62 +143,37 @@ export async function rAgentsDraftPost(ctx: RouteCtx): Promise<void> {
   }
 }
 
-export async function rAgentDelete(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
-  const id = decodeURIComponent(m[1]);
-  const group = await getAgentGroup(id);
-  if (!group) return json(ctx.res, 404, { error: 'Agent not found' });
-  // Unwire from every room first so no room is left routing at a ghost.
-  for (const room of await getWebRoomsForAgent(id)) {
-    await unwireAgentFromWebRoom(room.id, id);
+// ── Room settings ───────────────────────────────────────────────────────────
+// Model, instructions and the auto-learn switch are properties of the agent,
+// but the agent IS the room, so they are addressed by room id — one settings
+// surface per chat instead of a parallel list of agents to keep in sync.
+
+/** Resolve a room to its agent, or answer 404. */
+async function agentOf(ctx: RouteCtx, roomId: string): Promise<{ id: string; folder: string } | null> {
+  const agent = await getAgentForWebRoom(roomId);
+  if (!agent) {
+    json(ctx.res, 404, { error: 'Room not found' });
+    return null;
   }
-  await unassignModelFromAgent(id);
-  await clearPrimeAgentForAgentGroup(id); // no ghost prime row pointing at the deleted agent
-  // Pending skill drafts: the FK cascade drops the rows, but the staged bodies
-  // live on disk — resolve them so nothing is orphaned, and flip their cards.
-  for (const d of await listSkillDrafts(id)) {
-    await resolveSkillDraft(d.id, 'discarded');
-    notifySkillDraftResolved({ draftId: d.id, outcome: 'discarded', by: 'agent-deleted' });
-  }
-  await deleteAgentGroup(id);
-  await broadcastRooms();
-  return json(ctx.res, 200, { ok: true });
+  return agent;
 }
 
-/** Assign (or clear, with model_id: null) an agent's model. */
-export async function rAgentModelPut(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
-  const id = decodeURIComponent(m[1]);
-  if (!(await getAgentGroup(id))) return json(ctx.res, 404, { error: 'Agent not found' });
+/** Assign (or clear, with model_id: null) the room's model. */
+export async function rRoomModelPut(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const agent = await agentOf(ctx, decodeURIComponent(m[1]));
+  if (!agent) return;
   const body = await parseBody<{ model_id?: unknown }>(ctx);
   if (!body) return;
   if (body.model_id === null) {
-    await unassignModelFromAgent(id);
+    await unassignModelFromAgent(agent.id);
   } else if (typeof body.model_id === 'string') {
     if (!(await getWebModel(body.model_id))) return json(ctx.res, 404, { error: 'Model not found' });
-    await assignModelToAgent(id, body.model_id);
+    await assignModelToAgent(agent.id, body.model_id);
   } else {
     return json(ctx.res, 400, { error: 'model_id must be a string or null' });
   }
-  await reloadAgentModelEnv(id, 'agent-model-change');
+  await reloadAgentModelEnv(agent.id, 'agent-model-change');
   return json(ctx.res, 200, { ok: true });
-}
-
-// ── Room ↔ agent wiring ─────────────────────────────────────────────────────
-
-export async function rRoomAgentsPost(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
-  const roomId = decodeURIComponent(m[1]);
-  const body = await parseBody<{ agent_group_id?: unknown }>(ctx);
-  if (!body) return;
-  const agentId = typeof body.agent_group_id === 'string' ? body.agent_group_id : '';
-  if (!agentId || !(await getAgentGroup(agentId))) return json(ctx.res, 404, { error: 'Agent not found' });
-  await wireAgentToRoom(roomId, agentId);
-  return json(ctx.res, 200, { ok: true });
-}
-
-export async function rRoomAgentDelete(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
-  const roomId = decodeURIComponent(m[1]);
-  const agentId = decodeURIComponent(m[2]);
-  const removed = await unwireAgentFromWebRoom(roomId, agentId);
-  return json(ctx.res, removed ? 200 : 404, removed ? { ok: true } : { error: 'Not wired' });
 }
 
 // ── Models ──────────────────────────────────────────────────────────────────
@@ -430,24 +390,21 @@ export type { WebModelKind };
 
 const INSTRUCTIONS_MAX_BYTES = 256 * 1024;
 
-export async function rAgentInstructionsGet(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
-  const id = decodeURIComponent(m[1]);
-  const group = await getAgentGroup(id);
-  if (!group) return json(ctx.res, 404, { error: 'Agent not found' });
-  const dir = resolveGroupFolderPath(group.folder);
-  return json(ctx.res, 200, { instructions: readGroupPersona(dir) ?? '' });
+export async function rRoomInstructionsGet(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const agent = await agentOf(ctx, decodeURIComponent(m[1]));
+  if (!agent) return;
+  return json(ctx.res, 200, { instructions: readGroupPersona(resolveGroupFolderPath(agent.folder)) ?? '' });
 }
 
-export async function rAgentInstructionsPut(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
-  const id = decodeURIComponent(m[1]);
-  const group = await getAgentGroup(id);
-  if (!group) return json(ctx.res, 404, { error: 'Agent not found' });
+export async function rRoomInstructionsPut(ctx: RouteCtx, m: RegExpMatchArray): Promise<void> {
+  const agent = await agentOf(ctx, decodeURIComponent(m[1]));
+  if (!agent) return;
   const body = await parseBody<{ instructions?: unknown }>(ctx);
   if (!body) return;
   if (typeof body.instructions !== 'string') return json(ctx.res, 400, { error: 'instructions must be a string' });
   if (Buffer.byteLength(body.instructions) > INSTRUCTIONS_MAX_BYTES) {
     return json(ctx.res, 413, { error: 'Instructions too large (256KB max)' });
   }
-  writeGroupPersona(resolveGroupFolderPath(group.folder), body.instructions);
+  writeGroupPersona(resolveGroupFolderPath(agent.folder), body.instructions);
   return json(ctx.res, 200, { ok: true, applies: 'next-session' });
 }

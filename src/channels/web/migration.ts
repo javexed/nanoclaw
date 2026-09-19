@@ -2,9 +2,10 @@
  * Web schema — consolidated migrations.
  *
  * An earlier, multi-user version of this web reached its schema through
- * many incremental migrations. This single-user build has no installed base
- * to migrate, so the FINAL shapes are declared here directly, in three
- * feature-scoped migrations. Rules carried over:
+ * many incremental migrations. This build declared the FINAL shapes directly
+ * in three feature-scoped migrations (v1-v3), because at the time it had no
+ * installed base to migrate. It does now, so changes from v4 on are ordinary
+ * incremental migrations. Rules carried over:
  *
  *   - Rooms are NOT a web table. A room IS its `messaging_groups` row
  *     (`channel_type = 'web'`, `platform_id` = room id) — one source of
@@ -46,8 +47,9 @@ export const moduleWebCore: Migration = {
       CREATE INDEX idx_web_messages_room
         ON web_messages(room_id, created_at);
 
-      -- The room's wired agent. One row per room (single-agent rooms are a
-      -- v1 invariant, enforced here by the PK, not just by UI convention).
+      -- The room's wired agent. Superseded by v4 (room-agent-1to1), which
+      -- drops this table: with agent and room one-to-one the single wiring
+      -- row is the answer. Kept here so the migration history stays honest.
       CREATE TABLE web_room_primes (
         room_id        TEXT PRIMARY KEY,
         agent_group_id TEXT NOT NULL,
@@ -118,7 +120,77 @@ export const moduleWebApprovals: Migration = {
   },
 };
 
-export const webMigrations: Migration[] = [moduleWebCore, moduleWebModels, moduleWebApprovals];
+/**
+ * Room ↔ agent becomes strictly one-to-one.
+ *
+ * Room → agent was already 1:1 (the `web_room_primes` PK); agent → rooms was
+ * not. Closing the second half makes the room and its agent one user-facing
+ * object, which retires `web_room_primes` entirely: with a single wiring row
+ * per room there is nothing left for a "prime" designation to disambiguate.
+ *
+ * The invariant is upheld by the single writer (`wireAgentToRoom`) rather than
+ * a constraint: SQLite partial indexes cannot carry the `channel_type = 'web'`
+ * subquery this would need, and `messaging_group_agents` is shared with every
+ * other channel, where many-agent rooms stay legal.
+ */
+export const moduleWebOneToOne: Migration = {
+  version: 4,
+  name: 'module:web:room-agent-1to1',
+  sqliteOnly: true,
+  up(db: Database.Database) {
+    // Reconcile any agent already wired to more than one chat room: keep the
+    // room with the most recent message (silent rooms fall back to the oldest),
+    // unwire the rest. Approval inboxes are not chat rooms — they carry no
+    // agent — so they never enter the count.
+    const dupes = db
+      .prepare(
+        `SELECT mga.agent_group_id AS agent_group_id
+           FROM messaging_group_agents mga
+           JOIN messaging_groups mg ON mg.id = mga.messaging_group_id
+          WHERE mg.channel_type = 'web' AND mg.platform_id NOT LIKE 'approvals:%'
+          GROUP BY mga.agent_group_id
+         HAVING COUNT(*) > 1`,
+      )
+      .all() as { agent_group_id: string }[];
+
+    const hasDestinations = !!db
+      .prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_destinations'`)
+      .get();
+
+    for (const { agent_group_id } of dupes) {
+      const rooms = db
+        .prepare(
+          `SELECT mg.id AS mg_id,
+                  COALESCE((SELECT MAX(created_at) FROM web_messages WHERE room_id = mg.platform_id), 0) AS last_at,
+                  mg.created_at AS born_at
+             FROM messaging_group_agents mga
+             JOIN messaging_groups mg ON mg.id = mga.messaging_group_id
+            WHERE mga.agent_group_id = ?
+              AND mg.channel_type = 'web' AND mg.platform_id NOT LIKE 'approvals:%'
+            ORDER BY last_at DESC, born_at ASC`,
+        )
+        .all(agent_group_id) as { mg_id: string }[];
+
+      for (const room of rooms.slice(1)) {
+        db.prepare(`DELETE FROM messaging_group_agents WHERE messaging_group_id = ? AND agent_group_id = ?`).run(
+          room.mg_id,
+          agent_group_id,
+        );
+        if (hasDestinations) {
+          db.prepare(
+            `DELETE FROM agent_destinations
+              WHERE agent_group_id = ? AND target_type = 'channel' AND target_id = ?`,
+          ).run(agent_group_id, room.mg_id);
+        }
+      }
+    }
+
+    // The room's single wiring row is now the whole answer.
+    db.exec(`DROP TABLE IF EXISTS web_room_primes;`);
+  },
+};
+
+export const webMigrations: Migration[] = [moduleWebCore, moduleWebModels, moduleWebApprovals, moduleWebOneToOne];
 
 // Self-registration: the channel entry (web/index.ts) side-effect-imports
 // this module, and src/index.ts imports the channels barrel before running
