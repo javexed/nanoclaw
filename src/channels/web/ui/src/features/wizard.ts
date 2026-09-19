@@ -703,7 +703,7 @@ function renderAgent(): HTMLElement {
     draftBtn.disabled = true;
     draftBtn.textContent = 'Drafting…';
     try {
-      const { draft } = (await apiJson('/api/agents/draft', { method: 'POST', body: { prompt } })) as {
+      const { draft } = (await apiJson('/api/rooms/draft', { method: 'POST', body: { prompt } })) as {
         draft: { name?: string; instructions?: string };
       };
       if (draft.name) name.value = draft.name;
@@ -734,13 +734,10 @@ function renderAgent(): HTMLElement {
           await finish();
           return;
         }
-        const { agent } = (await apiJson('/api/agents', {
-          method: 'POST',
-          body: { name: n, instructions: instructions.value.trim() || undefined },
-        })) as { agent: { id: string; name: string } };
+        // One call: the chat and its agent are created together.
         await apiJson('/api/rooms', {
           method: 'POST',
-          body: { name: agent.name, agent_group_id: agent.id },
+          body: { name: n, instructions: instructions.value.trim() || undefined },
         });
         await finish();
       },
