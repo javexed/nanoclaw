@@ -4,6 +4,13 @@ import { describe, expect, it } from 'vitest';
 import { moduleWebOneToOne } from './migration.js';
 
 /**
+ * `Migration.up` is declared over `DbDriver & Database` so module migrations
+ * can reach either API. This one only ever touches better-sqlite3's own
+ * `prepare`/`exec`, so a bare handle is all it needs — and all this test has.
+ */
+const up = moduleWebOneToOne.up as unknown as (db: Database.Database) => void;
+
+/**
  * The v4 migration runs against a live install, so what matters is what it
  * does to an agent that already holds more than one room — a state the old
  * schema allowed and the new invariant forbids. Driven directly on a raw
@@ -55,7 +62,7 @@ describe('module:web:room-agent-1to1', () => {
     db.prepare(`INSERT INTO web_messages VALUES ('m1', 'quiet', 100)`).run();
     db.prepare(`INSERT INTO web_messages VALUES ('m2', 'busy', 200)`).run();
 
-    moduleWebOneToOne.up(db);
+    up(db);
 
     expect(wiredRooms(db, 'a1')).toEqual(['busy']);
   });
@@ -67,7 +74,7 @@ describe('module:web:room-agent-1to1', () => {
     wire(db, 'first', 'a1');
     wire(db, 'second', 'a1');
 
-    moduleWebOneToOne.up(db);
+    up(db);
 
     expect(wiredRooms(db, 'a1')).toEqual(['first']);
   });
@@ -79,7 +86,7 @@ describe('module:web:room-agent-1to1', () => {
     wire(db, 'chat', 'a1');
     wire(db, 'approvals:owner', 'a1');
 
-    moduleWebOneToOne.up(db);
+    up(db);
 
     expect(wiredRooms(db, 'a1')).toEqual(['approvals:owner', 'chat']);
   });
@@ -91,7 +98,7 @@ describe('module:web:room-agent-1to1', () => {
     wire(db, 'r1', 'a1');
     wire(db, 'r2', 'a2');
 
-    moduleWebOneToOne.up(db);
+    up(db);
 
     expect(wiredRooms(db, 'a1')).toEqual(['r1']);
     expect(wiredRooms(db, 'a2')).toEqual(['r2']);
@@ -99,7 +106,7 @@ describe('module:web:room-agent-1to1', () => {
 
   it('drops web_room_primes', () => {
     const db = seed();
-    moduleWebOneToOne.up(db);
+    up(db);
     const t = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='web_room_primes'`).get();
     expect(t).toBeUndefined();
   });
