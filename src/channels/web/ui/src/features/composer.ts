@@ -8,12 +8,12 @@ import { appendOptimistic } from './transcript.js';
 import { hasStagedFiles, sendStagedFiles } from './files.js';
 
 const SLASH_COMMANDS: Array<{ cmd: string; hint: string }> = [
-  { cmd: '/clear', hint: 'Start a fresh conversation (context is cleared)' },
-  { cmd: '/compact', hint: 'Compress the conversation context' },
-  { cmd: '/context', hint: 'Show how full the context window is' },
-  { cmd: '/cost', hint: 'Show token usage for this session' },
-  { cmd: '/files', hint: 'List files in the agent workspace' },
-  { cmd: '/learn', hint: 'Distill a reusable skill from this conversation — you review it before it goes live' },
+  { cmd: '/clear', hint: 'Fresh conversation' },
+  { cmd: '/compact', hint: 'Compact context' },
+  { cmd: '/context', hint: 'Context usage' },
+  { cmd: '/cost', hint: 'Token usage' },
+  { cmd: '/files', hint: 'Workspace files' },
+  { cmd: '/learn', hint: 'Draft a skill' },
 ];
 
 let seq = 0;
@@ -22,7 +22,7 @@ export function sendMessage(text: string): boolean {
   const content = text.trim();
   if (!content || !state.currentRoom) return false;
   if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
-    showToast('Reconnecting… your message was not sent. Try again in a moment.', { kind: 'error' });
+    showToast('Not sent — reconnecting', { kind: 'error' });
     return false;
   }
   // Unique per send — the server dedups on it (flaky-socket resend) and the

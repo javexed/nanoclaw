@@ -48,7 +48,6 @@ export function joinRoom(roomId, roomName) {
     $('#room-title').textContent = roomName;
     $('#room-set-btn').hidden = false;
     $('#room-del-btn').hidden = false;
-    $('#no-room-hint').hidden = true;
     $('#app').classList.add('in-room'); // mobile: show the chat pane
     $('#composer').hidden = false;
     clearTranscript();
@@ -73,7 +72,6 @@ export function leaveRoom() {
     $('#room-title').textContent = 'Pick a chat';
     $('#room-set-btn').hidden = true;
     $('#room-del-btn').hidden = true;
-    $('#no-room-hint').hidden = false;
     $('#composer').hidden = true;
     $('#app').classList.remove('in-room');
     clearTranscript();
@@ -137,7 +135,7 @@ export function wireRoomDelete() {
         const roomId = state.currentRoom;
         if (!roomId)
             return;
-        if (!(await confirmDialog(`Delete "${state.currentRoomName}"? The chat, its messages and the agent behind it are removed permanently.`)))
+        if (!(await confirmDialog(`Delete "${state.currentRoomName}" and its agent?`)))
             return;
         try {
             await apiJson(`/api/rooms/${encodeURIComponent(roomId)}`, { method: 'DELETE' });
@@ -174,7 +172,7 @@ export function wireRoomCreate() {
     onAsync(draftBtn, 'click', async () => {
         const prompt = instrEl.value.trim() || nameEl.value.trim();
         if (!prompt) {
-            showToast('Describe it first — a name or a sentence is enough', { kind: 'error' });
+            showToast('Type an idea first', { kind: 'error' });
             return;
         }
         draftBtn.disabled = true;
@@ -231,7 +229,7 @@ export function wireRoomSettings() {
             const defName = models.find((m) => m.id === defaultId)?.name;
             const none = document.createElement('option');
             none.value = '';
-            none.textContent = defName ? `Install default (${defName})` : 'Install default (Claude built-in)';
+            none.textContent = defName ? `Default (${defName})` : 'Default';
             modelEl.replaceChildren(none, ...models.map((m) => {
                 const opt = document.createElement('option');
                 opt.value = m.id;
@@ -270,7 +268,7 @@ export function wireRoomSettings() {
             }
             await Promise.all(writes);
             dialog.close();
-            showToast('Saved — applies on the next turn', { kind: 'success' });
+            showToast('Saved', { kind: 'success' });
         }
         catch (err) {
             toastError(err, 'Save failed');
