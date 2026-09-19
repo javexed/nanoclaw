@@ -4,10 +4,17 @@
 // site knows which render function to call, so plain data + explicit renders
 // keeps the whole flow greppable.
 
+/**
+ * A chat. Room and agent are one object (host migration v4), so the agent's
+ * settings ride along on the room row — there is no second list to fetch.
+ */
 export interface Room {
   id: string;
   name: string;
   last_activity: number;
+  agent_id: string | null;
+  model_id: string | null;
+  auto_learn: boolean;
 }
 
 /** An optimistic (not yet server-echoed) outgoing message row. */

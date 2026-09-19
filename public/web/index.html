@@ -27,19 +27,20 @@
     <header id="sidebar-header">
       <img class="brand-logo" src="/logo.svg" alt="NanoClaw" />
       <span class="sidebar-actions">
-        <button id="manage-btn" type="button" title="Manage agents and models" aria-label="Manage agents and models">⚙</button>
-        <button id="new-room-btn" type="button" title="New room" aria-label="New room">+</button>
+        <button id="manage-btn" type="button" title="Models" aria-label="Models">⚙</button>
+        <button id="new-room-btn" type="button" title="New chat" aria-label="New chat">+</button>
       </span>
     </header>
     <ul id="room-list"></ul>
   </aside>
 
   <main id="chat">
-    <div id="no-room-hint">Pick a room, or create one with the + button.</div>
+    <div id="no-room-hint">Pick a chat, or start one with the + button.</div>
     <header id="chat-header">
       <button id="back-btn" type="button" aria-label="Back to rooms">‹</button>
-      <span id="room-title">Pick a room</span>
-      <button id="room-del-btn" type="button" aria-label="Delete room" title="Delete room" hidden>🗑</button>
+      <span id="room-title">Pick a chat</span>
+      <button id="room-set-btn" type="button" aria-label="Chat settings" title="Chat settings" hidden>⚙</button>
+      <button id="room-del-btn" type="button" aria-label="Delete chat" title="Delete chat" hidden>🗑</button>
     </header>
     <div id="connection-banner"></div>
     <div id="transcript">
@@ -74,15 +75,10 @@
 
 <aside id="manage">
   <header id="manage-header">
-    <span>Manage</span>
+    <span>Models</span>
     <button id="manage-close" type="button" aria-label="Close">✕</button>
   </header>
-  <nav id="manage-tabs">
-    <button id="mtab-agents" type="button" class="active">Agents</button>
-    <button id="mtab-models" type="button">Models</button>
-  </nav>
-  <div id="mpane-agents" class="mpane"></div>
-  <div id="mpane-models" class="mpane" hidden></div>
+  <div id="mpane-models" class="mpane"></div>
   <div id="manage-footer">
     <button id="wizard-btn" type="button">Run setup wizard…</button>
   </div>
@@ -90,12 +86,32 @@
 
 <dialog id="new-room-dialog">
   <form id="new-room-form" method="dialog">
-    <h2>New room</h2>
+    <h2>New chat</h2>
     <label>Name <input id="new-room-name" type="text" maxlength="80" required></label>
-    <label>Agent <select id="new-room-agent"></select></label>
+    <label>Instructions
+      <textarea id="new-room-instructions" rows="3" placeholder="What should this one be? (optional)"></textarea>
+    </label>
     <menu>
+      <button id="new-room-draft" type="button">✨ Suggest from prompt</button>
       <button id="new-room-cancel" type="button">Cancel</button>
       <button type="submit" value="create">Create</button>
+    </menu>
+  </form>
+</dialog>
+
+<dialog id="room-settings-dialog">
+  <form id="room-settings-form" method="dialog">
+    <h2>Chat settings</h2>
+    <label>Model <select id="room-set-model"></select></label>
+    <label>Instructions
+      <textarea id="room-set-instructions" rows="8" placeholder="Standing instructions (markdown)"></textarea>
+    </label>
+    <label class="inline">
+      <input id="room-set-autolearn" type="checkbox"> Learn from our conversations
+    </label>
+    <menu>
+      <button id="room-settings-cancel" type="button">Cancel</button>
+      <button type="submit" value="save">Save</button>
     </menu>
   </form>
 </dialog>
