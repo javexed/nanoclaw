@@ -62,7 +62,7 @@ async function renderModels() {
             dot.title = 'Cloud (Anthropic)';
             const nm = document.createElement('span');
             nm.className = 'mrow-name';
-            nm.textContent = 'Claude — built-in default';
+            nm.textContent = 'Claude';
             head.append(dot, nm);
             builtin.append(head);
             rows.push(builtin);
@@ -108,7 +108,7 @@ function buildModelRow(m, defaultId) {
         catch (err) {
             const body = err.body;
             if (body?.agents?.length) {
-                if (await confirmDialog(`Assigned to: ${body.agents.join(', ')}. Delete anyway (they fall back to the default)?`)) {
+                if (await confirmDialog(`In use by ${body.agents.join(', ')}. Remove?`)) {
                     await apiJson(`/api/models/${encodeURIComponent(m.id)}?force=1`, { method: 'DELETE' }).catch((e) => toastError(e, 'Delete failed'));
                     void renderModels();
                 }
@@ -129,7 +129,7 @@ function buildModelRow(m, defaultId) {
     onAsync(def, 'click', async () => {
         try {
             await apiJson('/api/models/default', { method: 'PUT', body: { model_id: m.id } });
-            showToast('Default model updated', { kind: 'success' });
+            showToast('Default set', { kind: 'success' });
             void renderModels();
         }
         catch (err) {
@@ -160,8 +160,7 @@ async function probeRosterDots(pane, models) {
                 continue; // stays grey
             }
             el.classList.add(verdict);
-            el.title =
-                verdict === 'ok' ? 'Reachable from agent containers' : `Unreachable${detail ? `: ${detail}` : ''}`;
+            el.title = verdict === 'ok' ? 'Reachable' : `Unreachable${detail ? `: ${detail}` : ''}`;
         }
     }));
 }
@@ -191,13 +190,12 @@ function buildCustomEndpoint(rosterKeys) {
             endpoint.value = resolved;
             const kindLine = document.createElement('div');
             kindLine.className = 'mrow-meta';
-            kindLine.textContent =
-                r.kind === 'ollama' ? 'Detected: Ollama' : 'Detected: OpenAI-compatible (LiteLLM, vLLM, …)';
+            kindLine.textContent = r.kind === 'ollama' ? 'Ollama' : 'OpenAI-compatible';
             results.appendChild(kindLine);
             if (r.models.length === 0) {
                 const none = document.createElement('div');
                 none.className = 'mrow-meta';
-                none.textContent = 'The server answered but lists no models.';
+                none.textContent = 'No models';
                 results.appendChild(none);
             }
             for (const modelId of r.models) {
@@ -224,7 +222,7 @@ function buildCustomEndpoint(rosterKeys) {
                             method: 'POST',
                             body: { name: modelId, kind: r.kind, endpoint: resolved, model_id: modelId },
                         });
-                        showToast('Added to roster', { kind: 'success' });
+                        showToast('Added', { kind: 'success' });
                         void renderModels();
                     }
                     catch (err) {
@@ -282,7 +280,7 @@ async function renderOllamaInto(pane, rosterKeys) {
                     del.className = 'mrow-del';
                     del.textContent = 'Delete';
                     onAsync(del, 'click', async () => {
-                        if (!(await confirmDialog(`Remove ${mm.name} from ${hostSel.value}? This frees its disk space.`, 'Remove')))
+                        if (!(await confirmDialog(`Delete ${mm.name} from ${hostSel.value}?`, 'Delete')))
                             return;
                         try {
                             await apiJson('/api/ollama/delete', {
@@ -308,7 +306,7 @@ async function renderOllamaInto(pane, rosterKeys) {
                         return row;
                     }
                     const add = document.createElement('button');
-                    add.textContent = 'Add to roster';
+                    add.textContent = 'Add';
                     onAsync(add, 'click', async () => {
                         add.disabled = true;
                         try {
@@ -316,7 +314,7 @@ async function renderOllamaInto(pane, rosterKeys) {
                                 method: 'POST',
                                 body: { name: mm.name, kind: 'ollama', endpoint: hostSel.value, model_id: mm.name },
                             });
-                            showToast('Added to roster', { kind: 'success' });
+                            showToast('Added', { kind: 'success' });
                             void renderModels();
                         }
                         catch (err) {
@@ -334,7 +332,7 @@ async function renderOllamaInto(pane, rosterKeys) {
                 if (models.length === 0) {
                     const empty = document.createElement('div');
                     empty.className = 'mrow-meta';
-                    empty.textContent = 'No models on this host yet — pull one below.';
+                    empty.textContent = 'No models';
                     list.appendChild(empty);
                 }
             }
@@ -343,9 +341,7 @@ async function renderOllamaInto(pane, rosterKeys) {
                 const bad = document.createElement('div');
                 bad.className = 'mrow-meta';
                 const local = /127\.0\.0\.1|localhost/.test(hostSel.value);
-                bad.textContent = local
-                    ? 'Ollama is not running on this machine.'
-                    : `Host unreachable: ${err.message}`;
+                bad.textContent = local ? 'Not running' : `Host unreachable: ${err.message}`;
                 list.appendChild(bad);
                 if (local)
                     void offerLocalInstall(list, refreshModels);
@@ -354,11 +350,11 @@ async function renderOllamaInto(pane, rosterKeys) {
         hostSel.addEventListener('change', () => void refreshModels());
         // Pull form, prefilled from the hardware recommendation.
         const pullInput = document.createElement('input');
-        pullInput.placeholder = 'Model to pull (e.g. qwen3:8b)';
+        pullInput.placeholder = 'Model';
         void apiJson('/api/ollama/recommend')
             .then((r) => {
             if (r.model && !pullInput.value)
-                pullInput.placeholder = `Model to pull (recommended: ${r.model})`;
+                pullInput.placeholder = r.model;
         })
             .catch(() => { });
         const pullBtn = document.createElement('button');
@@ -440,16 +436,16 @@ async function offerLocalInstall(list, onReady) {
             return;
         const btn = document.createElement('button');
         btn.className = 'mprimary';
-        btn.textContent = 'Install Ollama on this machine';
+        btn.textContent = 'Install Ollama';
         onAsync(btn, 'click', async () => {
             btn.disabled = true;
-            btn.textContent = 'Installing… (a few minutes)';
+            btn.textContent = 'Installing…';
             try {
                 await apiJson('/api/ollama/install', { method: 'POST', body: {} });
             }
             catch (err) {
                 btn.disabled = false;
-                btn.textContent = 'Install Ollama on this machine';
+                btn.textContent = 'Install Ollama';
                 toastError(err, 'Install failed to start');
                 return;
             }
@@ -468,7 +464,7 @@ async function offerLocalInstall(list, onReady) {
                     if (!st.running && st.exitCode !== null && st.exitCode !== undefined && st.exitCode !== 0) {
                         const lastLine = (st.lines ?? []).filter((l) => l.trim()).pop() ?? '';
                         btn.disabled = false;
-                        btn.textContent = 'Install Ollama on this machine';
+                        btn.textContent = 'Install Ollama';
                         showToast(`Install failed (exit ${st.exitCode})${lastLine ? `: ${lastLine}` : ''}`, { kind: 'error' });
                         return;
                     }
@@ -478,8 +474,8 @@ async function offerLocalInstall(list, onReady) {
                 }
             }
             btn.disabled = false;
-            btn.textContent = 'Install Ollama on this machine';
-            showToast('Install is taking unusually long — check the host logs', { kind: 'error' });
+            btn.textContent = 'Install Ollama';
+            showToast('Install timed out', { kind: 'error' });
         });
         list.appendChild(btn);
     }
