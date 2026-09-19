@@ -39,7 +39,7 @@ import { withSetupLock, launchSlackJob, readSlackJob, slackJobStatus } from '../
 // extensions (setup/channels/companions.ts) before running its install skill
 // — the wizard itself stays free of channel-specific imports.
 import { runChannelSkillWithPreStep } from './channels/run-channel-skill.js';
-import { chooserOptions, type ChooserChoice } from './lib/web-plan.js';
+import { webSkips } from './lib/web-plan.js';
 import {
   channelDmLabel,
   initialChannelOptions,
@@ -89,7 +89,6 @@ import { ensureAnswer, fail, runQuietChild, runQuietStep, spawnQuiet } from './l
 import { emit as phEmit } from './lib/diagnostics.js';
 import { offerToOpenWeb } from './lib/web-open.js';
 import { isRemoteSession } from './lib/web-reach.js';
-import { hostExec } from './lib/skill-driver.js';
 import {
   accentGreen,
   brandBody,
@@ -264,18 +263,97 @@ async function main(): Promise<void> {
   }
 
   // ── Web UI ─────────────────────────────────────────────────────────────────
-  // NOT asked here. The web UI is one of the answers to "where do you want to
-  // talk to your assistant?", and that question is upstream's channel chooser,
-  // further down — asking it twice, in two places, is what this used to do.
-  //
-  // What remains here is the bridge: an install that already has WEB_ENABLED
-  // (a previous run, deploy/web-deploy.sh, or a re-exec under `sg docker`)
-  // must still open the browser at the end, and must not be offered the web UI
-  // again in the chooser.
-  const webAlreadyEnabled = (process.env.WEB_ENABLED || readEnvKey('WEB_ENABLED'))?.trim() === 'true';
-  let webPortEnabled: string | null = webAlreadyEnabled
-    ? process.env.WEB_PORT || readEnvKey('WEB_PORT')?.trim() || '3100'
-    : null;
+  // Asked up front, before the long image build, because the answer decides
+  // what the rest of this run does. Yes → the terminal handles only what a
+  // browser can't (image, gateway, service) and hands off at the end: the
+  // in-app wizard does model → access → first agent, so the channel,
+  // first-agent and first-chat steps are skipped here. No → the phone-channel
+  // flow as before. Headless (no TTY) never prompts — deploy/web-deploy.sh
+  // writes the env keys itself. A re-exec pass (sg docker, fail-retry) skips
+  // the prompt and reads the first pass's answer back from .env.
+  let webPortEnabled: string | null = null;
+  let alsoChannel = false;
+  if (!skip.has('web') && process.env.NANOCLAW_REEXEC_SG !== '1' && process.stdin.isTTY) {
+    const enableWeb = ensureAnswer(
+      await brightSelect<'yes' | 'no'>({
+        message: 'Set up the built-in web UI?',
+        options: [
+          { value: 'yes', label: 'Yes', hint: 'chat with your assistant in a browser' },
+          { value: 'no', label: 'No', hint: "you'll pick a messaging app in a moment" },
+        ],
+        initialValue: 'yes',
+      }),
+    );
+    setupLog.userInput('web_enabled', String(enableWeb));
+    phEmit('web_choice', { enabled: enableWeb === 'yes' });
+    if (enableWeb === 'yes') {
+      upsertEnvVar('WEB_ENABLED', 'true');
+      webPortEnabled = process.env.WEB_PORT || '3100';
+
+      // Localhost-only is right when you are sitting at the machine: the
+      // loopback auto-owner signs you in, no token, no exposure, and the in-app
+      // wizard offers to open the port later. Over SSH it is the one setting
+      // that cannot work — the wizard that would fix it is behind the very URL
+      // you cannot reach. So on a remote session, offer the shape
+      // deploy/web-deploy.sh has always used for headless installs: bound to
+      // the network, with a bearer token. Asked rather than assumed, because it
+      // changes who can reach this install.
+      let openToNetwork = false;
+      if (isRemoteSession()) {
+        openToNetwork =
+          ensureAnswer(
+            await p.confirm({
+              message: 'This looks like a remote session. Open the web UI to your network (a token is generated)?',
+              initialValue: true,
+            }),
+          ) === true;
+      }
+      if (openToNetwork) {
+        upsertEnvVar('WEB_HOST', '0.0.0.0');
+        // Same recipe as deploy/web-deploy.sh: 32 url-safe chars.
+        if (!readEnvKey('WEB_TOKEN')?.trim()) {
+          upsertEnvVar('WEB_TOKEN', randomBytes(24).toString('base64url').slice(0, 32));
+        }
+      } else {
+        upsertEnvVar('WEB_HOST', '127.0.0.1');
+      }
+
+      // The web UI is ADDITIVE, not exclusive — and this is the only place a
+      // browser-first operator is told the messaging apps exist at all. The
+      // in-app wizard is engine → model → access → first agent
+      // (src/channels/web/ui/src/features/wizard.ts); it has no channel step.
+      // So before this, answering yes above meant NOTHING anywhere offered
+      // Slack or Telegram, and the only way in was knowing to type
+      // /add-<name> in Claude Code afterwards.
+      //
+      // Yes simply stops skipping the channel step, so upstream's chooser runs
+      // in upstream's place, with upstream's wording and its back-navigation
+      // intact. Default No, so the short browser path stays short.
+      alsoChannel =
+        ensureAnswer(
+          await p.confirm({
+            message: 'Also connect a messaging app, so you can reach it from your phone?',
+            initialValue: false,
+          }),
+        ) === true;
+      setupLog.userInput('web_plus_channel', String(alsoChannel));
+      // Persisted for the same reason WEB_ENABLED is: a re-exec (sg docker,
+      // fail-retry) re-derives the skips below from scratch, and NANOCLAW_SKIP
+      // carries only COMPLETED STEPS (lib/runner.ts, maybeReexecUnderSg) — not
+      // an in-memory decision. Without this, the second pass would forget the
+      // channel was wanted and skip the step the operator just asked for.
+      upsertEnvVar('NANOCLAW_WEB_PLUS_CHANNEL', String(alsoChannel));
+    }
+  } else if (process.env.NANOCLAW_REEXEC_SG === '1' && readEnvKey('WEB_ENABLED')?.trim() === 'true') {
+    webPortEnabled = process.env.WEB_PORT || readEnvKey('WEB_PORT')?.trim() || '3100';
+    alsoChannel = readEnvKey('NANOCLAW_WEB_PLUS_CHANNEL')?.trim() === 'true';
+  }
+  if (webPortEnabled !== null) {
+    // The browser wizard replaces these terminal steps; which ones depends on
+    // whether a messaging app is coming too. The rule, and why auth is the one
+    // a channel takes back, live in lib/web-plan.ts with tests.
+    for (const step of webSkips(alsoChannel)) skip.add(step);
+  }
 
   if (!skip.has('container')) {
     p.log.message(
@@ -755,23 +833,7 @@ async function main(): Promise<void> {
     let backed = true;
     while (backed) {
       backed = false;
-      const picked = await askChannelChoice(webPortEnabled !== null);
-      if (picked === 'web') {
-        // Enabling the web UI is not a channel install: no agent to wire, no
-        // welcome to send. Turn it on, then offer the list again — without the
-        // web entry this time — so "the browser AND my phone" is reachable in
-        // one pass. Declining ends the loop exactly as any other answer does.
-        webPortEnabled = await enableWebUi();
-        backed =
-          ensureAnswer(
-            await p.confirm({
-              message: 'Also connect a messaging app, so you can reach it from your phone?',
-              initialValue: false,
-            }),
-          ) === true;
-        continue;
-      }
-      channelChoice = picked;
+      channelChoice = await askChannelChoice();
       if (channelChoice !== 'skip' && channelChoice !== 'other') {
         await resolveDisplayName();
       }
@@ -1980,73 +2042,11 @@ async function askDisplayName(fallback: string): Promise<string> {
   return value;
 }
 
-/**
- * Turn the web UI on from inside the channel chooser.
- *
- * Unlike every other answer there this installs nothing and wires nothing: no
- * adapter, no agent, no welcome. It writes the env keys and restarts the host
- * so the listener actually comes up — the service step has already run by the
- * time the chooser is reached, and a host started without WEB_ENABLED has no
- * web listener no matter what lands in .env afterwards.
- *
- * Returns the port, so the caller can hand the operator a URL at the end.
- */
-async function enableWebUi(): Promise<string> {
-  upsertEnvVar('WEB_ENABLED', 'true');
-
-  // Localhost-only is right when you are sitting at the machine: the loopback
-  // auto-owner signs you in, no token, no exposure, and the in-app wizard
-  // offers to open the port later. Over SSH it is the one setting that cannot
-  // work — the wizard that would fix it is behind the very URL you cannot
-  // reach. So on a remote session, offer the shape deploy/web-deploy.sh has
-  // always used for headless installs: bound to the network, with a bearer
-  // token. Asked rather than assumed, because it changes who can reach this
-  // install.
-  let openToNetwork = false;
-  if (isRemoteSession()) {
-    openToNetwork =
-      ensureAnswer(
-        await p.confirm({
-          message: 'This looks like a remote session. Open the web UI to your network (a token is generated)?',
-          initialValue: true,
-        }),
-      ) === true;
-  }
-  if (openToNetwork) {
-    upsertEnvVar('WEB_HOST', '0.0.0.0');
-    // Same recipe as deploy/web-deploy.sh: 32 url-safe chars.
-    if (!readEnvKey('WEB_TOKEN')?.trim()) {
-      upsertEnvVar('WEB_TOKEN', randomBytes(24).toString('base64url').slice(0, 32));
-    }
-  } else {
-    upsertEnvVar('WEB_HOST', '127.0.0.1');
-  }
-
-  // The same restart every channel skill ends with, for the same reason: the
-  // running host is holding pre-edit state.
-  try {
-    await hostExec(process.cwd())('bash setup/lib/restart.sh');
-  } catch (err) {
-    p.log.warn(
-      brandBody(
-        wrapForGutter(
-          `Couldn't restart the host automatically — the web UI starts on the next restart: bash setup/lib/restart.sh (${String(err)})`,
-          4,
-        ),
-      ),
-    );
-  }
-  return process.env.WEB_PORT || readEnvKey('WEB_PORT')?.trim() || '3100';
-}
-
-async function askChannelChoice(webEnabled: boolean): Promise<ChooserChoice> {
+async function askChannelChoice(): Promise<ChannelChoice> {
   const choice = ensureAnswer(
-    await brightSelect<ChooserChoice>({
-      // Upstream asks "…from your phone?". The web UI is not a phone, so the
-      // question widens by two words — the smallest edit that keeps every
-      // upstream label ("Yes, connect Slack") answering it grammatically.
-      message: 'Want to chat with your assistant from your browser or your phone?',
-      options: chooserOptions(initialChannelOptions(), webEnabled),
+    await brightSelect<ChannelChoice>({
+      message: 'Want to chat with your assistant from your phone?',
+      options: initialChannelOptions(),
     }),
   );
   setupLog.userInput('channel_choice', String(choice));
