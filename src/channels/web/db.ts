@@ -14,7 +14,12 @@
 import { randomUUID } from 'crypto';
 
 import { getDb, hasTable } from '../../db/connection.js';
-import { createMessagingGroup, deleteMessagingGroup, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
+import {
+  createMessagingGroup,
+  createMessagingGroupAgent,
+  deleteMessagingGroup,
+  getMessagingGroupByPlatform,
+} from '../../db/messaging-groups.js';
 
 /**
  * "Web room" is a UI-level alias for `messaging_groups WHERE
@@ -148,7 +153,6 @@ export async function deleteWebRoom(id: string): Promise<void> {
   const db = getDb();
   await db.run(`DELETE FROM web_messages WHERE room_id = ?`, id);
   await db.run(`DELETE FROM messaging_group_agents WHERE messaging_group_id = ?`, mg.id);
-  await db.run(`DELETE FROM web_room_primes WHERE room_id = ?`, id);
   // Drop any agent_destinations rows pointing at this room. target_id has no
   // FK so they wouldn't block, just rot. Guarded — a2a module may not have
   // created the table yet.
@@ -264,43 +268,22 @@ export interface WebRoomAgent {
   folder: string;
 }
 
-/** The agents wired to a web room (v1 invariant: at most one). */
-export async function getAgentsForWebRoom(roomId: string): Promise<WebRoomAgent[]> {
+/**
+ * The room's agent. Room and agent are one-to-one (see migration v4), so this
+ * is the room's whole identity on the agent side — null only for a room whose
+ * agent was deleted out from under it, or for an approval inbox.
+ */
+export async function getAgentForWebRoom(roomId: string): Promise<WebRoomAgent | null> {
   const mg = await getMessagingGroupByPlatform('web', roomId);
-  if (!mg) return [];
-  return (await getDb().all(
+  if (!mg) return null;
+  const row = (await getDb().get(
     `SELECT ag.id, ag.name, ag.folder
        FROM messaging_group_agents mga
        JOIN agent_groups ag ON ag.id = mga.agent_group_id
-       WHERE mga.messaging_group_id = ?
-       ORDER BY ag.name`,
+      WHERE mga.messaging_group_id = ?`,
     mg.id,
-  )) as WebRoomAgent[];
-}
-
-/**
- * Remove a single (room, agent) wiring. Returns true if a row was deleted.
- * Also drops the matching agent_destinations row so the agent's session
- * doesn't keep a destination pointing at a chat it can no longer write to.
- */
-export async function unwireAgentFromWebRoom(roomId: string, agentGroupId: string): Promise<boolean> {
-  const mg = await getMessagingGroupByPlatform('web', roomId);
-  if (!mg) return false;
-  const db = getDb();
-  const result = await db.run(
-    `DELETE FROM messaging_group_agents WHERE messaging_group_id = ? AND agent_group_id = ?`,
-    mg.id,
-    agentGroupId,
-  );
-  if (await hasTable(db, 'agent_destinations')) {
-    await db.run(
-      `DELETE FROM agent_destinations
-       WHERE agent_group_id = ? AND target_type = 'channel' AND target_id = ?`,
-      agentGroupId,
-      mg.id,
-    );
-  }
-  return result.changes > 0;
+  )) as WebRoomAgent | undefined;
+  return row ?? null;
 }
 
 export interface AgentWebRoom {
@@ -308,48 +291,53 @@ export interface AgentWebRoom {
   name: string;
 }
 
-/** The web rooms a given agent is wired to (excludes approval inboxes). */
-export async function getWebRoomsForAgent(agentGroupId: string): Promise<AgentWebRoom[]> {
-  const rows = (await getDb().all(
+/**
+ * The chat room this agent belongs to. One-to-one, so at most one row;
+ * approval inboxes carry no agent and never match.
+ */
+export async function getWebRoomForAgent(agentGroupId: string): Promise<AgentWebRoom | null> {
+  const row = (await getDb().get(
     `SELECT mg.platform_id AS id, mg.name AS name
        FROM messaging_group_agents mga
        JOIN messaging_groups mg ON mg.id = mga.messaging_group_id
-       WHERE mga.agent_group_id = ? AND mg.channel_type = 'web'
-       ORDER BY mg.name`,
+      WHERE mga.agent_group_id = ?
+        AND mg.channel_type = 'web'
+        AND mg.platform_id NOT LIKE 'approvals:%'`,
     agentGroupId,
-  )) as { id: string; name: string | null }[];
-  return rows.filter((r) => !isApprovalInbox(r.id)).map((r) => ({ id: r.id, name: r.name ?? r.id }));
+  )) as { id: string; name: string | null } | undefined;
+  return row ? { id: row.id, name: row.name ?? row.id } : null;
 }
 
 /**
- * The agent that produces messages for this room. One agent per room is a v1
- * invariant, so this is simply the wired agent (null when unwired). Kept as
- * its own accessor because the multi-agent build replaces this body with a
- * most-recently-active-session heuristic.
+ * Bind an agent to its room. The sole writer of the one-to-one invariant —
+ * there is no constraint behind it (see migration v4), so it refuses rather
+ * than silently creating a second wiring.
+ *
+ * The wiring engages on every message (pattern '.'): a room with exactly one
+ * agent needs no @-mention dance to decide who answers.
  */
-export async function findActiveAgentForWebRoom(roomId: string): Promise<WebRoomAgent | null> {
-  const agents = await getAgentsForWebRoom(roomId);
-  return agents[0] ?? null;
-}
-
-// ── Prime agent designation ─────────────────────────────────────────────────
-// v1: the room's single wired agent IS the prime. setPrime is stamped by
-// wireAgentToRoom (server.ts); deleting an agent clears any prime rows that
-// pointed at it so getPrime never returns a ghost.
-
-export async function setPrimeAgentForWebRoom(roomId: string, agentGroupId: string): Promise<void> {
-  await getDb().run(
-    `INSERT INTO web_room_primes (room_id, agent_group_id, created_at)
-       VALUES (?, ?, ?)
-       ON CONFLICT(room_id) DO UPDATE SET agent_group_id = excluded.agent_group_id, created_at = excluded.created_at`,
-    roomId,
-    agentGroupId,
-    Date.now(),
-  );
-}
-
-export async function clearPrimeAgentForAgentGroup(agentGroupId: string): Promise<void> {
-  await getDb().run(`DELETE FROM web_room_primes WHERE agent_group_id = ?`, agentGroupId);
+export async function wireAgentToRoom(roomId: string, agentGroupId: string): Promise<void> {
+  const mg = await getMessagingGroupByPlatform('web', roomId);
+  if (!mg) throw new Error(`wireAgentToRoom: room ${roomId} has no messaging_groups row`);
+  const roomAgent = await getAgentForWebRoom(roomId);
+  if (roomAgent) {
+    if (roomAgent.id === agentGroupId) return;
+    throw new Error(`wireAgentToRoom: room ${roomId} already belongs to agent ${roomAgent.id}`);
+  }
+  const agentRoom = await getWebRoomForAgent(agentGroupId);
+  if (agentRoom) throw new Error(`wireAgentToRoom: agent ${agentGroupId} already belongs to room ${agentRoom.id}`);
+  await createMessagingGroupAgent({
+    id: randomUUID(),
+    messaging_group_id: mg.id,
+    agent_group_id: agentGroupId,
+    engage_mode: 'pattern',
+    engage_pattern: '.',
+    sender_scope: 'all',
+    ignored_message_policy: 'accumulate',
+    session_mode: 'shared',
+    priority: 0,
+    created_at: new Date().toISOString(),
+  });
 }
 
 // ── Messages ────────────────────────────────────────────────────────────────
