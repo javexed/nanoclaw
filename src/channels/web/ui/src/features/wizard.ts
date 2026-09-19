@@ -534,8 +534,8 @@ function renderAccess(): HTMLElement {
   // where it is tied to a button instead of floating above one.
   const choices = choiceCards<Access>(access, (id) => (access = id), [
     { id: 'local', title: 'Only from this device' },
-    { id: 'tailscale', title: 'Tailscale', body: buildTailscale },
     { id: 'token', title: 'Only from your network with a token', body: buildBearer },
+    { id: 'tailscale', title: 'Tailscale', body: buildTailscale },
   ]);
   box.append(choices, nav({}));
   return box;
