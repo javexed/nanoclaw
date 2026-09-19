@@ -320,8 +320,15 @@ export function determineVerifyStatus(input: {
   slackInstall?: SlackJob['status'];
   configuredChannels?: string[];
 }): 'success' | 'failed' {
+  // `credentials` may legitimately be missing on the web path: setup skips the
+  // terminal auth step and the browser wizard signs in. webPending means the
+  // wizard has not run yet (zero groups + WEB_ENABLED), so a missing credential
+  // there is the expected mid-install state, not a broken install — and failing
+  // it would exit(1) BEFORE the hand-off that opens the browser, stranding the
+  // operator with no way to supply the credential at all. Outside that window a
+  // missing credential still fails, loudly.
   return input.service === 'running' &&
-    input.credentials !== 'missing' &&
+    (input.credentials !== 'missing' || input.webPending === true) &&
     input.slackInstall !== 'failed' &&
     input.slackInstall !== 'expired' &&
     (input.registeredGroups > 0 ||

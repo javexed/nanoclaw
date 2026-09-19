@@ -294,14 +294,25 @@ async function main(): Promise<void> {
     webPortEnabled = process.env.WEB_PORT || readEnvKey('WEB_PORT')?.trim() || '3100';
   }
   if (webPortEnabled !== null) {
-    // The browser wizard replaces these three terminal steps.
+    // The browser wizard replaces these terminal steps.
     skip.add('cli-agent');
     skip.add('first-chat');
     skip.add('channel');
+    // Auth too: the wizard's first step IS "which model powers your agents?",
+    // with a full Claude sign-in behind it (/api/web/claude-auth/start → the
+    // sign-in URL → paste the code → /api/web/claude-auth/code) for an install
+    // with no credential at all. Asking in the terminal first made the operator
+    // answer the same question twice, and contradicted this path's promise that
+    // the terminal handles only what a browser cannot. The headless sibling
+    // (deploy/web-deploy.sh) has always skipped it; this makes the interactive
+    // run agree. verify() tolerates the resulting credential-less state — see
+    // the webPending branch there, which now covers credentials as well as
+    // groups.
+    skip.add('auth');
     p.log.success(
       brandBody(
         wrapForGutter(
-          'Web UI enabled. Once NanoClaw is running, setup opens it in your browser to finish: pick a model and create your first agent.',
+          'Web UI enabled. Once NanoClaw is running, setup opens it in your browser to finish: sign in, pick a model and create your first agent.',
           4,
         ),
       ),
