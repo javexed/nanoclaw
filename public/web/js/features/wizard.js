@@ -11,6 +11,7 @@ let step = 0;
 let state = null;
 /** The engine picked in step 1 — steers whether step 2 (local model) shows. */
 let engine = 'claude';
+let access = null;
 let pullTimer = null;
 export async function maybeOpenWizard() {
     try {
@@ -124,45 +125,54 @@ function heading(text) {
     h.textContent = text;
     return h;
 }
-// ── Step: engine ────────────────────────────────────────────────────────────
-function renderEngine() {
-    const box = document.createElement('div');
-    box.append(heading('Model'));
+/**
+ * Accordion cards for a one-of-few choice: the selected card holds its own
+ * setup body, so toggling expands in place instead of shuffling content
+ * below the cards. A card without a body just selects.
+ */
+function choiceCards(current, set, items) {
     const choices = document.createElement('div');
     choices.className = 'wiz-choices';
-    // Accordion cards: the selected card holds its own setup body, so toggling
-    // expands in place instead of shuffling content below both cards.
-    const mk = (id, title, desc, body) => {
+    for (const it of items) {
         const c = document.createElement('div');
-        c.className = 'wiz-choice' + (engine === id ? ' selected' : '');
+        c.className = 'wiz-choice' + (current === it.id ? ' selected' : '');
         const head = document.createElement('button');
         head.type = 'button';
         head.className = 'wiz-choice-head';
-        const t = document.createElement('div');
-        t.className = 'wiz-choice-title';
-        t.textContent = title;
-        head.append(t);
-        if (desc) {
+        const title = document.createElement('div');
+        title.className = 'wiz-choice-title';
+        title.textContent = it.title;
+        head.append(title);
+        if (it.desc) {
             const d = document.createElement('div');
             d.className = 'wiz-choice-desc';
-            d.textContent = desc;
+            d.textContent = it.desc;
             head.append(d);
         }
         head.onclick = () => {
-            if (engine !== id) {
-                engine = id;
+            if (current !== it.id) {
+                set(it.id);
                 render();
             }
         };
         c.appendChild(head);
-        if (engine === id) {
-            const b = body();
+        if (current === it.id && it.body) {
+            const b = it.body();
             b.classList.add('wiz-choice-body');
             c.appendChild(b);
         }
-        return c;
-    };
-    choices.append(mk('claude', 'Claude', '', renderClaudeAuth), mk('local', 'Local (Ollama)', '', buildLocalModels));
+        choices.appendChild(c);
+    }
+    return choices;
+}
+// ── Step: engine ────────────────────────────────────────────────────────────
+function renderEngine() {
+    const box = document.createElement('div');
+    box.append(heading('Model'));
+    const choices = choiceCards(engine, (id) => (engine = id), [
+        { id: 'claude', title: 'Claude', body: renderClaudeAuth },
+        { id: 'local', title: 'Local (Ollama)', body: buildLocalModels },
+    ]);
     box.append(choices, nav({}));
     return box;
 }
@@ -475,11 +485,21 @@ function buildLocalModels() {
 function renderAccess() {
     const box = document.createElement('div');
     box.append(heading('Access'));
+    // First render: the install's current state picks the card.
+    if (access === null) {
+        access = state?.tailscale.active ? 'tailscale' : state?.bearerConfigured ? 'token' : 'local';
+    }
+    const choices = choiceCards(access, (id) => (access = id), [
+        { id: 'local', title: 'This device', desc: 'Only this computer. No login.' },
+        { id: 'tailscale', title: 'Tailscale', desc: 'Your other devices, over HTTPS. No login.', body: buildTailscale },
+        { id: 'token', title: 'Access token', desc: 'Any network. Log in with a token.', body: buildBearer },
+    ]);
+    box.append(choices, nav({}));
+    return box;
+}
+/** Tailscale card body: state + the one action that fits it. */
+function buildTailscale() {
     const ts = document.createElement('div');
-    ts.className = 'mrow';
-    const tsTitle = document.createElement('div');
-    tsTitle.className = 'mrow-name';
-    tsTitle.textContent = 'Tailscale HTTPS';
     // Integrations-row: dot + state text; an action button ONLY when there is an
     // action. 'Already serving' with a disabled enable-button read as broken.
     const tsRow = document.createElement('div');
@@ -539,12 +559,12 @@ function renderAccess() {
         tsStatus.textContent = 'Not detected';
         tsRow.appendChild(tsStatus);
     }
-    ts.append(tsTitle, tsRow, tsHint);
+    ts.append(tsRow, tsHint);
+    return ts;
+}
+/** Access-token card body: generate (two-click armed) or the configured state. */
+function buildBearer() {
     const bearer = document.createElement('div');
-    bearer.className = 'mrow';
-    const bTitle = document.createElement('div');
-    bTitle.className = 'mrow-name';
-    bTitle.textContent = 'Access token';
     const bDesc = document.createElement('div');
     bDesc.className = 'mrow-meta';
     if (state?.bearerConfigured) {
@@ -555,9 +575,8 @@ function renderAccess() {
         st.className = 'wiz-creds-status is-connected';
         st.textContent = 'Configured';
         row.appendChild(st);
-        bearer.append(bTitle, row);
-        box.append(ts, bearer, nav({}));
-        return box;
+        bearer.append(row);
+        return bearer;
     }
     const bBtn = document.createElement('button');
     bBtn.textContent = 'Generate token';
@@ -607,9 +626,8 @@ function renderAccess() {
             bBtn.disabled = false;
         }
     };
-    bearer.append(bTitle, bDesc, bBtn);
-    box.append(ts, bearer, nav({}));
-    return box;
+    bearer.append(bDesc, bBtn);
+    return bearer;
 }
 // ── Step: first agent ───────────────────────────────────────────────────────
 function renderAgent() {

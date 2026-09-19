@@ -37,7 +37,8 @@ You can reopen it any time from **⚙ → Setup…**. Every step is skippable.
   model with live progress. If Ollama isn't running locally, **Install
   Ollama** appears (Linux only); install failures show inline.
 
-**2. Access** (optional) — see [Access](#access).
+**2. Access** — one of three: **This device**, **Tailscale**, **Access token**.
+See [Access](#access).
 
 **3. First agent** — a name and optional instructions. **✨ Draft** turns a
 one-line idea into both. **Create** makes the agent and a room wired to it. On
@@ -117,16 +118,17 @@ demand; until it is, a local assignment has no harness to run on. See
 
 ## Access
 
-By default the chat is **localhost-only** — reachable only from the machine it
-runs on. To reach it from a phone or another device, open **⚙ → Run setup
-wizard… → the access step**:
+One of three, chosen in the wizard's access step (**⚙ → Setup…**):
 
-- **Tailscale HTTPS** — puts the chat on your tailnet with a real certificate,
-  so the PWA installs cleanly on a phone. One click if Tailscale is up.
-- **Access token** — generates a bearer token and opens the port to your
-  network (binds `0.0.0.0`). The token is shown once with a **Copy** button —
-  save it, you log in with it. It takes effect after the restart at the end of
-  the wizard. Generation is two-click confirmed, because it changes your
+- **This device** — the default. Reachable only from the machine it runs on;
+  no login.
+- **Tailscale** — puts the chat on your tailnet over HTTPS with a real
+  certificate, so the PWA installs cleanly on a phone; no login. **Enable** is
+  one click if Tailscale is up; "Not detected" means install Tailscale first.
+- **Access token** — for any network. **Generate token** makes a bearer token
+  and opens the port (binds `0.0.0.0`); the token is shown once with **Copy**
+  — save it, you log in with it. It takes effect after the restart at the end
+  of the wizard. Generation is two-click confirmed, because it changes your
   network exposure.
 
 To go back to localhost-only: remove `WEB_TOKEN` from `.env`, set
