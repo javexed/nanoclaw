@@ -77,24 +77,16 @@ async function renderModels(): Promise<void> {
     };
     const rosterKeys = new Set(data.models.map((m) => `${(m.endpoint ?? '').replace(/\/$/, '')}|${m.model_id}`));
     const ollamaBox = document.createElement('div');
-    const rows: HTMLElement[] = data.models.map((m) => buildModelRow(m, data.default_model_id));
-    if (rows.length === 0) {
-      // Empty roster is not "no model": agents fall through to the provider's
-      // built-in Claude default. Say so instead of implying nothing works.
-      const builtin = document.createElement('div');
-      builtin.className = 'mrow';
-      const head = document.createElement('div');
-      head.className = 'mrow-head';
-      const dot = document.createElement('span');
-      dot.className = 'mdot ok';
-      dot.title = 'Cloud (Anthropic)';
-      const nm = document.createElement('span');
-      nm.className = 'mrow-name';
-      nm.textContent = 'Claude';
-      head.append(dot, nm);
-      builtin.append(head);
-      rows.push(builtin);
-    }
+    // Claude is ALWAYS a row, not only when the roster is empty. It used to
+    // appear just as an explainer for an empty list, which meant adding any
+    // model made it vanish — and with it the only way back: "Make default"
+    // exists per roster row, Claude has no roster row, and nothing in the UI
+    // ever sent `model_id: null`. Setting a local model as the install default
+    // was therefore a one-way door, with the server perfectly able to undo it.
+    const rows: HTMLElement[] = [
+      buildBuiltinClaudeRow(data.default_model_id),
+      ...data.models.map((m) => buildModelRow(m, data.default_model_id)),
+    ];
     pane.replaceChildren(
       msection('Your models'),
       ...rows,
@@ -108,6 +100,51 @@ async function renderModels(): Promise<void> {
   } catch (err) {
     toastError(err, 'Could not load models');
   }
+}
+
+/**
+ * The built-in Claude provider as a roster row. It has no `web_models` record —
+ * it is what an agent falls back to when no default is set — so "make it the
+ * default" means CLEARING the default (`model_id: null`), which is exactly what
+ * the server has always accepted.
+ */
+function buildBuiltinClaudeRow(defaultId: string | null): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'mrow';
+
+  const head = document.createElement('div');
+  head.className = 'mrow-head';
+  const dot = document.createElement('span');
+  dot.className = 'mdot ok';
+  dot.title = 'Cloud (Anthropic)';
+  const nm = document.createElement('span');
+  nm.className = 'mrow-name';
+  nm.textContent = 'Claude';
+  head.append(dot, nm);
+
+  const meta = document.createElement('div');
+  meta.className = 'mrow-meta';
+  meta.textContent = 'built-in · cloud (Anthropic)';
+
+  const actions = document.createElement('div');
+  actions.className = 'mactions';
+  const def = document.createElement('button');
+  const isDefault = defaultId === null;
+  def.textContent = isDefault ? '★ Default' : 'Make default';
+  def.disabled = isDefault;
+  onAsync(def, 'click', async () => {
+    try {
+      await apiJson('/api/models/default', { method: 'PUT', body: { model_id: null } });
+      showToast('Default set', { kind: 'success' });
+      void renderModels();
+    } catch (err) {
+      toastError(err, 'Could not set default');
+    }
+  });
+  actions.appendChild(def);
+
+  row.append(head, meta, actions);
+  return row;
 }
 
 function buildModelRow(m: ModelRow, defaultId: string | null): HTMLElement {

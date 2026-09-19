@@ -635,6 +635,23 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; margin: 6px 0 
    Chips sit above the textarea until Send, which uploads them with the typed
    text as the caption. Full-width so the row wraps above the composer controls
    rather than squeezing the textarea. */
+/* A checkbox and its words are one line, not two. `dialog label` is a grid so
+   the label text sits under its input — right for "Model", "Instructions" and
+   every other stacked field, wrong for a checkbox. The markup has always asked
+   for the exception with class="inline"; this is the rule it was asking for.
+   Without it the tick floats above its own caption, which reads as an unlabelled
+   box next to a stray word. */
+dialog label.inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+dialog label.inline input[type='checkbox'] {
+  /* Keep the box at its intrinsic size — the grid rule stretched it. */
+  width: auto;
+  margin: 0;
+}
+
 #attach-tray {
   flex: 0 0 100%;
   order: -1;
