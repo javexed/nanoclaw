@@ -671,4 +671,30 @@ describe('ensureDockerRunning', () => {
     expect(() => ensureDockerRunning(cli)).toThrow('Container runtime is required but failed to start');
     expect(log.error).toHaveBeenCalled();
   });
+
+  // A systemd --user service inherits the group list its manager had at login,
+  // so joining the docker group afterwards never reaches it: the service
+  // crash-loops while `docker info` in the operator's shell keeps working.
+  // Telling them to "ensure Docker is running" there sends them to check the
+  // one thing that is already fine, so the banner has to name the real cause.
+  it('names the group, not the daemon, when the socket exists but is forbidden', () => {
+    const errs: string[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((m?: unknown) => void errs.push(String(m)));
+    try {
+      cli.responses = [
+        {
+          match: /^info$/,
+          throws: new Error('permission denied while trying to connect to the Docker daemon socket'),
+        },
+      ];
+      expect(() => ensureDockerRunning(cli)).toThrow('Container runtime is required but failed to start');
+      const banner = errs.join('\n');
+      expect(banner).toContain('docker group');
+      expect(banner).toContain('loginctl terminate-user');
+      // and NOT the advice that sends them to check a healthy daemon
+      expect(banner).not.toContain('Ensure Docker is installed and running');
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
