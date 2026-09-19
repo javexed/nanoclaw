@@ -23,6 +23,7 @@
  * confirmed with the user, and free-text replies fall through to a
  * headless `claude -p` call for IANA-zone resolution.
  */
+import { randomBytes } from 'crypto';
 import { spawn, spawnSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import fs from 'fs';
@@ -86,6 +87,7 @@ import * as setupLog from './logs.js';
 import { ensureAnswer, fail, runQuietChild, runQuietStep, spawnQuiet } from './lib/runner.js';
 import { emit as phEmit } from './lib/diagnostics.js';
 import { offerToOpenWeb } from './lib/web-open.js';
+import { isRemoteSession } from './lib/web-reach.js';
 import {
   accentGreen,
   brandBody,
@@ -283,12 +285,36 @@ async function main(): Promise<void> {
     setupLog.userInput('web_enabled', String(enableWeb));
     phEmit('web_choice', { enabled: enableWeb === 'yes' });
     if (enableWeb === 'yes') {
-      // Localhost-only: bind loopback, no token — the loopback auto-owner signs
-      // the operator in. Opening the port + a bearer token are offered from
-      // the in-app wizard.
       upsertEnvVar('WEB_ENABLED', 'true');
-      upsertEnvVar('WEB_HOST', '127.0.0.1');
       webPortEnabled = process.env.WEB_PORT || '3100';
+
+      // Localhost-only is right when you are sitting at the machine: the
+      // loopback auto-owner signs you in, no token, no exposure, and the in-app
+      // wizard offers to open the port later. Over SSH it is the one setting
+      // that cannot work — the wizard that would fix it is behind the very URL
+      // you cannot reach. So on a remote session, offer the shape
+      // deploy/web-deploy.sh has always used for headless installs: bound to
+      // the network, with a bearer token. Asked rather than assumed, because it
+      // changes who can reach this install.
+      let openToNetwork = false;
+      if (isRemoteSession()) {
+        openToNetwork =
+          ensureAnswer(
+            await p.confirm({
+              message: 'This looks like a remote session. Open the web UI to your network (a token is generated)?',
+              initialValue: true,
+            }),
+          ) === true;
+      }
+      if (openToNetwork) {
+        upsertEnvVar('WEB_HOST', '0.0.0.0');
+        // Same recipe as deploy/web-deploy.sh: 32 url-safe chars.
+        if (!readEnvKey('WEB_TOKEN')?.trim()) {
+          upsertEnvVar('WEB_TOKEN', randomBytes(24).toString('base64url').slice(0, 32));
+        }
+      } else {
+        upsertEnvVar('WEB_HOST', '127.0.0.1');
+      }
     }
   } else if (process.env.NANOCLAW_REEXEC_SG === '1' && readEnvKey('WEB_ENABLED')?.trim() === 'true') {
     webPortEnabled = process.env.WEB_PORT || readEnvKey('WEB_PORT')?.trim() || '3100';
