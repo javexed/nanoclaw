@@ -18,6 +18,7 @@ import {
   upsertEnv,
 } from '../ollama-manage.js';
 import { enableTailscaleServe, getTailscaleServeState } from '../tailscale-serve.js';
+import { getOpencodeInstallState, startOpencodeInstall } from '../opencode-manage.js';
 import {
   cancelClaudeSignin,
   finishClaudeSignin,
@@ -47,6 +48,7 @@ export async function rOnboardingGet({ res }: RouteCtx): Promise<void> {
     getTailscaleServeState(),
     hasClaudeCredential(),
   ]);
+  const opencode = getOpencodeInstallState();
   return json(res, 200, {
     complete,
     agents: agents.length,
@@ -54,6 +56,11 @@ export async function rOnboardingGet({ res }: RouteCtx): Promise<void> {
     bearerConfigured: Boolean(process.env.WEB_TOKEN),
     claude: { connected: claudeConnected },
     ollama: { reachable: ollama.reachable, canInstall: ollama.canInstall },
+    // The harness a local model runs on. Reported because without it, picking a
+    // local model changes nothing about inference (models.ts: a non-anthropic
+    // kind with no OpenCode yields no env at all) — and the wizard used to give
+    // no hint that anything was missing.
+    opencode: { installed: opencode.installed, canInstall: opencode.canInstall, reason: opencode.reason },
     tailscale: { available: tailscale.available, active: tailscale.active, url: tailscale.url },
   });
 }
@@ -155,4 +162,28 @@ export async function rClaudeAuthCancelPost(ctx: RouteCtx): Promise<void> {
   if (!body) return;
   if (typeof body.sessionId === 'string') cancelClaudeSignin(body.sessionId);
   return json(ctx.res, 200, { ok: true });
+}
+
+/** Harness state + the streamed log of an install in flight. */
+export function rOpencodeGet({ res }: RouteCtx): void {
+  const state = getOpencodeInstallState();
+  json(res, 200, {
+    installed: state.installed,
+    canInstall: state.canInstall,
+    reason: state.reason,
+    running: state.running,
+    lines: state.lines,
+    exitCode: state.exitCode,
+  });
+}
+
+/**
+ * Start the install. Returns immediately — this rebuilds the host, rebuilds the
+ * agent image and restarts the service, so the client polls rOpencodeGet for
+ * progress the same way it does for Ollama.
+ */
+export function rOpencodeInstallPost({ res }: RouteCtx): void {
+  const started = startOpencodeInstall();
+  if (!started.started) return json(res, 409, { error: started.error ?? 'could not start' });
+  json(res, 202, { started: true });
 }
