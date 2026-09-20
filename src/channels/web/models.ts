@@ -477,6 +477,44 @@ export function syncOpenCodeBackendEnv(model: WebModel): boolean {
  * roster model is Anthropic; only a model id this module wrote is cleared.
  * Idempotent; takes effect on the next spawn, like the settings.json write.
  */
+/**
+ * Stamp the workspace default model's harness as the INSTANCE default provider.
+ *
+ * Everything else here is per-group: the default-model sweep re-points existing
+ * groups, and providerForNewAgent borns web-created ones correctly. Neither
+ * reaches a group created anywhere else — `ncl groups create`, a channel
+ * approval, an agent-to-agent subagent — because those take
+ * DEFAULT_AGENT_PROVIDER from .env, which nothing in the web module wrote. They
+ * were born on Claude and only corrected by the next boot reconcile, which is
+ * after their first run.
+ *
+ * The terminal installer already does exactly this with the provider it picks
+ * (setup/auto.ts, "Persist the pick as the instance-wide default so every
+ * future group (channel-approved, ncl-created) is created on this provider").
+ * This is the same line for the browser path.
+ *
+ * Only ever moves between claude and opencode. An operator who set this to some
+ * other provider by hand meant it, and a model choice must not silently undo
+ * that.
+ *
+ * Takes effect for groups created AFTER the next restart: config.ts resolves
+ * DEFAULT_AGENT_PROVIDER once at import, and it is stamped at creation rather
+ * than consulted at spawn, so existing groups are never retroactively flipped.
+ * The OpenCode install restarts anyway; a later model change relies on the
+ * per-group sweep until the next one.
+ */
+export async function syncInstanceDefaultProvider(root: string = process.cwd()): Promise<string | null> {
+  const id = await getDefaultModelId();
+  const model = id ? await getWebModel(id) : undefined;
+  const want = (model && providerForModelKind(model.kind)) || 'claude';
+  const have = (readEnvFile(['DEFAULT_AGENT_PROVIDER'], root).DEFAULT_AGENT_PROVIDER ?? '').trim().toLowerCase();
+  if (have === want) return null;
+  if (have && have !== 'claude' && have !== 'opencode') return null;
+  upsertEnv(root, 'DEFAULT_AGENT_PROVIDER', want);
+  log.info('Web: instance default provider updated', { provider: want, was: have || '(unset)' });
+  return want;
+}
+
 export async function syncAgentProviderForAssignedModel(agentGroupId: string): Promise<void> {
   const row = await getContainerConfig(agentGroupId);
   const current = row?.provider ?? null;
