@@ -28,6 +28,7 @@ import { getAssignedModelForAgent, getDefaultModelId, getWebModel } from '../db.
 import {
   providerForModelKind,
   syncAgentProviderForAssignedModel,
+  syncInstanceDefaultProvider,
   writeAgentSettingsForAssignedModel,
 } from '../models.js';
 
@@ -63,6 +64,15 @@ export async function reloadAgentModelEnv(agentGroupId: string, reason: string):
  * (Codex) groups (their harness ignores the ANTHROPIC_* env this writes).
  */
 export async function refreshUnassignedGroupsForDefaultModel(reason: string): Promise<void> {
+  // Before the per-group sweep: this is the only hook both the default-model
+  // route and the boot reconcile share, and it is the one place that knows the
+  // workspace default just became authoritative. Groups created outside the web
+  // module read this from .env at creation; without it they are born on Claude.
+  try {
+    await syncInstanceDefaultProvider();
+  } catch (err) {
+    log.warn('Web: instance default provider sync failed', { reason, err });
+  }
   for (const g of await getAllAgentGroups()) {
     if (await getAssignedModelForAgent(g.id)) continue;
     const provider = (await getContainerConfig(g.id))?.provider;
