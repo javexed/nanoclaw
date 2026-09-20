@@ -281,61 +281,109 @@ function renderClaudeAuth() {
 // roster row exists, the default is set, and nothing works differently. This
 // row is the only place the install is ever mentioned, so it says what is
 // happening rather than sitting silent.
-/** The harness row, refreshed in place by the poller below. */
+/**
+ * Status on the left, the action on the right — the same shape the Claude
+ * credentials row uses, because it is the same kind of row: a thing that is
+ * either set up or has one button to set it up.
+ */
 const harnessRow = document.createElement('div');
-harnessRow.className = 'wiz-text';
+harnessRow.className = 'wiz-creds-row';
+const harnessText = document.createElement('span');
+harnessText.className = 'wiz-text';
+const harnessBtn = document.createElement('button');
+harnessBtn.type = 'button';
+harnessRow.append(harnessText, harnessBtn);
 let harnessTimer = null;
+/** Two-click arm state, reset whenever the row re-renders into a new state. */
+let harnessArmed = false;
+let harnessDisarm = null;
 function renderHarness(h) {
+    const disarm = () => {
+        harnessArmed = false;
+        if (harnessDisarm)
+            clearTimeout(harnessDisarm);
+        harnessDisarm = null;
+    };
     if (h.installed) {
-        harnessRow.textContent = '✓ OpenCode harness installed — local models run on it.';
+        harnessText.textContent = '✓ OpenCode harness installed — local models run on it.';
+        harnessBtn.hidden = true;
+        disarm();
         return;
     }
     if (h.running) {
         // The last line of the stream, not the whole log: this runs a skill apply,
         // a host build and an image rebuild, and a wizard step is not a terminal.
         const last = h.lines[h.lines.length - 1] ?? 'starting…';
-        harnessRow.textContent = `Installing the OpenCode harness — ${last}`;
+        harnessText.textContent = `Installing the OpenCode harness — ${last}`;
+        harnessBtn.hidden = false;
+        harnessBtn.disabled = true;
+        harnessBtn.textContent = 'Installing…';
+        disarm();
         return;
     }
+    harnessBtn.hidden = !h.canInstall;
+    harnessBtn.disabled = false;
+    if (!harnessArmed)
+        harnessBtn.textContent = 'Install OpenCode';
     if (h.exitCode !== null && h.exitCode !== 0) {
-        harnessRow.textContent = `OpenCode install failed: ${h.lines[h.lines.length - 1] ?? `exit ${h.exitCode}`}`;
+        harnessText.textContent = `OpenCode install failed: ${h.lines[h.lines.length - 1] ?? `exit ${h.exitCode}`}`;
+        // Offered again rather than latched off — most failures here are a missing
+        // daemon or a network blip, and the log line above says which.
+        if (!harnessArmed)
+            harnessBtn.textContent = 'Retry install';
         return;
     }
-    harnessRow.textContent = h.canInstall
-        ? 'Local models need the OpenCode harness — it installs when you pick one.'
+    harnessText.textContent = h.canInstall
+        ? 'Local models need the OpenCode harness.'
         : `Local models need the OpenCode harness. ${h.reason ?? ''}`.trim();
 }
-/**
- * Install the harness if it isn't there. Safe to call on every model pick: the
- * server answers 409 'already-installed' / 'already-running', and this treats
- * both as nothing to do.
- */
-async function ensureHarness() {
-    let h;
+/** Read the live state into the row. Cheap: the server caches its docker probe. */
+async function refreshHarness() {
     try {
-        h = (await apiJson('/api/web/opencode'));
-    }
-    catch {
-        return;
-    }
-    if (h.installed || h.running) {
+        const h = (await apiJson('/api/web/opencode'));
         renderHarness(h);
         if (h.running)
             pollHarness();
+        if (state)
+            state.opencode.installed = h.installed;
+    }
+    catch {
+        /* leave the row showing what the wizard was opened with */
+    }
+}
+/**
+ * The button. Two-click arm, the same as the bearer-token button beside it and
+ * for a stronger reason: this applies a skill, rebuilds the host, rebuilds the
+ * ~2.6GB agent image and restarts the service. It is the most consequential
+ * thing anyone can do from this wizard, and it should not happen on a stray
+ * click — which is why it is a button at all, rather than firing off the radio
+ * you press to choose a model.
+ */
+harnessBtn.onclick = async () => {
+    if (!harnessArmed) {
+        harnessArmed = true;
+        harnessBtn.textContent = 'Rebuilds & restarts — click again';
+        harnessDisarm = setTimeout(() => {
+            harnessArmed = false;
+            harnessBtn.textContent = 'Install OpenCode';
+        }, 5000);
         return;
     }
-    if (!h.canInstall) {
-        renderHarness(h);
-        return;
-    }
+    if (harnessDisarm)
+        clearTimeout(harnessDisarm);
+    harnessArmed = false;
+    harnessBtn.disabled = true;
+    harnessBtn.textContent = 'Installing…';
     try {
         await apiJson('/api/web/opencode/install', { method: 'POST' });
     }
-    catch {
-        // 409 means someone else already started it — fall through to polling.
+    catch (err) {
+        // 409 means it is already running or already installed — both are states
+        // the poll below reports correctly, so only a real failure surfaces here.
+        toastError(err, 'Could not start the OpenCode install');
     }
     pollHarness();
-}
+};
 function pollHarness() {
     if (harnessTimer)
         clearInterval(harnessTimer);
@@ -440,10 +488,11 @@ function buildLocalModels() {
             }
             await apiJson('/api/models/default', { method: 'PUT', body: { model_id: row.id } });
             showToast(`Default: ${modelId}`, { kind: 'success' });
-            // Picking the model is only half of it. Without the OpenCode harness a
+            // Picking the model is only half of it — without the OpenCode harness a
             // local model produces no env at all and the agent keeps answering from
-            // Claude — silently. So the choice starts the install that makes it true.
-            void ensureHarness();
+            // Claude, silently. Refresh the row so the button is right there saying
+            // so; installing is the operator's click, not a side effect of choosing.
+            void refreshHarness();
         }
         catch (err) {
             toastError(err, 'Could not select that model');
@@ -580,6 +629,7 @@ function buildLocalModels() {
         pullRow.hidden = true;
     if (state)
         renderHarness({ ...state.opencode, running: false, lines: [], exitCode: null });
+    void refreshHarness(); // an install may already be running from an earlier visit
     return box;
 }
 // ── Step: access ────────────────────────────────────────────────────────────
