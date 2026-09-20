@@ -373,12 +373,12 @@ let lastHarness = null;
  */
 function blockReason() {
     if (engine === 'claude')
-        return state?.claude.connected ? null : 'Connect Claude to continue';
+        return state?.claude.connected ? null : 'Connect Claude first';
     const model = lastHarness?.defaultModel?.model_id ?? localCard.model;
     if (!model)
-        return 'Pick a model to continue';
+        return 'Pick a model';
     const installed = lastHarness?.installed ?? state?.opencode.installed;
-    return installed ? null : `Install OpenCode to continue — ${model} can't run without it`;
+    return installed ? null : 'Install OpenCode first';
 }
 function applyNavBlock() {
     if (!navNext || step !== 0)
@@ -396,7 +396,7 @@ function renderHarness(h) {
     // install is minutes and a restart, and the row should say what you get.
     const model = h.defaultModel?.model_id ?? localCard.model;
     if (h.installed) {
-        harnessText.textContent = model ? `✓ OpenCode installed — ${model} runs on it.` : '✓ OpenCode installed.';
+        harnessText.textContent = '✓ OpenCode installed';
         harnessBtn.hidden = true;
         return;
     }
@@ -404,7 +404,7 @@ function renderHarness(h) {
         // The last line of the stream, not the whole log: this runs a skill apply,
         // a host build and an image rebuild, and a wizard step is not a terminal.
         const last = h.lines[h.lines.length - 1] ?? 'starting…';
-        harnessText.textContent = `Installing the OpenCode harness — ${last}`;
+        harnessText.textContent = `Installing OpenCode — ${last}`;
         harnessBtn.hidden = false;
         harnessBtn.disabled = true;
         harnessBtn.textContent = 'Installing…';
@@ -412,21 +412,19 @@ function renderHarness(h) {
     }
     harnessBtn.hidden = !h.canInstall;
     harnessBtn.disabled = false;
-    harnessBtn.textContent = 'Set up: install & restart';
+    harnessBtn.textContent = 'Install OpenCode';
     if (h.exitCode !== null && h.exitCode !== 0) {
-        harnessText.textContent = `OpenCode install failed: ${h.lines[h.lines.length - 1] ?? `exit ${h.exitCode}`}`;
+        harnessText.textContent = `Install failed — ${h.lines[h.lines.length - 1] ?? `exit ${h.exitCode}`}`;
         // Offered again rather than latched off — most failures here are a missing
         // daemon or a network blip, and the log line above says which.
-        harnessBtn.textContent = 'Retry install';
+        harnessBtn.textContent = 'Retry';
         return;
     }
-    // Probe-first flow: the model is chosen and saved above; this row is the one
-    // step between that choice and it doing anything. Say so, naming the model,
-    // and say what happens if the button is not pressed.
-    const what = model
-        ? `OpenCode is not installed — needed to run ${model}. Until then Claude still answers.`
-        : 'OpenCode is not installed — needed to run local models.';
-    harnessText.textContent = h.canInstall ? what : `${what} ${h.reason ?? ''}`.trim();
+    // The button says the action and the blocked Next says the consequence, so
+    // this only has to name the gap. A reason (no Docker) is the exception —
+    // there is no button to explain it.
+    const what = model ? `${model} needs OpenCode` : 'Local models need OpenCode';
+    harnessText.textContent = h.canInstall ? what : `${what} — ${h.reason ?? 'unavailable here'}`;
 }
 /** Read the live state into the row. Cheap: the server caches its docker probe. */
 async function refreshHarness() {
@@ -455,9 +453,7 @@ async function refreshHarness() {
  * worse way to state a consequence than a sentence with a Cancel next to it.
  */
 harnessBtn.onclick = async () => {
-    const ok = await confirmDialog('Install OpenCode?\n\nIt is the harness that runs local models — Ollama and other OpenAI-compatible endpoints. ' +
-        'Until it is installed, choosing a local model changes nothing: the choice is saved and Claude keeps answering.' +
-        '\n\nInstalling rebuilds NanoClaw and its agent image, then restarts the service. It takes a few minutes and the web UI will drop briefly.', 'Install');
+    const ok = await confirmDialog('Install OpenCode?\n\nRebuilds NanoClaw and restarts it — a few minutes, and this page will drop briefly.', 'Install');
     if (!ok)
         return;
     // The install ends in a host restart. The socket reconnects without a page
@@ -832,7 +828,7 @@ function buildTailscale() {
     ts.append(tsRow, tsHint);
     return ts;
 }
-/** Access-token card body: generate (two-click armed) or the configured state. */
+/** Access-token card body: generate, or the configured state. */
 function buildBearer() {
     const bearer = document.createElement('div');
     const bDesc = document.createElement('div');
@@ -848,38 +844,19 @@ function buildBearer() {
         bearer.append(row);
         return bearer;
     }
-    // What the button will do, before it is pressed. This is the one action in
-    // the wizard that cannot be undone from the wizard.
-    bDesc.textContent = 'Generates a token and opens this port to your network. Takes effect on the next restart.';
+    bDesc.textContent = 'Opens this port on restart.';
     const bBtn = document.createElement('button');
     bBtn.textContent = 'Generate token';
-    // Two-click arm: generation commits real install state (token + network
-    // exposure on the next restart), and stray single clicks kept arming it.
-    //
-    // The armed state has to SAY what it is arming. "Opens the port — click
-    // again" named the effect in four words and left out the parts that matter:
-    // which interfaces, and that there is no way back from here. The endpoint
-    // refuses a second generate ("Remove WEB_TOKEN from .env to replace it"), so
-    // undoing this means editing .env on the box.
-    let armed = false;
-    let disarm = null;
+    // One guard pattern in this wizard, and it is this one. The two-click arm
+    // that used to be here said "Opens the port — click again": a changing
+    // button label is a poor place for the only warning about the one action
+    // here that cannot be undone from the UI (generate binds 0.0.0.0, and the
+    // endpoint then refuses to run again — replacing the token means editing
+    // .env on the host). The dialog has room to say it and a Cancel.
     bBtn.onclick = async () => {
-        if (!armed) {
-            armed = true;
-            bBtn.textContent = 'Click again to confirm';
-            bDesc.textContent =
-                'This binds the web UI to all network interfaces (0.0.0.0), not just this machine, and anyone ' +
-                    'with the token can sign in. It cannot be undone from here — replacing the token means editing ' +
-                    '.env on the host. The token is shown once.';
-            disarm = setTimeout(() => {
-                armed = false;
-                bBtn.textContent = 'Generate token';
-                bDesc.textContent = 'Generates a token and opens this port to your network. Takes effect on the next restart.';
-            }, 5000);
+        const ok = await confirmDialog('Generate a token?\n\nThis opens the web UI to your whole network, not just this machine. It can’t be undone here.', 'Generate');
+        if (!ok)
             return;
-        }
-        if (disarm)
-            clearTimeout(disarm);
         bBtn.disabled = true;
         try {
             const { token } = (await apiJson('/api/web/auth/bearer/generate', { method: 'POST' }));
@@ -901,7 +878,7 @@ function buildBearer() {
             const row = document.createElement('div');
             row.className = 'wiz-token-row';
             row.append(tokenBox, copyBtn);
-            bDesc.textContent = 'Shown once. Port opens on restart.';
+            bDesc.textContent = 'Shown once.';
             bearer.insertBefore(row, bBtn);
             bBtn.remove(); // spent — the token row replaces it
         }
