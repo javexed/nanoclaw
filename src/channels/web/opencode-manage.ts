@@ -122,6 +122,29 @@ export function getOpencodeInstallState(root: string = process.cwd()): InstallSt
   return { ...opencodeInstallState, ...getOpencodeState(root) };
 }
 
+/**
+ * The chain succeeded, but THIS process still reports the provider as absent.
+ *
+ * opencodeInstalled() reads the in-memory provider registry, populated when
+ * dist/providers/index.js was imported — before the skill was applied. So the
+ * process that runs the install can never see the result of it, no matter what
+ * is on disk. And the last step only SCHEDULES the restart (detached, after a
+ * 2s sleep), so the chain reports complete while the process that reported it
+ * is still the old one.
+ *
+ * Every field this reads is already in the state; the client just had no way to
+ * tell "finished, not installed" (a failure) from "finished, restart coming"
+ * (a success it cannot see yet). Without it the row fell back to "needs
+ * OpenCode" with an Install button, and pressing that button did nothing but
+ * ask the NEW process — which answered "already installed" and made the row
+ * finally correct. That is the loop the operator was stuck in.
+ */
+export function restartPending(
+  state: Pick<InstallState, 'running' | 'exitCode' | 'finishedAt'> & { installed: boolean },
+): boolean {
+  return !state.running && !state.installed && state.exitCode === 0 && state.finishedAt !== null;
+}
+
 export function _resetOpencodeInstallForTest(): void {
   Object.assign(opencodeInstallState, {
     running: false,
