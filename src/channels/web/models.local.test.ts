@@ -62,6 +62,9 @@ describe("openCodeBackendEnv — upstream's install-wide contract", () => {
       OPENCODE_PROVIDER: 'openai',
       OPENCODE_BASE_URL: 'http://host.docker.internal:11434/v1',
       OPENCODE_MODEL: 'openai/qwen3:8b',
+      // Side tasks (titles, summaries) must target a model this endpoint
+      // actually serves — unset, OpenCode asks for its built-in gpt-5.4-nano.
+      OPENCODE_SMALL_MODEL: 'openai/qwen3:8b',
     });
     expect(b.proxyHost).toBe('host.docker.internal');
   });
