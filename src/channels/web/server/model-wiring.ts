@@ -24,8 +24,12 @@ import { restartAgentGroupContainers } from '../../../container-restart.js';
 import { getAllAgentGroups } from '../../../db/agent-groups.js';
 import { getContainerConfig } from '../../../db/container-configs.js';
 import { log } from '../../../log.js';
-import { getAssignedModelForAgent } from '../db.js';
-import { syncAgentProviderForAssignedModel, writeAgentSettingsForAssignedModel } from '../models.js';
+import { getAssignedModelForAgent, getDefaultModelId, getWebModel } from '../db.js';
+import {
+  providerForModelKind,
+  syncAgentProviderForAssignedModel,
+  writeAgentSettingsForAssignedModel,
+} from '../models.js';
 
 export async function reloadAgentModelEnv(agentGroupId: string, reason: string): Promise<void> {
   try {
@@ -80,4 +84,28 @@ export async function refreshUnassignedGroupsForDefaultModel(reason: string): Pr
       log.warn('Web: container restart for default-model change failed', { agentGroupId: g.id, reason, err });
     }
   }
+}
+
+/**
+ * Re-wire the default model once, at boot.
+ *
+ * Provider sync otherwise runs only inside PUT /api/models/default, and
+ * providerForModelKind consults an in-memory registry populated at import. So a
+ * local model picked BEFORE OpenCode was installed is wired to nothing, and the
+ * process that applied the skill can never fix that — only the restarted one
+ * has OpenCode in its registry. Without this, the wizard's "install OpenCode,
+ * restart, come back" flow ends with the model still unused, silently; the
+ * same failure hits anyone who installs OpenCode by hand after picking a model.
+ *
+ * A no-op when there is no default, the default is Anthropic, or the harness is
+ * still missing — exactly the cases where a sync would change nothing.
+ */
+export async function reconcileDefaultModelProvider(reason: string): Promise<void> {
+  const id = await getDefaultModelId();
+  if (!id) return;
+  const model = await getWebModel(id);
+  if (!model || model.kind === 'anthropic') return;
+  if (providerForModelKind(model.kind) !== 'opencode') return;
+  log.info('Web: reconciling default local model onto its harness', { reason, model: model.model_id });
+  await refreshUnassignedGroupsForDefaultModel(reason);
 }

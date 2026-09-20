@@ -34,6 +34,7 @@ import {
   requiresExplicitAuth,
 } from './auth.js';
 import { setupWebSocket } from './ws.js';
+import { reconcileDefaultModelProvider } from './server/model-wiring.js';
 import { json, readJsonBody } from './server/http.js';
 import { broadcast, broadcastRooms, annotateRooms } from './state.js';
 import {
@@ -193,6 +194,11 @@ export async function startWebServer(hooks: WebServerHooks): Promise<WebServer> 
     });
     httpServer.listen(port, host, () => {
       log.info('Web HTTP listening', { host, port, tls: tlsEnabled });
+      // After the listener, not before: this can restart agent containers, and
+      // nothing about it should delay the UI coming up.
+      void reconcileDefaultModelProvider('boot').catch((err: unknown) => {
+        log.warn('Web: default-model reconcile at boot failed', { err });
+      });
       resolve();
     });
   });
