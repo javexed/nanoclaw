@@ -451,6 +451,19 @@ function renderHarness(h) {
         startTick();
         return;
     }
+    if (h.restartPending) {
+        // Done, and waiting for the process that said so to be replaced. Shown as
+        // progress because that is what it is — offering the Install button here
+        // is what made the operator press it a second time.
+        harnessText.textContent = 'Installing OpenCode — restarting';
+        harnessBtn.hidden = false;
+        harnessBtn.disabled = true;
+        harnessBtn.textContent = 'Installing…';
+        harnessDetail.hidden = false;
+        paintDetail();
+        startTick();
+        return;
+    }
     stopTick();
     harnessBtn.hidden = !h.canInstall;
     harnessBtn.disabled = false;
@@ -541,6 +554,12 @@ function pollHarness() {
             return; // the host restarts at the end of the install — a gap is expected
         }
         renderHarness(h);
+        // Keep polling across the restart. The gap itself throws (caught above);
+        // this is the window before it, where the old process has already said it
+        // is finished. Bounded so a restart that never lands stops eventually
+        // rather than spinning for the life of the page.
+        if (h.restartPending && Date.now() - (h.startedAt ?? Date.now()) < 15 * 60 * 1000)
+            return;
         if (!h.running) {
             if (harnessTimer)
                 clearInterval(harnessTimer);
@@ -799,6 +818,7 @@ function buildLocalModels() {
             stepCount: 0,
             stepLabel: null,
             startedAt: null,
+            restartPending: false,
         });
     void refreshHarness(); // an install may already be running from an earlier visit
     return box;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { opencodeInstallability, opencodeInstallSteps, OPENCODE_SKILL_DIR } from './opencode-manage.js';
+import { opencodeInstallability, opencodeInstallSteps, restartPending, OPENCODE_SKILL_DIR } from './opencode-manage.js';
 
 describe('opencodeInstallability', () => {
   it('already installed is the finished state, not an error to report', () => {
@@ -75,5 +75,32 @@ describe('opencodeInstallSteps', () => {
     const l = labels('/srv/nanoclaw');
     expect(l.indexOf('Rebuilding NanoClaw')).toBeLessThan(l.indexOf('Rebuilding the agent image'));
     expect(l.indexOf('Rebuilding the agent image')).toBeLessThan(l.indexOf('Restarting'));
+  });
+});
+
+describe('restartPending', () => {
+  const done = { running: false, exitCode: 0, finishedAt: 1_000 };
+
+  it('is true when the chain succeeded but this process still says not installed', () => {
+    // The process that ran the install imported the provider barrel before the
+    // skill was applied, so its registry can never contain the new provider.
+    // The client must read this as "success, waiting", not "failed".
+    expect(restartPending({ ...done, installed: false })).toBe(true);
+  });
+
+  it('is false once the restarted process reports it installed', () => {
+    expect(restartPending({ ...done, installed: true })).toBe(false);
+  });
+
+  it('is false while the chain is still running', () => {
+    expect(restartPending({ running: true, exitCode: null, finishedAt: null, installed: false })).toBe(false);
+  });
+
+  it('is false after a real failure — that button should come back', () => {
+    expect(restartPending({ running: false, exitCode: 1, finishedAt: 1_000, installed: false })).toBe(false);
+  });
+
+  it('is false before anything has ever run', () => {
+    expect(restartPending({ running: false, exitCode: null, finishedAt: null, installed: false })).toBe(false);
   });
 });
