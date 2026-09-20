@@ -392,6 +392,9 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent-soft
 .wiz-choice-title { font-weight: 600; }
 .wiz-choice-desc { color: var(--text-dim); font-size: 0.85rem; }
 .wiz-nav { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+/* Next while the step cannot be left: red, not greyed. Grey reads as "not yet",
+   this is "not until you do the thing named on the button". */
+.wiz-nav button.wiz-blocked { background: transparent; color: var(--danger); border-color: var(--danger); cursor: not-allowed; opacity: 1; }
 .wiz-token {
   display: block;
   background: var(--bg);
