@@ -579,10 +579,13 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; margin: 6px 0 
    a heading rather than as the choice itself. */
 .wiz-model-list label { display: flex; align-items: center; gap: 8px; cursor: pointer; font-weight: 600; }
 .wiz-model-list input[type='radio'] { accent-color: var(--accent); }
-/* The pull field names a model too, so it carries the list's weight. Scoped to
-   its own class, not `.mactions input`: that class is on seven rows across the
-   wizard and the manage drawer, most of which hold endpoints and hostnames. */
-.wiz-model-input { font-weight: 600; }
+/* A field that names a model carries the weight model names are rendered at —
+   .wiz-model-list in the wizard, .mrow-name in the manage drawer, both 600.
+   Scoped to its own class, not `.mactions input`: that class is on seven rows
+   across both surfaces, most of which hold endpoints and hostnames. Unprefixed
+   because it is shared; the wiz- prefix was wrong the moment the second
+   surface needed the same rule. */
+.model-input { font-weight: 600; }
 
 .wiz-token-row { display: flex; gap: 8px; align-items: stretch; }
 .wiz-token-row .wiz-token { flex: 1; min-width: 0; }
