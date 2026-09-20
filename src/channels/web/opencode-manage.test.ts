@@ -6,29 +6,41 @@ describe('opencodeInstallability', () => {
   it('already installed is the finished state, not an error to report', () => {
     // canInstall is false because there is nothing left to install. A reason
     // here would put a failure message on a card that is working.
-    expect(opencodeInstallability({ installed: true, skillPresent: true, dockerAvailable: true })).toEqual({
+    expect(
+      opencodeInstallability({ installed: true, skillPresent: true, dockerAvailable: true, pnpmFound: true }),
+    ).toEqual({
       canInstall: false,
       reason: null,
     });
   });
 
   it('installs when the skill is present and docker answers', () => {
-    expect(opencodeInstallability({ installed: false, skillPresent: true, dockerAvailable: true })).toEqual({
+    expect(
+      opencodeInstallability({ installed: false, skillPresent: true, dockerAvailable: true, pnpmFound: true }),
+    ).toEqual({
       canInstall: true,
       reason: null,
     });
   });
 
   it('names the missing skill rather than failing mid-chain', () => {
-    const r = opencodeInstallability({ installed: false, skillPresent: false, dockerAvailable: true });
+    const r = opencodeInstallability({ installed: false, skillPresent: false, dockerAvailable: true, pnpmFound: true });
     expect(r.canInstall).toBe(false);
     expect(r.reason).toContain(OPENCODE_SKILL_DIR);
   });
 
   it('refuses without docker — the agent image is what carries the harness', () => {
-    const r = opencodeInstallability({ installed: false, skillPresent: true, dockerAvailable: false });
+    const r = opencodeInstallability({ installed: false, skillPresent: true, dockerAvailable: false, pnpmFound: true });
     expect(r.canInstall).toBe(false);
     expect(r.reason).toMatch(/Docker/);
+  });
+
+  it('refuses when pnpm cannot be found — before anything is applied', () => {
+    // Three of the five steps shell out to pnpm and the skill apply is the
+    // first. Discovering it mid-chain would leave a half-applied provider.
+    const r = opencodeInstallability({ installed: false, skillPresent: true, dockerAvailable: true, pnpmFound: false });
+    expect(r.canInstall).toBe(false);
+    expect(r.reason).toMatch(/pnpm/);
   });
 });
 
