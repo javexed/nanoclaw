@@ -424,7 +424,28 @@ export function openCodeBackendEnv(model: WebModel): { env: Record<string, strin
     /* keep the alias */
   }
   return {
-    env: { OPENCODE_PROVIDER: 'openai', OPENCODE_BASE_URL: base, OPENCODE_MODEL: `openai/${model.model_id}` },
+    env: {
+      OPENCODE_PROVIDER: 'openai',
+      OPENCODE_BASE_URL: base,
+      OPENCODE_MODEL: `openai/${model.model_id}`,
+      // OpenCode runs side tasks (session titles, summaries) on a SMALL model,
+      // and with none configured it asks its own built-in default. Observed in
+      // a live session log:
+      //
+      //   ERROR "stream error" providerID=openai modelID=gpt-5.4-nano
+      //     small=true agent=title
+      //     error="AI_APICallError: model 'gpt-5.4-nano' not found"
+      //
+      // A local endpoint serves the models it serves, and an OpenAI cloud name
+      // is never one of them — so every auxiliary call failed. The main reply
+      // was unaffected, which is why it read as noise rather than a fault.
+      //
+      // Point it at the same model: the only one this endpoint is known to
+      // have. The payload handles the rest — a small model equal to the main
+      // one shares its declared limits, one that differs gets a bare entry
+      // (opencode-config.ts, `isMainModel`).
+      OPENCODE_SMALL_MODEL: `openai/${model.model_id}`,
+    },
     proxyHost,
   };
 }
