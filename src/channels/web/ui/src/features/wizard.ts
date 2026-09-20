@@ -6,6 +6,7 @@
 // just records completion.
 import { $ } from '../core/dom.js';
 import { apiJson } from '../core/api.js';
+import { confirmDialog } from '../core/confirm.js';
 import { showToast, toastError } from '../core/toast.js';
 
 interface OnboardingState {
@@ -322,9 +323,6 @@ const harnessBtn = document.createElement('button');
 harnessBtn.type = 'button';
 harnessRow.append(harnessText, harnessBtn);
 let harnessTimer: ReturnType<typeof setInterval> | null = null;
-/** Two-click arm state, reset whenever the row re-renders into a new state. */
-let harnessArmed = false;
-let harnessDisarm: ReturnType<typeof setTimeout> | null = null;
 
 interface HarnessState {
   installed: boolean;
@@ -336,15 +334,9 @@ interface HarnessState {
 }
 
 function renderHarness(h: HarnessState): void {
-  const disarm = (): void => {
-    harnessArmed = false;
-    if (harnessDisarm) clearTimeout(harnessDisarm);
-    harnessDisarm = null;
-  };
   if (h.installed) {
-    harnessText.textContent = '✓ OpenCode harness installed — local models run on it.';
+    harnessText.textContent = '✓ OpenCode installed — local models run on it.';
     harnessBtn.hidden = true;
-    disarm();
     return;
   }
   if (h.running) {
@@ -355,22 +347,25 @@ function renderHarness(h: HarnessState): void {
     harnessBtn.hidden = false;
     harnessBtn.disabled = true;
     harnessBtn.textContent = 'Installing…';
-    disarm();
     return;
   }
   harnessBtn.hidden = !h.canInstall;
   harnessBtn.disabled = false;
-  if (!harnessArmed) harnessBtn.textContent = 'Install OpenCode';
+  harnessBtn.textContent = 'Install OpenCode';
   if (h.exitCode !== null && h.exitCode !== 0) {
     harnessText.textContent = `OpenCode install failed: ${h.lines[h.lines.length - 1] ?? `exit ${h.exitCode}`}`;
     // Offered again rather than latched off — most failures here are a missing
     // daemon or a network blip, and the log line above says which.
-    if (!harnessArmed) harnessBtn.textContent = 'Retry install';
+    harnessBtn.textContent = 'Retry install';
     return;
   }
-  harnessText.textContent = h.canInstall
-    ? 'Local models need the OpenCode harness.'
-    : `Local models need the OpenCode harness. ${h.reason ?? ''}`.trim();
+  // Say what it IS and what its absence costs. "Needs the OpenCode harness"
+  // named a missing part without saying what the part does, or that skipping
+  // it leaves a local model selected and unused — the silent failure this
+  // whole row exists to prevent.
+  const what =
+    'OpenCode is the harness that runs local models — without it your pick is saved but Claude still answers.';
+  harnessText.textContent = h.canInstall ? what : `${what} ${h.reason ?? ''}`.trim();
 }
 
 /** Read the live state into the row. Cheap: the server caches its docker probe. */
@@ -386,25 +381,25 @@ async function refreshHarness(): Promise<void> {
 }
 
 /**
- * The button. Two-click arm, the same as the bearer-token button beside it and
- * for a stronger reason: this applies a skill, rebuilds the host, rebuilds the
- * ~2.6GB agent image and restarts the service. It is the most consequential
- * thing anyone can do from this wizard, and it should not happen on a stray
- * click — which is why it is a button at all, rather than firing off the radio
- * you press to choose a model.
+ * The button. This applies a skill, rebuilds the host, rebuilds the ~2.6GB
+ * agent image and restarts the service, so it asks first — with confirmDialog,
+ * the same prompt that guards deleting a model or a room.
+ *
+ * Deliberately NOT the two-click arm the bearer-token button uses. That guard
+ * is for an action that is irreversible from the UI and changes who can reach
+ * the install (generate flips WEB_HOST to 0.0.0.0 and the endpoint then refuses
+ * to run again). This one is disruptive but reversible — the skill ships a
+ * REMOVE.md and re-running is idempotent — and a changing button label is a
+ * worse way to state a consequence than a sentence with a Cancel next to it.
  */
 harnessBtn.onclick = async () => {
-  if (!harnessArmed) {
-    harnessArmed = true;
-    harnessBtn.textContent = 'Rebuilds & restarts — click again';
-    harnessDisarm = setTimeout(() => {
-      harnessArmed = false;
-      harnessBtn.textContent = 'Install OpenCode';
-    }, 5000);
-    return;
-  }
-  if (harnessDisarm) clearTimeout(harnessDisarm);
-  harnessArmed = false;
+  const ok = await confirmDialog(
+    'Install OpenCode?\n\nIt is the harness that runs local models — Ollama and other OpenAI-compatible endpoints. ' +
+      'Until it is installed, choosing a local model changes nothing: the choice is saved and Claude keeps answering.' +
+      '\n\nInstalling rebuilds NanoClaw and its agent image, then restarts the service. It takes a few minutes and the web UI will drop briefly.',
+    'Install',
+  );
+  if (!ok) return;
   harnessBtn.disabled = true;
   harnessBtn.textContent = 'Installing…';
   try {
@@ -777,19 +772,33 @@ function buildBearer(): HTMLElement {
     bearer.append(row);
     return bearer;
   }
+  // What the button will do, before it is pressed. This is the one action in
+  // the wizard that cannot be undone from the wizard.
+  bDesc.textContent = 'Generates a token and opens this port to your network. Takes effect on the next restart.';
   const bBtn = document.createElement('button');
   bBtn.textContent = 'Generate token';
   // Two-click arm: generation commits real install state (token + network
   // exposure on the next restart), and stray single clicks kept arming it.
+  //
+  // The armed state has to SAY what it is arming. "Opens the port — click
+  // again" named the effect in four words and left out the parts that matter:
+  // which interfaces, and that there is no way back from here. The endpoint
+  // refuses a second generate ("Remove WEB_TOKEN from .env to replace it"), so
+  // undoing this means editing .env on the box.
   let armed = false;
   let disarm: ReturnType<typeof setTimeout> | null = null;
   bBtn.onclick = async () => {
     if (!armed) {
       armed = true;
-      bBtn.textContent = 'Opens the port — click again';
+      bBtn.textContent = 'Click again to confirm';
+      bDesc.textContent =
+        'This binds the web UI to all network interfaces (0.0.0.0), not just this machine, and anyone ' +
+        'with the token can sign in. It cannot be undone from here — replacing the token means editing ' +
+        '.env on the host. The token is shown once.';
       disarm = setTimeout(() => {
         armed = false;
         bBtn.textContent = 'Generate token';
+        bDesc.textContent = 'Generates a token and opens this port to your network. Takes effect on the next restart.';
       }, 5000);
       return;
     }
