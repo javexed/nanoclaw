@@ -113,6 +113,9 @@ const opencodeInstallState: InstallState = {
   exitCode: null,
   startedAt: null,
   finishedAt: null,
+  stepIndex: 0,
+  stepCount: 0,
+  stepLabel: null,
 };
 
 export function getOpencodeInstallState(root: string = process.cwd()): InstallState & OpencodeState {
@@ -126,6 +129,9 @@ export function _resetOpencodeInstallForTest(): void {
     exitCode: null,
     startedAt: null,
     finishedAt: null,
+    stepIndex: 0,
+    stepCount: 0,
+    stepLabel: null,
   });
 }
 
@@ -145,12 +151,15 @@ export function opencodeInstallSteps(root: string): InstallStep[] {
     // That path's dependency resolver runs bun via `pnpm dlx` at the pinned
     // version when the host has none, so this needs nothing a nanoclaw host
     // does not already have.
-    { run: ['pnpm', ['exec', 'tsx', 'scripts/install-provider.ts', OPENCODE_SKILL_DIR]] },
+    {
+      run: ['pnpm', ['exec', 'tsx', 'scripts/install-provider.ts', OPENCODE_SKILL_DIR]],
+      label: 'Applying the OpenCode skill',
+    },
     // The host runs from dist/. The skill edited src/, so without this the new
     // provider exists on disk and is invisible to the process that restarts.
-    { run: ['pnpm', ['run', 'build']] },
+    { run: ['pnpm', ['run', 'build']], label: 'Rebuilding NanoClaw' },
     // And the agent-runner half lives inside the image.
-    { run: ['bash', ['./container/build.sh', 'build']] },
+    { run: ['bash', ['./container/build.sh', 'build']], label: 'Rebuilding the agent image' },
     {
       label: 'Stamping the upgrade marker',
       call: () => {

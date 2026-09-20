@@ -89,6 +89,7 @@ function closeWizard(): void {
     clearInterval(harnessTimer);
     harnessTimer = null;
   }
+  stopTick();
   $('#wizard')!.hidden = true;
 }
 
@@ -364,6 +365,40 @@ harnessText.className = 'wiz-text';
 const harnessBtn = document.createElement('button');
 harnessBtn.type = 'button';
 harnessRow.append(harnessText, harnessBtn);
+/**
+ * Second line: elapsed time and the last thing the installer said.
+ *
+ * The elapsed clock is the part that matters. The agent-image rebuild can go
+ * minutes between output lines, and a status line that stops changing reads as
+ * hung — so this ticks once a second from startedAt, independent of the 2s
+ * poll, and keeps moving even when the installer says nothing at all.
+ */
+const harnessDetail = document.createElement('div');
+harnessDetail.className = 'wiz-text wiz-detail';
+harnessDetail.hidden = true;
+let harnessTick: ReturnType<typeof setInterval> | null = null;
+let harnessStartedAt: number | null = null;
+let harnessLastLine = '';
+
+function elapsed(since: number): string {
+  const secs = Math.max(0, Math.round((Date.now() - since) / 1000));
+  return secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${String(secs % 60).padStart(2, '0')}s`;
+}
+
+function paintDetail(): void {
+  if (harnessStartedAt === null) return;
+  harnessDetail.textContent = [elapsed(harnessStartedAt), harnessLastLine].filter(Boolean).join(' · ');
+}
+
+function startTick(): void {
+  if (harnessTick) return;
+  harnessTick = setInterval(paintDetail, 1000);
+}
+
+function stopTick(): void {
+  if (harnessTick) clearInterval(harnessTick);
+  harnessTick = null;
+}
 let harnessTimer: ReturnType<typeof setInterval> | null = null;
 
 /**
@@ -423,6 +458,10 @@ interface HarnessState {
   running: boolean;
   lines: string[];
   exitCode: number | null;
+  stepIndex: number;
+  stepCount: number;
+  stepLabel: string | null;
+  startedAt: number | null;
   /** The default local model, if one is set — what the harness is FOR. */
   defaultModel: { model_id: string; kind: string } | null;
 }
@@ -436,23 +475,32 @@ function renderHarness(h: HarnessState): void {
   if (h.installed) {
     harnessText.textContent = '✓ OpenCode installed';
     harnessBtn.hidden = true;
+    harnessDetail.hidden = true;
+    stopTick();
     return;
   }
   if (h.running) {
-    // The last line of the stream, not the whole log: this runs a skill apply,
-    // a host build and an image rebuild, and a wizard step is not a terminal.
-    const last = h.lines[h.lines.length - 1] ?? 'starting…';
-    harnessText.textContent = `Installing OpenCode — ${last}`;
+    // Which step, of how many — the named step is the honest progress signal;
+    // the log line below is detail, not status.
+    const where = h.stepCount ? `${h.stepIndex} of ${h.stepCount}` : '';
+    harnessText.textContent = ['Installing OpenCode', where, h.stepLabel].filter(Boolean).join(' — ');
     harnessBtn.hidden = false;
     harnessBtn.disabled = true;
     harnessBtn.textContent = 'Installing…';
+    harnessStartedAt = h.startedAt ?? harnessStartedAt ?? Date.now();
+    harnessLastLine = h.lines[h.lines.length - 1] ?? '';
+    harnessDetail.hidden = false;
+    paintDetail();
+    startTick();
     return;
   }
+  stopTick();
   harnessBtn.hidden = !h.canInstall;
   harnessBtn.disabled = false;
   harnessBtn.textContent = 'Install OpenCode';
   if (h.exitCode !== null && h.exitCode !== 0) {
     harnessText.textContent = `Install failed — ${h.lines[h.lines.length - 1] ?? `exit ${h.exitCode}`}`;
+    harnessDetail.hidden = true;
     // Offered again rather than latched off — most failures here are a missing
     // daemon or a network blip, and the log line above says which.
     harnessBtn.textContent = 'Retry';
@@ -463,6 +511,7 @@ function renderHarness(h: HarnessState): void {
   // there is no button to explain it.
   const what = model ? `${model} needs OpenCode` : 'Local models need OpenCode';
   harnessText.textContent = h.canInstall ? what : `${what} — ${h.reason ?? 'unavailable here'}`;
+  harnessDetail.hidden = true;
 }
 
 /** Read the live state into the row. Cheap: the server caches its docker probe. */
@@ -506,6 +555,13 @@ harnessBtn.onclick = async () => {
   }
   harnessBtn.disabled = true;
   harnessBtn.textContent = 'Installing…';
+  // Don't wait up to 2s for the first poll to say something is happening.
+  harnessText.textContent = 'Installing OpenCode — starting';
+  harnessStartedAt = Date.now();
+  harnessLastLine = '';
+  harnessDetail.hidden = false;
+  paintDetail();
+  startTick();
   try {
     await apiJson('/api/web/opencode/install', { method: 'POST' });
   } catch (err) {
@@ -776,13 +832,24 @@ function buildLocalModels(): HTMLElement {
   pullRow.className = 'mactions';
   pullRow.append(pullInput, pullBtn);
 
-  box.append(urlRow, installRow, statusLine, list, pullRow, progress, harnessRow);
+  box.append(urlRow, installRow, statusLine, list, pullRow, progress, harnessRow, harnessDetail);
   // Always check on entry — localhost by default, or the endpoint we came back
   // to. A daemon that is down answers with the error and the Install Ollama
   // row; that is more honest than an empty card that waits to be asked.
   pullRow.hidden = true;
   void probe();
-  if (state) renderHarness({ ...state.opencode, running: false, lines: [], exitCode: null, defaultModel: null });
+  if (state)
+    renderHarness({
+      ...state.opencode,
+      running: false,
+      lines: [],
+      exitCode: null,
+      defaultModel: null,
+      stepIndex: 0,
+      stepCount: 0,
+      stepLabel: null,
+      startedAt: null,
+    });
   void refreshHarness(); // an install may already be running from an earlier visit
   return box;
 }
