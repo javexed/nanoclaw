@@ -23,7 +23,7 @@ import { getSystemdUnit, getLaunchdLabel } from '../../install-slug.js';
 
 const LINES_CAP = 200;
 
-interface InstallState {
+export interface InstallState {
   running: boolean;
   lines: string[];
   exitCode: number | null;
@@ -334,7 +334,7 @@ function installChainEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
 // download), but not forever; past this it's a stall, not progress.
 const STEP_TIMEOUT_MS = 30 * 60 * 1000;
 
-function runInstallChain(state: InstallState, steps: InstallStep[], root: string): void {
+export function runInstallChain(state: InstallState, steps: InstallStep[], root: string): void {
   // Line-buffered append. Chunks rarely align with lines: progress output
   // (health-check dots, docker/ollama status) arrives newline-free or
   // \r-separated. An unterminated tail is held as `partial` and rendered as a

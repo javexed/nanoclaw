@@ -15,6 +15,7 @@ interface OnboardingState {
   bearerConfigured: boolean;
   claude: { connected: boolean };
   ollama: { reachable: boolean; canInstall: boolean };
+  opencode: { installed: boolean; canInstall: boolean; reason: string | null };
   tailscale: { available: boolean; active: boolean; url: string | null };
 }
 
@@ -59,6 +60,13 @@ function closeWizard(): void {
   if (pullTimer) {
     clearInterval(pullTimer);
     pullTimer = null;
+  }
+  // Deliberately NOT cleared in render(): the harness install outlives a step
+  // change (it rebuilds an image — minutes), so moving through the wizard must
+  // not stop it reporting. Closing the wizard does.
+  if (harnessTimer) {
+    clearInterval(harnessTimer);
+    harnessTimer = null;
   }
   $('#wizard')!.hidden = true;
 }
@@ -294,6 +302,96 @@ function renderClaudeAuth(): HTMLElement {
 // ── Ollama accordion body (engine screen, engine = local) ───────────────────
 
 /** The Ollama accordion body on the engine screen: probe → pick → pull. */
+// ── The harness a local model runs on ───────────────────────────────────────
+// A local model needs OpenCode. Without it models.ts writes NO env for a
+// non-anthropic kind, so the agent quietly keeps answering from Claude: the
+// roster row exists, the default is set, and nothing works differently. This
+// row is the only place the install is ever mentioned, so it says what is
+// happening rather than sitting silent.
+
+/** The harness row, refreshed in place by the poller below. */
+const harnessRow = document.createElement('div');
+harnessRow.className = 'wiz-text';
+let harnessTimer: ReturnType<typeof setInterval> | null = null;
+
+interface HarnessState {
+  installed: boolean;
+  canInstall: boolean;
+  reason: string | null;
+  running: boolean;
+  lines: string[];
+  exitCode: number | null;
+}
+
+function renderHarness(h: HarnessState): void {
+  if (h.installed) {
+    harnessRow.textContent = '✓ OpenCode harness installed — local models run on it.';
+    return;
+  }
+  if (h.running) {
+    // The last line of the stream, not the whole log: this runs a skill apply,
+    // a host build and an image rebuild, and a wizard step is not a terminal.
+    const last = h.lines[h.lines.length - 1] ?? 'starting…';
+    harnessRow.textContent = `Installing the OpenCode harness — ${last}`;
+    return;
+  }
+  if (h.exitCode !== null && h.exitCode !== 0) {
+    harnessRow.textContent = `OpenCode install failed: ${h.lines[h.lines.length - 1] ?? `exit ${h.exitCode}`}`;
+    return;
+  }
+  harnessRow.textContent = h.canInstall
+    ? 'Local models need the OpenCode harness — it installs when you pick one.'
+    : `Local models need the OpenCode harness. ${h.reason ?? ''}`.trim();
+}
+
+/**
+ * Install the harness if it isn't there. Safe to call on every model pick: the
+ * server answers 409 'already-installed' / 'already-running', and this treats
+ * both as nothing to do.
+ */
+async function ensureHarness(): Promise<void> {
+  let h: HarnessState;
+  try {
+    h = (await apiJson('/api/web/opencode')) as HarnessState;
+  } catch {
+    return;
+  }
+  if (h.installed || h.running) {
+    renderHarness(h);
+    if (h.running) pollHarness();
+    return;
+  }
+  if (!h.canInstall) {
+    renderHarness(h);
+    return;
+  }
+  try {
+    await apiJson('/api/web/opencode/install', { method: 'POST' });
+  } catch {
+    // 409 means someone else already started it — fall through to polling.
+  }
+  pollHarness();
+}
+
+function pollHarness(): void {
+  if (harnessTimer) clearInterval(harnessTimer);
+  harnessTimer = setInterval(async () => {
+    let h: HarnessState;
+    try {
+      h = (await apiJson('/api/web/opencode')) as HarnessState;
+    } catch {
+      return; // the host restarts at the end of the install — a gap is expected
+    }
+    renderHarness(h);
+    if (!h.running) {
+      if (harnessTimer) clearInterval(harnessTimer);
+      harnessTimer = null;
+      if (state) state.opencode.installed = h.installed;
+      if (h.installed) showToast('OpenCode harness ready', { kind: 'success' });
+    }
+  }, 2000);
+}
+
 function buildLocalModels(): HTMLElement {
   const box = document.createElement('div');
   box.className = 'wiz-auth';
@@ -384,6 +482,10 @@ function buildLocalModels(): HTMLElement {
       }
       await apiJson('/api/models/default', { method: 'PUT', body: { model_id: row.id } });
       showToast(`Default: ${modelId}`, { kind: 'success' });
+      // Picking the model is only half of it. Without the OpenCode harness a
+      // local model produces no env at all and the agent keeps answering from
+      // Claude — silently. So the choice starts the install that makes it true.
+      void ensureHarness();
     } catch (err) {
       toastError(err, 'Could not select that model');
     }
@@ -515,10 +617,11 @@ function buildLocalModels(): HTMLElement {
   pullRow.className = 'mactions';
   pullRow.append(pullInput, pullBtn);
 
-  box.append(urlRow, installRow, statusLine, list, pullRow, progress);
+  box.append(urlRow, installRow, statusLine, list, pullRow, progress, harnessRow);
   // Auto-query on step entry when the local daemon is already up.
   if (state?.ollama.reachable) void probe();
   else pullRow.hidden = true;
+  if (state) renderHarness({ ...state.opencode, running: false, lines: [], exitCode: null });
   return box;
 }
 
