@@ -579,6 +579,10 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; margin: 6px 0 
    a heading rather than as the choice itself. */
 .wiz-model-list label { display: flex; align-items: center; gap: 8px; cursor: pointer; font-weight: 600; }
 .wiz-model-list input[type='radio'] { accent-color: var(--accent); }
+/* The pull field names a model too, so it carries the list's weight. Scoped to
+   its own class, not `.mactions input`: that class is on seven rows across the
+   wizard and the manage drawer, most of which hold endpoints and hostnames. */
+.wiz-model-input { font-weight: 600; }
 
 .wiz-token-row { display: flex; gap: 8px; align-items: stretch; }
 .wiz-token-row .wiz-token { flex: 1; min-width: 0; }
