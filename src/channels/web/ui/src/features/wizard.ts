@@ -456,6 +456,10 @@ function buildLocalModels(): HTMLElement {
   const progress = document.createElement('div');
   progress.className = 'wiz-text';
   const pullInput = document.createElement('input');
+  // Same weight as the list above it: this field holds the same kind of value
+  // the radios do — a model name — and it sat a weight lighter than the models
+  // it sits under.
+  pullInput.className = 'wiz-model-input';
   pullInput.placeholder = 'Model';
   void apiJson('/api/ollama/recommend')
     .then((r: { model?: string }) => {
