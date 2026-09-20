@@ -21,9 +21,33 @@ export async function maybeOpenWizard() {
     catch {
         return;
     }
-    if (state.complete || state.agents > 0 || state.rooms > 0)
+    if (state.complete)
+        return;
+    // A resume record means the operator was mid-wizard when the OpenCode
+    // install restarted the host; reopen even if something exists already.
+    if (!consumeResume() && (state.agents > 0 || state.rooms > 0))
         return;
     openWizard();
+}
+/** Read and clear the resume record; true when there was one (and it is fresh). */
+function consumeResume() {
+    try {
+        const raw = localStorage.getItem(RESUME_KEY);
+        if (!raw)
+            return false;
+        localStorage.removeItem(RESUME_KEY);
+        const r = JSON.parse(raw);
+        if (!r.at || Date.now() - r.at > 60 * 60 * 1000)
+            return false; // an hour: stale means abandoned
+        engine = 'local';
+        resumeEndpoint = r.endpoint ?? null;
+        if (r.model)
+            localCard.model = r.model;
+        return true;
+    }
+    catch {
+        return false;
+    }
 }
 /** Manual trigger (manage drawer): refresh state, then open at step one. */
 export async function launchWizard() {
@@ -179,7 +203,7 @@ function renderEngine() {
     box.append(heading('Model'));
     const choices = choiceCards(engine, (id) => (engine = id), [
         { id: 'claude', title: 'Claude', body: renderClaudeAuth },
-        { id: 'local', title: 'Local (Ollama)', body: buildLocalModels },
+        { id: 'local', title: 'Local model', body: buildLocalModels },
     ]);
     box.append(choices, nav({}));
     return box;
@@ -295,9 +319,22 @@ const harnessBtn = document.createElement('button');
 harnessBtn.type = 'button';
 harnessRow.append(harnessText, harnessBtn);
 let harnessTimer = null;
+/**
+ * What the Local card currently points at, kept outside the card because the
+ * install button (module-level) writes it to the resume record, and the card
+ * (rebuilt on every render) reads the endpoint back. The install ends in a
+ * host restart; this is what lets the wizard come back to the same place.
+ */
+const localCard = { endpoint: 'http://127.0.0.1:11434', model: null };
+const RESUME_KEY = 'nanoclaw-web:wizard-resume';
+/** Set by openWizard when a resume record is found; consumed by the Local card. */
+let resumeEndpoint = null;
 function renderHarness(h) {
+    // Name the model. "Needed for local models" is true and says nothing; this
+    // install is minutes and a restart, and the row should say what you get.
+    const model = h.defaultModel?.model_id ?? localCard.model;
     if (h.installed) {
-        harnessText.textContent = '✓ OpenCode installed — local models run on it.';
+        harnessText.textContent = model ? `✓ OpenCode installed — ${model} runs on it.` : '✓ OpenCode installed.';
         harnessBtn.hidden = true;
         return;
     }
@@ -313,7 +350,7 @@ function renderHarness(h) {
     }
     harnessBtn.hidden = !h.canInstall;
     harnessBtn.disabled = false;
-    harnessBtn.textContent = 'Install OpenCode';
+    harnessBtn.textContent = 'Set up: install & restart';
     if (h.exitCode !== null && h.exitCode !== 0) {
         harnessText.textContent = `OpenCode install failed: ${h.lines[h.lines.length - 1] ?? `exit ${h.exitCode}`}`;
         // Offered again rather than latched off — most failures here are a missing
@@ -321,11 +358,12 @@ function renderHarness(h) {
         harnessBtn.textContent = 'Retry install';
         return;
     }
-    // Say what it IS and what its absence costs. "Needs the OpenCode harness"
-    // named a missing part without saying what the part does, or that skipping
-    // it leaves a local model selected and unused — the silent failure this
-    // whole row exists to prevent.
-    const what = 'OpenCode is the harness that runs local models — without it your pick is saved but Claude still answers.';
+    // Probe-first flow: the model is chosen and saved above; this row is the one
+    // step between that choice and it doing anything. Say so, naming the model,
+    // and say what happens if the button is not pressed.
+    const what = model
+        ? `OpenCode is not installed — needed to run ${model}. Until then Claude still answers.`
+        : 'OpenCode is not installed — needed to run local models.';
     harnessText.textContent = h.canInstall ? what : `${what} ${h.reason ?? ''}`.trim();
 }
 /** Read the live state into the row. Cheap: the server caches its docker probe. */
@@ -360,6 +398,16 @@ harnessBtn.onclick = async () => {
         '\n\nInstalling rebuilds NanoClaw and its agent image, then restarts the service. It takes a few minutes and the web UI will drop briefly.', 'Install');
     if (!ok)
         return;
+    // The install ends in a host restart. The socket reconnects without a page
+    // load, so usually the wizard is still open and nothing is lost — but a
+    // reload during the gap (or a bored operator hitting F5) would land on a
+    // fresh wizard at step one. Record where we were; openWizard consumes it.
+    try {
+        localStorage.setItem(RESUME_KEY, JSON.stringify({ ...localCard, at: Date.now() }));
+    }
+    catch {
+        /* storage unavailable — the flow still works, it just does not resume */
+    }
     harnessBtn.disabled = true;
     harnessBtn.textContent = 'Installing…';
     try {
@@ -390,8 +438,21 @@ function pollHarness() {
             harnessTimer = null;
             if (state)
                 state.opencode.installed = h.installed;
-            if (h.installed)
-                showToast('OpenCode harness ready', { kind: 'success' });
+            if (h.installed) {
+                // We are back: the restarted host has OpenCode in its registry and its
+                // boot reconcile has wired the default model. Rebuild the step so the
+                // card re-checks the endpoint and shows the model as it now stands.
+                // The page never reloaded, so the resume record is spent unused.
+                try {
+                    localStorage.removeItem(RESUME_KEY);
+                }
+                catch {
+                    /* nothing to clear */
+                }
+                showToast('OpenCode ready', { kind: 'success' });
+                if (step === 0)
+                    render();
+            }
         }
     }, 2000);
 }
@@ -399,10 +460,11 @@ function buildLocalModels() {
     const box = document.createElement('div');
     box.className = 'wiz-auth';
     const urlInput = document.createElement('input');
-    urlInput.value = 'http://127.0.0.1:11434';
+    urlInput.value = resumeEndpoint ?? localCard.endpoint;
+    resumeEndpoint = null;
     const probeBtn = document.createElement('button');
     probeBtn.className = 'mprimary';
-    probeBtn.textContent = 'Probe';
+    probeBtn.textContent = 'Check';
     const urlRow = document.createElement('div');
     urlRow.className = 'mactions';
     urlRow.append(urlInput, probeBtn);
@@ -475,6 +537,7 @@ function buildLocalModels() {
                 row = created.model;
             }
             await apiJson('/api/models/default', { method: 'PUT', body: { model_id: row.id } });
+            localCard.model = modelId;
             showToast(`Default: ${modelId}`, { kind: 'success' });
             // Picking the model is only half of it — without the OpenCode harness a
             // local model produces no env at all and the agent keeps answering from
@@ -508,7 +571,7 @@ function buildLocalModels() {
         if (!ep)
             return;
         probeBtn.disabled = true;
-        probeBtn.textContent = 'Probing…';
+        probeBtn.textContent = 'Checking…';
         statusLine.textContent = '';
         statusLine.className = 'wiz-text';
         try {
@@ -516,6 +579,7 @@ function buildLocalModels() {
             const resolved = (r.endpoint ?? ep).replace(/\/$/, '');
             probed = { kind: r.kind, endpoint: resolved };
             urlInput.value = resolved; // reflect what actually answered
+            localCard.endpoint = resolved;
             // Mark the current default's radio when it lives on this endpoint.
             const roster = (await apiJson('/api/models').catch(() => null));
             const def = roster?.models.find((m) => m.id === roster.default_model_id);
@@ -537,7 +601,7 @@ function buildLocalModels() {
         }
         finally {
             probeBtn.disabled = false;
-            probeBtn.textContent = 'Probe';
+            probeBtn.textContent = 'Check';
         }
     };
     probeBtn.onclick = () => void probe();
@@ -610,13 +674,13 @@ function buildLocalModels() {
     pullRow.className = 'mactions';
     pullRow.append(pullInput, pullBtn);
     box.append(urlRow, installRow, statusLine, list, pullRow, progress, harnessRow);
-    // Auto-query on step entry when the local daemon is already up.
-    if (state?.ollama.reachable)
-        void probe();
-    else
-        pullRow.hidden = true;
+    // Always check on entry — localhost by default, or the endpoint we came back
+    // to. A daemon that is down answers with the error and the Install Ollama
+    // row; that is more honest than an empty card that waits to be asked.
+    pullRow.hidden = true;
+    void probe();
     if (state)
-        renderHarness({ ...state.opencode, running: false, lines: [], exitCode: null });
+        renderHarness({ ...state.opencode, running: false, lines: [], exitCode: null, defaultModel: null });
     void refreshHarness(); // an install may already be running from an earlier visit
     return box;
 }
