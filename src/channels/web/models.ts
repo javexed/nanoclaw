@@ -24,7 +24,13 @@ import { listProviderContainerConfigNames } from '../../providers/provider-conta
 import { log } from '../../log.js';
 import { readEnvFile } from '../../env.js';
 import { upsertEnv } from './env-write.js';
-import { getAssignedModelForAgent, getEffectiveModelForAgent, type WebModel } from './db.js';
+import {
+  getAssignedModelForAgent,
+  getDefaultModelId,
+  getEffectiveModelForAgent,
+  getWebModel,
+  type WebModel,
+} from './db.js';
 
 // ─── SSRF defense for owner-supplied probe/discover/validate URLs ─────────
 //
@@ -374,6 +380,25 @@ function opencodeInstalled(): boolean {
  * Which harness a model kind runs on. Local kinds need OpenCode; until it is
  * installed there is no harness for them and the agent stays on the default.
  */
+/**
+ * The harness a BRAND-NEW group should be born on, from the current default
+ * model. Undefined means "no opinion" — the caller then leaves the instance
+ * default alone.
+ *
+ * Needed because every other path attaches a provider to a group that already
+ * exists: PUT /api/models/default sweeps existing groups, and the boot
+ * reconcile sweeps them again. A group created after both simply never got
+ * one. The wizard's own order guarantees it — model, then access, then first
+ * agent — so the agent is always created last, and on a local-model install it
+ * was always born on Claude.
+ */
+export async function providerForNewAgent(): Promise<string | undefined> {
+  const id = await getDefaultModelId();
+  if (!id) return undefined;
+  const model = await getWebModel(id);
+  return providerForModelKind(model?.kind) ?? undefined;
+}
+
 export function providerForModelKind(kind: string | null | undefined): 'opencode' | null {
   if (!kind || kind === 'anthropic') return null;
   return opencodeInstalled() ? 'opencode' : null;
