@@ -179,6 +179,13 @@ export async function rOpencodeGet({ res }: RouteCtx): Promise<void> {
     running: state.running,
     lines: state.lines,
     exitCode: state.exitCode,
+    // Progress, so a silent step still shows movement: which step, of how
+    // many, and since when. The agent-image rebuild emits almost nothing for
+    // minutes — with only the last line, the UI looked hung.
+    stepIndex: state.stepIndex,
+    stepCount: state.stepCount,
+    stepLabel: state.stepLabel,
+    startedAt: state.startedAt,
     defaultModel: def && def.kind !== 'anthropic' ? { model_id: def.model_id, kind: def.kind } : null,
   });
 }

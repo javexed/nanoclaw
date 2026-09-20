@@ -30,6 +30,12 @@ export interface InstallState {
   exitCode: number | null;
   startedAt: number | null;
   finishedAt: number | null;
+  /** 1-based position in the chain, 0 before the first step. */
+  stepIndex: number;
+  /** How many steps this chain has, so a client can say "3 of 5". */
+  stepCount: number;
+  /** Human name of the step in flight. */
+  stepLabel: string | null;
 }
 
 // ── Host model listing ─────────────────────────────────────────────────────
@@ -307,7 +313,7 @@ async function consumePullStream(job: PullJob, res: Response, key: string, abort
 /** A chain step: a spawned command, or an in-process callback (with a log label).
  *  Callbacks may be async — the chain awaits a returned promise. */
 export type InstallStep =
-  | { run: [string, string[]]; env?: Record<string, string> }
+  | { run: [string, string[]]; env?: Record<string, string>; label?: string }
   | { call: () => void | Promise<void>; label: string };
 
 /**
@@ -340,6 +346,13 @@ function installChainEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
 // A single install step may legitimately run long (a multi-GB model/tarball
 // download), but not forever; past this it's a stall, not progress.
 const STEP_TIMEOUT_MS = 30 * 60 * 1000;
+
+/** A readable name for a run-step that was not given one: the script/command. */
+function stepName(run: [string, string[]]): string {
+  const [cmd, args] = run;
+  const first = args.find((a) => !a.startsWith('-')) ?? cmd;
+  return first.split('/').slice(-1)[0];
+}
 
 export function runInstallChain(state: InstallState, steps: InstallStep[], root: string): void {
   // Line-buffered append. Chunks rarely align with lines: progress output
@@ -384,9 +397,17 @@ export function runInstallChain(state: InstallState, steps: InstallStep[], root:
       state.running = false;
       state.exitCode = 0;
       state.finishedAt = Date.now();
+      state.stepLabel = null;
       return;
     }
     const step = steps[i];
+    // Stamped before the step runs, so a client polling mid-step sees the step
+    // that is actually in flight. A long silent step (an image rebuild emits
+    // little) is the whole reason this exists: without it the UI has only the
+    // last output line, which stops changing and reads as hung.
+    state.stepIndex = i + 1;
+    state.stepCount = steps.length;
+    state.stepLabel = step.label ?? ('call' in step ? step.label : stepName(step.run));
     if ('call' in step) {
       append(`→ ${step.label} …
 `);
@@ -401,7 +422,7 @@ export function runInstallChain(state: InstallState, steps: InstallStep[], root:
       return;
     }
     const [cmd, args] = step.run;
-    append(`→ ${args[0].split('/').slice(-1)[0]} …\n`);
+    append(`→ ${state.stepLabel} …\n`);
     // A step may carry extra env (e.g. a secret token) — merged over the parent
     // so it reaches the child WITHOUT ever appearing in the streamed log or args.
     const child = spawn(cmd, args, { cwd: root, env: installChainEnv(step.env) });
@@ -451,6 +472,9 @@ const tailscaleInstallState: InstallState = {
   exitCode: null,
   startedAt: null,
   finishedAt: null,
+  stepIndex: 0,
+  stepCount: 0,
+  stepLabel: null,
 };
 
 export interface TailscaleInstallState extends InstallState {
@@ -540,6 +564,9 @@ const ollamaInstallState: InstallState = {
   exitCode: null,
   startedAt: null,
   finishedAt: null,
+  stepIndex: 0,
+  stepCount: 0,
+  stepLabel: null,
 };
 
 const OLLAMA_INSTALL_SCRIPT = `

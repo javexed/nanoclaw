@@ -575,6 +575,8 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; margin: 6px 0 
 .mactions input { flex: 1; min-width: 0; }
 
 /* Wizard: local-model radio list */
+/* Second line under the harness row: elapsed + last installer line. */
+.wiz-detail { color: var(--text-dim); font-size: 0.82rem; margin-top: -4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wiz-model-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 180px; overflow-y: auto; }
 /* Weight 600 to match .wiz-choice-title. These are the same KIND of thing as
    "Claude" or "Local (Ollama)" — one of a few options you pick — and they were
