@@ -32,6 +32,8 @@ import {
   KNOWN_ANTHROPIC_MODELS,
   probeEndpointKind,
   validateModel,
+  providerForNewAgent,
+  syncAgentProviderForAssignedModel,
   writeAgentSettingsForAssignedModel,
 } from '../models.js';
 import { probeContainerReachability } from '../reachability.js';
@@ -103,14 +105,31 @@ export async function createAgent(
   } catch (err) {
     return { error: `Could not create agent group: ${(err as Error).message}`, status: 409 };
   }
-  await initGroupFilesystem(group, { instructions });
-  // Materialize the model env NOW: a group born AFTER the default model was
-  // set would otherwise have no settings.json until some later model change —
-  // its first container would fall through to api.anthropic.com.
+  // Born on the harness the default model needs, not on the instance
+  // default. The hint reaches ensureContainerConfig AND decides which
+  // provider-contract files are scaffolded, so it has to be known here
+  // rather than patched on afterwards.
+  let provider: string | undefined;
+  try {
+    provider = await providerForNewAgent();
+  } catch (err) {
+    log.warn('Web: could not resolve the provider for a new agent group', { agentGroupId: group.id, err });
+  }
+  await initGroupFilesystem(group, { instructions, provider });
+  // Materialize the model wiring NOW: a group born AFTER the default model
+  // was set would otherwise have nothing until some later model change - its
+  // first container would fall through to api.anthropic.com.
+  //
+  // Both halves, because they cover different kinds. The settings.json write
+  // carries ANTHROPIC_MODEL and envForModel returns {} for everything else,
+  // so alone it did nothing for a local model - the very case the comment it
+  // replaces was worried about. The provider sync is what stamps provider +
+  // `openai/<model>` and writes the OPENCODE_* env.
   try {
     await writeAgentSettingsForAssignedModel(group.id);
+    await syncAgentProviderForAssignedModel(group.id);
   } catch (err) {
-    log.warn('Web: settings.json write for new agent group failed', { agentGroupId: group.id, err });
+    log.warn('Web: model wiring for new agent group failed', { agentGroupId: group.id, err });
   }
   return { group };
 }
