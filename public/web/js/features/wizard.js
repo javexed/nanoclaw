@@ -78,6 +78,16 @@ function closeWizard() {
         harnessTimer = null;
     }
     stopTick();
+    // The resume record exists to survive a reload that happens WHILE the wizard
+    // is open. Closing it is the point at which there is nothing left to resume,
+    // and leaving a stale record would reopen the wizard on a later visit — it
+    // deliberately bypasses the "already has agents" gate.
+    try {
+        localStorage.removeItem(RESUME_KEY);
+    }
+    catch {
+        /* nothing to clear */
+    }
     $('#wizard').hidden = true;
 }
 async function finish() {
@@ -567,16 +577,20 @@ function pollHarness() {
             if (state)
                 state.opencode.installed = h.installed;
             if (h.installed) {
-                // We are back: the restarted host has OpenCode in its registry and its
-                // boot reconcile has wired the default model. Rebuild the step so the
-                // card re-checks the endpoint and shows the model as it now stands.
-                // The page never reloaded, so the resume record is spent unused.
-                try {
-                    localStorage.removeItem(RESUME_KEY);
-                }
-                catch {
-                    /* nothing to clear */
-                }
+                // We are back: the restarted host has OpenCode in its registry and
+                // its boot reconcile has wired the default model. Rebuild the step so
+                // the card re-checks the endpoint and shows the model as it stands.
+                //
+                // The resume record is deliberately NOT cleared here. It used to be,
+                // reasoning that the page never reloaded — but the install guarantees
+                // a reload shortly after: `pnpm run build` rebuilds the CLIENT bundle
+                // into public/web/js, the service worker's cache name is a content
+                // hash of everything served, so a new worker installs, claims, and
+                // main.ts reloads on controllerchange. Clearing it here meant that
+                // reload landed on a fresh wizard at step one on the Claude card —
+                // the screen "reset" and Local had to be picked again. closeWizard
+                // owns the clearing now, which is when there is nothing left to
+                // resume.
                 showToast('OpenCode ready', { kind: 'success' });
                 if (step === 0)
                     render();
