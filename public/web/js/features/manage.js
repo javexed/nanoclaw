@@ -383,6 +383,9 @@ async function renderOllamaInto(pane, rosterKeys) {
         hostSel.addEventListener('change', () => void refreshModels());
         // Pull form, prefilled from the hardware recommendation.
         const pullInput = document.createElement('input');
+        // Model names in this pane are .mrow-name at weight 600; the field you type
+        // one into was the exception.
+        pullInput.className = 'model-input';
         pullInput.placeholder = 'Model';
         void apiJson('/api/ollama/recommend')
             .then((r) => {
