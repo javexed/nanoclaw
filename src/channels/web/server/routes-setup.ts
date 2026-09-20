@@ -7,7 +7,7 @@ import { randomBytes } from 'crypto';
 
 import { json, readJsonBody } from './http.js';
 import type { RouteCtx } from '../server.js';
-import { getAllWebRooms, getOnboardingComplete, setOnboardingComplete } from '../db.js';
+import { getAllWebRooms, getDefaultModelId, getOnboardingComplete, getWebModel, setOnboardingComplete } from '../db.js';
 import { getAllAgentGroups } from '../../../db/agent-groups.js';
 import { grantRole } from '../../../modules/permissions/db/user-roles.js';
 import {
@@ -165,8 +165,13 @@ export async function rClaudeAuthCancelPost(ctx: RouteCtx): Promise<void> {
 }
 
 /** Harness state + the streamed log of an install in flight. */
-export function rOpencodeGet({ res }: RouteCtx): void {
+export async function rOpencodeGet({ res }: RouteCtx): Promise<void> {
   const state = getOpencodeInstallState();
+  // The model the harness is for, so the row can say "needed to run qwen3:8b"
+  // rather than "needed for local models" — the install is several minutes and
+  // a restart; it should name what the operator gets for it.
+  const defaultId = await getDefaultModelId();
+  const def = defaultId ? await getWebModel(defaultId) : undefined;
   json(res, 200, {
     installed: state.installed,
     canInstall: state.canInstall,
@@ -174,6 +179,7 @@ export function rOpencodeGet({ res }: RouteCtx): void {
     running: state.running,
     lines: state.lines,
     exitCode: state.exitCode,
+    defaultModel: def && def.kind !== 'anthropic' ? { model_id: def.model_id, kind: def.kind } : null,
   });
 }
 
