@@ -228,9 +228,25 @@ function renderEngine(): HTMLElement {
     { id: 'claude', title: 'Claude', body: renderClaudeAuth },
     { id: 'local', title: 'Local model', body: buildLocalModels },
   ]);
-  box.append(choices, nav({}));
-  // The block depends on server state (a local default with no harness), which
-  // holds whichever card is open — so refresh it here, not only inside Local.
+  box.append(
+    choices,
+    nav({
+      next: async () => {
+        // Leaving on Claude makes Claude the engine. A local model picked
+        // earlier stays in the roster but stops being the default — otherwise
+        // the pick would silently keep governing who answers from behind a
+        // card that says Claude. Only when there is one to clear: the PUT
+        // restarts unassigned containers, and a no-op restart is not free.
+        if (engine === 'claude' && (lastHarness?.defaultModel || localCard.model)) {
+          await apiJson('/api/models/default', { method: 'PUT', body: { model_id: null } });
+          localCard.model = null;
+          if (lastHarness) lastHarness.defaultModel = null;
+        }
+      },
+    }),
+  );
+  // The Claude card needs the harness state too — not for a block (Claude's is
+  // "connected"), but so Next knows whether there is a local default to clear.
   if (engine !== 'local') void refreshHarness();
   return box;
 }
@@ -370,23 +386,30 @@ let lastHarness: HarnessState | null = null;
 /**
  * Why the Model step may not be left, or null.
  *
- * Not every step is skippable. A local model saved as the default with no
- * harness to run it is not a choice that can be deferred: with Claude connected
- * it silently answers instead, without it nothing answers at all. The row above
- * says so; letting Next through anyway made the row a suggestion. The condition
- * is server state, not which card is open — switching to the Claude card does
- * not unset a local default.
+ * Not every step is skippable. The rule is one sentence: you may leave this
+ * step only in a state where something can answer. Per card:
+ *
+ *   Claude  — connected. The Connect button is right there.
+ *   Local   — a model picked, AND the harness that runs it installed. A local
+ *             default with no OpenCode is not a choice that can be deferred:
+ *             nothing answers, or Claude silently does instead.
+ *
+ * The card that is OPEN is the choice. A local pick made earlier does not
+ * follow you onto the Claude card — leaving on Claude clears it (see the Next
+ * handler in renderEngine), so the block never asks you to fix a card you are
+ * not on.
  */
-function localBlockReason(h: HarnessState | null): string | null {
-  const model = h?.defaultModel?.model_id ?? localCard.model;
-  if (!model) return null;
-  if (h?.installed ?? state?.opencode.installed) return null;
-  return `Install OpenCode to continue — ${model} can't run without it`;
+function blockReason(): string | null {
+  if (engine === 'claude') return state?.claude.connected ? null : 'Connect Claude to continue';
+  const model = lastHarness?.defaultModel?.model_id ?? localCard.model;
+  if (!model) return 'Pick a model to continue';
+  const installed = lastHarness?.installed ?? state?.opencode.installed;
+  return installed ? null : `Install OpenCode to continue — ${model} can't run without it`;
 }
 
 function applyNavBlock(): void {
   if (!navNext || step !== 0) return;
-  const reason = localBlockReason(lastHarness);
+  const reason = blockReason();
   navNext.disabled = reason !== null;
   navNext.classList.toggle('wiz-blocked', reason !== null);
   navNext.textContent = reason ?? navNextLabel;
