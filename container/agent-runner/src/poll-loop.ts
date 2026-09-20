@@ -1223,7 +1223,43 @@ export async function dispatchResultText(
   // turnDelivered (door deliveries + DB-visible sends like MCP send_message);
   // otherwise by this dispatch's own send count.
   const anythingDelivered = options?.suppressDelivery ? options.turnDelivered === true : sent > 0;
-  const hasUnwrapped = !routing.taskRun && !anythingDelivered && !!scratchpad;
+  let hasUnwrapped = !routing.taskRun && !anythingDelivered && !!scratchpad;
+
+  // A correct answer with no envelope is still a correct answer.
+  //
+  // The nudge below asks the model to re-send its reply wrapped. A capable
+  // model does; a smaller one answers the nudge instead — observed on a local
+  // 8B, twice in a row, where the model had already produced exactly the right
+  // text:
+  //
+  //   [assistant] 'hello'                          ← the answer, unwrapped
+  //   [user]      '<system>Your response was not delivered …'
+  //   [assistant] '<message to="…">Received. All future responses will be
+  //                properly wrapped …</message>'   ← an acknowledgement, delivered
+  //
+  // The reply was thrown away and a meta-comment took its place. So when there
+  // is exactly ONE destination, wrap it here instead of asking: there is no
+  // question who it was for, and delivering the model's own words beats
+  // delivering its apology for the format.
+  //
+  // Strictly one destination. With several, an undirected reply IS ambiguous —
+  // broadcasting or guessing would be worse than the nudge, so that case is
+  // unchanged. Never under suppressDelivery either: there the result door does
+  // not send at all and delivery belongs to the mid-turn door, so wrapping here
+  // would either double-send or bypass the one-door rule.
+  if (hasUnwrapped && !options?.suppressDelivery) {
+    const only = getAllDestinations();
+    if (only.length === 1) {
+      const body = stripHarnessTagArtifacts(scratchpad.trim());
+      if (body) {
+        log(`Unwrapped reply with a single destination ("${only[0].name}") — delivering it rather than nudging`);
+        await sendToDestination(only[0], body, routing);
+        sent++;
+        hasUnwrapped = false;
+      }
+    }
+  }
+
   if (hasUnwrapped) {
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
   }
