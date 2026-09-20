@@ -45,14 +45,17 @@ describe('opencodeInstallability', () => {
 });
 
 describe('opencodeInstallSteps', () => {
-  const labels = (root: string): string[] =>
-    opencodeInstallSteps(root).map((s) => ('call' in s ? s.label : `${s.run[0]} ${s.run[1].join(' ')}`));
+  const labels = (root: string): string[] => opencodeInstallSteps(root).map((s) => s.label ?? '(unlabelled)');
+
+  it('gives every step a human label — the UI shows "3 of 5: <label>"', () => {
+    expect(opencodeInstallSteps('/srv/nanoclaw').every((st) => Boolean(st.label))).toBe(true);
+  });
 
   it('applies, rebuilds both halves, stamps, then restarts — in that order', () => {
     expect(labels('/srv/nanoclaw')).toEqual([
-      `pnpm exec tsx scripts/install-provider.ts ${OPENCODE_SKILL_DIR}`,
-      'pnpm run build',
-      'bash ./container/build.sh build',
+      'Applying the OpenCode skill',
+      'Rebuilding NanoClaw',
+      'Rebuilding the agent image',
       'Stamping the upgrade marker',
       'Restarting',
     ]);
@@ -70,7 +73,7 @@ describe('opencodeInstallSteps', () => {
     // The host runs from dist/; the skill edited src/. Restarting without the
     // build brings back the process that has never seen the new provider.
     const l = labels('/srv/nanoclaw');
-    expect(l.indexOf('pnpm run build')).toBeLessThan(l.indexOf('bash ./container/build.sh build'));
-    expect(l.indexOf('bash ./container/build.sh build')).toBeLessThan(l.indexOf('Restarting'));
+    expect(l.indexOf('Rebuilding NanoClaw')).toBeLessThan(l.indexOf('Rebuilding the agent image'));
+    expect(l.indexOf('Rebuilding the agent image')).toBeLessThan(l.indexOf('Restarting'));
   });
 });
