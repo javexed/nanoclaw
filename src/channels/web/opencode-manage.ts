@@ -21,6 +21,7 @@ import path from 'node:path';
 import { log } from '../../log.js';
 import { listProviderContainerConfigNames } from '../../providers/provider-container-registry.js';
 import { writeUpgradeState } from '../../upgrade-state.js';
+import { pnpmDir } from './host-path.js';
 import { runInstallChain, scheduleHostRestart, type InstallState, type InstallStep } from './ollama-manage.js';
 
 /** Where upstream ships the provider skill this installs. */
@@ -45,6 +46,7 @@ export function opencodeInstallability(facts: {
   installed: boolean;
   skillPresent: boolean;
   dockerAvailable: boolean;
+  pnpmFound: boolean;
 }): { canInstall: boolean; reason: string | null } {
   if (facts.installed) return { canInstall: false, reason: null };
   if (!facts.skillPresent)
@@ -59,6 +61,11 @@ export function opencodeInstallability(facts: {
       canInstall: false,
       reason: 'Docker is not reachable — the agent image has to be rebuilt to carry the harness.',
     };
+  // Checked HERE, before the button is offered, rather than discovered by the
+  // first step: three of the five steps shell out to pnpm, and the skill apply
+  // is the first of them. Failing on it later would be a half-applied provider.
+  if (!facts.pnpmFound)
+    return { canInstall: false, reason: 'pnpm is not on this service’s PATH — the rebuild steps need it.' };
   return { canInstall: true, reason: null };
 }
 
@@ -95,6 +102,7 @@ export function getOpencodeState(root: string = process.cwd()): OpencodeState {
     installed,
     skillPresent: fs.existsSync(path.join(root, OPENCODE_SKILL_DIR, 'SKILL.md')),
     dockerAvailable: installed ? true : dockerAvailable(),
+    pnpmFound: installed ? true : pnpmDir() !== null,
   };
   return { installed, ...opencodeInstallability(facts) };
 }

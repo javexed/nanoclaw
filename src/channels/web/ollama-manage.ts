@@ -18,6 +18,7 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
+import { pnpmDir } from './host-path.js';
 import { safeFetch } from './models.js';
 import { getSystemdUnit, getLaunchdLabel } from '../../install-slug.js';
 
@@ -319,9 +320,15 @@ export type InstallStep =
  */
 function installChainEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
-  const nodeDir = path.dirname(process.execPath);
   const parts = (env.PATH ?? '').split(path.delimiter).filter(Boolean);
-  if (!parts.includes(nodeDir)) env.PATH = [nodeDir, ...parts].join(path.delimiter);
+  // Our own node, and wherever pnpm actually lives — which is NOT always the
+  // same directory. See host-path.ts: a host with two node installs puts pnpm
+  // beside the other one, and splicing only node's dir gives `spawn pnpm
+  // ENOENT`. Both go on, so a step and anything it spawns can reach either.
+  for (const dir of [pnpmDir(), path.dirname(process.execPath)]) {
+    if (dir && !parts.includes(dir)) parts.unshift(dir);
+  }
+  env.PATH = parts.join(path.delimiter);
   return env;
 }
 
