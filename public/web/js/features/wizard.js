@@ -110,6 +110,9 @@ function nav(opts) {
     const next = document.createElement('button');
     next.className = 'mprimary';
     next.textContent = opts.nextLabel ?? 'Next';
+    navNext = next;
+    navNextLabel = opts.nextLabel ?? 'Next';
+    applyNavBlock();
     next.onclick = async () => {
         next.disabled = true;
         try {
@@ -206,6 +209,10 @@ function renderEngine() {
         { id: 'local', title: 'Local model', body: buildLocalModels },
     ]);
     box.append(choices, nav({}));
+    // The block depends on server state (a local default with no harness), which
+    // holds whichever card is open — so refresh it here, not only inside Local.
+    if (engine !== 'local')
+        void refreshHarness();
     return box;
 }
 // The in-flight sign-in, so a re-render mid-flow keeps the URL + code box.
@@ -329,7 +336,41 @@ const localCard = { endpoint: 'http://127.0.0.1:11434', model: null };
 const RESUME_KEY = 'nanoclaw-web:wizard-resume';
 /** Set by openWizard when a resume record is found; consumed by the Local card. */
 let resumeEndpoint = null;
+/** The live Next button, so a harness state change can block or release it. */
+let navNext = null;
+let navNextLabel = 'Next';
+/** Last harness state seen, so a rebuilt nav can apply the block immediately. */
+let lastHarness = null;
+/**
+ * Why the Model step may not be left, or null.
+ *
+ * Not every step is skippable. A local model saved as the default with no
+ * harness to run it is not a choice that can be deferred: with Claude connected
+ * it silently answers instead, without it nothing answers at all. The row above
+ * says so; letting Next through anyway made the row a suggestion. The condition
+ * is server state, not which card is open — switching to the Claude card does
+ * not unset a local default.
+ */
+function localBlockReason(h) {
+    const model = h?.defaultModel?.model_id ?? localCard.model;
+    if (!model)
+        return null;
+    if (h?.installed ?? state?.opencode.installed)
+        return null;
+    return `Install OpenCode to continue — ${model} can't run without it`;
+}
+function applyNavBlock() {
+    if (!navNext || step !== 0)
+        return;
+    const reason = localBlockReason(lastHarness);
+    navNext.disabled = reason !== null;
+    navNext.classList.toggle('wiz-blocked', reason !== null);
+    navNext.textContent = reason ?? navNextLabel;
+    navNext.title = reason ?? '';
+}
 function renderHarness(h) {
+    lastHarness = h;
+    applyNavBlock();
     // Name the model. "Needed for local models" is true and says nothing; this
     // install is minutes and a restart, and the row should say what you get.
     const model = h.defaultModel?.model_id ?? localCard.model;
