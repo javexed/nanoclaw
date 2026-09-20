@@ -462,6 +462,8 @@ interface HarnessState {
   stepCount: number;
   stepLabel: string | null;
   startedAt: number | null;
+  /** Finished successfully, but the answering process has not restarted yet. */
+  restartPending: boolean;
   /** The default local model, if one is set — what the harness is FOR. */
   defaultModel: { model_id: string; kind: string } | null;
 }
@@ -489,6 +491,19 @@ function renderHarness(h: HarnessState): void {
     harnessBtn.textContent = 'Installing…';
     harnessStartedAt = h.startedAt ?? harnessStartedAt ?? Date.now();
     harnessLastLine = h.lines[h.lines.length - 1] ?? '';
+    harnessDetail.hidden = false;
+    paintDetail();
+    startTick();
+    return;
+  }
+  if (h.restartPending) {
+    // Done, and waiting for the process that said so to be replaced. Shown as
+    // progress because that is what it is — offering the Install button here
+    // is what made the operator press it a second time.
+    harnessText.textContent = 'Installing OpenCode — restarting';
+    harnessBtn.hidden = false;
+    harnessBtn.disabled = true;
+    harnessBtn.textContent = 'Installing…';
     harnessDetail.hidden = false;
     paintDetail();
     startTick();
@@ -582,6 +597,11 @@ function pollHarness(): void {
       return; // the host restarts at the end of the install — a gap is expected
     }
     renderHarness(h);
+    // Keep polling across the restart. The gap itself throws (caught above);
+    // this is the window before it, where the old process has already said it
+    // is finished. Bounded so a restart that never lands stops eventually
+    // rather than spinning for the life of the page.
+    if (h.restartPending && Date.now() - (h.startedAt ?? Date.now()) < 15 * 60 * 1000) return;
     if (!h.running) {
       if (harnessTimer) clearInterval(harnessTimer);
       harnessTimer = null;
@@ -849,6 +869,7 @@ function buildLocalModels(): HTMLElement {
       stepCount: 0,
       stepLabel: null,
       startedAt: null,
+      restartPending: false,
     });
   void refreshHarness(); // an install may already be running from an earlier visit
   return box;

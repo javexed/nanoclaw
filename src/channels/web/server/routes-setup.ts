@@ -18,7 +18,7 @@ import {
   upsertEnv,
 } from '../ollama-manage.js';
 import { enableTailscaleServe, getTailscaleServeState } from '../tailscale-serve.js';
-import { getOpencodeInstallState, startOpencodeInstall } from '../opencode-manage.js';
+import { getOpencodeInstallState, restartPending, startOpencodeInstall } from '../opencode-manage.js';
 import {
   cancelClaudeSignin,
   finishClaudeSignin,
@@ -186,6 +186,9 @@ export async function rOpencodeGet({ res }: RouteCtx): Promise<void> {
     stepCount: state.stepCount,
     stepLabel: state.stepLabel,
     startedAt: state.startedAt,
+    // "Finished, and the answer above is stale until I restart." Lets the
+    // client keep waiting instead of reading success as failure.
+    restartPending: restartPending(state),
     defaultModel: def && def.kind !== 'anthropic' ? { model_id: def.model_id, kind: def.kind } : null,
   });
 }
