@@ -46,8 +46,8 @@ export function joinRoom(roomId, roomName) {
     clearAllTurns();
     localStorage.setItem('lastRoom', roomId);
     $('#room-title').textContent = roomName;
+    $('#room-set-btn').hidden = false;
     $('#room-del-btn').hidden = false;
-    $('#no-room-hint').hidden = true;
     $('#app').classList.add('in-room'); // mobile: show the chat pane
     $('#composer').hidden = false;
     clearTranscript();
@@ -69,9 +69,9 @@ export function leaveRoom() {
     state.currentRoom = null;
     state.currentRoomName = '';
     localStorage.removeItem('lastRoom');
-    $('#room-title').textContent = 'Pick a room';
+    $('#room-title').textContent = 'Pick a chat';
+    $('#room-set-btn').hidden = true;
     $('#room-del-btn').hidden = true;
-    $('#no-room-hint').hidden = false;
     $('#composer').hidden = true;
     $('#app').classList.remove('in-room');
     clearTranscript();
@@ -112,7 +112,7 @@ export function wireRoomRename() {
                     return; // switched away mid-request
                 state.currentRoomName = name;
                 title.textContent = name;
-                showToast('Room renamed', { kind: 'success' });
+                showToast('Renamed', { kind: 'success' });
             }
             catch (err) {
                 toastError(err, 'Rename failed');
@@ -135,7 +135,7 @@ export function wireRoomDelete() {
         const roomId = state.currentRoom;
         if (!roomId)
             return;
-        if (!(await confirmDialog(`Delete room "${state.currentRoomName}"? Its messages are removed permanently.`)))
+        if (!(await confirmDialog(`Delete "${state.currentRoomName}" and its agent?`)))
             return;
         try {
             await apiJson(`/api/rooms/${encodeURIComponent(roomId)}`, { method: 'DELETE' });
@@ -143,52 +143,135 @@ export function wireRoomDelete() {
             renderRooms(state.lastRoomsList.filter((r) => r.id !== roomId));
         }
         catch (err) {
-            toastError(err, 'Could not delete room');
+            toastError(err, 'Could not delete chat');
         }
     });
 }
+// ── Create-chat dialog ───────────────────────────────────────────────────────
 export function wireBackButton() {
     $('#back-btn').addEventListener('click', () => {
         $('#app').classList.remove('in-room');
     });
 }
+/**
+ * Creating a chat creates its agent — one object, one form. There is no agent
+ * picker because there is nothing to pick between: an existing agent already
+ * has its chat.
+ */
 export function wireRoomCreate() {
     const dialog = $('#new-room-dialog');
-    onAsync($('#new-room-btn'), 'click', async () => {
-        const select = $('#new-room-agent');
-        try {
-            const agents = (await apiJson('/api/agents'));
-            select.replaceChildren(...agents.map((a) => {
-                const opt = document.createElement('option');
-                opt.value = a.id;
-                opt.textContent = a.name;
-                return opt;
-            }));
-        }
-        catch (err) {
-            toastError(err, 'Could not load agents');
-            return;
-        }
-        $('#new-room-name').value = '';
+    const nameEl = $('#new-room-name');
+    const instrEl = $('#new-room-instructions');
+    const draftBtn = $('#new-room-draft');
+    $('#new-room-btn').addEventListener('click', () => {
+        nameEl.value = '';
+        instrEl.value = '';
         dialog.showModal();
     });
     $('#new-room-cancel').addEventListener('click', () => dialog.close());
+    onAsync(draftBtn, 'click', async () => {
+        const prompt = instrEl.value.trim() || nameEl.value.trim();
+        if (!prompt) {
+            showToast('Type an idea first', { kind: 'error' });
+            return;
+        }
+        draftBtn.disabled = true;
+        const label = draftBtn.textContent;
+        draftBtn.textContent = 'Drafting…';
+        try {
+            const { draft } = (await apiJson('/api/rooms/draft', { method: 'POST', body: { prompt } }));
+            if (draft.name)
+                nameEl.value = draft.name;
+            if (draft.instructions)
+                instrEl.value = draft.instructions;
+        }
+        catch (err) {
+            toastError(err, 'Drafting failed');
+        }
+        finally {
+            draftBtn.disabled = false;
+            draftBtn.textContent = label;
+        }
+    });
     onAsync($('#new-room-form'), 'submit', async (e) => {
         e.preventDefault();
-        const name = $('#new-room-name').value.trim();
-        const agentId = $('#new-room-agent').value;
+        const name = nameEl.value.trim();
         if (!name)
             return;
         try {
             const { room } = (await apiJson('/api/rooms', {
                 method: 'POST',
-                body: { name, agent_group_id: agentId || undefined },
+                body: { name, instructions: instrEl.value.trim() || undefined },
             }));
             dialog.close();
             joinRoom(room.id, room.name);
         }
         catch (err) {
-            toastError(err, 'Could not create room');
+            toastError(err, 'Could not create chat');
+        }
+    });
+}
+export function wireRoomSettings() {
+    const dialog = $('#room-settings-dialog');
+    const modelEl = $('#room-set-model');
+    const instrEl = $('#room-set-instructions');
+    const learnEl = $('#room-set-autolearn');
+    onAsync($('#room-set-btn'), 'click', async () => {
+        const roomId = state.currentRoom;
+        if (!roomId)
+            return;
+        const room = state.lastRoomsList.find((r) => r.id === roomId);
+        try {
+            const [{ models, default_model_id: defaultId }, { instructions }] = await Promise.all([
+                apiJson('/api/models'),
+                apiJson(`/api/rooms/${encodeURIComponent(roomId)}/instructions`),
+            ]);
+            const defName = models.find((m) => m.id === defaultId)?.name;
+            const none = document.createElement('option');
+            none.value = '';
+            none.textContent = defName ? `Default (${defName})` : 'Default';
+            modelEl.replaceChildren(none, ...models.map((m) => {
+                const opt = document.createElement('option');
+                opt.value = m.id;
+                opt.textContent = `${m.name} (${m.kind})`;
+                opt.selected = m.id === room?.model_id;
+                return opt;
+            }));
+            instrEl.value = instructions;
+            learnEl.checked = room?.auto_learn ?? false;
+            dialog.showModal();
+        }
+        catch (err) {
+            toastError(err, 'Could not load chat settings');
+        }
+    });
+    $('#room-settings-cancel').addEventListener('click', () => dialog.close());
+    onAsync($('#room-settings-form'), 'submit', async (e) => {
+        e.preventDefault();
+        const roomId = state.currentRoom;
+        if (!roomId)
+            return;
+        const base = `/api/rooms/${encodeURIComponent(roomId)}`;
+        const room = state.lastRoomsList.find((r) => r.id === roomId);
+        try {
+            // Sent independently so an unchanged field costs nothing, and so one
+            // rejected write (an instructions body over the cap, say) doesn't
+            // silently drop the others.
+            const writes = [
+                apiJson(`${base}/instructions`, { method: 'PUT', body: { instructions: instrEl.value } }),
+            ];
+            if ((modelEl.value || null) !== (room?.model_id ?? null)) {
+                writes.push(apiJson(`${base}/model`, { method: 'PUT', body: { model_id: modelEl.value || null } }));
+            }
+            if (learnEl.checked !== (room?.auto_learn ?? false)) {
+                writes.push(apiJson(`${base}/learning`, { method: 'PUT', body: { autoTrigger: learnEl.checked } }));
+            }
+            await Promise.all(writes);
+            dialog.close();
+            showToast('Saved', { kind: 'success' });
+        }
+        catch (err) {
+            toastError(err, 'Save failed');
         }
     });
 }

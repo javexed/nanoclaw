@@ -702,6 +702,22 @@ export function assertMountSourcesExist(mounts: readonly MountSpec[]): void {
   }
 }
 
+/**
+ * Is this a permission failure on an existing socket, rather than "no daemon"?
+ * Told apart so the operator is not sent to check a daemon that is already up:
+ * the group case has a completely different fix. Deliberately conservative —
+ * anything unrecognised falls back to the generic advice.
+ */
+function deniedByGroup(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (!/permission denied|dial unix.*permission|connect: permission/i.test(msg)) return false;
+  try {
+    return fs.existsSync('/var/run/docker.sock');
+  } catch {
+    return false;
+  }
+}
+
 /** Ensure the container runtime is reachable. Fatal at startup — agents cannot run without it. */
 export function ensureDockerRunning(cli: Cli = realCli('docker')): void {
   try {
@@ -712,10 +728,26 @@ export function ensureDockerRunning(cli: Cli = realCli('docker')): void {
     console.error('\n╔════════════════════════════════════════════════════════════════╗');
     console.error('║  FATAL: Container runtime failed to start                      ║');
     console.error('║                                                                ║');
-    console.error('║  Agents cannot run without a container runtime. To fix:        ║');
-    console.error('║  1. Ensure Docker is installed and running                     ║');
-    console.error('║  2. Run: docker info                                           ║');
-    console.error('║  3. Restart NanoClaw                                           ║');
+    if (deniedByGroup(err)) {
+      // "Install Docker and run `docker info`" is actively misleading here:
+      // Docker IS running and `docker info` WORKS in the operator's shell. What
+      // differs is this process — a systemd user service inherits the group list
+      // its manager had at login, so joining the docker group afterwards never
+      // reaches it, and the service crash-loops while every manual check passes.
+      console.error('║  The socket exists but THIS PROCESS may not use it: it is not  ║');
+      console.error('║  in the docker group. A systemd --user service inherits the    ║');
+      console.error('║  groups its manager had at login, so joining the group later   ║');
+      console.error('║  does not reach it. `docker info` in your shell will work.     ║');
+      console.error('║                                                                ║');
+      console.error('║  Fix: loginctl terminate-user $(id -un)   (another session),   ║');
+      console.error('║  or log out of ALL sessions and back in, then restart the      ║');
+      console.error('║  service. Check with: systemd-run --user --pipe docker info    ║');
+    } else {
+      console.error('║  Agents cannot run without a container runtime. To fix:        ║');
+      console.error('║  1. Ensure Docker is installed and running                     ║');
+      console.error('║  2. Run: docker info                                           ║');
+      console.error('║  3. Restart NanoClaw                                           ║');
+    }
     console.error('╚════════════════════════════════════════════════════════════════╝\n');
     throw new Error('Container runtime is required but failed to start', { cause: err });
   }

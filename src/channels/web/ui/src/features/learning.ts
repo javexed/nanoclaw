@@ -45,7 +45,7 @@ function overlapsFromError(err: unknown): Overlap[] | null {
 }
 
 function outcomeNote(outcome: string | undefined, resolvedBy: string | undefined): string {
-  if (resolvedBy === 'superseded') return 'Superseded by a newer draft';
+  if (resolvedBy === 'superseded') return 'Superseded';
   const who = resolvedBy ? String(resolvedBy).split(':').pop() : null;
   if (outcome === 'kept') return who ? `✅ Kept by ${who}` : '✅ Kept';
   if (outcome === 'discarded') return who ? `🗑 Discarded by ${who}` : '🗑 Discarded';
@@ -113,7 +113,7 @@ function actionRow(card: HTMLElement, data: DraftPayload): HTMLElement {
     try {
       await keep(draftId, false);
       flip(card, 'kept');
-      showToast(`Kept ${data.skillName ?? 'skill'} — the agent restarts to pick it up`, { kind: 'success' });
+      showToast('Kept', { kind: 'success' });
     } catch (err) {
       const overlaps = overlapsFromError(err);
       if (!overlaps) {
@@ -122,7 +122,7 @@ function actionRow(card: HTMLElement, data: DraftPayload): HTMLElement {
         return;
       }
       const list = overlaps.map((o) => `${o.name}${o.reason ? ` — ${o.reason}` : ''}`).join('\n');
-      const go = await confirmDialog(`Overlaps with an existing skill:\n${list}\n\nKeep anyway?`);
+      const go = await confirmDialog(`Overlaps:\n${list}\n\nKeep?`);
       if (!go) {
         setBusy(false);
         return;
@@ -130,7 +130,7 @@ function actionRow(card: HTMLElement, data: DraftPayload): HTMLElement {
       try {
         await keep(draftId, true);
         flip(card, 'kept');
-        showToast(`Kept ${data.skillName ?? 'skill'} — the agent restarts to pick it up`, { kind: 'success' });
+        showToast('Kept', { kind: 'success' });
       } catch (err2) {
         setBusy(false);
         toastError(err2, 'Keep failed');
@@ -174,8 +174,8 @@ export function buildSkillDraftCard(msg: { content?: string; message_type?: stri
 
   const title = document.createElement('div');
   title.className = 'appr-title';
-  const verb = data.kind === 'patch' ? `Revise skill “${data.targetSkill ?? data.skillName ?? ''}”` : 'New skill';
-  title.textContent = `📘 ${verb}${data.kind === 'patch' ? '' : `: ${data.skillName ?? ''}`}`;
+  const verb = data.kind === 'patch' ? `Revise “${data.targetSkill ?? data.skillName ?? ''}”` : (data.skillName ?? '');
+  title.textContent = `📘 ${verb}`;
   card.appendChild(title);
 
   if (data.description) {
@@ -187,9 +187,7 @@ export function buildSkillDraftCard(msg: { content?: string; message_type?: stri
 
   const note = document.createElement('div');
   note.className = 'appr-note';
-  note.textContent = resolved
-    ? outcomeNote(data.outcome, data.resolvedBy)
-    : `learned · ${data.agentName ?? 'agent'} · not live until kept`;
+  note.textContent = resolved ? outcomeNote(data.outcome, data.resolvedBy) : `${data.agentName ?? 'agent'} · draft`;
   card.appendChild(note);
 
   if (!resolved && data.draftId) card.appendChild(actionRow(card, data));

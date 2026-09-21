@@ -52,8 +52,8 @@ export function joinRoom(roomId: string, roomName: string): void {
   clearAllTurns();
   localStorage.setItem('lastRoom', roomId);
   $('#room-title')!.textContent = roomName;
+  $('#room-set-btn')!.hidden = false;
   $('#room-del-btn')!.hidden = false;
-  $('#no-room-hint')!.hidden = true;
   $('#app')!.classList.add('in-room'); // mobile: show the chat pane
   $('#composer')!.hidden = false;
   clearTranscript();
@@ -75,9 +75,9 @@ export function leaveRoom(): void {
   state.currentRoom = null;
   state.currentRoomName = '';
   localStorage.removeItem('lastRoom');
-  $('#room-title')!.textContent = 'Pick a room';
+  $('#room-title')!.textContent = 'Pick a chat';
+  $('#room-set-btn')!.hidden = true;
   $('#room-del-btn')!.hidden = true;
-  $('#no-room-hint')!.hidden = false;
   $('#composer')!.hidden = true;
   $('#app')!.classList.remove('in-room');
   clearTranscript();
@@ -115,7 +115,7 @@ export function wireRoomRename(): void {
         if (state.currentRoom !== room) return; // switched away mid-request
         state.currentRoomName = name;
         title.textContent = name;
-        showToast('Room renamed', { kind: 'success' });
+        showToast('Renamed', { kind: 'success' });
       } catch (err) {
         toastError(err, 'Rename failed');
       }
@@ -136,23 +136,18 @@ export function wireRoomDelete(): void {
   onAsync($('#room-del-btn')!, 'click', async () => {
     const roomId = state.currentRoom;
     if (!roomId) return;
-    if (!(await confirmDialog(`Delete room "${state.currentRoomName}"? Its messages are removed permanently.`))) return;
+    if (!(await confirmDialog(`Delete "${state.currentRoomName}" and its agent?`))) return;
     try {
       await apiJson(`/api/rooms/${encodeURIComponent(roomId)}`, { method: 'DELETE' });
       leaveRoom();
       renderRooms(state.lastRoomsList.filter((r) => r.id !== roomId));
     } catch (err) {
-      toastError(err, 'Could not delete room');
+      toastError(err, 'Could not delete chat');
     }
   });
 }
 
-// ── Create-room dialog ───────────────────────────────────────────────────────
-
-interface AgentOption {
-  id: string;
-  name: string;
-}
+// ── Create-chat dialog ───────────────────────────────────────────────────────
 
 export function wireBackButton(): void {
   $('#back-btn')!.addEventListener('click', () => {
@@ -160,42 +155,139 @@ export function wireBackButton(): void {
   });
 }
 
+/**
+ * Creating a chat creates its agent — one object, one form. There is no agent
+ * picker because there is nothing to pick between: an existing agent already
+ * has its chat.
+ */
 export function wireRoomCreate(): void {
   const dialog = $('#new-room-dialog') as HTMLDialogElement;
-  onAsync($('#new-room-btn')!, 'click', async () => {
-    const select = $('#new-room-agent') as HTMLSelectElement;
-    try {
-      const agents = (await apiJson('/api/agents')) as AgentOption[];
-      select.replaceChildren(
-        ...agents.map((a) => {
-          const opt = document.createElement('option');
-          opt.value = a.id;
-          opt.textContent = a.name;
-          return opt;
-        }),
-      );
-    } catch (err) {
-      toastError(err, 'Could not load agents');
-      return;
-    }
-    ($('#new-room-name') as HTMLInputElement).value = '';
+  const nameEl = $('#new-room-name') as HTMLInputElement;
+  const instrEl = $('#new-room-instructions') as HTMLTextAreaElement;
+  const draftBtn = $('#new-room-draft') as HTMLButtonElement;
+
+  $('#new-room-btn')!.addEventListener('click', () => {
+    nameEl.value = '';
+    instrEl.value = '';
     dialog.showModal();
   });
   $('#new-room-cancel')!.addEventListener('click', () => dialog.close());
+
+  onAsync(draftBtn, 'click', async () => {
+    const prompt = instrEl.value.trim() || nameEl.value.trim();
+    if (!prompt) {
+      showToast('Type an idea first', { kind: 'error' });
+      return;
+    }
+    draftBtn.disabled = true;
+    const label = draftBtn.textContent;
+    draftBtn.textContent = 'Drafting…';
+    try {
+      const { draft } = (await apiJson('/api/rooms/draft', { method: 'POST', body: { prompt } })) as {
+        draft: { name?: string; instructions?: string };
+      };
+      if (draft.name) nameEl.value = draft.name;
+      if (draft.instructions) instrEl.value = draft.instructions;
+    } catch (err) {
+      toastError(err, 'Drafting failed');
+    } finally {
+      draftBtn.disabled = false;
+      draftBtn.textContent = label;
+    }
+  });
+
   onAsync($('#new-room-form') as HTMLFormElement, 'submit', async (e) => {
     e.preventDefault();
-    const name = ($('#new-room-name') as HTMLInputElement).value.trim();
-    const agentId = ($('#new-room-agent') as HTMLSelectElement).value;
+    const name = nameEl.value.trim();
     if (!name) return;
     try {
       const { room } = (await apiJson('/api/rooms', {
         method: 'POST',
-        body: { name, agent_group_id: agentId || undefined },
+        body: { name, instructions: instrEl.value.trim() || undefined },
       })) as { room: Room };
       dialog.close();
       joinRoom(room.id, room.name);
     } catch (err) {
-      toastError(err, 'Could not create room');
+      toastError(err, 'Could not create chat');
+    }
+  });
+}
+
+// ── Chat settings ────────────────────────────────────────────────────────────
+// Model, standing instructions and the auto-learn switch. These belong to the
+// agent, and the agent is the chat — so they are edited here, in the chat, and
+// addressed by room id. This is what the management drawer's Agents tab used
+// to hold.
+
+interface ModelOption {
+  id: string;
+  name: string;
+  kind: string;
+}
+
+export function wireRoomSettings(): void {
+  const dialog = $('#room-settings-dialog') as HTMLDialogElement;
+  const modelEl = $('#room-set-model') as HTMLSelectElement;
+  const instrEl = $('#room-set-instructions') as HTMLTextAreaElement;
+  const learnEl = $('#room-set-autolearn') as HTMLInputElement;
+
+  onAsync($('#room-set-btn')!, 'click', async () => {
+    const roomId = state.currentRoom;
+    if (!roomId) return;
+    const room = state.lastRoomsList.find((r) => r.id === roomId);
+    try {
+      const [{ models, default_model_id: defaultId }, { instructions }] = await Promise.all([
+        apiJson('/api/models') as Promise<{ models: ModelOption[]; default_model_id: string | null }>,
+        apiJson(`/api/rooms/${encodeURIComponent(roomId)}/instructions`) as Promise<{ instructions: string }>,
+      ]);
+      const defName = models.find((m) => m.id === defaultId)?.name;
+      const none = document.createElement('option');
+      none.value = '';
+      none.textContent = defName ? `Default (${defName})` : 'Default';
+      modelEl.replaceChildren(
+        none,
+        ...models.map((m) => {
+          const opt = document.createElement('option');
+          opt.value = m.id;
+          opt.textContent = `${m.name} (${m.kind})`;
+          opt.selected = m.id === room?.model_id;
+          return opt;
+        }),
+      );
+      instrEl.value = instructions;
+      learnEl.checked = room?.auto_learn ?? false;
+      dialog.showModal();
+    } catch (err) {
+      toastError(err, 'Could not load chat settings');
+    }
+  });
+
+  $('#room-settings-cancel')!.addEventListener('click', () => dialog.close());
+
+  onAsync($('#room-settings-form') as HTMLFormElement, 'submit', async (e) => {
+    e.preventDefault();
+    const roomId = state.currentRoom;
+    if (!roomId) return;
+    const base = `/api/rooms/${encodeURIComponent(roomId)}`;
+    const room = state.lastRoomsList.find((r) => r.id === roomId);
+    try {
+      // Sent independently so an unchanged field costs nothing, and so one
+      // rejected write (an instructions body over the cap, say) doesn't
+      // silently drop the others.
+      const writes: Promise<unknown>[] = [
+        apiJson(`${base}/instructions`, { method: 'PUT', body: { instructions: instrEl.value } }),
+      ];
+      if ((modelEl.value || null) !== (room?.model_id ?? null)) {
+        writes.push(apiJson(`${base}/model`, { method: 'PUT', body: { model_id: modelEl.value || null } }));
+      }
+      if (learnEl.checked !== (room?.auto_learn ?? false)) {
+        writes.push(apiJson(`${base}/learning`, { method: 'PUT', body: { autoTrigger: learnEl.checked } }));
+      }
+      await Promise.all(writes);
+      dialog.close();
+      showToast('Saved', { kind: 'success' });
+    } catch (err) {
+      toastError(err, 'Save failed');
     }
   });
 }

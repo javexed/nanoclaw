@@ -1,21 +1,16 @@
-// ── Management drawer: Agents / Models / Ollama ──────────────────────────────
-// The whole admin surface in one slide-over panel. Rendering is repaint-on-
-// action (each mutation re-fetches its tab) — at this scale the simplicity
+// ── Management drawer: Models / Ollama ──────────────────────────────────────
+// The install-wide admin surface in one slide-over panel. Rendering is
+// repaint-on-action (each mutation re-fetches) — at this scale the simplicity
 // beats diffing. Everything else administrative lives in ncl.
+//
+// Per-chat settings (model, instructions, auto-learn) are NOT here: they
+// belong to the chat and are edited in it (rooms.ts, wireRoomSettings). This
+// drawer holds only what is shared across every chat — the model roster.
 import { $, onAsync } from '../core/dom.js';
 import { apiJson } from '../core/api.js';
 import { showToast, toastError } from '../core/toast.js';
 import { launchWizard } from './wizard.js';
 import { confirmDialog } from '../core/confirm.js';
-
-interface AgentDetail {
-  id: string;
-  name: string;
-  folder: string;
-  model_id: string | null;
-  auto_learn: boolean;
-  rooms: Array<{ id: string; name: string }>;
-}
 
 interface ModelRow {
   id: string;
@@ -40,9 +35,6 @@ let pullTimer: ReturnType<typeof setInterval> | null = null;
 export function wireManage(): void {
   $('#manage-btn')!.addEventListener('click', () => (open ? closeDrawer() : openDrawer()));
   $('#manage-close')!.addEventListener('click', closeDrawer);
-  for (const tab of ['agents', 'models']) {
-    $(`#mtab-${tab}`)!.addEventListener('click', () => showTab(tab));
-  }
   $('#wizard-btn')!.addEventListener('click', () => {
     closeDrawer();
     void launchWizard();
@@ -53,7 +45,7 @@ function openDrawer(): void {
   open = true;
   document.body.classList.add('drawer-open');
   $('#manage')!.classList.add('open');
-  showTab('agents');
+  void renderModels();
 }
 
 function closeDrawer(): void {
@@ -66,258 +58,7 @@ function closeDrawer(): void {
   }
 }
 
-function showTab(tab: string): void {
-  for (const t of ['agents', 'models']) {
-    $(`#mtab-${t}`)!.classList.toggle('active', t === tab);
-    $(`#mpane-${t}`)!.hidden = t !== tab;
-  }
-  if (pullTimer) {
-    clearInterval(pullTimer);
-    pullTimer = null;
-  }
-  if (tab === 'agents') void renderAgents();
-  else void renderModels();
-}
-
-// ── Agents tab ──────────────────────────────────────────────────────────────
-
-async function renderAgents(): Promise<void> {
-  const pane = $('#mpane-agents')!;
-  try {
-    const [detail, modelsRes] = await Promise.all([
-      apiJson('/api/agents/detail') as Promise<{ agents: AgentDetail[]; default_model_id: string | null }>,
-      apiJson('/api/models') as Promise<{ models: ModelRow[] }>,
-    ]);
-    pane.replaceChildren(
-      buildAgentCreate(),
-      ...detail.agents.map((a) => buildAgentRow(a, modelsRes.models, detail.default_model_id)),
-    );
-  } catch (err) {
-    toastError(err, 'Could not load agents');
-  }
-}
-
-/**
- * Auto-learn — per agent. Busy turns (≥5 tool calls) run a skill review by
- * themselves; it only ever stages a draft for the Keep/Discard card. Takes
- * effect on the agent's next container start.
- */
-function buildAutoLearnSeg(a: AgentDetail): HTMLElement {
-  const wrap = document.createElement('div');
-  wrap.className = 'seg';
-  const label = document.createElement('span');
-  label.textContent = 'Auto-learn';
-  const btns = document.createElement('div');
-  btns.className = 'seg-btns';
-  btns.setAttribute('role', 'group');
-  btns.setAttribute('aria-label', `Auto-learn for ${a.name}`);
-  let current = a.auto_learn;
-  const make = (on: boolean): HTMLButtonElement => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = on ? 'On' : 'Off';
-    b.setAttribute('aria-pressed', String(current === on));
-    if (current === on) b.classList.add('selected');
-    onAsync(b, 'click', async () => {
-      if (current === on) return;
-      try {
-        await apiJson(`/api/agents/${encodeURIComponent(a.id)}/learning`, { method: 'PUT', body: { autoTrigger: on } });
-        current = on;
-        for (const x of btns.querySelectorAll('button')) {
-          const sel = x.textContent === (on ? 'On' : 'Off');
-          x.classList.toggle('selected', sel);
-          x.setAttribute('aria-pressed', String(sel));
-        }
-      } catch (err) {
-        toastError(err, 'Could not update auto-learn');
-      }
-    });
-    return b;
-  };
-  btns.append(make(false), make(true));
-  wrap.append(label, btns);
-  return wrap;
-}
-
-function buildAgentRow(a: AgentDetail, models: ModelRow[], defaultModelId: string | null): HTMLElement {
-  const row = document.createElement('div');
-  row.className = 'mrow';
-  const head = document.createElement('div');
-  head.className = 'mrow-head';
-  const name = document.createElement('span');
-  name.className = 'mrow-name';
-  name.textContent = a.name;
-  const del = document.createElement('button');
-  del.className = 'mrow-del';
-  del.textContent = 'Delete';
-  onAsync(del, 'click', async () => {
-    if (!(await confirmDialog(`Delete agent "${a.name}"? Its rooms stay but stop routing to it.`))) return;
-    try {
-      await apiJson(`/api/agents/${encodeURIComponent(a.id)}`, { method: 'DELETE' });
-      showToast(`Deleted ${a.name}`, { kind: 'success' });
-      void renderAgents();
-    } catch (err) {
-      toastError(err, 'Delete failed');
-    }
-  });
-  head.append(name, buildAutoLearnSeg(a), del);
-
-  const modelSel = document.createElement('select');
-  const none = document.createElement('option');
-  none.value = '';
-  // Say what "default" resolves to — the bare label read as placeholder text.
-  const defName = models.find((m) => m.id === defaultModelId)?.name;
-  none.textContent = defName ? `Install default (${defName})` : 'Install default (Claude built-in)';
-  modelSel.appendChild(none);
-  for (const m of models) {
-    const opt = document.createElement('option');
-    opt.value = m.id;
-    opt.textContent = `${m.name} (${m.kind})`;
-    if (m.id === a.model_id) opt.selected = true;
-    modelSel.appendChild(opt);
-  }
-  onAsync(modelSel, 'change', async () => {
-    try {
-      await apiJson(`/api/agents/${encodeURIComponent(a.id)}/model`, {
-        method: 'PUT',
-        body: { model_id: modelSel.value || null },
-      });
-      showToast('Model updated — takes effect on the next turn', { kind: 'success' });
-    } catch (err) {
-      toastError(err, 'Model change failed');
-      void renderAgents();
-    }
-  });
-
-  const rooms = document.createElement('div');
-  rooms.className = 'mrow-meta';
-  rooms.textContent = a.rooms.length ? `Rooms: ${a.rooms.map((r) => r.name).join(', ')}` : 'Not wired to any room';
-
-  // Standing instructions (instructions.prepend.md), collapsed behind a toggle.
-  const instrBox = document.createElement('div');
-  instrBox.hidden = true;
-  const instrBtn = document.createElement('button');
-  instrBtn.textContent = 'Instructions';
-  onAsync(instrBtn, 'click', async () => {
-    if (!instrBox.hidden) {
-      instrBox.hidden = true;
-      return;
-    }
-    instrBtn.disabled = true;
-    try {
-      const { instructions } = (await apiJson(`/api/agents/${encodeURIComponent(a.id)}/instructions`)) as {
-        instructions: string;
-      };
-      const ta = document.createElement('textarea');
-      ta.rows = 6;
-      ta.value = instructions;
-      ta.placeholder = 'Standing instructions for this agent (markdown)';
-      const save = document.createElement('button');
-      save.className = 'mprimary';
-      save.textContent = 'Save';
-      onAsync(save, 'click', async () => {
-        save.disabled = true;
-        try {
-          await apiJson(`/api/agents/${encodeURIComponent(a.id)}/instructions`, {
-            method: 'PUT',
-            body: { instructions: ta.value },
-          });
-          showToast('Saved — applies on the agent\u2019s next session', { kind: 'success' });
-          instrBox.hidden = true;
-        } catch (err) {
-          toastError(err, 'Save failed');
-        } finally {
-          save.disabled = false;
-        }
-      });
-      const actions = document.createElement('div');
-      actions.className = 'mactions';
-      actions.appendChild(save);
-      instrBox.replaceChildren(ta, actions);
-      instrBox.hidden = false;
-    } catch (err) {
-      toastError(err, 'Could not load instructions');
-    } finally {
-      instrBtn.disabled = false;
-    }
-  });
-  const instrRow = document.createElement('div');
-  instrRow.className = 'mactions';
-  instrRow.appendChild(instrBtn);
-
-  row.append(head, modelSel, instrRow, instrBox, rooms);
-  return row;
-}
-
-function buildAgentCreate(): HTMLElement {
-  const box = document.createElement('div');
-  box.className = 'mrow mcreate';
-  const title = document.createElement('div');
-  title.className = 'mrow-name';
-  title.textContent = 'New agent';
-
-  const name = document.createElement('input');
-  name.placeholder = 'Name';
-  name.maxLength = 60;
-  const instructions = document.createElement('textarea');
-  instructions.placeholder = 'Instructions (optional — what should this agent be?)';
-  instructions.rows = 3;
-
-  const draftBtn = document.createElement('button');
-  draftBtn.textContent = '✨ Suggest from prompt';
-  onAsync(draftBtn, 'click', async () => {
-    const prompt = instructions.value.trim() || name.value.trim();
-    if (!prompt) {
-      showToast('Describe the agent first — a name or a sentence in the instructions box', { kind: 'error' });
-      return;
-    }
-    draftBtn.disabled = true;
-    draftBtn.textContent = 'Drafting…';
-    try {
-      const { draft } = (await apiJson('/api/agents/draft', { method: 'POST', body: { prompt } })) as {
-        draft: { name?: string; instructions?: string };
-      };
-      if (draft.name) name.value = draft.name;
-      if (draft.instructions) instructions.value = draft.instructions;
-    } catch (err) {
-      toastError(err, 'Drafting failed');
-    } finally {
-      draftBtn.disabled = false;
-      draftBtn.textContent = '✨ Suggest from prompt';
-    }
-  });
-
-  const create = document.createElement('button');
-  create.className = 'mprimary';
-  create.textContent = 'Create agent';
-  onAsync(create, 'click', async () => {
-    const n = name.value.trim();
-    if (!n) return;
-    create.disabled = true;
-    try {
-      await apiJson('/api/agents', {
-        method: 'POST',
-        body: { name: n, instructions: instructions.value.trim() || undefined },
-      });
-      showToast(`Created ${n} — wire it to a room to start chatting`, { kind: 'success' });
-      name.value = '';
-      instructions.value = '';
-      void renderAgents();
-    } catch (err) {
-      toastError(err, 'Create failed');
-    } finally {
-      create.disabled = false;
-    }
-  });
-
-  const actions = document.createElement('div');
-  actions.className = 'mactions';
-  actions.append(draftBtn, create);
-  box.append(title, name, instructions, actions);
-  return box;
-}
-
-// ── Models tab ──────────────────────────────────────────────────────────────
+// ── Model roster ────────────────────────────────────────────────────────────
 
 function msection(label: string): HTMLElement {
   const el = document.createElement('div');
@@ -336,24 +77,16 @@ async function renderModels(): Promise<void> {
     };
     const rosterKeys = new Set(data.models.map((m) => `${(m.endpoint ?? '').replace(/\/$/, '')}|${m.model_id}`));
     const ollamaBox = document.createElement('div');
-    const rows: HTMLElement[] = data.models.map((m) => buildModelRow(m, data.default_model_id));
-    if (rows.length === 0) {
-      // Empty roster is not "no model": agents fall through to the provider's
-      // built-in Claude default. Say so instead of implying nothing works.
-      const builtin = document.createElement('div');
-      builtin.className = 'mrow';
-      const head = document.createElement('div');
-      head.className = 'mrow-head';
-      const dot = document.createElement('span');
-      dot.className = 'mdot ok';
-      dot.title = 'Cloud (Anthropic)';
-      const nm = document.createElement('span');
-      nm.className = 'mrow-name';
-      nm.textContent = 'Claude — built-in default';
-      head.append(dot, nm);
-      builtin.append(head);
-      rows.push(builtin);
-    }
+    // Claude is ALWAYS a row, not only when the roster is empty. It used to
+    // appear just as an explainer for an empty list, which meant adding any
+    // model made it vanish — and with it the only way back: "Make default"
+    // exists per roster row, Claude has no roster row, and nothing in the UI
+    // ever sent `model_id: null`. Setting a local model as the install default
+    // was therefore a one-way door, with the server perfectly able to undo it.
+    const rows: HTMLElement[] = [
+      buildBuiltinClaudeRow(data.default_model_id),
+      ...data.models.map((m) => buildModelRow(m, data.default_model_id)),
+    ];
     pane.replaceChildren(
       msection('Your models'),
       ...rows,
@@ -367,6 +100,51 @@ async function renderModels(): Promise<void> {
   } catch (err) {
     toastError(err, 'Could not load models');
   }
+}
+
+/**
+ * The built-in Claude provider as a roster row. It has no `web_models` record —
+ * it is what an agent falls back to when no default is set — so "make it the
+ * default" means CLEARING the default (`model_id: null`), which is exactly what
+ * the server has always accepted.
+ */
+function buildBuiltinClaudeRow(defaultId: string | null): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'mrow';
+
+  const head = document.createElement('div');
+  head.className = 'mrow-head';
+  const dot = document.createElement('span');
+  dot.className = 'mdot ok';
+  dot.title = 'Cloud (Anthropic)';
+  const nm = document.createElement('span');
+  nm.className = 'mrow-name';
+  nm.textContent = 'Claude';
+  head.append(dot, nm);
+
+  const meta = document.createElement('div');
+  meta.className = 'mrow-meta';
+  meta.textContent = 'built-in · cloud (Anthropic)';
+
+  const actions = document.createElement('div');
+  actions.className = 'mactions';
+  const def = document.createElement('button');
+  const isDefault = defaultId === null;
+  def.textContent = isDefault ? '★ Default' : 'Make default';
+  def.disabled = isDefault;
+  onAsync(def, 'click', async () => {
+    try {
+      await apiJson('/api/models/default', { method: 'PUT', body: { model_id: null } });
+      showToast('Default set', { kind: 'success' });
+      void renderModels();
+    } catch (err) {
+      toastError(err, 'Could not set default');
+    }
+  });
+  actions.appendChild(def);
+
+  row.append(head, meta, actions);
+  return row;
 }
 
 function buildModelRow(m: ModelRow, defaultId: string | null): HTMLElement {
@@ -402,9 +180,7 @@ function buildModelRow(m: ModelRow, defaultId: string | null): HTMLElement {
     } catch (err) {
       const body = (err as { body?: { agents?: string[] } }).body;
       if (body?.agents?.length) {
-        if (
-          await confirmDialog(`Assigned to: ${body.agents.join(', ')}. Delete anyway (they fall back to the default)?`)
-        ) {
+        if (await confirmDialog(`In use by ${body.agents.join(', ')}. Remove?`)) {
           await apiJson(`/api/models/${encodeURIComponent(m.id)}?force=1`, { method: 'DELETE' }).catch((e) =>
             toastError(e, 'Delete failed'),
           );
@@ -427,7 +203,7 @@ function buildModelRow(m: ModelRow, defaultId: string | null): HTMLElement {
   onAsync(def, 'click', async () => {
     try {
       await apiJson('/api/models/default', { method: 'PUT', body: { model_id: m.id } });
-      showToast('Default model updated', { kind: 'success' });
+      showToast('Default set', { kind: 'success' });
       void renderModels();
     } catch (err) {
       toastError(err, 'Could not set default');
@@ -464,8 +240,7 @@ async function probeRosterDots(pane: HTMLElement, models: ModelRow[]): Promise<v
           continue; // stays grey
         }
         el.classList.add(verdict);
-        (el as HTMLElement).title =
-          verdict === 'ok' ? 'Reachable from agent containers' : `Unreachable${detail ? `: ${detail}` : ''}`;
+        (el as HTMLElement).title = verdict === 'ok' ? 'Reachable' : `Unreachable${detail ? `: ${detail}` : ''}`;
       }
     }),
   );
@@ -501,13 +276,12 @@ function buildCustomEndpoint(rosterKeys: Set<string>): HTMLElement {
       endpoint.value = resolved;
       const kindLine = document.createElement('div');
       kindLine.className = 'mrow-meta';
-      kindLine.textContent =
-        r.kind === 'ollama' ? 'Detected: Ollama' : 'Detected: OpenAI-compatible (LiteLLM, vLLM, …)';
+      kindLine.textContent = r.kind === 'ollama' ? 'Ollama' : 'OpenAI-compatible';
       results.appendChild(kindLine);
       if (r.models.length === 0) {
         const none = document.createElement('div');
         none.className = 'mrow-meta';
-        none.textContent = 'The server answered but lists no models.';
+        none.textContent = 'No models';
         results.appendChild(none);
       }
       for (const modelId of r.models) {
@@ -534,7 +308,7 @@ function buildCustomEndpoint(rosterKeys: Set<string>): HTMLElement {
               method: 'POST',
               body: { name: modelId, kind: r.kind, endpoint: resolved, model_id: modelId },
             });
-            showToast('Added to roster', { kind: 'success' });
+            showToast('Added', { kind: 'success' });
             void renderModels();
           } catch (err) {
             add.disabled = false;
@@ -596,10 +370,7 @@ async function renderOllamaInto(pane: HTMLElement, rosterKeys: Set<string>): Pro
             del.className = 'mrow-del';
             del.textContent = 'Delete';
             onAsync(del, 'click', async () => {
-              if (
-                !(await confirmDialog(`Remove ${mm.name} from ${hostSel.value}? This frees its disk space.`, 'Remove'))
-              )
-                return;
+              if (!(await confirmDialog(`Delete ${mm.name} from ${hostSel.value}?`, 'Delete'))) return;
               try {
                 await apiJson('/api/ollama/delete', {
                   method: 'POST',
@@ -623,7 +394,7 @@ async function renderOllamaInto(pane: HTMLElement, rosterKeys: Set<string>): Pro
               return row;
             }
             const add = document.createElement('button');
-            add.textContent = 'Add to roster';
+            add.textContent = 'Add';
             onAsync(add, 'click', async () => {
               add.disabled = true;
               try {
@@ -631,7 +402,7 @@ async function renderOllamaInto(pane: HTMLElement, rosterKeys: Set<string>): Pro
                   method: 'POST',
                   body: { name: mm.name, kind: 'ollama', endpoint: hostSel.value, model_id: mm.name },
                 });
-                showToast('Added to roster', { kind: 'success' });
+                showToast('Added', { kind: 'success' });
                 void renderModels();
               } catch (err) {
                 add.disabled = false;
@@ -649,7 +420,7 @@ async function renderOllamaInto(pane: HTMLElement, rosterKeys: Set<string>): Pro
         if (models.length === 0) {
           const empty = document.createElement('div');
           empty.className = 'mrow-meta';
-          empty.textContent = 'No models on this host yet — pull one below.';
+          empty.textContent = 'No models';
           list.appendChild(empty);
         }
       } catch (err) {
@@ -657,9 +428,7 @@ async function renderOllamaInto(pane: HTMLElement, rosterKeys: Set<string>): Pro
         const bad = document.createElement('div');
         bad.className = 'mrow-meta';
         const local = /127\.0\.0\.1|localhost/.test(hostSel.value);
-        bad.textContent = local
-          ? 'Ollama is not running on this machine.'
-          : `Host unreachable: ${(err as Error).message}`;
+        bad.textContent = local ? 'Not running' : `Host unreachable: ${(err as Error).message}`;
         list.appendChild(bad);
         if (local) void offerLocalInstall(list, refreshModels);
       }
@@ -668,10 +437,13 @@ async function renderOllamaInto(pane: HTMLElement, rosterKeys: Set<string>): Pro
 
     // Pull form, prefilled from the hardware recommendation.
     const pullInput = document.createElement('input');
-    pullInput.placeholder = 'Model to pull (e.g. qwen3:8b)';
+    // Model names in this pane are .mrow-name at weight 600; the field you type
+    // one into was the exception.
+    pullInput.className = 'model-input';
+    pullInput.placeholder = 'Model';
     void apiJson('/api/ollama/recommend')
       .then((r: { model?: string; note?: string }) => {
-        if (r.model && !pullInput.value) pullInput.placeholder = `Model to pull (recommended: ${r.model})`;
+        if (r.model && !pullInput.value) pullInput.placeholder = r.model;
       })
       .catch(() => {});
     const pullBtn = document.createElement('button');
@@ -751,15 +523,15 @@ async function offerLocalInstall(list: HTMLElement, onReady: () => Promise<void>
     if (state.reachable || !state.canInstall) return;
     const btn = document.createElement('button');
     btn.className = 'mprimary';
-    btn.textContent = 'Install Ollama on this machine';
+    btn.textContent = 'Install Ollama';
     onAsync(btn, 'click', async () => {
       btn.disabled = true;
-      btn.textContent = 'Installing… (a few minutes)';
+      btn.textContent = 'Installing…';
       try {
         await apiJson('/api/ollama/install', { method: 'POST', body: {} });
       } catch (err) {
         btn.disabled = false;
-        btn.textContent = 'Install Ollama on this machine';
+        btn.textContent = 'Install Ollama';
         toastError(err, 'Install failed to start');
         return;
       }
@@ -783,7 +555,7 @@ async function offerLocalInstall(list: HTMLElement, onReady: () => Promise<void>
           if (!st.running && st.exitCode !== null && st.exitCode !== undefined && st.exitCode !== 0) {
             const lastLine = (st.lines ?? []).filter((l) => l.trim()).pop() ?? '';
             btn.disabled = false;
-            btn.textContent = 'Install Ollama on this machine';
+            btn.textContent = 'Install Ollama';
             showToast(`Install failed (exit ${st.exitCode})${lastLine ? `: ${lastLine}` : ''}`, { kind: 'error' });
             return;
           }
@@ -792,8 +564,8 @@ async function offerLocalInstall(list: HTMLElement, onReady: () => Promise<void>
         }
       }
       btn.disabled = false;
-      btn.textContent = 'Install Ollama on this machine';
-      showToast('Install is taking unusually long — check the host logs', { kind: 'error' });
+      btn.textContent = 'Install Ollama';
+      showToast('Install timed out', { kind: 'error' });
     });
     list.appendChild(btn);
   } catch {

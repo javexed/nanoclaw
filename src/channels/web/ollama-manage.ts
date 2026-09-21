@@ -18,17 +18,24 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
+import { pnpmDir } from './host-path.js';
 import { safeFetch } from './models.js';
 import { getSystemdUnit, getLaunchdLabel } from '../../install-slug.js';
 
 const LINES_CAP = 200;
 
-interface InstallState {
+export interface InstallState {
   running: boolean;
   lines: string[];
   exitCode: number | null;
   startedAt: number | null;
   finishedAt: number | null;
+  /** 1-based position in the chain, 0 before the first step. */
+  stepIndex: number;
+  /** How many steps this chain has, so a client can say "3 of 5". */
+  stepCount: number;
+  /** Human name of the step in flight. */
+  stepLabel: string | null;
 }
 
 // ── Host model listing ─────────────────────────────────────────────────────
@@ -306,7 +313,7 @@ async function consumePullStream(job: PullJob, res: Response, key: string, abort
 /** A chain step: a spawned command, or an in-process callback (with a log label).
  *  Callbacks may be async — the chain awaits a returned promise. */
 export type InstallStep =
-  | { run: [string, string[]]; env?: Record<string, string> }
+  | { run: [string, string[]]; env?: Record<string, string>; label?: string }
   | { call: () => void | Promise<void>; label: string };
 
 /**
@@ -319,9 +326,15 @@ export type InstallStep =
  */
 function installChainEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
-  const nodeDir = path.dirname(process.execPath);
   const parts = (env.PATH ?? '').split(path.delimiter).filter(Boolean);
-  if (!parts.includes(nodeDir)) env.PATH = [nodeDir, ...parts].join(path.delimiter);
+  // Our own node, and wherever pnpm actually lives — which is NOT always the
+  // same directory. See host-path.ts: a host with two node installs puts pnpm
+  // beside the other one, and splicing only node's dir gives `spawn pnpm
+  // ENOENT`. Both go on, so a step and anything it spawns can reach either.
+  for (const dir of [pnpmDir(), path.dirname(process.execPath)]) {
+    if (dir && !parts.includes(dir)) parts.unshift(dir);
+  }
+  env.PATH = parts.join(path.delimiter);
   return env;
 }
 
@@ -334,7 +347,14 @@ function installChainEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
 // download), but not forever; past this it's a stall, not progress.
 const STEP_TIMEOUT_MS = 30 * 60 * 1000;
 
-function runInstallChain(state: InstallState, steps: InstallStep[], root: string): void {
+/** A readable name for a run-step that was not given one: the script/command. */
+function stepName(run: [string, string[]]): string {
+  const [cmd, args] = run;
+  const first = args.find((a) => !a.startsWith('-')) ?? cmd;
+  return first.split('/').slice(-1)[0];
+}
+
+export function runInstallChain(state: InstallState, steps: InstallStep[], root: string): void {
   // Line-buffered append. Chunks rarely align with lines: progress output
   // (health-check dots, docker/ollama status) arrives newline-free or
   // \r-separated. An unterminated tail is held as `partial` and rendered as a
@@ -377,9 +397,17 @@ function runInstallChain(state: InstallState, steps: InstallStep[], root: string
       state.running = false;
       state.exitCode = 0;
       state.finishedAt = Date.now();
+      state.stepLabel = null;
       return;
     }
     const step = steps[i];
+    // Stamped before the step runs, so a client polling mid-step sees the step
+    // that is actually in flight. A long silent step (an image rebuild emits
+    // little) is the whole reason this exists: without it the UI has only the
+    // last output line, which stops changing and reads as hung.
+    state.stepIndex = i + 1;
+    state.stepCount = steps.length;
+    state.stepLabel = step.label ?? ('call' in step ? step.label : stepName(step.run));
     if ('call' in step) {
       append(`→ ${step.label} …
 `);
@@ -394,7 +422,7 @@ function runInstallChain(state: InstallState, steps: InstallStep[], root: string
       return;
     }
     const [cmd, args] = step.run;
-    append(`→ ${args[0].split('/').slice(-1)[0]} …\n`);
+    append(`→ ${state.stepLabel} …\n`);
     // A step may carry extra env (e.g. a secret token) — merged over the parent
     // so it reaches the child WITHOUT ever appearing in the streamed log or args.
     const child = spawn(cmd, args, { cwd: root, env: installChainEnv(step.env) });
@@ -432,27 +460,7 @@ function runInstallChain(state: InstallState, steps: InstallStep[], root: string
   runStep(0);
 }
 
-/** Idempotent KEY=VALUE upsert into .env (mirrors the installers' set_env). */
-export function upsertEnv(root: string, key: string, val: string): void {
-  const envFile = path.join(root, '.env');
-  // Strip CR/LF so a value can never inject an extra KEY=value line (e.g. a
-  // crafted value rebinding WEB_HOST). Keys here are constants.
-  const safeVal = String(val).replace(/[\r\n]/g, '');
-  let raw = fs.existsSync(envFile) ? fs.readFileSync(envFile, 'utf8') : '';
-  raw = raw
-    .split('\n')
-    .filter((l) => !l.startsWith(`${key}=`))
-    .join('\n');
-  if (raw && !raw.endsWith('\n')) raw += '\n';
-  fs.writeFileSync(envFile, raw + `${key}=${safeVal}\n`, { mode: 0o600 });
-  // mode only applies on create; force 0600 on the (usual) pre-existing file so
-  // a secret value (e.g. WEB_TOKEN) never lands in a group/world-readable .env.
-  try {
-    fs.chmodSync(envFile, 0o600);
-  } catch {
-    /* best-effort; non-fatal on platforms without chmod semantics */
-  }
-}
+export { upsertEnv } from './env-write.js';
 // ── Tailscale install (one-click from the wizard Access step) ───────────────
 // Only offered where it can actually succeed: tailscaled needs /dev/net/tun (an
 // unprivileged Proxmox LXC only has it if the host passes it through) and the
@@ -464,6 +472,9 @@ const tailscaleInstallState: InstallState = {
   exitCode: null,
   startedAt: null,
   finishedAt: null,
+  stepIndex: 0,
+  stepCount: 0,
+  stepLabel: null,
 };
 
 export interface TailscaleInstallState extends InstallState {
@@ -553,6 +564,9 @@ const ollamaInstallState: InstallState = {
   exitCode: null,
   startedAt: null,
   finishedAt: null,
+  stepIndex: 0,
+  stepCount: 0,
+  stepLabel: null,
 };
 
 const OLLAMA_INSTALL_SCRIPT = `

@@ -22,7 +22,15 @@ import { DATA_DIR } from '../../config.js';
 import { ensureContainerConfig, getContainerConfig, updateContainerConfigScalars } from '../../db/container-configs.js';
 import { listProviderContainerConfigNames } from '../../providers/provider-container-registry.js';
 import { log } from '../../log.js';
-import { getAssignedModelForAgent, getEffectiveModelForAgent, type WebModel } from './db.js';
+import { readEnvFile } from '../../env.js';
+import { upsertEnv } from './env-write.js';
+import {
+  getAssignedModelForAgent,
+  getDefaultModelId,
+  getEffectiveModelForAgent,
+  getWebModel,
+  type WebModel,
+} from './db.js';
 
 // ─── SSRF defense for owner-supplied probe/discover/validate URLs ─────────
 //
@@ -266,79 +274,21 @@ export function isPlausibleAnthropicModelId(id: string): boolean {
 }
 
 /**
- * Compute the env-var overrides for a given model. Returns an empty object
- * when nothing needs to change (caller can use that to wipe the env block).
- *
- * Anthropic-with-custom-model-name: just ANTHROPIC_MODEL.
- * Ollama: ANTHROPIC_BASE_URL pointed at the Ollama endpoint + ANTHROPIC_MODEL.
- *   Ollama serves the Anthropic API at <endpoint>/v1/messages; the SDK
- *   reads ANTHROPIC_BASE_URL and uses it as the API root.
+ * Materialize a model choice into the agent group: an Anthropic model sets
+ * ANTHROPIC_MODEL in the mounted settings.json; a local model sets nothing
+ * there — it runs on OpenCode, wired by syncAgentProviderForAssignedModel
+ * (container config) and syncOpenCodeBackendEnv (install env).
  */
 /**
- * The env a roster model injects into an agent container: ANTHROPIC_MODEL for
- * an Anthropic model, or the base-URL rewrite for a local (Ollama /
- * OpenAI-compatible) endpoint, with 127.0.0.1/localhost rewritten to the docker
- * host-gateway so a container can reach a host-local server. `{}` for a model
- * that can't serve one. Shared by the explicit per-agent pick and the
- * install-default resolver.
+ * The env a roster model injects into an agent container's settings.json —
+ * ANTHROPIC_MODEL for an Anthropic model. A local model injects nothing here:
+ * it runs on OpenCode, configured through the install env
+ * (syncOpenCodeBackendEnv) and container_configs, not through the Claude
+ * settings file. `{}` clears any override a previous assignment wrote.
  */
 export function envForModel(model: WebModel | null): Record<string, string> {
-  if (!model) return {};
-  if (model.kind === 'anthropic') {
-    return { ANTHROPIC_MODEL: model.model_id };
-  }
-  if (model.kind === 'ollama') {
-    if (!model.endpoint) return {};
-    // ANTHROPIC_BASE_URL must be the bare Ollama root: the Anthropic SDK appends
-    // the FULL `/v1/messages` path itself, and Ollama serves the Anthropic API
-    // there. Appending `/v1` here is a bug — it makes the SDK hit
-    // `<endpoint>/v1/v1/messages` → 404, surfaced to the agent as
-    // "issue with the selected model … may not exist". Verified against Ollama
-    // 0.17 (qwen3-coder, llama3.2): bare → 200, `/v1` → 404.
-    const base = containerReachableUrl(model.endpoint.replace(/\/+$/, ''));
-    // The container routes model calls through the OneCLI credential proxy
-    // (HTTP_PROXY/HTTPS_PROXY from the gateway env). A redirected Ollama
-    // endpoint must BYPASS it — the proxy only fronts known providers and
-    // resets anything else (surfaces as "API Error: ECONNRESET" from the
-    // agent). Same requirement as /add-ollama-provider; see docs/ollama.md.
-    let host = 'host.docker.internal';
-    try {
-      host = new URL(base).hostname;
-    } catch {
-      /* keep the default alias */
-    }
-    return {
-      ANTHROPIC_BASE_URL: base,
-      ANTHROPIC_MODEL: model.model_id,
-      NO_PROXY: host,
-      no_proxy: host,
-    };
-  }
-  if (model.kind === 'openai-compatible') {
-    // Direct path — no OpenCode hop. LiteLLM serves the Anthropic-spec
-    // /v1/messages endpoint for every model it fronts, so the default Claude
-    // SDK talks to it natively: same contract as the `ollama` kind above.
-    // Registry endpoints conventionally carry their OpenAI-format `/v1`
-    // suffix; strip it — the SDK appends the full `/v1/messages` path itself
-    // (LiteLLM serves it at the root, like Ollama).
-    if (!model.endpoint) return {};
-    const base = containerReachableUrl(model.endpoint.replace(/\/+$/, '').replace(/\/v1$/, ''));
-    let host = 'host.docker.internal';
-    try {
-      host = new URL(base).hostname;
-    } catch {
-      /* keep the default alias */
-    }
-    return {
-      ANTHROPIC_BASE_URL: base,
-      ANTHROPIC_MODEL: model.model_id,
-      // Bypass the OneCLI credential proxy for the local router — same
-      // requirement (and same failure mode) as the ollama kind.
-      NO_PROXY: host,
-      no_proxy: host,
-    };
-  }
-  return {};
+  if (!model || model.kind !== 'anthropic') return {};
+  return { ANTHROPIC_MODEL: model.model_id };
 }
 
 /**
@@ -404,115 +354,203 @@ export async function writeAgentSettingsForAssignedModel(agentGroupId: string): 
   fs.writeFileSync(settingsPath, JSON.stringify(merged, null, 2) + '\n');
 }
 
+// ── Local models run on OpenCode ────────────────────────────────────────────
+//
+// Anything in the roster that is not an Anthropic model is a local
+// OpenAI-compatible backend — Ollama, LM Studio, vLLM, a LiteLLM router — and
+// those run on upstream's OpenCode harness (/add-opencode), never on the Claude
+// provider. This follows upstream's own contract exactly:
+//
+//   which harness      container_configs.provider = 'opencode'
+//   which model        container_configs.model = 'openai/<id>' (the runner strips the prefix)
+//   which backend      install-wide .env: OPENCODE_PROVIDER=openai, OPENCODE_BASE_URL=<endpoint>/v1,
+//                      OPENCODE_MODEL_CONTEXT_LIMIT + OPENCODE_MODEL_OUTPUT_LIMIT — both required,
+//                      or OpenCode's session creation fails on "Missing key"
+//   reaching the host  NO_PROXY carries the docker host alias so the call bypasses the OneCLI
+//                      credential proxy, which fronts known providers and resets the rest
+//
+// One backend per install is the shape upstream offers; the model is per agent.
+
 /** OpenCode is installed iff its provider container-config is registered. */
 function opencodeInstalled(): boolean {
   return listProviderContainerConfigNames().includes('opencode');
 }
 
 /**
- * Which provider a model kind should run on. A small local model (Ollama) follows
- * tools/format far better on a local harness than on the Claude SDK — so once one
- * is installed, an Ollama-backed agent DEFAULTS to it (no manual Agent → Harness
- * switch; that's the "install it and it just works" behavior). Every other kind —
- * and Ollama when no local harness is installed — stays on the default Claude
- * provider (openai-compatible/LiteLLM is consumed via its Anthropic-spec surface).
- *
- * WHY pi OUTRANKS OpenCode when both are installed. This is the only place that
- * preference is expressed, and it is a property of the harnesses rather than a
- * toss-up: pi replaces the system prompt outright, so the model sees NanoClaw's
- * instructions and nothing else, while OpenCode-lean still carries a coding
- * preamble that has to be stripped. Measured head-to-head 2026-07-31: 587 tokens
- * vs 6,443 — an order of magnitude of a small model's context spent before it
- * reaches the actual task, which is why the lean path fit a stock 4k window and
- * the other needed a 16k variant.
- *
- * Harness selection is deliberately NOT a user-facing choice: it is derived from
- * the model, because "which model" is a question an operator can answer and
- * "which agent harness" is not. An explicit pick still wins — see
- * syncAgentProviderForAssignedModel, where a sticky choice survives reassignment.
+ * Which harness a model kind runs on. Local kinds need OpenCode; until it is
+ * installed there is no harness for them and the agent stays on the default.
  */
+/**
+ * The harness a BRAND-NEW group should be born on, from the current default
+ * model. Undefined means "no opinion" — the caller then leaves the instance
+ * default alone.
+ *
+ * Needed because every other path attaches a provider to a group that already
+ * exists: PUT /api/models/default sweeps existing groups, and the boot
+ * reconcile sweeps them again. A group created after both simply never got
+ * one. The wizard's own order guarantees it — model, then access, then first
+ * agent — so the agent is always created last, and on a local-model install it
+ * was always born on Claude.
+ */
+export async function providerForNewAgent(): Promise<string | undefined> {
+  const id = await getDefaultModelId();
+  if (!id) return undefined;
+  const model = await getWebModel(id);
+  return providerForModelKind(model?.kind) ?? undefined;
+}
+
 export function providerForModelKind(kind: string | null | undefined): 'opencode' | null {
-  if (kind !== 'ollama') return null;
-  if (opencodeInstalled()) return 'opencode';
-  return null;
+  if (!kind || kind === 'anthropic') return null;
+  return opencodeInstalled() ? 'opencode' : null;
 }
 
+export const OPENCODE_DEFAULT_CONTEXT_LIMIT = 32768;
+export const OPENCODE_DEFAULT_OUTPUT_LIMIT = 8192;
+
 /**
- * Keep the agent group's provider in lockstep with its EFFECTIVE model (per-agent
- * assignment OR the workspace default): Ollama → OpenCode when installed, else the
- * default Claude provider. Also (re)writes or clears the per-agent OpenCode model
- * file so the harness always talks to the right local model. Idempotent.
+ * The install-wide keys a local roster model maps onto. Pure; null for an
+ * Anthropic model or one without an endpoint. The provider id is `openai` —
+ * the OpenAI-compatible transport is pinned to that id — not `ollama`.
  */
-export async function syncAgentProviderForAssignedModel(agentGroupId: string): Promise<void> {
-  // Only manage the local-harness axis (Claude ↔ OpenCode ↔ pi). Any OTHER
-  // non-default provider (e.g. codex) is an explicit harness the web model
-  // registry doesn't own — never clobber it. Within the managed axis, an explicit
-  // OpenCode/pi choice (Agent → Harness) is sticky when installed; a
-  // stale/uninstalled one is un-wedged to the default so the group can spawn.
-  const current = (await getContainerConfig(agentGroupId))?.provider;
-  const managed = !current || current === 'claude' || current === 'opencode';
-  const sticky = current === 'opencode' && opencodeInstalled();
-  if (managed && !sticky) {
-    // Decide on the EFFECTIVE model so a workspace-default local model (wizard
-    // "default engine = Ollama") auto-uses OpenCode too, not only per-agent picks.
-    const model = await getEffectiveModelForAgent(agentGroupId);
-    await ensureContainerConfig(agentGroupId);
-    await updateContainerConfigScalars(agentGroupId, { provider: providerForModelKind(model?.kind) });
+export function openCodeBackendEnv(model: WebModel): { env: Record<string, string>; proxyHost: string } | null {
+  if (model.kind === 'anthropic' || !model.endpoint) return null;
+  // OpenCode speaks OpenAI-compat at /v1/chat/completions, so the base URL
+  // takes the /v1 suffix; registry endpoints may already carry it.
+  const base = containerReachableUrl(model.endpoint.replace(/\/+$/, '').replace(/\/v1$/, '')) + '/v1';
+  let proxyHost = 'host.docker.internal';
+  try {
+    proxyHost = new URL(base).hostname;
+  } catch {
+    /* keep the alias */
   }
-  await writeLocalModelForAgent(agentGroupId);
+  return {
+    env: {
+      OPENCODE_PROVIDER: 'openai',
+      OPENCODE_BASE_URL: base,
+      OPENCODE_MODEL: `openai/${model.model_id}`,
+      // OpenCode runs side tasks (session titles, summaries) on a SMALL model,
+      // and with none configured it asks its own built-in default. Observed in
+      // a live session log:
+      //
+      //   ERROR "stream error" providerID=openai modelID=gpt-5.4-nano
+      //     small=true agent=title
+      //     error="AI_APICallError: model 'gpt-5.4-nano' not found"
+      //
+      // A local endpoint serves the models it serves, and an OpenAI cloud name
+      // is never one of them — so every auxiliary call failed. The main reply
+      // was unaffected, which is why it read as noise rather than a fault.
+      //
+      // Point it at the same model: the only one this endpoint is known to
+      // have. The payload handles the rest — a small model equal to the main
+      // one shares its declared limits, one that differs gets a bare entry
+      // (opencode-config.ts, `isMainModel`).
+      OPENCODE_SMALL_MODEL: `openai/${model.model_id}`,
+    },
+    proxyHost,
+  };
+}
+
+function mergeNoProxy(current: string | undefined, host: string): string {
+  const parts = new Set(
+    (current ?? '')
+      .split(/[\s,]+/)
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+  parts.add(host);
+  return [...parts].join(',');
 }
 
 /**
- * Bridge the web model registry → a LOCAL harness. Neither local provider has
- * a notion of web's per-agent model, so both read this file to learn which
- * backend to talk to. Written when the group is on a local harness with an
- * Ollama-kind effective model; removed otherwise, so switching away (or a cloud
- * reassignment) fully clears it. Same placement + "only if the folder exists"
- * contract as writeAgentSettingsForAssignedModel.
- *
- * The file is `local-model.json`. It was `opencode-model.json` when OpenCode was
- * the only reader; pi then inherited the name and a third harness would have
- * inherited the misnomer too. The readers accept either name (new first), so a
- * file written before this rename still resolves; this writer emits only the new
- * name and REMOVES the legacy one, so the two can never disagree.
+ * Point the install's OpenCode at this model's backend. Provider, base URL and
+ * model are set outright; the two limits only if absent, so an operator's
+ * values stick. NO_PROXY is merged into .env AND into this process's env:
+ * upstream's host provider reads the host process env (ctx.hostEnv) and does
+ * not yet fall back to .env for NO_PROXY, so the process copy is what reaches
+ * the container today, and the file copy is what will once it does.
  */
-export const LOCAL_MODEL_FILE = 'local-model.json';
-/** Pre-rename name. Written by no one; still read as a fallback. */
-export const LEGACY_LOCAL_MODEL_FILE = 'opencode-model.json';
+export function syncOpenCodeBackendEnv(model: WebModel): boolean {
+  const backend = openCodeBackendEnv(model);
+  if (!backend) return false;
+  const root = process.cwd();
+  for (const [k, v] of Object.entries(backend.env)) upsertEnv(root, k, v);
+  const have = readEnvFile(['OPENCODE_MODEL_CONTEXT_LIMIT', 'OPENCODE_MODEL_OUTPUT_LIMIT', 'NO_PROXY'], root);
+  if (!have.OPENCODE_MODEL_CONTEXT_LIMIT) {
+    upsertEnv(root, 'OPENCODE_MODEL_CONTEXT_LIMIT', String(OPENCODE_DEFAULT_CONTEXT_LIMIT));
+  }
+  if (!have.OPENCODE_MODEL_OUTPUT_LIMIT) {
+    upsertEnv(root, 'OPENCODE_MODEL_OUTPUT_LIMIT', String(OPENCODE_DEFAULT_OUTPUT_LIMIT));
+  }
+  upsertEnv(root, 'NO_PROXY', mergeNoProxy(have.NO_PROXY, backend.proxyHost));
+  process.env.NO_PROXY = mergeNoProxy(process.env.NO_PROXY, backend.proxyHost);
+  process.env.no_proxy = process.env.NO_PROXY;
+  log.info('Web: OpenCode backend set', { base: backend.env.OPENCODE_BASE_URL, model: backend.env.OPENCODE_MODEL });
+  return true;
+}
 
-export async function writeLocalModelForAgent(agentGroupId: string): Promise<void> {
-  const dir = path.join(DATA_DIR, 'v2-sessions', agentGroupId, '.claude-shared');
-  const file = path.join(dir, LOCAL_MODEL_FILE);
-  const legacy = path.join(dir, LEGACY_LOCAL_MODEL_FILE);
-  // Shared local-model wiring: both local harnesses (opencode + pi) read this file.
-  const provider = (await getContainerConfig(agentGroupId))?.provider;
-  const onLocalHarness = provider === 'opencode' && opencodeInstalled();
-  const model = await (onLocalHarness ? getEffectiveModelForAgent(agentGroupId) : null);
-  if (!model || model.kind !== 'ollama' || !model.endpoint) {
-    // Clear BOTH names: an install that predates the rename can still be
-    // carrying the legacy file, and leaving it would keep stale wiring alive
-    // through the readers' fallback.
-    fs.rmSync(file, { force: true });
-    fs.rmSync(legacy, { force: true });
+/**
+ * Keep the agent group's harness in lockstep with its EFFECTIVE model (the
+ * per-agent assignment, else the workspace default): a local model → OpenCode
+ * when installed, with the backend env written; an Anthropic model → the
+ * default provider. Only the Claude ↔ OpenCode axis is managed — any other
+ * explicit harness (codex, …) is never clobbered. An OpenCode choice the
+ * operator made by hand (e.g. for a cloud OpenCode backend) stays put when the
+ * roster model is Anthropic; only a model id this module wrote is cleared.
+ * Idempotent; takes effect on the next spawn, like the settings.json write.
+ */
+/**
+ * Stamp the workspace default model's harness as the INSTANCE default provider.
+ *
+ * Everything else here is per-group: the default-model sweep re-points existing
+ * groups, and providerForNewAgent borns web-created ones correctly. Neither
+ * reaches a group created anywhere else — `ncl groups create`, a channel
+ * approval, an agent-to-agent subagent — because those take
+ * DEFAULT_AGENT_PROVIDER from .env, which nothing in the web module wrote. They
+ * were born on Claude and only corrected by the next boot reconcile, which is
+ * after their first run.
+ *
+ * The terminal installer already does exactly this with the provider it picks
+ * (setup/auto.ts, "Persist the pick as the instance-wide default so every
+ * future group (channel-approved, ncl-created) is created on this provider").
+ * This is the same line for the browser path.
+ *
+ * Only ever moves between claude and opencode. An operator who set this to some
+ * other provider by hand meant it, and a model choice must not silently undo
+ * that.
+ *
+ * Takes effect for groups created AFTER the next restart: config.ts resolves
+ * DEFAULT_AGENT_PROVIDER once at import, and it is stamped at creation rather
+ * than consulted at spawn, so existing groups are never retroactively flipped.
+ * The OpenCode install restarts anyway; a later model change relies on the
+ * per-group sweep until the next one.
+ */
+export async function syncInstanceDefaultProvider(root: string = process.cwd()): Promise<string | null> {
+  const id = await getDefaultModelId();
+  const model = id ? await getWebModel(id) : undefined;
+  const want = (model && providerForModelKind(model.kind)) || 'claude';
+  const have = (readEnvFile(['DEFAULT_AGENT_PROVIDER'], root).DEFAULT_AGENT_PROVIDER ?? '').trim().toLowerCase();
+  if (have === want) return null;
+  if (have && have !== 'claude' && have !== 'opencode') return null;
+  upsertEnv(root, 'DEFAULT_AGENT_PROVIDER', want);
+  log.info('Web: instance default provider updated', { provider: want, was: have || '(unset)' });
+  return want;
+}
+
+export async function syncAgentProviderForAssignedModel(agentGroupId: string): Promise<void> {
+  const row = await getContainerConfig(agentGroupId);
+  const current = row?.provider ?? null;
+  if (current && current !== 'claude' && current !== 'opencode') return;
+  const model = await getEffectiveModelForAgent(agentGroupId);
+  await ensureContainerConfig(agentGroupId);
+  if (providerForModelKind(model?.kind) === 'opencode' && model) {
+    syncOpenCodeBackendEnv(model);
+    await updateContainerConfigScalars(agentGroupId, { provider: 'opencode', model: `openai/${model.model_id}` });
     return;
   }
-  if (!fs.existsSync(dir)) return; // folder not initialized yet; a later sync rewrites
-  // OpenCode speaks OpenAI-compat at /v1/chat/completions, so its baseURL DOES take
-  // the /v1 suffix (unlike the Anthropic-SDK path in envForModel, where /v1 is a
-  // bug). containerReachableUrl rewrites localhost → host.docker.internal so the
-  // container reaches the host's Ollama, bypassing the OneCLI proxy (NO_PROXY set
-  // by the provider). OPENCODE_MODEL form is `<provider>/<model>` = `ollama/<id>`.
-  const baseURL = containerReachableUrl(model.endpoint.replace(/\/+$/, '')) + '/v1';
-  const payload = {
-    provider: 'ollama',
-    model: `ollama/${model.model_id}`,
-    smallModel: `ollama/${model.model_id}`,
-    baseURL,
-  };
-  fs.writeFileSync(file, JSON.stringify(payload, null, 2) + '\n');
-  // One source of truth: drop the pre-rename file so a reader's fallback can
-  // never serve wiring this function has since changed.
-  fs.rmSync(legacy, { force: true });
+  const updates: Parameters<typeof updateContainerConfigScalars>[1] = {};
+  if (row?.model?.startsWith('openai/')) updates.model = null; // ours — never an operator's ncl-set model
+  if (!(current === 'opencode' && opencodeInstalled())) updates.provider = null;
+  if (Object.keys(updates).length > 0) await updateContainerConfigScalars(agentGroupId, updates);
 }
 
 /**

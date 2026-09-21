@@ -392,6 +392,9 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent-soft
 .wiz-choice-title { font-weight: 600; }
 .wiz-choice-desc { color: var(--text-dim); font-size: 0.85rem; }
 .wiz-nav { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+/* Next while the step cannot be left: red, not greyed. Grey reads as "not yet",
+   this is "not until you do the thing named on the button". */
+.wiz-nav button.wiz-blocked { background: transparent; color: var(--danger); border-color: var(--danger); cursor: not-allowed; opacity: 1; }
 .wiz-token {
   display: block;
   background: var(--bg);
@@ -572,9 +575,22 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; margin: 6px 0 
 .mactions input { flex: 1; min-width: 0; }
 
 /* Wizard: local-model radio list */
+/* Second line under the harness row: elapsed + last installer line. */
+.wiz-detail { color: var(--text-dim); font-size: 0.82rem; margin-top: -4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wiz-model-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 180px; overflow-y: auto; }
-.wiz-model-list label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+/* Weight 600 to match .wiz-choice-title. These are the same KIND of thing as
+   "Claude" or "Local (Ollama)" — one of a few options you pick — and they were
+   the only ones rendered at the body weight, which read as caption text under
+   a heading rather than as the choice itself. */
+.wiz-model-list label { display: flex; align-items: center; gap: 8px; cursor: pointer; font-weight: 600; }
 .wiz-model-list input[type='radio'] { accent-color: var(--accent); }
+/* A field that names a model carries the weight model names are rendered at —
+   .wiz-model-list in the wizard, .mrow-name in the manage drawer, both 600.
+   Scoped to its own class, not `.mactions input`: that class is on seven rows
+   across both surfaces, most of which hold endpoints and hostnames. Unprefixed
+   because it is shared; the wiz- prefix was wrong the moment the second
+   surface needed the same rule. */
+.model-input { font-weight: 600; }
 
 .wiz-token-row { display: flex; gap: 8px; align-items: stretch; }
 .wiz-token-row .wiz-token { flex: 1; min-width: 0; }
@@ -609,15 +625,6 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; margin: 6px 0 
 #wizard-body > div > .wiz-nav { margin-top: auto; }
 
 /* UX review batch */
-#no-room-hint {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-dim);
-  pointer-events: none;
-}
 #chat { position: relative; }
 #room-title { cursor: text; }
 #room-title-edit { font: inherit; font-weight: 600; }
@@ -639,3 +646,64 @@ dialog menu { display: flex; gap: 8px; justify-content: flex-end; margin: 6px 0 
 .seg-btns button.selected { background: #1d4428; color: #fff; }
 /* skill-draft card body (View) */
 .draft-body { white-space: pre-wrap; font-size: 0.8rem; max-height: 320px; overflow: auto; padding: 8px; border-radius: 6px; background: rgba(128,128,128,.12); }
+
+/* ── Staged attachments ───────────────────────────────────────────────────────
+   Chips sit above the textarea until Send, which uploads them with the typed
+   text as the caption. Full-width so the row wraps above the composer controls
+   rather than squeezing the textarea. */
+/* A checkbox and its words are one line, not two. `dialog label` is a grid so
+   the label text sits under its input — right for "Model", "Instructions" and
+   every other stacked field, wrong for a checkbox. The markup has always asked
+   for the exception with class="inline"; this is the rule it was asking for.
+   Without it the tick floats above its own caption, which reads as an unlabelled
+   box next to a stray word. */
+dialog label.inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+dialog label.inline input[type='checkbox'] {
+  /* Keep the box at its intrinsic size — the grid rule stretched it. */
+  width: auto;
+  margin: 0;
+}
+
+#attach-tray {
+  flex: 0 0 100%;
+  order: -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 6px;
+}
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 6px 3px 10px;
+  border: 1px solid var(--border, #d0d0d0);
+  border-radius: 999px;
+  background: var(--bg-alt, #f3f3f3);
+  font-size: 0.85em;
+  line-height: 1.4;
+}
+.attach-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attach-chip-x {
+  border: 0;
+  background: none;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 0.9em;
+  line-height: 1;
+  color: inherit;
+  opacity: 0.6;
+}
+.attach-chip-x:hover,
+.attach-chip-x:focus-visible {
+  opacity: 1;
+}

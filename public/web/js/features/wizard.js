@@ -6,11 +6,13 @@
 // just records completion.
 import { $ } from '../core/dom.js';
 import { apiJson } from '../core/api.js';
+import { confirmDialog } from '../core/confirm.js';
 import { showToast, toastError } from '../core/toast.js';
 let step = 0;
 let state = null;
 /** The engine picked in step 1 — steers whether step 2 (local model) shows. */
 let engine = 'claude';
+let access = null;
 let pullTimer = null;
 export async function maybeOpenWizard() {
     try {
@@ -19,9 +21,34 @@ export async function maybeOpenWizard() {
     catch {
         return;
     }
-    if (state.complete || state.agents > 0 || state.rooms > 0)
+    if (state.complete)
+        return;
+    // A resume record means the operator was mid-wizard when the OpenCode
+    // install restarted the host; reopen even if something exists already.
+    if (!consumeResume() && (state.agents > 0 || state.rooms > 0))
         return;
     openWizard();
+}
+/** Read and clear the resume record; true when there was one (and it is fresh). */
+function consumeResume() {
+    try {
+        const raw = localStorage.getItem(RESUME_KEY);
+        if (!raw)
+            return false;
+        localStorage.removeItem(RESUME_KEY);
+        const r = JSON.parse(raw);
+        if (!r.at || Date.now() - r.at > 60 * 60 * 1000)
+            return false; // an hour: stale means abandoned
+        engine = 'local';
+        if (r.endpoint)
+            localCard.endpoint = r.endpoint;
+        if (r.model)
+            localCard.model = r.model;
+        return true;
+    }
+    catch {
+        return false;
+    }
 }
 /** Manual trigger (manage drawer): refresh state, then open at step one. */
 export async function launchWizard() {
@@ -43,6 +70,24 @@ function closeWizard() {
     if (pullTimer) {
         clearInterval(pullTimer);
         pullTimer = null;
+    }
+    // Deliberately NOT cleared in render(): the harness install outlives a step
+    // change (it rebuilds an image — minutes), so moving through the wizard must
+    // not stop it reporting. Closing the wizard does.
+    if (harness.poll) {
+        clearInterval(harness.poll);
+        harness.poll = null;
+    }
+    stopTick();
+    // The resume record exists to survive a reload that happens WHILE the wizard
+    // is open. Closing it is the point at which there is nothing left to resume,
+    // and leaving a stale record would reopen the wizard on a later visit — it
+    // deliberately bypasses the "already has agents" gate.
+    try {
+        localStorage.removeItem(RESUME_KEY);
+    }
+    catch {
+        /* nothing to clear */
     }
     $('#wizard').hidden = true;
 }
@@ -77,6 +122,9 @@ function nav(opts) {
     const next = document.createElement('button');
     next.className = 'mprimary';
     next.textContent = opts.nextLabel ?? 'Next';
+    navState.next = next;
+    navState.label = opts.nextLabel ?? 'Next';
+    applyNavBlock();
     next.onclick = async () => {
         next.disabled = true;
         try {
@@ -119,56 +167,78 @@ async function copyText(text) {
         return false;
     }
 }
-function para(text) {
-    const p = document.createElement('p');
-    p.className = 'wiz-text';
-    p.textContent = text;
-    return p;
-}
 function heading(text) {
     const h = document.createElement('h3');
     h.textContent = text;
     return h;
 }
-// ── Step: engine ────────────────────────────────────────────────────────────
-function renderEngine() {
-    const box = document.createElement('div');
-    box.append(heading('Which model powers your agents?'));
+/**
+ * Accordion cards for a one-of-few choice: the selected card holds its own
+ * setup body, so toggling expands in place instead of shuffling content
+ * below the cards. A card without a body just selects.
+ */
+function choiceCards(current, set, items) {
     const choices = document.createElement('div');
     choices.className = 'wiz-choices';
-    // Accordion cards: the selected card holds its own setup body, so toggling
-    // expands in place instead of shuffling content below both cards.
-    const mk = (id, title, desc, body) => {
+    for (const it of items) {
         const c = document.createElement('div');
-        c.className = 'wiz-choice' + (engine === id ? ' selected' : '');
+        c.className = 'wiz-choice' + (current === it.id ? ' selected' : '');
         const head = document.createElement('button');
         head.type = 'button';
         head.className = 'wiz-choice-head';
-        const t = document.createElement('div');
-        t.className = 'wiz-choice-title';
-        t.textContent = title;
-        const d = document.createElement('div');
-        d.className = 'wiz-choice-desc';
-        d.textContent = desc;
-        head.append(t, d);
+        const title = document.createElement('div');
+        title.className = 'wiz-choice-title';
+        title.textContent = it.title;
+        head.append(title);
+        if (it.desc) {
+            const d = document.createElement('div');
+            d.className = 'wiz-choice-desc';
+            d.textContent = it.desc;
+            head.append(d);
+        }
         head.onclick = () => {
-            if (engine !== id) {
-                engine = id;
+            if (current !== it.id) {
+                set(it.id);
                 render();
             }
         };
         c.appendChild(head);
-        if (engine === id) {
-            const b = body();
+        if (current === it.id && it.body) {
+            const b = it.body();
             b.classList.add('wiz-choice-body');
             c.appendChild(b);
         }
-        return c;
-    };
-    choices.append(mk('claude', 'Claude (Anthropic)', 'Most capable — sign in with your Claude account.', renderClaudeAuth), mk('local', 'Local model (Ollama)', state?.ollama.reachable
-        ? 'Private, no cloud — pull a model and chat.'
-        : 'Private, no cloud. Not detected yet; select to install it.', buildLocalModels));
-    box.append(choices, nav({}));
+        choices.appendChild(c);
+    }
+    return choices;
+}
+// ── Step: engine ────────────────────────────────────────────────────────────
+function renderEngine() {
+    const box = document.createElement('div');
+    box.append(heading('Model'));
+    const choices = choiceCards(engine, (id) => (engine = id), [
+        { id: 'claude', title: 'Claude', body: renderClaudeAuth },
+        { id: 'local', title: 'Local model', body: buildLocalModels },
+    ]);
+    box.append(choices, nav({
+        next: async () => {
+            // Leaving on Claude makes Claude the engine. A local model picked
+            // earlier stays in the roster but stops being the default — otherwise
+            // the pick would silently keep governing who answers from behind a
+            // card that says Claude. Only when there is one to clear: the PUT
+            // restarts unassigned containers, and a no-op restart is not free.
+            if (engine === 'claude' && (harness.last?.defaultModel || localCard.model)) {
+                await apiJson('/api/models/default', { method: 'PUT', body: { model_id: null } });
+                localCard.model = null;
+                if (harness.last)
+                    harness.last.defaultModel = null;
+            }
+        },
+    }));
+    // The Claude card needs the harness state too — not for a block (Claude's is
+    // "connected"), but so Next knows whether there is a local default to clear.
+    if (engine !== 'local')
+        void refreshHarness();
     return box;
 }
 // The in-flight sign-in, so a re-render mid-flow keeps the URL + code box.
@@ -184,7 +254,7 @@ function renderClaudeAuth() {
     rowEl.className = 'wiz-creds-row';
     const status = document.createElement('span');
     status.className = 'wiz-creds-status' + (connected ? ' is-connected' : '');
-    status.textContent = `Claude account — ${connected ? 'connected' : 'not connected'}`;
+    status.textContent = connected ? 'Connected' : 'Not connected';
     const action = document.createElement('button');
     action.textContent = connected ? 'Reconnect' : 'Connect';
     if (!connected)
@@ -214,9 +284,9 @@ function renderClaudeAuth() {
     link.href = claudeSignin.url;
     link.target = '_blank';
     link.rel = 'noopener';
-    link.textContent = 'Open the sign-in page ↗';
+    link.textContent = 'Sign in ↗';
     const codeInput = document.createElement('input');
-    codeInput.placeholder = 'Paste the code from that page';
+    codeInput.placeholder = 'Code';
     const connect = document.createElement('button');
     connect.className = 'mprimary';
     connect.textContent = 'Connect';
@@ -263,14 +333,281 @@ function renderClaudeAuth() {
 }
 // ── Ollama accordion body (engine screen, engine = local) ───────────────────
 /** The Ollama accordion body on the engine screen: probe → pick → pull. */
+// ── The harness a local model runs on ───────────────────────────────────────
+// A local model needs OpenCode. Without it models.ts writes NO env for a
+// non-anthropic kind, so the agent quietly keeps answering from Claude: the
+// roster row exists, the default is set, and nothing works differently. This
+// row is the only place the install is ever mentioned, so it says what is
+// happening rather than sitting silent.
+/**
+ * Status on the left, the action on the right — the same shape the Claude
+ * credentials row uses, because it is the same kind of row: a thing that is
+ * either set up or has one button to set it up.
+ */
+const harnessRow = document.createElement('div');
+harnessRow.className = 'wiz-creds-row';
+const harnessText = document.createElement('span');
+harnessText.className = 'wiz-text';
+const harnessBtn = document.createElement('button');
+harnessBtn.type = 'button';
+harnessRow.append(harnessText, harnessBtn);
+/**
+ * Second line: elapsed time and the last thing the installer said.
+ *
+ * The elapsed clock is the part that matters. The agent-image rebuild can go
+ * minutes between output lines, and a status line that stops changing reads as
+ * hung — so this ticks once a second from startedAt, independent of the 2s
+ * poll, and keeps moving even when the installer says nothing at all.
+ */
+const harnessDetail = document.createElement('div');
+harnessDetail.className = 'wiz-text wiz-detail';
+harnessDetail.hidden = true;
+/**
+ * Everything the harness row remembers between renders, in one place.
+ *
+ * It was five module-level `let`s — two timers, a start time, the last log
+ * line, the last state — each added as the row grew a feature, and each reset
+ * in a different function. Grouping them makes "what does this row remember,
+ * and who clears it" one question with one answer.
+ */
+const harness = { poll: null, tick: null, startedAt: null, lastLine: '', last: null };
+function elapsed(since) {
+    const secs = Math.max(0, Math.round((Date.now() - since) / 1000));
+    return secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${String(secs % 60).padStart(2, '0')}s`;
+}
+function paintDetail() {
+    if (harness.startedAt === null)
+        return;
+    harnessDetail.textContent = [elapsed(harness.startedAt), harness.lastLine].filter(Boolean).join(' · ');
+}
+function startTick() {
+    if (harness.tick)
+        return;
+    harness.tick = setInterval(paintDetail, 1000);
+}
+function stopTick() {
+    if (harness.tick)
+        clearInterval(harness.tick);
+    harness.tick = null;
+}
+/**
+ * What the Local card currently points at, kept outside the card because the
+ * install button (module-level) writes it to the resume record, and the card
+ * (rebuilt on every render) reads the endpoint back. The install ends in a
+ * host restart; this is what lets the wizard come back to the same place.
+ */
+const localCard = { endpoint: 'http://127.0.0.1:11434', model: null };
+const RESUME_KEY = 'nanoclaw-web:wizard-resume';
+/** The live Next button and its unblocked label, so a state change can release it. */
+const navState = { next: null, label: 'Next' };
+/**
+ * Why the Model step may not be left, or null.
+ *
+ * Not every step is skippable. The rule is one sentence: you may leave this
+ * step only in a state where something can answer. Per card:
+ *
+ *   Claude  — connected. The Connect button is right there.
+ *   Local   — a model picked, AND the harness that runs it installed. A local
+ *             default with no OpenCode is not a choice that can be deferred:
+ *             nothing answers, or Claude silently does instead.
+ *
+ * The card that is OPEN is the choice. A local pick made earlier does not
+ * follow you onto the Claude card — leaving on Claude clears it (see the Next
+ * handler in renderEngine), so the block never asks you to fix a card you are
+ * not on.
+ */
+function blockReason() {
+    if (engine === 'claude')
+        return state?.claude.connected ? null : 'Connect Claude first';
+    const model = harness.last?.defaultModel?.model_id ?? localCard.model;
+    if (!model)
+        return 'Pick a model';
+    const installed = harness.last?.installed ?? state?.opencode.installed;
+    return installed ? null : 'Install OpenCode first';
+}
+function applyNavBlock() {
+    const next = navState.next;
+    if (!next || step !== 0)
+        return;
+    const reason = blockReason();
+    next.disabled = reason !== null;
+    next.classList.toggle('wiz-blocked', reason !== null);
+    next.textContent = reason ?? navState.label;
+    next.title = reason ?? '';
+}
+function renderHarness(h) {
+    harness.last = h;
+    applyNavBlock();
+    // Name the model. "Needed for local models" is true and says nothing; this
+    // install is minutes and a restart, and the row should say what you get.
+    const model = h.defaultModel?.model_id ?? localCard.model;
+    if (h.installed) {
+        harnessText.textContent = '✓ OpenCode installed';
+        harnessBtn.hidden = true;
+        harnessDetail.hidden = true;
+        stopTick();
+        return;
+    }
+    if (h.running) {
+        // Which step, of how many — the named step is the honest progress signal;
+        // the log line below is detail, not status.
+        const where = h.stepCount ? `${h.stepIndex} of ${h.stepCount}` : '';
+        harnessText.textContent = ['Installing OpenCode', where, h.stepLabel].filter(Boolean).join(' — ');
+        harnessBtn.hidden = false;
+        harnessBtn.disabled = true;
+        harnessBtn.textContent = 'Installing…';
+        harness.startedAt = h.startedAt ?? harness.startedAt ?? Date.now();
+        harness.lastLine = h.lines[h.lines.length - 1] ?? '';
+        harnessDetail.hidden = false;
+        paintDetail();
+        startTick();
+        return;
+    }
+    if (h.restartPending) {
+        // Done, and waiting for the process that said so to be replaced. Shown as
+        // progress because that is what it is — offering the Install button here
+        // is what made the operator press it a second time.
+        harnessText.textContent = 'Installing OpenCode — restarting';
+        harnessBtn.hidden = false;
+        harnessBtn.disabled = true;
+        harnessBtn.textContent = 'Installing…';
+        harnessDetail.hidden = false;
+        paintDetail();
+        startTick();
+        return;
+    }
+    stopTick();
+    harnessBtn.hidden = !h.canInstall;
+    harnessBtn.disabled = false;
+    harnessBtn.textContent = 'Install OpenCode';
+    if (h.exitCode !== null && h.exitCode !== 0) {
+        harnessText.textContent = `Install failed — ${h.lines[h.lines.length - 1] ?? `exit ${h.exitCode}`}`;
+        harnessDetail.hidden = true;
+        // Offered again rather than latched off — most failures here are a missing
+        // daemon or a network blip, and the log line above says which.
+        harnessBtn.textContent = 'Retry';
+        return;
+    }
+    // The button says the action and the blocked Next says the consequence, so
+    // this only has to name the gap. A reason (no Docker) is the exception —
+    // there is no button to explain it.
+    const what = model ? `${model} needs OpenCode` : 'Local models need OpenCode';
+    harnessText.textContent = h.canInstall ? what : `${what} — ${h.reason ?? 'unavailable here'}`;
+    harnessDetail.hidden = true;
+}
+/** Read the live state into the row. Cheap: the server caches its docker probe. */
+async function refreshHarness() {
+    try {
+        const h = (await apiJson('/api/web/opencode'));
+        renderHarness(h);
+        if (h.running)
+            pollHarness();
+        if (state)
+            state.opencode.installed = h.installed;
+    }
+    catch {
+        /* leave the row showing what the wizard was opened with */
+    }
+}
+/**
+ * The button. This applies a skill, rebuilds the host, rebuilds the ~2.6GB
+ * agent image and restarts the service, so it asks first — with confirmDialog,
+ * the same prompt that guards deleting a model or a room.
+ *
+ * Deliberately NOT the two-click arm the bearer-token button uses. That guard
+ * is for an action that is irreversible from the UI and changes who can reach
+ * the install (generate flips WEB_HOST to 0.0.0.0 and the endpoint then refuses
+ * to run again). This one is disruptive but reversible — the skill ships a
+ * REMOVE.md and re-running is idempotent — and a changing button label is a
+ * worse way to state a consequence than a sentence with a Cancel next to it.
+ */
+harnessBtn.onclick = async () => {
+    const ok = await confirmDialog('Install OpenCode?\n\nRebuilds NanoClaw and restarts it — a few minutes, and this page will drop briefly.', 'Install');
+    if (!ok)
+        return;
+    // The install ends in a host restart. The socket reconnects without a page
+    // load, so usually the wizard is still open and nothing is lost — but a
+    // reload during the gap (or a bored operator hitting F5) would land on a
+    // fresh wizard at step one. Record where we were; openWizard consumes it.
+    try {
+        localStorage.setItem(RESUME_KEY, JSON.stringify({ ...localCard, at: Date.now() }));
+    }
+    catch {
+        /* storage unavailable — the flow still works, it just does not resume */
+    }
+    harnessBtn.disabled = true;
+    harnessBtn.textContent = 'Installing…';
+    // Don't wait up to 2s for the first poll to say something is happening.
+    harnessText.textContent = 'Installing OpenCode — starting';
+    harness.startedAt = Date.now();
+    harness.lastLine = '';
+    harnessDetail.hidden = false;
+    paintDetail();
+    startTick();
+    try {
+        await apiJson('/api/web/opencode/install', { method: 'POST' });
+    }
+    catch (err) {
+        // 409 means it is already running or already installed — both are states
+        // the poll below reports correctly, so only a real failure surfaces here.
+        toastError(err, 'Could not start the OpenCode install');
+    }
+    pollHarness();
+};
+function pollHarness() {
+    if (harness.poll)
+        clearInterval(harness.poll);
+    harness.poll = setInterval(async () => {
+        let h;
+        try {
+            h = (await apiJson('/api/web/opencode'));
+        }
+        catch {
+            return; // the host restarts at the end of the install — a gap is expected
+        }
+        renderHarness(h);
+        // Keep polling across the restart. The gap itself throws (caught above);
+        // this is the window before it, where the old process has already said it
+        // is finished. Bounded so a restart that never lands stops eventually
+        // rather than spinning for the life of the page.
+        if (h.restartPending && Date.now() - (h.startedAt ?? Date.now()) < 15 * 60 * 1000)
+            return;
+        if (!h.running) {
+            if (harness.poll)
+                clearInterval(harness.poll);
+            harness.poll = null;
+            if (state)
+                state.opencode.installed = h.installed;
+            if (h.installed) {
+                // We are back: the restarted host has OpenCode in its registry and
+                // its boot reconcile has wired the default model. Rebuild the step so
+                // the card re-checks the endpoint and shows the model as it stands.
+                //
+                // The resume record is deliberately NOT cleared here. It used to be,
+                // reasoning that the page never reloaded — but the install guarantees
+                // a reload shortly after: `pnpm run build` rebuilds the CLIENT bundle
+                // into public/web/js, the service worker's cache name is a content
+                // hash of everything served, so a new worker installs, claims, and
+                // main.ts reloads on controllerchange. Clearing it here meant that
+                // reload landed on a fresh wizard at step one on the Claude card —
+                // the screen "reset" and Local had to be picked again. closeWizard
+                // owns the clearing now, which is when there is nothing left to
+                // resume.
+                showToast('OpenCode ready', { kind: 'success' });
+                if (step === 0)
+                    render();
+            }
+        }
+    }, 2000);
+}
 function buildLocalModels() {
     const box = document.createElement('div');
     box.className = 'wiz-auth';
     const urlInput = document.createElement('input');
-    urlInput.value = 'http://127.0.0.1:11434';
+    urlInput.value = localCard.endpoint;
     const probeBtn = document.createElement('button');
     probeBtn.className = 'mprimary';
-    probeBtn.textContent = 'Probe';
+    probeBtn.textContent = 'Check';
     const urlRow = document.createElement('div');
     urlRow.className = 'mactions';
     urlRow.append(urlInput, probeBtn);
@@ -284,7 +621,7 @@ function buildLocalModels() {
     const installErr = document.createElement('div');
     installErr.className = 'wiz-text wiz-err';
     const installBtn = document.createElement('button');
-    installBtn.textContent = state?.ollama.canInstall ? 'Install Ollama on this machine' : 'Ollama not detected';
+    installBtn.textContent = state?.ollama.canInstall ? 'Install Ollama' : 'Not detected';
     installBtn.disabled = !state?.ollama.canInstall;
     installBtn.onclick = async () => {
         installBtn.disabled = true;
@@ -318,7 +655,7 @@ function buildLocalModels() {
                 const lastLine = (st.lines ?? []).filter((l) => l.trim()).pop() ?? '';
                 installErr.textContent = `Install failed (exit ${st.exitCode})${lastLine ? `: ${lastLine}` : ''}`;
                 installBtn.disabled = false;
-                installBtn.textContent = 'Install Ollama on this machine';
+                installBtn.textContent = 'Install Ollama';
             }
         }, 3000);
     };
@@ -343,7 +680,13 @@ function buildLocalModels() {
                 row = created.model;
             }
             await apiJson('/api/models/default', { method: 'PUT', body: { model_id: row.id } });
-            showToast(`${modelId} is the default model`, { kind: 'success' });
+            localCard.model = modelId;
+            showToast(`Default: ${modelId}`, { kind: 'success' });
+            // Picking the model is only half of it — without the OpenCode harness a
+            // local model produces no env at all and the agent keeps answering from
+            // Claude, silently. Refresh the row so the button is right there saying
+            // so; installing is the operator's click, not a side effect of choosing.
+            void refreshHarness();
         }
         catch (err) {
             toastError(err, 'Could not select that model');
@@ -371,7 +714,7 @@ function buildLocalModels() {
         if (!ep)
             return;
         probeBtn.disabled = true;
-        probeBtn.textContent = 'Probing…';
+        probeBtn.textContent = 'Checking…';
         statusLine.textContent = '';
         statusLine.className = 'wiz-text';
         try {
@@ -379,6 +722,7 @@ function buildLocalModels() {
             const resolved = (r.endpoint ?? ep).replace(/\/$/, '');
             probed = { kind: r.kind, endpoint: resolved };
             urlInput.value = resolved; // reflect what actually answered
+            localCard.endpoint = resolved;
             // Mark the current default's radio when it lives on this endpoint.
             const roster = (await apiJson('/api/models').catch(() => null));
             const def = roster?.models.find((m) => m.id === roster.default_model_id);
@@ -387,10 +731,7 @@ function buildLocalModels() {
             const n = r.models.length;
             const kindName = r.kind === 'ollama' ? 'Ollama' : 'OpenAI-compatible server';
             statusLine.className = 'wiz-creds-status is-connected';
-            statusLine.textContent =
-                n === 0
-                    ? `${kindName} detected — nothing installed yet, pull a model below.`
-                    : `${kindName} detected — ${n} model${n === 1 ? '' : 's'}, pick one to make it the default.`;
+            statusLine.textContent = n === 0 ? `${kindName} — no models` : `${kindName} — ${n} model${n === 1 ? '' : 's'}`;
             pullRow.hidden = r.kind !== 'ollama' || !isLocal();
         }
         catch (err) {
@@ -403,7 +744,7 @@ function buildLocalModels() {
         }
         finally {
             probeBtn.disabled = false;
-            probeBtn.textContent = 'Probe';
+            probeBtn.textContent = 'Check';
         }
     };
     probeBtn.onclick = () => void probe();
@@ -411,7 +752,11 @@ function buildLocalModels() {
     const progress = document.createElement('div');
     progress.className = 'wiz-text';
     const pullInput = document.createElement('input');
-    pullInput.placeholder = 'Model to pull (e.g. qwen3:8b)';
+    // Same weight as the list above it: this field holds the same kind of value
+    // the radios do — a model name — and it sat a weight lighter than the models
+    // it sits under.
+    pullInput.className = 'model-input';
+    pullInput.placeholder = 'Model';
     void apiJson('/api/ollama/recommend')
         .then((r) => {
         if (r.model)
@@ -471,23 +816,52 @@ function buildLocalModels() {
     const pullRow = document.createElement('div');
     pullRow.className = 'mactions';
     pullRow.append(pullInput, pullBtn);
-    box.append(urlRow, installRow, statusLine, list, pullRow, progress);
-    // Auto-query on step entry when the local daemon is already up.
-    if (state?.ollama.reachable)
-        void probe();
-    else
-        pullRow.hidden = true;
+    box.append(urlRow, installRow, statusLine, list, pullRow, progress, harnessRow, harnessDetail);
+    // Always check on entry — localhost by default, or the endpoint we came back
+    // to. A daemon that is down answers with the error and the Install Ollama
+    // row; that is more honest than an empty card that waits to be asked.
+    pullRow.hidden = true;
+    void probe();
+    if (state)
+        renderHarness({
+            ...state.opencode,
+            running: false,
+            lines: [],
+            exitCode: null,
+            defaultModel: null,
+            stepIndex: 0,
+            stepCount: 0,
+            stepLabel: null,
+            startedAt: null,
+            restartPending: false,
+        });
+    void refreshHarness(); // an install may already be running from an earlier visit
     return box;
 }
 // ── Step: access ────────────────────────────────────────────────────────────
 function renderAccess() {
     const box = document.createElement('div');
-    box.append(heading('Reach it from other devices?'), para('Right now the chat answers on this machine only. Both options below are optional — Skip is fine.'));
+    box.append(heading('Access'));
+    // First render: the install's current state picks the card.
+    if (access === null) {
+        access = state?.tailscale.active ? 'tailscale' : state?.bearerConfigured ? 'token' : 'local';
+    }
+    // Titles only. Each of these had a second line explaining it ("Only this
+    // computer. No login.") and the explanation was the same sentence as the
+    // title with more words around it. The title now says the whole thing, and
+    // the cards that need more — Tailscale, the token — say it in their body,
+    // where it is tied to a button instead of floating above one.
+    const choices = choiceCards(access, (id) => (access = id), [
+        { id: 'local', title: 'Only from this device' },
+        { id: 'token', title: 'Only from your network with a token', body: buildBearer },
+        { id: 'tailscale', title: 'Tailscale', body: buildTailscale },
+    ]);
+    box.append(choices, nav({}));
+    return box;
+}
+/** Tailscale card body: state + the one action that fits it. */
+function buildTailscale() {
     const ts = document.createElement('div');
-    ts.className = 'mrow';
-    const tsTitle = document.createElement('div');
-    tsTitle.className = 'mrow-name';
-    tsTitle.textContent = 'Tailscale HTTPS';
     // Integrations-row: dot + state text; an action button ONLY when there is an
     // action. 'Already serving' with a disabled enable-button read as broken.
     const tsRow = document.createElement('div');
@@ -498,7 +872,7 @@ function renderAccess() {
     tsHint.className = 'mrow-meta';
     const showServing = (url) => {
         tsStatus.classList.add('is-connected');
-        tsStatus.textContent = 'Serving on your tailnet';
+        tsStatus.textContent = 'Serving';
         tsHint.replaceChildren();
         if (url) {
             const a = document.createElement('a');
@@ -506,7 +880,7 @@ function renderAccess() {
             a.target = '_blank';
             a.rel = 'noopener';
             a.textContent = url;
-            tsHint.append('Open on any tailnet device: ', a);
+            tsHint.append(a);
         }
     };
     if (state?.tailscale.active) {
@@ -514,11 +888,10 @@ function renderAccess() {
         tsRow.appendChild(tsStatus);
     }
     else if (state?.tailscale.available) {
-        tsStatus.textContent = 'Tailscale is up — not serving yet';
-        tsHint.textContent = 'Puts the chat on your tailnet with a real HTTPS cert (installable as an app on your phone).';
+        tsStatus.textContent = 'Not serving';
         const tsBtn = document.createElement('button');
         tsBtn.className = 'mprimary';
-        tsBtn.textContent = 'Enable HTTPS';
+        tsBtn.textContent = 'Enable';
         tsBtn.onclick = async () => {
             tsBtn.disabled = true;
             try {
@@ -545,16 +918,15 @@ function renderAccess() {
         tsRow.append(tsStatus, tsBtn);
     }
     else {
-        tsStatus.textContent = 'Not detected on this machine';
-        tsHint.textContent = 'Install Tailscale (tailscale.com) and sign in, then re-run this step from the wizard.';
+        tsStatus.textContent = 'Not detected';
         tsRow.appendChild(tsStatus);
     }
-    ts.append(tsTitle, tsRow, tsHint);
+    ts.append(tsRow, tsHint);
+    return ts;
+}
+/** Access-token card body: generate, or the configured state. */
+function buildBearer() {
     const bearer = document.createElement('div');
-    bearer.className = 'mrow';
-    const bTitle = document.createElement('div');
-    bTitle.className = 'mrow-name';
-    bTitle.textContent = 'Access token (any network)';
     const bDesc = document.createElement('div');
     bDesc.className = 'mrow-meta';
     if (state?.bearerConfigured) {
@@ -563,33 +935,24 @@ function renderAccess() {
         row.className = 'wiz-creds-row';
         const st = document.createElement('span');
         st.className = 'wiz-creds-status is-connected';
-        st.textContent = 'Token configured';
+        st.textContent = 'Configured';
         row.appendChild(st);
-        bDesc.textContent = 'To replace it, remove WEB_TOKEN from .env and restart, then generate here again.';
-        bearer.append(bTitle, row, bDesc);
-        box.append(ts, bearer, nav({}));
-        return box;
+        bearer.append(row);
+        return bearer;
     }
-    bDesc.textContent =
-        'Generates a token and opens the port to your network. You log in with the token; keep it safe. Requires a restart.';
+    bDesc.textContent = 'Opens this port on restart.';
     const bBtn = document.createElement('button');
     bBtn.textContent = 'Generate token';
-    // Two-click arm: generation commits real install state (token + network
-    // exposure on the next restart), and stray single clicks kept arming it.
-    let armed = false;
-    let disarm = null;
+    // One guard pattern in this wizard, and it is this one. The two-click arm
+    // that used to be here said "Opens the port — click again": a changing
+    // button label is a poor place for the only warning about the one action
+    // here that cannot be undone from the UI (generate binds 0.0.0.0, and the
+    // endpoint then refuses to run again — replacing the token means editing
+    // .env on the host). The dialog has room to say it and a Cancel.
     bBtn.onclick = async () => {
-        if (!armed) {
-            armed = true;
-            bBtn.textContent = 'Opens the port to your network — click again to confirm';
-            disarm = setTimeout(() => {
-                armed = false;
-                bBtn.textContent = 'Generate token';
-            }, 5000);
+        const ok = await confirmDialog('Generate a token?\n\nThis opens the web UI to your whole network, not just this machine. It can’t be undone here.', 'Generate');
+        if (!ok)
             return;
-        }
-        if (disarm)
-            clearTimeout(disarm);
         bBtn.disabled = true;
         try {
             const { token } = (await apiJson('/api/web/auth/bearer/generate', { method: 'POST' }));
@@ -601,7 +964,7 @@ function renderAccess() {
             copyBtn.textContent = 'Copy';
             copyBtn.onclick = async () => {
                 const ok = await copyText(token);
-                copyBtn.textContent = ok ? 'Copied ✓' : 'Select + copy manually';
+                copyBtn.textContent = ok ? 'Copied' : 'Copy failed';
                 if (ok) {
                     setTimeout(() => {
                         copyBtn.textContent = 'Copy';
@@ -611,8 +974,7 @@ function renderAccess() {
             const row = document.createElement('div');
             row.className = 'wiz-token-row';
             row.append(tokenBox, copyBtn);
-            bDesc.textContent =
-                'Save this token now — it is shown once. This also opens the port to your network (binds 0.0.0.0); it becomes active after the restart at the end of the wizard.';
+            bDesc.textContent = 'Shown once.';
             bearer.insertBefore(row, bBtn);
             bBtn.remove(); // spent — the token row replaces it
         }
@@ -621,52 +983,49 @@ function renderAccess() {
             bBtn.disabled = false;
         }
     };
-    bearer.append(bTitle, bDesc, bBtn);
-    box.append(ts, bearer, nav({}));
-    return box;
+    bearer.append(bDesc, bBtn);
+    return bearer;
 }
 // ── Step: first agent ───────────────────────────────────────────────────────
 function renderAgent() {
     const box = document.createElement('div');
     const rerun = (state?.agents ?? 0) > 0;
-    box.append(heading(rerun ? 'Add another agent (optional)' : 'Create your first agent'), para(rerun
-        ? `You already have ${state.agents} agent${state.agents === 1 ? '' : 's'} — leave the name empty to just finish.`
-        : 'A name and, optionally, what it should be. ✨ drafts both from a one-line idea.'));
+    box.append(heading(rerun ? 'Another agent' : 'First agent'));
     const name = document.createElement('input');
-    name.placeholder = 'Name (e.g. Assistant)';
+    name.placeholder = 'Name';
     const instructions = document.createElement('textarea');
     instructions.rows = 4;
-    instructions.placeholder = 'Instructions (optional)';
+    instructions.placeholder = 'Instructions';
     const draftBtn = document.createElement('button');
-    draftBtn.textContent = '✨ Draft from an idea';
+    draftBtn.textContent = '✨ Draft';
     draftBtn.onclick = async () => {
         const prompt = instructions.value.trim() || name.value.trim();
         if (!prompt) {
-            showToast('Type an idea first — a sentence is enough', { kind: 'error' });
+            showToast('Type an idea first', { kind: 'error' });
             return;
         }
         draftBtn.disabled = true;
         draftBtn.textContent = 'Drafting…';
         try {
-            const { draft } = (await apiJson('/api/agents/draft', { method: 'POST', body: { prompt } }));
+            const { draft } = (await apiJson('/api/rooms/draft', { method: 'POST', body: { prompt } }));
             if (draft.name)
                 name.value = draft.name;
             if (draft.instructions)
                 instructions.value = draft.instructions;
         }
         catch (err) {
-            toastError(err, 'Drafting failed (is a model credential set up?)');
+            toastError(err, 'Drafting failed');
         }
         finally {
             draftBtn.disabled = false;
-            draftBtn.textContent = '✨ Draft from an idea';
+            draftBtn.textContent = '✨ Draft';
         }
     };
     const row = document.createElement('div');
     row.className = 'mactions';
     row.append(draftBtn);
     box.append(name, instructions, row, nav({
-        nextLabel: rerun ? 'Finish' : 'Create & finish',
+        nextLabel: rerun ? 'Finish' : 'Create',
         next: async () => {
             // Re-run with nothing typed: there is nothing to create — the default
             // 'Assistant' name would collide with the agent the first run made.
@@ -675,13 +1034,10 @@ function renderAgent() {
                 await finish();
                 return;
             }
-            const { agent } = (await apiJson('/api/agents', {
-                method: 'POST',
-                body: { name: n, instructions: instructions.value.trim() || undefined },
-            }));
+            // One call: the chat and its agent are created together.
             await apiJson('/api/rooms', {
                 method: 'POST',
-                body: { name: agent.name, agent_group_id: agent.id },
+                body: { name: n, instructions: instructions.value.trim() || undefined },
             });
             await finish();
         },

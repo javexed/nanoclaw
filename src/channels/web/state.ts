@@ -11,7 +11,14 @@
 import { WebSocket } from 'ws';
 
 import { log } from '../../log.js';
-import { getAllWebRooms, getRoomLastActivity, type WebRoom } from './db.js';
+import {
+  getAgentForWebRoom,
+  getAllWebRooms,
+  getAssignedModelForAgent,
+  getRoomLastActivity,
+  type WebRoom,
+} from './db.js';
+import { getAgentLearning } from '../../modules/learning/settings.js';
 import { redactMessageContent } from './redact.js';
 
 export interface WSClient {
@@ -137,14 +144,38 @@ export function pushApprovalResolvedToUser(userId: string, approvalId: string, r
   pushToUser(userId, { type: 'approval_resolved', approvalId, resolvedBy: resolvedByUserId });
 }
 
-/** Room list rows as the client renders them — name + activity sort key. */
+/** Room list rows as the client renders them — the chat and its settings. */
+export interface AnnotatedRoom extends WebRoom {
+  last_activity: number;
+  /** The room's agent. Null only when the pair was broken out of band. */
+  agent_id: string | null;
+  model_id: string | null;
+  auto_learn: boolean;
+}
+
+/**
+ * The room list, with each room's agent settings inline. Room and agent are
+ * one object (migration v4), so there is no second list to fetch and keep in
+ * sync — this replaces the old `/api/agents/detail`.
+ */
 export async function annotateRooms(
   allRoomsIn?: WebRoom[],
   activityMapIn?: Map<string, number>,
-): Promise<Array<WebRoom & { last_activity: number }>> {
+): Promise<AnnotatedRoom[]> {
   const allRooms = allRoomsIn ?? (await getAllWebRooms());
   const activityMap = activityMapIn ?? (await getRoomLastActivity());
-  return allRooms.map((r) => ({ ...r, last_activity: activityMap.get(r.id) ?? r.created_at }));
+  return Promise.all(
+    allRooms.map(async (r) => {
+      const agent = await getAgentForWebRoom(r.id);
+      return {
+        ...r,
+        last_activity: activityMap.get(r.id) ?? r.created_at,
+        agent_id: agent?.id ?? null,
+        model_id: agent ? ((await getAssignedModelForAgent(agent.id))?.id ?? null) : null,
+        auto_learn: agent ? (await getAgentLearning(agent.id)).autoTrigger : false,
+      };
+    }),
+  );
 }
 
 /** Push the current room list to every connected client. Called by the routes that mutate rooms. */

@@ -23,29 +23,27 @@ never need to hard-refresh.
 
 On a fresh install (no agents, no rooms) a short wizard opens by itself —
 this is where setup hands off when you enabled the web UI in the terminal.
-You can reopen it any time from **⚙ → Run setup wizard…**. Every step is
-skippable.
+You can reopen it any time from **⚙ → Setup…**. Every step is skippable.
 
-**1. Which model powers your agents?** Two cards:
+**1. Model** — two cards:
 
-- **Claude (Anthropic)** — expands a credentials row. If a Claude credential
-  is already in your OneCLI vault it shows "✓ connected"; otherwise
-  **Connect** runs a browser sign-in (open the link, paste the code back) and
-  stores the token in the vault.
-- **Local model (Ollama)** — expands an endpoint box (prefilled
-  `http://127.0.0.1:11434`) and a **Probe**. Probe reports what it found
-  ("Ollama detected — N models") and lists them as radios; picking one makes
-  it the default. A **Pull** box downloads a new model with live progress. If
-  Ollama isn't running locally, an **Install Ollama on this machine** button
-  appears (Linux only), and install failures are shown inline.
+- **Claude** — a credentials row. If a Claude credential is already in your
+  OneCLI vault it shows "Connected"; otherwise **Connect** runs a browser
+  sign-in (open the link, paste the code back) and stores the token in the
+  vault.
+- **Local (Ollama)** — an endpoint box (prefilled `http://127.0.0.1:11434`)
+  and **Probe**. Probe reports what it found ("Ollama — N models") and lists
+  them as radios; picking one makes it the default. **Pull** downloads a new
+  model with live progress. If Ollama isn't running locally, **Install
+  Ollama** appears (Linux only); install failures show inline.
 
-**2. Reach it from other devices?** (optional) — see [Access](#access).
+**2. Access** — one of three: **This device**, **Tailscale**, **Access token**.
+See [Access](#access).
 
-**3. Create your first agent** — a name and optional instructions. **✨ Draft
-from an idea** turns a one-line description into a name and instructions.
-**Create & finish** makes the agent and a room wired to it. On a re-run with
-agents already present this becomes "Add another agent", and leaving the name
-empty just finishes.
+**3. First agent** — a name and optional instructions. **✨ Draft** turns a
+one-line idea into both. **Create** makes the agent and a room wired to it. On
+a re-run with agents already present the step is "Another agent", and
+**Finish** with an empty name just finishes.
 
 ## The chat
 
@@ -102,10 +100,10 @@ Two tabs.
 - **Your models** — the roster. Each row has a live status dot: green means
   reachable from agent containers, red means unreachable (tap it for the
   reason), grey means cloud/Anthropic. Star one as the default; ✕ removes it.
-  An empty roster shows "Claude — built-in default": agents fall back to the
+  An empty roster shows "Claude": agents fall back to the
   provider's built-in Claude model until you register something.
 - **On this machine** — the local Ollama console: your host's models with
-  sizes, an **Add to roster** shortcut per model, a **Pull** box with streamed
+  sizes, an **Add** shortcut per model, a **Pull** box with streamed
   progress and cancel, and a one-click installer when local Ollama is down.
 - **Add custom endpoint** — a two-pass probe. Type any endpoint (prefilled
   localhost) and **Probe** detects what is serving it — Ollama, or something
@@ -113,22 +111,24 @@ Two tabs.
   one-click **Add**. Bare hostnames are normalised (`localhost` →
   `http://localhost:11434`).
 
-Assigning a model changes which model the agent talks to. Ollama and
-OpenAI-compatible endpoints both work as-is, because each serves an
-Anthropic-compatible API — see [local models](README.md#local-models).
+Assigning a model changes which model the agent talks to. Local models —
+Ollama and OpenAI-compatible endpoints — run on OpenCode, which is installed on
+demand; until it is, a local assignment has no harness to run on. See
+[local models](README.md#local-models).
 
 ## Access
 
-By default the chat is **localhost-only** — reachable only from the machine it
-runs on. To reach it from a phone or another device, open **⚙ → Run setup
-wizard… → the access step**:
+One of three, chosen in the wizard's access step (**⚙ → Setup…**):
 
-- **Tailscale HTTPS** — puts the chat on your tailnet with a real certificate,
-  so the PWA installs cleanly on a phone. One click if Tailscale is up.
-- **Access token** — generates a bearer token and opens the port to your
-  network (binds `0.0.0.0`). The token is shown once with a **Copy** button —
-  save it, you log in with it. It takes effect after the restart at the end of
-  the wizard. Generation is two-click confirmed, because it changes your
+- **This device** — the default. Reachable only from the machine it runs on;
+  no login.
+- **Tailscale** — puts the chat on your tailnet over HTTPS with a real
+  certificate, so the PWA installs cleanly on a phone; no login. **Enable** is
+  one click if Tailscale is up; "Not detected" means install Tailscale first.
+- **Access token** — for any network. **Generate token** makes a bearer token
+  and opens the port (binds `0.0.0.0`); the token is shown once with **Copy**
+  — save it, you log in with it. It takes effect after the restart at the end
+  of the wizard. Generation is two-click confirmed, because it changes your
   network exposure.
 
 To go back to localhost-only: remove `WEB_TOKEN` from `.env`, set

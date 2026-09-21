@@ -9,8 +9,8 @@
  * (localhost). The first identity to authenticate is granted role='owner'.
  *
  * Schema lives in the central DB (see migration.ts): web_messages,
- * web_room_primes, web_settings, web_models, web_agent_models,
- * web_approvals_index. Rooms are `messaging_groups(channel_type='web')`.
+ * web_settings, web_models, web_agent_models, web_approvals_index. Rooms
+ * are `messaging_groups(channel_type='web')`, one-to-one with their agent.
  *
  * The adapter mirrors agent traffic into web_messages so the PWA has a
  * unified history view; routing/delivery still flows through the per-session
@@ -40,7 +40,7 @@ import { startWebServer, stopWebServer, type WebServer } from './server.js';
 import {
   APPROVAL_INBOX_PREFIX,
   deleteWebApprovalIndex,
-  findActiveAgentForWebRoom,
+  getAgentForWebRoom,
   getWebApprovalInboxes,
   getWebRoom,
   isApprovalInbox,
@@ -187,7 +187,7 @@ function createAdapter(): ChannelAdapter {
         return undefined;
       }
       // One agent per room, so the room's wired agent IS the producer.
-      const producer: WebRoomAgent | null = await findActiveAgentForWebRoom(roomId);
+      const producer: WebRoomAgent | null = await getAgentForWebRoom(roomId);
       const senderName = producer?.name ?? process.env.AGENT_DISPLAY_NAME ?? 'Agent';
       const text = extractText(message);
       if (text !== null && text.length > 0) {
@@ -257,7 +257,7 @@ function extractText(message: OutboundMessage): string | null {
 
 /** The wired agent's display name, for typing frames that don't carry one. */
 async function senderForRoom(roomId: string): Promise<string> {
-  const agent = await findActiveAgentForWebRoom(roomId);
+  const agent = await getAgentForWebRoom(roomId);
   return agent?.name || process.env.AGENT_DISPLAY_NAME || 'Agent';
 }
 

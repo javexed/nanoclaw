@@ -7,7 +7,7 @@ import { randomBytes } from 'crypto';
 
 import { json, readJsonBody } from './http.js';
 import type { RouteCtx } from '../server.js';
-import { getAllWebRooms, getOnboardingComplete, setOnboardingComplete } from '../db.js';
+import { getAllWebRooms, getDefaultModelId, getOnboardingComplete, getWebModel, setOnboardingComplete } from '../db.js';
 import { getAllAgentGroups } from '../../../db/agent-groups.js';
 import { grantRole } from '../../../modules/permissions/db/user-roles.js';
 import {
@@ -18,6 +18,7 @@ import {
   upsertEnv,
 } from '../ollama-manage.js';
 import { enableTailscaleServe, getTailscaleServeState } from '../tailscale-serve.js';
+import { getOpencodeInstallState, restartPending, startOpencodeInstall } from '../opencode-manage.js';
 import {
   cancelClaudeSignin,
   finishClaudeSignin,
@@ -47,6 +48,7 @@ export async function rOnboardingGet({ res }: RouteCtx): Promise<void> {
     getTailscaleServeState(),
     hasClaudeCredential(),
   ]);
+  const opencode = getOpencodeInstallState();
   return json(res, 200, {
     complete,
     agents: agents.length,
@@ -54,6 +56,11 @@ export async function rOnboardingGet({ res }: RouteCtx): Promise<void> {
     bearerConfigured: Boolean(process.env.WEB_TOKEN),
     claude: { connected: claudeConnected },
     ollama: { reachable: ollama.reachable, canInstall: ollama.canInstall },
+    // The harness a local model runs on. Reported because without it, picking a
+    // local model changes nothing about inference (models.ts: a non-anthropic
+    // kind with no OpenCode yields no env at all) — and the wizard used to give
+    // no hint that anything was missing.
+    opencode: { installed: opencode.installed, canInstall: opencode.canInstall, reason: opencode.reason },
     tailscale: { available: tailscale.available, active: tailscale.active, url: tailscale.url },
   });
 }
@@ -155,4 +162,44 @@ export async function rClaudeAuthCancelPost(ctx: RouteCtx): Promise<void> {
   if (!body) return;
   if (typeof body.sessionId === 'string') cancelClaudeSignin(body.sessionId);
   return json(ctx.res, 200, { ok: true });
+}
+
+/** Harness state + the streamed log of an install in flight. */
+export async function rOpencodeGet({ res }: RouteCtx): Promise<void> {
+  const state = getOpencodeInstallState();
+  // The model the harness is for, so the row can say "needed to run qwen3:8b"
+  // rather than "needed for local models" — the install is several minutes and
+  // a restart; it should name what the operator gets for it.
+  const defaultId = await getDefaultModelId();
+  const def = defaultId ? await getWebModel(defaultId) : undefined;
+  json(res, 200, {
+    installed: state.installed,
+    canInstall: state.canInstall,
+    reason: state.reason,
+    running: state.running,
+    lines: state.lines,
+    exitCode: state.exitCode,
+    // Progress, so a silent step still shows movement: which step, of how
+    // many, and since when. The agent-image rebuild emits almost nothing for
+    // minutes — with only the last line, the UI looked hung.
+    stepIndex: state.stepIndex,
+    stepCount: state.stepCount,
+    stepLabel: state.stepLabel,
+    startedAt: state.startedAt,
+    // "Finished, and the answer above is stale until I restart." Lets the
+    // client keep waiting instead of reading success as failure.
+    restartPending: restartPending(state),
+    defaultModel: def && def.kind !== 'anthropic' ? { model_id: def.model_id, kind: def.kind } : null,
+  });
+}
+
+/**
+ * Start the install. Returns immediately — this rebuilds the host, rebuilds the
+ * agent image and restarts the service, so the client polls rOpencodeGet for
+ * progress the same way it does for Ollama.
+ */
+export function rOpencodeInstallPost({ res }: RouteCtx): void {
+  const started = startOpencodeInstall();
+  if (!started.started) return json(res, 409, { error: started.error ?? 'could not start' });
+  json(res, 202, { started: true });
 }
