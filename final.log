@@ -1,8 +1,0 @@
-=== TSC ===
-host tsc errors: 0
-=== HOST SUITE ===
-[41m[1m FAIL [22m[49m scripts/update/transaction.e2e.test.ts[2m > [22mupdate-nanoclaw transaction end to end[2m > [22ma snapshot that fails midway on a RETRY never lets the automatic rollback restore a partial copy
-[41m[1m FAIL [22m[49m setup/uninstall/remove.test.ts[2m > [22mexecutePlan[2m > [22mkeeps .env when the backup fails
-[2m Test Files [22m [1m[31m2 failed[39m[22m[2m | [22m[1m[32m226 passed[39m[22m[2m | [22m[33m1 skipped[39m[90m (229)[39m
-=== CONTAINER ===
-DONE
