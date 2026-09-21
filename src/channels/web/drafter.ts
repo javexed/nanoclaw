@@ -32,10 +32,11 @@ import { safeFetch } from './models.js';
 const DRAFTER_AGENT_ID = 'web-drafter';
 const DRAFTER_AGENT_NAME = 'Agent Drafter';
 
-// Haiku — fast + cheap, more than capable of producing a one-shot JSON
-// agent definition. Drafter latency matters more than model nuance here.
-// Env-overridable so an operator can shift to a different model when this
-// one is deprecated, without waiting for a code release.
+// The ANTHROPIC-PATH model, used only when the workspace default is Claude or
+// unset — runDraft prefers the default model when that is a local one, so on a
+// qwen3 install this constant is never reached. Haiku because drafter latency
+// matters more than model nuance for a one-shot JSON definition. Env-overridable
+// so an operator can move off it when it is deprecated, without a code release.
 const DRAFTER_MODEL = process.env.WEB_DRAFTER_MODEL || 'claude-haiku-4-5';
 const DRAFTER_MAX_TOKENS = 2048;
 
@@ -110,12 +111,9 @@ export interface DraftedAgent {
  * This agent must stay in `all` secret mode. It is not a per-group agent, so
  * nothing assigns it a secret; in `selective` mode it would have none and 401.
  * Verified 2026-07-30 against gateway 1.37: a freshly created identifier
- * defaults to `all`, so no manual step is needed on a clean install. (An
- * earlier version of this comment claimed fresh identifiers start `selective`
- * and required a one-time
+ * defaults to `all`, so a clean install needs no manual step. If one is ever
+ * flipped to `selective`, restore it with
  *   onecli agents set-secret-mode --id web-drafter --mode all
- * — that was wrong.) If this agent is ever flipped to `selective`, that
- * command restores it.
  *
  * Note for credential-isolation sweeps: an orphan scan keyed on
  * "identifier not in agent_groups" WILL flag `web-drafter`. It is live —
@@ -155,15 +153,10 @@ export function ensureDrafterIdentity(): Promise<void> {
  *   - The `anthropic-beta: oauth-2025-04-20` header is required for the
  *     OAuth-style auth path to be accepted.
  *
- * Inside containers `cfg.env.HTTPS_PROXY` points at `host.docker.internal`;
- * on the host that doesn't resolve. The proxy listens on whatever host
- * OneCLI is bound to — same as the API endpoint we already know from
- * ONECLI_URL — so we substitute that hostname. macOS Docker Desktop
- * typically binds to 127.0.0.1; Linux Docker binds to the bridge IP
- * (172.17.0.1) and not loopback, which is why hardcoding 127.0.0.1 here
- * broke on Linux. The `NODE_EXTRA_CA_CERTS` env path likewise points at
- * the in-container path (`/tmp/onecli-gateway-ca.pem`), so we use the
- * inline `cfg.caCertificate` string instead.
+ * Two of the values it returns are container-shaped and need rewriting for a
+ * host-side call: the proxy host (see the block at the rewrite) and
+ * `NODE_EXTRA_CA_CERTS`, which points at `/tmp/onecli-gateway-ca.pem` inside
+ * the container — the inline `cfg.caCertificate` string is used instead.
  */
 async function buildDrafterTransport(): Promise<{
   dispatcher: ProxyAgent;
