@@ -10,6 +10,13 @@ dist/
 store/
 data/
 logs/
+# Build/verify output dropped at the repo root by a hand-run command. `logs/`
+# only covers the service's own directory, so nine of these (tsc output, an
+# install transcript, an auth failure) had been committed — visible at the top
+# of the tree listing, referenced by nothing. Root-scoped so a deliberate log
+# fixture deeper in the tree is unaffected.
+/*.log
+/*.err
 
 # Groups - per-installation state, not tracked
 groups/*
