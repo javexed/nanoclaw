@@ -94,7 +94,7 @@ export function _resetDockerProbeForTest(): void {
   dockerProbe = null;
 }
 
-export function getOpencodeState(root: string = process.cwd()): OpencodeState {
+function getOpencodeState(root: string = process.cwd()): OpencodeState {
   const installed = listProviderContainerConfigNames().includes('opencode');
   // Skip the docker probe once it is installed — nothing is going to be built,
   // and `docker info` is a round trip on every onboarding poll.
