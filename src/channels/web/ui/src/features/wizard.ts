@@ -52,7 +52,7 @@ function consumeResume(): boolean {
     const r = JSON.parse(raw) as { endpoint?: string; model?: string | null; at?: number };
     if (!r.at || Date.now() - r.at > 60 * 60 * 1000) return false; // an hour: stale means abandoned
     engine = 'local';
-    resumeEndpoint = r.endpoint ?? null;
+    if (r.endpoint) localCard.endpoint = r.endpoint;
     if (r.model) localCard.model = r.model;
     return true;
   } catch {
@@ -85,9 +85,9 @@ function closeWizard(): void {
   // Deliberately NOT cleared in render(): the harness install outlives a step
   // change (it rebuilds an image — minutes), so moving through the wizard must
   // not stop it reporting. Closing the wizard does.
-  if (harnessTimer) {
-    clearInterval(harnessTimer);
-    harnessTimer = null;
+  if (harness.poll) {
+    clearInterval(harness.poll);
+    harness.poll = null;
   }
   stopTick();
   // The resume record exists to survive a reload that happens WHILE the wizard
@@ -135,8 +135,8 @@ function nav(opts: { next?: () => void | Promise<void>; nextLabel?: string; canB
   const next = document.createElement('button');
   next.className = 'mprimary';
   next.textContent = opts.nextLabel ?? 'Next';
-  navNext = next;
-  navNextLabel = opts.nextLabel ?? 'Next';
+  navState.next = next;
+  navState.label = opts.nextLabel ?? 'Next';
   applyNavBlock();
   next.onclick = async () => {
     next.disabled = true;
@@ -247,10 +247,10 @@ function renderEngine(): HTMLElement {
         // the pick would silently keep governing who answers from behind a
         // card that says Claude. Only when there is one to clear: the PUT
         // restarts unassigned containers, and a no-op restart is not free.
-        if (engine === 'claude' && (lastHarness?.defaultModel || localCard.model)) {
+        if (engine === 'claude' && (harness.last?.defaultModel || localCard.model)) {
           await apiJson('/api/models/default', { method: 'PUT', body: { model_id: null } });
           localCard.model = null;
-          if (lastHarness) lastHarness.defaultModel = null;
+          if (harness.last) harness.last.defaultModel = null;
         }
       },
     }),
@@ -385,9 +385,21 @@ harnessRow.append(harnessText, harnessBtn);
 const harnessDetail = document.createElement('div');
 harnessDetail.className = 'wiz-text wiz-detail';
 harnessDetail.hidden = true;
-let harnessTick: ReturnType<typeof setInterval> | null = null;
-let harnessStartedAt: number | null = null;
-let harnessLastLine = '';
+/**
+ * Everything the harness row remembers between renders, in one place.
+ *
+ * It was five module-level `let`s — two timers, a start time, the last log
+ * line, the last state — each added as the row grew a feature, and each reset
+ * in a different function. Grouping them makes "what does this row remember,
+ * and who clears it" one question with one answer.
+ */
+const harness: {
+  poll: ReturnType<typeof setInterval> | null;
+  tick: ReturnType<typeof setInterval> | null;
+  startedAt: number | null;
+  lastLine: string;
+  last: HarnessState | null;
+} = { poll: null, tick: null, startedAt: null, lastLine: '', last: null };
 
 function elapsed(since: number): string {
   const secs = Math.max(0, Math.round((Date.now() - since) / 1000));
@@ -395,20 +407,19 @@ function elapsed(since: number): string {
 }
 
 function paintDetail(): void {
-  if (harnessStartedAt === null) return;
-  harnessDetail.textContent = [elapsed(harnessStartedAt), harnessLastLine].filter(Boolean).join(' · ');
+  if (harness.startedAt === null) return;
+  harnessDetail.textContent = [elapsed(harness.startedAt), harness.lastLine].filter(Boolean).join(' · ');
 }
 
 function startTick(): void {
-  if (harnessTick) return;
-  harnessTick = setInterval(paintDetail, 1000);
+  if (harness.tick) return;
+  harness.tick = setInterval(paintDetail, 1000);
 }
 
 function stopTick(): void {
-  if (harnessTick) clearInterval(harnessTick);
-  harnessTick = null;
+  if (harness.tick) clearInterval(harness.tick);
+  harness.tick = null;
 }
-let harnessTimer: ReturnType<typeof setInterval> | null = null;
 
 /**
  * What the Local card currently points at, kept outside the card because the
@@ -418,14 +429,9 @@ let harnessTimer: ReturnType<typeof setInterval> | null = null;
  */
 const localCard: { endpoint: string; model: string | null } = { endpoint: 'http://127.0.0.1:11434', model: null };
 const RESUME_KEY = 'nanoclaw-web:wizard-resume';
-/** Set by openWizard when a resume record is found; consumed by the Local card. */
-let resumeEndpoint: string | null = null;
 
-/** The live Next button, so a harness state change can block or release it. */
-let navNext: HTMLButtonElement | null = null;
-let navNextLabel = 'Next';
-/** Last harness state seen, so a rebuilt nav can apply the block immediately. */
-let lastHarness: HarnessState | null = null;
+/** The live Next button and its unblocked label, so a state change can release it. */
+const navState: { next: HTMLButtonElement | null; label: string } = { next: null, label: 'Next' };
 
 /**
  * Why the Model step may not be left, or null.
@@ -445,19 +451,20 @@ let lastHarness: HarnessState | null = null;
  */
 function blockReason(): string | null {
   if (engine === 'claude') return state?.claude.connected ? null : 'Connect Claude first';
-  const model = lastHarness?.defaultModel?.model_id ?? localCard.model;
+  const model = harness.last?.defaultModel?.model_id ?? localCard.model;
   if (!model) return 'Pick a model';
-  const installed = lastHarness?.installed ?? state?.opencode.installed;
+  const installed = harness.last?.installed ?? state?.opencode.installed;
   return installed ? null : 'Install OpenCode first';
 }
 
 function applyNavBlock(): void {
-  if (!navNext || step !== 0) return;
+  const next = navState.next;
+  if (!next || step !== 0) return;
   const reason = blockReason();
-  navNext.disabled = reason !== null;
-  navNext.classList.toggle('wiz-blocked', reason !== null);
-  navNext.textContent = reason ?? navNextLabel;
-  navNext.title = reason ?? '';
+  next.disabled = reason !== null;
+  next.classList.toggle('wiz-blocked', reason !== null);
+  next.textContent = reason ?? navState.label;
+  next.title = reason ?? '';
 }
 
 interface HarnessState {
@@ -478,7 +485,7 @@ interface HarnessState {
 }
 
 function renderHarness(h: HarnessState): void {
-  lastHarness = h;
+  harness.last = h;
   applyNavBlock();
   // Name the model. "Needed for local models" is true and says nothing; this
   // install is minutes and a restart, and the row should say what you get.
@@ -498,8 +505,8 @@ function renderHarness(h: HarnessState): void {
     harnessBtn.hidden = false;
     harnessBtn.disabled = true;
     harnessBtn.textContent = 'Installing…';
-    harnessStartedAt = h.startedAt ?? harnessStartedAt ?? Date.now();
-    harnessLastLine = h.lines[h.lines.length - 1] ?? '';
+    harness.startedAt = h.startedAt ?? harness.startedAt ?? Date.now();
+    harness.lastLine = h.lines[h.lines.length - 1] ?? '';
     harnessDetail.hidden = false;
     paintDetail();
     startTick();
@@ -581,8 +588,8 @@ harnessBtn.onclick = async () => {
   harnessBtn.textContent = 'Installing…';
   // Don't wait up to 2s for the first poll to say something is happening.
   harnessText.textContent = 'Installing OpenCode — starting';
-  harnessStartedAt = Date.now();
-  harnessLastLine = '';
+  harness.startedAt = Date.now();
+  harness.lastLine = '';
   harnessDetail.hidden = false;
   paintDetail();
   startTick();
@@ -597,8 +604,8 @@ harnessBtn.onclick = async () => {
 };
 
 function pollHarness(): void {
-  if (harnessTimer) clearInterval(harnessTimer);
-  harnessTimer = setInterval(async () => {
+  if (harness.poll) clearInterval(harness.poll);
+  harness.poll = setInterval(async () => {
     let h: HarnessState;
     try {
       h = (await apiJson('/api/web/opencode')) as HarnessState;
@@ -612,8 +619,8 @@ function pollHarness(): void {
     // rather than spinning for the life of the page.
     if (h.restartPending && Date.now() - (h.startedAt ?? Date.now()) < 15 * 60 * 1000) return;
     if (!h.running) {
-      if (harnessTimer) clearInterval(harnessTimer);
-      harnessTimer = null;
+      if (harness.poll) clearInterval(harness.poll);
+      harness.poll = null;
       if (state) state.opencode.installed = h.installed;
       if (h.installed) {
         // We are back: the restarted host has OpenCode in its registry and
@@ -642,8 +649,7 @@ function buildLocalModels(): HTMLElement {
   box.className = 'wiz-auth';
 
   const urlInput = document.createElement('input');
-  urlInput.value = resumeEndpoint ?? localCard.endpoint;
-  resumeEndpoint = null;
+  urlInput.value = localCard.endpoint;
   const probeBtn = document.createElement('button');
   probeBtn.className = 'mprimary';
   probeBtn.textContent = 'Check';
